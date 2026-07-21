@@ -137,7 +137,10 @@ pub fn default_provider(config: &crate::config::Config) -> Option<RegistryHandle
     let api_path = config.api_path.clone();
     let provider_max_tokens = config.provider_max_tokens;
     let model_context_windows = config.model_context_windows.clone();
-    let temperature = config.default_temperature;
+    // Code completion must be deterministic and fast: force temperature 0
+    // regardless of the chat default (which is tuned for creative dialogue and
+    // makes tab completions non-reproducible and slower to converge).
+    let temperature = 0.0;
 
     let runtime_options = crate::providers::ProviderRuntimeOptions {
         auth_profile_override: None,

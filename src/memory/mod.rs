@@ -1,14 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-pub mod ann;
 pub mod audit;
 pub mod backend;
 pub mod blackboard;
 pub mod chunker;
 pub mod cli;
-pub mod conflict;
-pub mod consolidation;
 pub mod decay;
 pub mod embeddings;
 pub mod gc;
@@ -178,7 +175,36 @@ fn resolve_embedding_config(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    let env_pair = embedding_provider_env_key(config.embedding_provider.trim());
+    // Auto-enable local Ollama embeddings (dense retrieval) when the user has an
+    // Ollama host configured but left the embedding provider off, so the default
+    // build gets real semantic search instead of BM25-only without extra setup.
+    let configured_provider = config.embedding_provider.trim();
+    let ollama_host_present = crate::util::get_runtime_var("OLLAMA_HOST")
+        .or_else(|| crate::util::get_runtime_var("SEN_OLLAMA_HOST"))
+        .is_some();
+    let (effective_provider, effective_model) =
+        if (configured_provider.is_empty() || configured_provider == "none") && ollama_host_present {
+            let model = if config.embedding_model.trim().is_empty()
+                || config.embedding_model.trim() == "none"
+            {
+                "nomic-embed-text".to_string()
+            } else {
+                config.embedding_model.trim().to_string()
+            };
+            tracing::info!(
+                target: "memory.embeddings",
+                model = %model,
+                "auto-enabling Ollama embeddings for dense retrieval (OLLAMA_HOST set, no embedding_provider configured)"
+            );
+            ("ollama".to_string(), model)
+        } else {
+            (
+                configured_provider.to_string(),
+                config.embedding_model.trim().to_string(),
+            )
+        };
+
+    let env_pair = embedding_provider_env_key(&effective_provider);
     let (fallback_api_key, fallback_api_key_source) = match (env_pair.as_ref(), caller_api_key.as_ref()) {
         (Some((var, val)), _) => (Some(val.clone()), EmbeddingApiKeySource::Env(var.clone())),
         (None, Some(val)) => (Some(val.clone()), EmbeddingApiKeySource::Caller),
@@ -186,8 +212,8 @@ fn resolve_embedding_config(
     };
 
     let fallback = EmbeddingResolution {
-        provider: config.embedding_provider.trim().to_string(),
-        model: config.embedding_model.trim().to_string(),
+        provider: effective_provider,
+        model: effective_model,
         dimensions: config.embedding_dimensions,
         api_key: fallback_api_key.clone(),
         config_source: EmbeddingConfigSource::Toml,

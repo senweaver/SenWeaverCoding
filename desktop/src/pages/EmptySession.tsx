@@ -20,8 +20,8 @@ import { FileSearchMenu, type FileSearchMenuHandle } from '../components/chat/Fi
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from '../components/chat/LocalSlashCommandPanel'
 import { TokenUsageRing } from '../components/chat/TokenUsageRing'
 import {
-  FALLBACK_SLASH_COMMANDS,
   findSlashToken,
+  localizedFallbackSlashCommands,
   mergeSlashCommands,
   replaceSlashCommand,
   resolveSlashUiAction,
@@ -152,14 +152,14 @@ export function EmptySession() {
   }, [workDir])
 
   const filteredCommands = useMemo(() => {
-    const source = mergeSlashCommands(slashCommands, FALLBACK_SLASH_COMMANDS)
+    const source = mergeSlashCommands(slashCommands, localizedFallbackSlashCommands(t))
     if (!slashFilter) return source
     const lower = slashFilter.toLowerCase()
     return source.filter((command) => (
       command.name.toLowerCase().includes(lower) ||
       command.description.toLowerCase().includes(lower)
     ))
-  }, [slashCommands, slashFilter])
+  }, [slashCommands, slashFilter, t])
 
   const exactSlashCommand = useMemo(() => {
     const normalized = slashFilter.trim().toLowerCase()

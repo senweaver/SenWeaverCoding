@@ -2,7 +2,30 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 use anyhow::{Result, bail};
-use std::io::{BufRead, Write};
+use std::io::{BufRead, Read, Write};
+
+pub fn read_line_lossy<R: BufRead>(reader: &mut R) -> std::io::Result<Option<String>> {
+    let mut raw = Vec::new();
+    let n = reader.read_until(b'\n', &mut raw)?;
+    if n == 0 {
+        return Ok(None);
+    }
+    Ok(Some(String::from_utf8_lossy(&raw).into_owned()))
+}
+
+pub fn read_stdin_line_lossy() -> std::io::Result<Option<String>> {
+    read_line_lossy(&mut std::io::stdin().lock())
+}
+
+// Piped stdin on Windows consoles frequently arrives as GBK (or another ANSI
+// code page) rather than UTF-8; decode with the same best-effort detection the
+// file tools use instead of failing the whole read on the first invalid byte.
+pub fn read_stdin_to_string_best_effort() -> std::io::Result<String> {
+    let mut raw = Vec::new();
+    std::io::stdin().lock().read_to_end(&mut raw)?;
+    let (text, _label) = crate::tools::file::encoding::decode_best_effort(&raw);
+    Ok(text)
+}
 
 #[derive(Debug, Clone, Default)]
 pub struct Input {
@@ -54,11 +77,9 @@ impl Input {
             write!(writer, "{}", self.render_prompt())?;
             writer.flush()?;
 
-            let mut line = String::new();
-            let bytes_read = reader.read_line(&mut line)?;
-            if bytes_read == 0 {
+            let Some(line) = read_line_lossy(&mut reader)? else {
                 bail!("No input received from stdin");
-            }
+            };
 
             let trimmed = trim_trailing_line_ending(&line);
             if trimmed.is_empty() {

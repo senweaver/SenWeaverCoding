@@ -3,7 +3,5 @@
 // Licensed under the MIT License.
 
 pub mod core;
-pub mod vec_ext;
 
 pub use core::*;
-pub use vec_ext::*;

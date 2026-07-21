@@ -110,6 +110,8 @@ pub struct IvfVectorIndex {
     total: usize,
 
     kmeans_iters: usize,
+
+    upserts_since_train: usize,
 }
 
 impl IvfVectorIndex {
@@ -126,6 +128,7 @@ impl IvfVectorIndex {
             dim: None,
             total: 0,
             kmeans_iters: 12,
+            upserts_since_train: 0,
         }
     }
 
@@ -253,13 +256,23 @@ impl IvfVectorIndex {
             self.dim = Some(sample.len());
         }
 
+        // Seed with a SINGLE real centroid. Previously this padded with N-1 zero
+        // centroids, which `nearest_centroid` skips, so every vector collapsed
+        // into cluster 0 until the first full retrain at 256 upserts. Real
+        // multi-cluster structure now forms via `maybe_seed_retrain` as soon as
+        // enough vectors accumulate.
         self.centroids.push(sample.to_vec());
         self.centroid_norms.push(compute_norm(sample));
+    }
 
-        for _ in 1..self.num_clusters {
-            let zero = vec![0.0_f32; sample.len()];
-            self.centroids.push(zero.clone());
-            self.centroid_norms.push(0.0);
+    /// During the seed period the index has a single centroid. Once enough
+    /// vectors have accumulated to form real clusters, run one k-means pass so
+    /// searches stop scanning a single giant list. Cheap no-op after the index
+    /// has grown past the seed threshold.
+    fn maybe_seed_retrain(&mut self) {
+        let seed_threshold = self.num_clusters.max(8);
+        if self.centroids.len() < self.num_clusters && self.total >= seed_threshold {
+            self.retrain_from_contents();
         }
     }
 
@@ -331,6 +344,26 @@ impl IvfVectorIndex {
         self.inverted_lists
             .iter()
             .any(|l| l.len() as f32 > threshold)
+    }
+
+    fn retrain_from_contents(&mut self) {
+        let entries: Vec<IvfEntry> = self
+            .inverted_lists
+            .iter_mut()
+            .flat_map(|l| l.drain(..))
+            .collect();
+        if entries.is_empty() {
+            return;
+        }
+        let data: Vec<Vec<f32>> = entries.iter().map(|e| e.embedding.clone()).collect();
+        self.train(&data);
+        self.inverted_lists = (0..self.num_clusters).map(|_| Vec::new()).collect();
+        self.total = 0;
+        for entry in entries {
+            let (cid, _) = self.nearest_centroid(&entry.embedding);
+            self.inverted_lists[cid].push(entry);
+            self.total += 1;
+        }
     }
 
     pub fn list_sizes(&self) -> Vec<usize> {
@@ -409,6 +442,22 @@ impl IvfVectorIndex {
         let dim_stored = read_u64(r)? as usize;
         let total = read_u64(r)? as usize;
 
+        const MAX_SANE_CLUSTERS: usize = 1 << 20;
+        const MAX_SANE_DIM: usize = 1 << 16;
+        const MAX_SANE_TOTAL: usize = 1 << 28;
+        if num_clusters == 0
+            || num_clusters > MAX_SANE_CLUSTERS
+            || dim_stored > MAX_SANE_DIM
+            || total > MAX_SANE_TOTAL
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!(
+                    "IVF snapshot header out of bounds: clusters={num_clusters}, dim={dim_stored}, total={total}"
+                ),
+            ));
+        }
+
         let mut index = IvfVectorIndex::new(num_clusters, nprobe);
         index.dim = if dim_stored == 0 {
             None
@@ -465,6 +514,19 @@ impl IvfVectorIndex {
     pub fn load_from_path(path: impl AsRef<Path>) -> std::io::Result<Self> {
         let mut f = std::fs::File::open(path)?;
         Self::load_from_reader(&mut f)
+    }
+
+    #[must_use]
+    pub fn dimensions(&self) -> Option<usize> {
+        self.dim
+    }
+
+    #[must_use]
+    pub fn entry_ids(&self) -> Vec<String> {
+        self.inverted_lists
+            .iter()
+            .flat_map(|list| list.iter().map(|e| e.id.clone()))
+            .collect()
     }
 }
 
@@ -534,6 +596,20 @@ fn squared_euclidean(a: &[f32], b: &[f32]) -> f32 {
 
 impl VectorIndex for IvfVectorIndex {
     fn upsert(&mut self, id: &str, embedding: &[f32]) {
+        const RETRAIN_CHECK_EVERY: usize = 256;
+        if let Some(dim) = self.dim {
+            if embedding.len() != dim {
+                crate::observability::coordination_metrics::incr_vector_dim_mismatch();
+                tracing::warn!(
+                    target: "memory.vector",
+                    id,
+                    expected = dim,
+                    got = embedding.len(),
+                    "skipping vector upsert with mismatched dimensions (embedding model changed?)"
+                );
+                return;
+            }
+        }
         self.ensure_trained_with(embedding);
 
         if let Some((cid, pos)) = self.find_cluster(id) {
@@ -549,6 +625,18 @@ impl VectorIndex for IvfVectorIndex {
         };
         self.inverted_lists[cid].push(entry);
         self.total += 1;
+
+        // Promote from the single-centroid seed state to real clusters early,
+        // instead of waiting for the 256-upsert retrain check.
+        self.maybe_seed_retrain();
+
+        self.upserts_since_train += 1;
+        if self.upserts_since_train >= RETRAIN_CHECK_EVERY {
+            self.upserts_since_train = 0;
+            if self.needs_retraining() {
+                self.retrain_from_contents();
+            }
+        }
     }
 
     fn remove(&mut self, id: &str) {
@@ -561,6 +649,18 @@ impl VectorIndex for IvfVectorIndex {
     fn search(&self, query: &[f32], limit: usize) -> Vec<(String, f32)> {
         if limit == 0 || self.total == 0 || !self.is_trained() {
             return Vec::new();
+        }
+        if let Some(dim) = self.dim {
+            if query.len() != dim {
+                crate::observability::coordination_metrics::incr_vector_dim_mismatch();
+                tracing::warn!(
+                    target: "memory.vector",
+                    expected = dim,
+                    got = query.len(),
+                    "skipping vector search with mismatched query dimensions (embedding model changed?)"
+                );
+                return Vec::new();
+            }
         }
         let q_norm = compute_norm(query);
         if q_norm < f32::EPSILON {

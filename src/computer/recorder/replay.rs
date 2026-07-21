@@ -3,14 +3,17 @@
 // Licensed under the MIT License.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio_util::sync::CancellationToken;
 
+use super::template_match;
 use super::types::{RecordedStep, RecordingManifest};
 use crate::computer::action::extract_json_object;
 use crate::computer::capture;
 use crate::computer::coordinates::{self, Box2d};
-use crate::computer::input::{self, ClickButton, ScrollDirection};
+use crate::computer::input;
+use crate::computer::input::core::{ClickButton, ScrollDirection};
 use crate::computer::run::{ComputerEvent, ComputerStepEvent, RunStatus};
 use crate::computer::vision::VisionClient;
 use crate::config::Config;
@@ -27,6 +30,10 @@ const SMART_MAX_RECOVERY_WAIT_MS: u64 = 5_000;
 const SMART_GROUNDING_TIMEOUT_MS: u64 = 60_000;
 const REFERENCE_CROP_PX: u32 = 480;
 const SKILL_CONTEXT_MAX_CHARS: usize = 2_000;
+const SETTLE_POLL_MS: u64 = 110;
+const SETTLE_MIN_WAIT_MS: u64 = 250;
+const SETTLE_DIFF_THRESHOLD: f64 = 0.0045;
+const RECOVERY_SETTLE_CAP_MS: u64 = 1_400;
 
 #[derive(Debug, Clone, Copy)]
 pub struct ReplayRepeat {
@@ -72,7 +79,7 @@ pub async fn replay_recording(
     }
 
     let _input_lease =
-        match crate::computer::input_lock::try_acquire(crate::computer::input_lock::InputActivity::Replay) {
+        match crate::computer::input::lock::try_acquire(crate::computer::input::lock::InputActivity::Replay) {
             Ok(lease) => lease,
             Err(message) => {
                 emit(ComputerEvent::error_code("busy", message));
@@ -126,7 +133,7 @@ async fn replay_steps_once(
         format!("replaying {} recorded steps", manifest.steps.len()),
     ));
 
-    let (display_w, display_h) = match input::main_display_size().await {
+    let (display_w, display_h) = match input::core::main_display_size().await {
         Ok((w, h)) if w > 0 && h > 0 => (w, h),
         _ => (manifest.display_w.max(1), manifest.display_h.max(1)),
     };
@@ -244,29 +251,29 @@ async fn execute_action_at(
     match action_type {
         "click" => {
             let (x, y) = target.ok_or_else(|| anyhow::anyhow!("click step missing target"))?;
-            input::click(x, y, ClickButton::Left, 1).await
+            input::core::click(x, y, ClickButton::Left, 1).await
         }
         "double_click" => {
             let (x, y) =
                 target.ok_or_else(|| anyhow::anyhow!("double_click step missing target"))?;
-            input::click(x, y, ClickButton::Left, 2).await
+            input::core::click(x, y, ClickButton::Left, 2).await
         }
         "right_click" => {
             let (x, y) =
                 target.ok_or_else(|| anyhow::anyhow!("right_click step missing target"))?;
-            input::click(x, y, ClickButton::Right, 1).await
+            input::core::click(x, y, ClickButton::Right, 1).await
         }
         "type" => {
             let text = value
                 .map(str::to_string)
                 .ok_or_else(|| anyhow::anyhow!("type step missing text"))?;
-            input::type_text(text).await
+            input::core::type_text(text).await
         }
         "key_press" => {
             let combo = value
                 .map(str::to_string)
                 .ok_or_else(|| anyhow::anyhow!("key_press step missing combo"))?;
-            input::key_combo(combo).await
+            input::core::key_combo(combo).await
         }
         "scroll" => {
             let (x, y) = target.unwrap_or((display_w / 2, display_h / 2));
@@ -277,17 +284,17 @@ async fn execute_action_at(
                 _ => ScrollDirection::Down,
             };
             let amount = amount.unwrap_or(DEFAULT_SCROLL_AMOUNT);
-            input::scroll(x, y, direction, amount).await
+            input::core::scroll(x, y, direction, amount).await
         }
         "drag" => {
             let (fx, fy) = target.ok_or_else(|| anyhow::anyhow!("drag step missing source"))?;
             let (tx, ty) =
                 to_target.ok_or_else(|| anyhow::anyhow!("drag step missing destination"))?;
-            input::drag(fx, fy, tx, ty).await
+            input::core::drag(fx, fy, tx, ty).await
         }
         "move_mouse" => {
             let (x, y) = target.ok_or_else(|| anyhow::anyhow!("move step missing target"))?;
-            input::move_to(x, y).await
+            input::core::move_to(x, y).await
         }
         "wait" => {
             let ms = amount
@@ -307,6 +314,146 @@ async fn sleep_or_cancel(cancel: &CancellationToken, ms: u64) {
     tokio::select! {
         () = cancel.cancelled() => {}
         () = tokio::time::sleep(std::time::Duration::from_millis(ms)) => {}
+    }
+}
+
+fn settle_cap(delay_ms: u64) -> u64 {
+    delay_ms.clamp(SETTLE_MIN_WAIT_MS, SMART_DELAY_CAP_MS)
+}
+
+async fn wait_for_settle(
+    cancel: &CancellationToken,
+    monitor_id: Option<u32>,
+    cap_ms: u64,
+) -> Option<capture::RawFrame> {
+    let cap_ms = cap_ms.max(SETTLE_MIN_WAIT_MS);
+    let started = std::time::Instant::now();
+    let mut prev: Option<capture::RawFrame> = None;
+    loop {
+        sleep_or_cancel(cancel, SETTLE_POLL_MS).await;
+        if cancel.is_cancelled() {
+            return prev;
+        }
+        let Ok(frame) = capture::capture_raw(monitor_id).await else {
+            return prev;
+        };
+        if let Some(previous) = &prev {
+            if template_match::frame_diff_ratio(&previous.image, &frame.image)
+                < SETTLE_DIFF_THRESHOLD
+            {
+                return Some(frame);
+            }
+        }
+        let out_of_time = started.elapsed().as_millis() as u64 >= cap_ms;
+        prev = Some(frame);
+        if out_of_time {
+            return prev;
+        }
+    }
+}
+
+async fn load_step_template(
+    recording_dir: &Path,
+    step: &RecordedStep,
+) -> Option<Arc<template_match::ReferenceTemplate>> {
+    let dir = recording_dir.to_path_buf();
+    let step = step.clone();
+    tokio::task::spawn_blocking(move || template_match::load_reference_template(&dir, &step))
+        .await
+        .ok()
+        .flatten()
+        .map(Arc::new)
+}
+
+async fn locate_locally(
+    template: &Arc<template_match::ReferenceTemplate>,
+    frame: &capture::RawFrame,
+    prior: Option<(f64, f64)>,
+) -> Option<template_match::LocalMatch> {
+    let template = Arc::clone(template);
+    let image = Arc::clone(&frame.image);
+    tokio::task::spawn_blocking(move || template_match::locate_in_frame(&template, &image, prior))
+        .await
+        .ok()
+        .flatten()
+}
+
+struct GroundedAction {
+    thought: String,
+    x_norm: f64,
+    y_norm: f64,
+    to_norm: Option<(f64, f64)>,
+    confidence: Option<f64>,
+    screenshot_base64: String,
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn perform_grounded_step(
+    step: &RecordedStep,
+    monitor: crate::computer::coordinates::MonitorRect,
+    action: GroundedAction,
+    display_w: i32,
+    display_h: i32,
+    cancel: &CancellationToken,
+    emit: &impl Fn(ComputerEvent),
+    ui_index: &mut u32,
+) -> Result<(), ()> {
+    let index = *ui_index;
+    emit(ComputerEvent::Step {
+        step: ComputerStepEvent {
+            index,
+            thought: action.thought,
+            action_type: step.action_type.clone(),
+            element_description: step.element_description.clone(),
+            value: step.value.clone(),
+            screenshot_base64: action.screenshot_base64,
+            screenshot_mime: "image/jpeg",
+            target_x_norm: Some(action.x_norm),
+            target_y_norm: Some(action.y_norm),
+            to_x_norm: action.to_norm.map(|t| t.0),
+            to_y_norm: action.to_norm.map(|t| t.1),
+            confidence: action.confidence,
+        },
+    });
+    let target = monitor.denormalize(action.x_norm, action.y_norm);
+    let to_target = action.to_norm.map(|(tx, ty)| monitor.denormalize(tx, ty));
+    match execute_action_at(
+        &step.action_type,
+        Some(target),
+        to_target,
+        step.value.as_deref(),
+        step.amount,
+        display_w,
+        display_h,
+        cancel,
+    )
+    .await
+    {
+        Ok(()) => {
+            emit(ComputerEvent::ActionResult {
+                index,
+                success: true,
+                message: None,
+            });
+            *ui_index += 1;
+            Ok(())
+        }
+        Err(err) => {
+            emit(ComputerEvent::ActionResult {
+                index,
+                success: false,
+                message: Some(err.to_string()),
+            });
+            emit(ComputerEvent::status_code(
+                RunStatus::Error,
+                "smart_replay_step_failed",
+                format!(
+                    "smart replay stopped at recorded step {}: {err}",
+                    step.index + 1
+                ),
+            ));
+            Err(())
+        }
     }
 }
 
@@ -525,7 +672,7 @@ pub async fn replay_recording_smart(
     }
 
     let _input_lease =
-        match crate::computer::input_lock::try_acquire(crate::computer::input_lock::InputActivity::Replay) {
+        match crate::computer::input::lock::try_acquire(crate::computer::input::lock::InputActivity::Replay) {
             Ok(lease) => lease,
             Err(message) => {
                 emit(ComputerEvent::error_code("busy", message));
@@ -608,7 +755,7 @@ async fn replay_smart_steps_once(
         format!("smart replaying {total} recorded steps"),
     ));
 
-    let (display_w, display_h) = match input::main_display_size().await {
+    let (display_w, display_h) = match input::core::main_display_size().await {
         Ok((w, h)) if w > 0 && h > 0 => (w, h),
         _ => (manifest.display_w.max(1), manifest.display_h.max(1)),
     };
@@ -621,17 +768,21 @@ async fn replay_smart_steps_once(
             return Err(());
         }
 
-        sleep_or_cancel(cancel, step.delay_ms.min(SMART_DELAY_CAP_MS)).await;
+        let step_monitor_id = step.monitor.map(|m| m.id);
+        let mut pending_frame =
+            wait_for_settle(cancel, step_monitor_id, settle_cap(step.delay_ms)).await;
         if cancel.is_cancelled() {
             emit(ComputerEvent::status(RunStatus::Stopped, None));
             return Err(());
         }
 
         if !step_needs_grounding(&step.action_type) {
-            let screenshot_base64 = capture::capture_primary()
-                .await
-                .map(|s| s.display_jpeg_base64)
-                .unwrap_or_default();
+            let screenshot_base64 = match &pending_frame {
+                Some(frame) => capture::encode_frame_display_jpeg(frame)
+                    .await
+                    .unwrap_or_default(),
+                None => String::new(),
+            };
             emit(ComputerEvent::Step {
                 step: ComputerStepEvent {
                     index: *ui_index,
@@ -681,9 +832,10 @@ async fn replay_smart_steps_once(
             continue;
         }
 
-        let reference = load_reference_crop(recording_dir, step).await;
+        let template = load_step_template(recording_dir, step).await;
+        let prior = step.x_norm.zip(step.y_norm);
         let step_text = describe_step(step, total, skill_context);
-        let step_monitor_id = step.monitor.map(|m| m.id);
+        let mut reference: Option<Option<String>> = None;
         let mut recoveries: u32 = 0;
 
         loop {
@@ -691,6 +843,72 @@ async fn replay_smart_steps_once(
                 emit(ComputerEvent::status(RunStatus::Stopped, None));
                 return Err(());
             }
+
+            let frame = match pending_frame.take() {
+                Some(frame) => frame,
+                None => match capture::capture_raw(step_monitor_id).await {
+                    Ok(frame) => frame,
+                    Err(err) => {
+                        emit(ComputerEvent::status_code(
+                            RunStatus::Error,
+                            "capture_failed",
+                            format!("screen capture failed: {err}"),
+                        ));
+                        return Err(());
+                    }
+                },
+            };
+            let monitor = frame.monitor;
+
+            if let Some(template) = template.as_ref() {
+                if let Some(hit) = locate_locally(template, &frame, prior).await {
+                    emit(ComputerEvent::status_code(
+                        RunStatus::Running,
+                        "smart_replay_local_match",
+                        format!(
+                            "matched step {}/{total} locally (score {:.2})",
+                            step.index + 1,
+                            hit.score
+                        ),
+                    ));
+                    let to_norm = if step.action_type == "drag" {
+                        step.to_x_norm.zip(step.to_y_norm).map(|(tx, ty)| {
+                            let dx = prior.map_or(0.0, |(px, _)| hit.x_norm - px);
+                            let dy = prior.map_or(0.0, |(_, py)| hit.y_norm - py);
+                            ((tx + dx).clamp(0.0, 1000.0), (ty + dy).clamp(0.0, 1000.0))
+                        })
+                    } else {
+                        None
+                    };
+                    let screenshot_base64 = capture::encode_frame_display_jpeg(&frame)
+                        .await
+                        .unwrap_or_default();
+                    perform_grounded_step(
+                        step,
+                        monitor,
+                        GroundedAction {
+                            thought: format!(
+                                "Matched the recorded target on the current screen \
+                                 (step {} of {total})",
+                                step.index + 1
+                            ),
+                            x_norm: hit.x_norm,
+                            y_norm: hit.y_norm,
+                            to_norm,
+                            confidence: Some(f64::from(hit.score) * 100.0),
+                            screenshot_base64,
+                        },
+                        display_w,
+                        display_h,
+                        cancel,
+                        emit,
+                        ui_index,
+                    )
+                    .await?;
+                    break;
+                }
+            }
+
             if calls_used >= call_budget {
                 emit(ComputerEvent::status_code(
                     RunStatus::Error,
@@ -703,23 +921,22 @@ async fn replay_smart_steps_once(
                 return Err(());
             }
 
-            let capture_result = match step_monitor_id {
-                Some(id) => capture::capture_monitor(id).await,
-                None => capture::capture_primary().await,
-            };
-            let screen = match capture_result {
-                Ok(screen) => screen,
+            let (screen_uri, display_jpeg) = match capture::encode_frame_for_vision(&frame).await {
+                Ok(encoded) => encoded,
                 Err(err) => {
                     emit(ComputerEvent::status_code(
                         RunStatus::Error,
                         "capture_failed",
-                        format!("screen capture failed: {err}"),
+                        format!("screen encode failed: {err}"),
                     ));
                     return Err(());
                 }
             };
-            let monitor = screen.monitor;
-            let screen_uri = screen.data_uri();
+
+            if reference.is_none() {
+                reference = Some(load_reference_crop(recording_dir, step).await);
+            }
+            let reference_uri = reference.as_ref().and_then(|r| r.as_deref());
 
             emit(ComputerEvent::status_code(
                 RunStatus::Thinking,
@@ -728,7 +945,7 @@ async fn replay_smart_steps_once(
             ));
 
             let mut user_text = step_text.clone();
-            if reference.is_some() {
+            if reference_uri.is_some() {
                 user_text.push_str(
                     "\nThe first image is the CURRENT screen. The second image is the recorded \
                      REFERENCE crop centered on the target element.",
@@ -737,8 +954,8 @@ async fn replay_smart_steps_once(
                 user_text.push_str("\nThe image is the CURRENT screen.");
             }
             let mut images: Vec<&str> = vec![screen_uri.as_str()];
-            if let Some(reference) = reference.as_deref() {
-                images.push(reference);
+            if let Some(reference_uri) = reference_uri {
+                images.push(reference_uri);
             }
 
             calls_used += 1;
@@ -815,62 +1032,25 @@ async fn replay_smart_steps_once(
                     } else {
                         location.thought.clone()
                     };
-                    emit(ComputerEvent::Step {
-                        step: ComputerStepEvent {
-                            index: *ui_index,
+                    perform_grounded_step(
+                        step,
+                        monitor,
+                        GroundedAction {
                             thought,
-                            action_type: step.action_type.clone(),
-                            element_description: step.element_description.clone(),
-                            value: step.value.clone(),
-                            screenshot_base64: screen.display_jpeg_base64.clone(),
-                            screenshot_mime: "image/jpeg",
-                            target_x_norm: Some(x_norm),
-                            target_y_norm: Some(y_norm),
-                            to_x_norm: to_norm.map(|t| t.0),
-                            to_y_norm: to_norm.map(|t| t.1),
+                            x_norm,
+                            y_norm,
+                            to_norm,
                             confidence: location.confidence,
+                            screenshot_base64: display_jpeg.clone(),
                         },
-                    });
-                    let target = monitor.denormalize(x_norm, y_norm);
-                    let to_target = to_norm.map(|(tx, ty)| monitor.denormalize(tx, ty));
-                    let outcome = execute_action_at(
-                        &step.action_type,
-                        Some(target),
-                        to_target,
-                        step.value.as_deref(),
-                        step.amount,
                         display_w,
                         display_h,
                         cancel,
+                        emit,
+                        ui_index,
                     )
-                    .await;
-                    match outcome {
-                        Ok(()) => {
-                            emit(ComputerEvent::ActionResult {
-                                index: *ui_index,
-                                success: true,
-                                message: None,
-                            });
-                            *ui_index += 1;
-                            break;
-                        }
-                        Err(err) => {
-                            emit(ComputerEvent::ActionResult {
-                                index: *ui_index,
-                                success: false,
-                                message: Some(err.to_string()),
-                            });
-                            emit(ComputerEvent::status_code(
-                                RunStatus::Error,
-                                "smart_replay_step_failed",
-                                format!(
-                                    "smart replay stopped at recorded step {}: {err}",
-                                    step.index + 1
-                                ),
-                            ));
-                            return Err(());
-                        }
-                    }
+                    .await?;
+                    break;
                 }
                 "obscured" => {
                     if recoveries >= SMART_MAX_RECOVERIES_PER_STEP {
@@ -887,7 +1067,9 @@ async fn replay_smart_steps_once(
                     }
                     recoveries += 1;
                     let Some(recovery) = location.recovery else {
-                        sleep_or_cancel(cancel, SMART_RECOVERY_SETTLE_MS).await;
+                        pending_frame =
+                            wait_for_settle(cancel, step_monitor_id, RECOVERY_SETTLE_CAP_MS)
+                                .await;
                         continue;
                     };
                     let thought = if location.thought.is_empty() {
@@ -902,7 +1084,7 @@ async fn replay_smart_steps_once(
                             action_type: recovery.action.clone(),
                             element_description: None,
                             value: recovery.value.clone(),
-                            screenshot_base64: screen.display_jpeg_base64.clone(),
+                            screenshot_base64: display_jpeg.clone(),
                             screenshot_mime: "image/jpeg",
                             target_x_norm: recovery.target.map(|t| t.0),
                             target_y_norm: recovery.target.map(|t| t.1),
@@ -951,7 +1133,8 @@ async fn replay_smart_steps_once(
                         }
                     }
                     *ui_index += 1;
-                    sleep_or_cancel(cancel, SMART_RECOVERY_SETTLE_MS).await;
+                    pending_frame =
+                        wait_for_settle(cancel, step_monitor_id, RECOVERY_SETTLE_CAP_MS).await;
                     continue;
                 }
                 _ => {
@@ -972,7 +1155,8 @@ async fn replay_smart_steps_once(
                         return Err(());
                     }
                     recoveries += 1;
-                    sleep_or_cancel(cancel, SMART_RECOVERY_SETTLE_MS).await;
+                    pending_frame =
+                        wait_for_settle(cancel, step_monitor_id, RECOVERY_SETTLE_CAP_MS).await;
                     continue;
                 }
             }

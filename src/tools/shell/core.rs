@@ -20,17 +20,125 @@ const MAX_OUTPUT_BYTES: usize = 1_048_576;
 const DEFAULT_LLM_OUTPUT_CAP: usize = 32_768;
 
 fn workspace_build_lock_enabled() -> bool {
+    // Default ON so two parallel sessions sharing a directory cannot run
+    // conflicting build/VCS commands (cargo build, git checkout, ...)
+    // simultaneously and clobber each other. Opt out with
+    // SEN_WORKSPACE_BUILD_LOCK=0.
     crate::util::get_runtime_var("SEN_WORKSPACE_BUILD_LOCK")
         .map(|v| {
             let t = v.trim();
-            t == "1" || t.eq_ignore_ascii_case("true") || t.eq_ignore_ascii_case("yes")
+            !(t == "0"
+                || t.eq_ignore_ascii_case("false")
+                || t.eq_ignore_ascii_case("no")
+                || t.eq_ignore_ascii_case("off"))
         })
-        .unwrap_or(false)
+        .unwrap_or(true)
 }
 
 // Heuristic: does this command mutate shared build/VCS state such that two
 // concurrent same-directory runs would conflict? Kept intentionally narrow so
 // read-only commands still run in parallel across sessions.
+/// Best-effort extraction of filesystem write targets from a shell command line,
+/// used to feed the workspace-confinement gate. It is intentionally conservative:
+/// it recognizes output redirections (`>`, `>>`) and the destination argument of
+/// common write commands (cp/mv/tee/install/dd of=). It is a defense-in-depth
+/// heuristic layered on top of `validate_command_execution` + `forbidden_path_argument`,
+/// not a full shell parser; unrecognized shapes simply pass through to the OS
+/// sandbox (Job Object on Windows, Landlock on Linux) as before.
+fn extract_shell_write_targets(command: &str) -> Vec<String> {
+    let mut targets = Vec::new();
+    let tokens: Vec<String> = tokenize_shell_words(command);
+
+    // Redirections: `> file`, `>> file`, `N> file`, and `>file` attached form.
+    for (i, tok) in tokens.iter().enumerate() {
+        let t = tok.as_str();
+        let redir_body = t
+            .strip_prefix("2>>")
+            .or_else(|| t.strip_prefix("1>>"))
+            .or_else(|| t.strip_prefix(">>"))
+            .or_else(|| t.strip_prefix("2>"))
+            .or_else(|| t.strip_prefix("1>"))
+            .or_else(|| t.strip_prefix('>'));
+        if let Some(rest) = redir_body {
+            if !rest.is_empty() && rest != "&1" && rest != "&2" {
+                targets.push(rest.to_string());
+            } else if let Some(next) = tokens.get(i + 1) {
+                if !next.starts_with('&') {
+                    targets.push(next.clone());
+                }
+            }
+        }
+    }
+
+    // First non-flag argument of common write commands (destination for cp/mv is
+    // last, but gating on any operand is sufficient for confinement).
+    let head = tokens
+        .first()
+        .map(|s| {
+            std::path::Path::new(s)
+                .file_name()
+                .map(|f| f.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_else(|| s.to_ascii_lowercase())
+        })
+        .unwrap_or_default();
+    const WRITE_CMDS: &[&str] = &["tee", "cp", "mv", "install", "touch", "truncate"];
+    if WRITE_CMDS.contains(&head.as_str()) {
+        for tok in tokens.iter().skip(1) {
+            if !tok.starts_with('-') && !tok.contains('=') {
+                targets.push(tok.clone());
+            }
+        }
+    }
+    for tok in &tokens {
+        if let Some(rest) = tok.strip_prefix("of=") {
+            if !rest.is_empty() {
+                targets.push(rest.to_string());
+            }
+        }
+    }
+
+    targets
+        .into_iter()
+        .map(|t| t.trim_matches(|c| c == '"' || c == '\'').to_string())
+        .filter(|t| !t.is_empty() && t != "/dev/null" && t != "nul" && !t.starts_with('$'))
+        .collect()
+}
+
+fn tokenize_shell_words(command: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut cur = String::new();
+    let mut quote: Option<char> = None;
+    for ch in command.chars() {
+        match quote {
+            Some(q) => {
+                if ch == q {
+                    quote = None;
+                } else {
+                    cur.push(ch);
+                }
+            }
+            None => match ch {
+                '"' | '\'' => quote = Some(ch),
+                c if c.is_whitespace() => {
+                    if !cur.is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                }
+                '|' | ';' | '&' => {
+                    if !cur.is_empty() {
+                        out.push(std::mem::take(&mut cur));
+                    }
+                }
+                c => cur.push(c),
+            },
+        }
+    }
+    if !cur.is_empty() {
+        out.push(cur);
+    }
+    out
+}
+
 fn command_is_build_like(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
     const NEEDLES: &[&str] = &[
@@ -146,7 +254,7 @@ const BACKGROUND_STREAM_CAP: usize = 1_048_576;
 async fn stream_background_output<R>(
     reader: R,
     id: String,
-    stream: super::super::background_registry::BgStream,
+    stream: super::super::background::registry::BgStream,
     session_id: Option<String>,
 ) where
     R: tokio::io::AsyncRead + Unpin,
@@ -167,8 +275,8 @@ async fn stream_background_output<R>(
                 emitted = emitted.saturating_add(n);
                 if emitted > BACKGROUND_STREAM_CAP {
                     truncated = true;
-                    super::super::background_registry::publish(
-                        super::super::background_registry::BackgroundShellSignal::Chunk {
+                    super::super::background::registry::publish(
+                        super::super::background::registry::BackgroundShellSignal::Chunk {
                             id: id.clone(),
                             stream,
                             line:
@@ -183,8 +291,8 @@ async fn stream_background_output<R>(
                 while text.ends_with('\n') || text.ends_with('\r') {
                     text.pop();
                 }
-                super::super::background_registry::publish(
-                    super::super::background_registry::BackgroundShellSignal::Chunk {
+                super::super::background::registry::publish(
+                    super::super::background::registry::BackgroundShellSignal::Chunk {
                         id: id.clone(),
                         stream,
                         line: text,
@@ -200,17 +308,32 @@ async fn stream_background_output<R>(
 async fn spawn_background(
     mut cmd: tokio::process::Command,
     command_text: &str,
+    job_limits: Option<JobLimits>,
 ) -> anyhow::Result<ToolResult> {
-    let mut child = match cmd.spawn() {
-        Ok(c) => c,
-        Err(e) => {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Failed to spawn background command: {e}")),
-            });
-        }
-    };
+    let (job_guard, mut child): (Option<JobObjectGuard>, tokio::process::Child) =
+        if let Some(limits) = job_limits {
+            match spawn_in_job(cmd, limits).await {
+                Ok((g, c)) => (Some(g), c),
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Failed to spawn background command: {e}")),
+                    });
+                }
+            }
+        } else {
+            match cmd.spawn() {
+                Ok(c) => (None, c),
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Failed to spawn background command: {e}")),
+                    });
+                }
+            }
+        };
 
     let id = format!(
         "bg-{}",
@@ -225,7 +348,7 @@ async fn spawn_background(
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
-    super::super::background_registry::register(
+    super::super::background::registry::register(
         id.clone(),
         command_text.to_string(),
         kill_tx,
@@ -239,7 +362,7 @@ async fn spawn_background(
             stream_background_output(
                 out,
                 id_clone,
-                super::super::background_registry::BgStream::Stdout,
+                super::super::background::registry::BgStream::Stdout,
                 sid_clone,
             )
             .await;
@@ -252,7 +375,7 @@ async fn spawn_background(
             stream_background_output(
                 err,
                 id_clone,
-                super::super::background_registry::BgStream::Stderr,
+                super::super::background::registry::BgStream::Stderr,
                 sid_clone,
             )
             .await;
@@ -266,6 +389,7 @@ async fn spawn_background(
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0);
     crate::runtime::spawn_supervised("tools.shell.bg.watchdog", async move {
+        let _job_guard = job_guard;
         let started = std::time::Instant::now();
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         tick.tick().await;
@@ -279,8 +403,8 @@ async fn spawn_background(
         let exit_status = loop {
             tokio::select! {
                 _ = tick.tick() => {
-                    super::super::background_registry::publish(
-                        super::super::background_registry::BackgroundShellSignal::Heartbeat {
+                    super::super::background::registry::publish(
+                        super::super::background::registry::BackgroundShellSignal::Heartbeat {
                             id: id_for_watchdog.clone(),
                             elapsed_secs: started.elapsed().as_secs(),
                             session_id: sid_for_watchdog.clone(),
@@ -309,15 +433,15 @@ async fn spawn_background(
             }
         };
         let exit_code = exit_status.and_then(|s| s.code());
-        super::super::background_registry::publish(
-            super::super::background_registry::BackgroundShellSignal::Exited {
+        super::super::background::registry::publish(
+            super::super::background::registry::BackgroundShellSignal::Exited {
                 id: id_for_watchdog.clone(),
                 elapsed_secs: started.elapsed().as_secs(),
                 exit_code,
                 session_id: sid_for_watchdog.clone(),
             },
         );
-        super::super::background_registry::unregister(&id_for_watchdog);
+        super::super::background::registry::unregister(&id_for_watchdog);
     });
 
     Ok(ToolResult {
@@ -325,8 +449,8 @@ async fn spawn_background(
         output: format!(
             "[background-shell:{id}] command spawned\n\
              $ {command_text}\n\
-             Live stdout/stderr is streaming to the GUI's background-shell card.\n\
-             Use the GUI 'Stop' button or `KillBackgroundShell {{ id: \"{id}\" }}` to terminate."
+             Poll `background_status` (id: \"{id}\") for liveness/exit code, \
+             read output with `background_logs`, and stop it with `background_kill`."
         ),
         error: None,
     })
@@ -341,7 +465,7 @@ fn is_valid_env_var_name(name: &str) -> bool {
     chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_')
 }
 
-fn is_sensitive_env_var(name: &str) -> bool {
+pub(crate) fn is_sensitive_env_var(name: &str) -> bool {
     let upper = name.to_ascii_uppercase();
     const NEEDLES: &[&str] = &[
         "API_KEY",
@@ -374,7 +498,7 @@ const MIRROR_MAX_LINES_PER_STREAM: usize = 2048;
 pub(crate) fn emit_mirror_chunks(
     id: &str,
     body: &str,
-    stream: super::super::background_registry::BgStream,
+    stream: super::super::background::registry::BgStream,
     session_id: Option<&str>,
 ) {
     if body.is_empty() {
@@ -383,8 +507,8 @@ pub(crate) fn emit_mirror_chunks(
     let sid_owned = session_id.map(|s| s.to_string());
     for (count, line) in body.split_inclusive('\n').enumerate() {
         if count >= MIRROR_MAX_LINES_PER_STREAM {
-            super::super::background_registry::publish(
-                super::super::background_registry::BackgroundShellSignal::Chunk {
+            super::super::background::registry::publish(
+                super::super::background::registry::BackgroundShellSignal::Chunk {
                     id: id.to_string(),
                     stream,
                     line: "... [mirror output truncated; agent still sees full result]\n"
@@ -394,8 +518,8 @@ pub(crate) fn emit_mirror_chunks(
             );
             break;
         }
-        super::super::background_registry::publish(
-            super::super::background_registry::BackgroundShellSignal::Chunk {
+        super::super::background::registry::publish(
+            super::super::background::registry::BackgroundShellSignal::Chunk {
                 id: id.to_string(),
                 stream,
                 line: line.to_string(),
@@ -405,7 +529,7 @@ pub(crate) fn emit_mirror_chunks(
     }
 }
 
-fn collect_allowed_shell_env_vars(security: &SecurityPolicy) -> Vec<String> {
+pub(crate) fn collect_allowed_shell_env_vars(security: &SecurityPolicy) -> Vec<String> {
     let mut out = Vec::new();
     let mut seen = HashSet::new();
     for key in SAFE_ENV_VARS
@@ -474,7 +598,7 @@ impl Tool for ShellTool {
                 },
                 "approved": {
                     "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk commands in supervised mode",
+                    "description": "Deprecated / ignored: approval is decided by the runtime approval policy, not by this flag. Do not set it to bypass a confirmation.",
                     "default": false
                 },
                 "timeout_ms": {
@@ -514,16 +638,20 @@ impl Tool for ShellTool {
             });
         }
 
-        match self.security.validate_command_execution(command, approved) {
-            Ok(_) => {}
+        let risk_level = match self.security.validate_command_execution(command, approved) {
+            Ok(risk) => risk,
             Err(reason) => {
+                // Record the denied attempt on the tamper-evident audit chain too.
+                crate::security::record_command_execution(
+                    "agent", command, "denied", approved, false, false, 0,
+                );
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
                     error: Some(reason),
                 });
             }
-        }
+        };
 
         if let Some(path) = self.security.forbidden_path_argument(command) {
             return Ok(ToolResult {
@@ -533,6 +661,36 @@ impl Tool for ShellTool {
             });
         }
 
+        // Filesystem-confinement gate for shell writes. The structured file tools
+        // already route through `sandbox_allows_path`, but the shell (which on
+        // Windows / NoopSandbox platforms has no OS-level filesystem jail) did
+        // not. Parse likely write targets (redirections + common write commands)
+        // and defer the allow/deny decision to the same deny-by-default confinement
+        // check. This is a hard boundary and is intentionally NOT bypassable by the
+        // model-supplied `approved` flag; it no-ops entirely when filesystem
+        // confinement is disabled (the check returns true).
+        {
+            let ws = self.security.workspace_dir();
+            for target in extract_shell_write_targets(command) {
+                let resolved = if std::path::Path::new(&target).is_absolute() {
+                    std::path::PathBuf::from(&target)
+                } else {
+                    ws.join(&target)
+                };
+                if !crate::security::sandbox::sandbox_allows_path(&resolved) {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "Shell write target '{target}' is outside the sandbox workspace \
+                             confinement. Add it to [autonomy].allowed_roots, or disable \
+                             [security.sandbox].confine_filesystem to permit it."
+                        )),
+                    });
+                }
+            }
+        }
+
         if !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,
@@ -540,6 +698,19 @@ impl Tool for ShellTool {
                 error: Some("Rate limit exceeded: action budget exhausted".into()),
             });
         }
+
+        // Command cleared every policy gate and is about to run: record it on the
+        // tamper-evident audit chain (allowed=true). This is the wiring that was
+        // previously missing entirely (the AuditLogger had zero call sites).
+        crate::security::record_command_execution(
+            "agent",
+            command,
+            risk_level.as_str(),
+            approved,
+            true,
+            true,
+            0,
+        );
 
         let _resource_guard = match crate::session::acquire_shell_for_current_session().await {
             Some(Ok(g)) => Some(g),
@@ -572,6 +743,39 @@ impl Tool for ShellTool {
             }
         } else {
             None
+        };
+
+        // Fold the shell command's declared write targets (redirections + common
+        // write commands) into the same cross-session FileWrite lock the
+        // structured editors use, so a shell `> file` / `tee file` cannot race a
+        // parallel session's file_edit on the same path. Best-effort: undetected
+        // write shapes still fall through to the OS sandbox as before.
+        let _shell_write_guards = {
+            let ws = self.security.workspace_dir();
+            let mut paths: Vec<std::path::PathBuf> = Vec::new();
+            for target in extract_shell_write_targets(command) {
+                let p = if std::path::Path::new(&target).is_absolute() {
+                    std::path::PathBuf::from(&target)
+                } else {
+                    ws.join(&target)
+                };
+                paths.push(p);
+            }
+            if paths.is_empty() {
+                None
+            } else {
+                match crate::session::acquire_many_file_writes_for_current_session(paths).await {
+                    Some(Ok(guards)) => Some(guards),
+                    Some(Err(e)) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("{e}")),
+                        });
+                    }
+                    None => None,
+                }
+            }
         };
 
         let mut cmd = match self
@@ -631,7 +835,7 @@ impl Tool for ShellTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if background {
-            return spawn_background(cmd, command).await;
+            return spawn_background(cmd, command, self.job_limits).await;
         }
 
         let timeout_duration = if let Some(ms) = args.get("timeout_ms").and_then(|v| v.as_u64()) {
@@ -653,8 +857,8 @@ impl Tool for ShellTool {
         );
         let mirror_session_id = crate::session::current_session_context().map(|c| c.session_id);
         let mirror_started = std::time::Instant::now();
-        super::super::background_registry::publish(
-            super::super::background_registry::BackgroundShellSignal::Spawned {
+        super::super::background::registry::publish(
+            super::super::background::registry::BackgroundShellSignal::Spawned {
                 id: mirror_id.clone(),
                 command: command.to_string(),
                 session_id: mirror_session_id.clone(),
@@ -681,11 +885,11 @@ impl Tool for ShellTool {
                 emit_mirror_chunks(
                     &mirror_id,
                     &format!("{error_text}\n"),
-                    super::super::background_registry::BgStream::Stderr,
+                    super::super::background::registry::BgStream::Stderr,
                     mirror_session_id.as_deref(),
                 );
-                super::super::background_registry::publish(
-                    super::super::background_registry::BackgroundShellSignal::Exited {
+                super::super::background::registry::publish(
+                    super::super::background::registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: None,
@@ -710,8 +914,8 @@ impl Tool for ShellTool {
         .await;
 
         if let super::foreground::ForegroundOutcome::Cancelled(part_stdout, part_stderr) = &outcome {
-            super::super::background_registry::publish(
-                super::super::background_registry::BackgroundShellSignal::Exited {
+            super::super::background::registry::publish(
+                super::super::background::registry::BackgroundShellSignal::Exited {
                     id: mirror_id.clone(),
                     elapsed_secs: mirror_started.elapsed().as_secs(),
                     exit_code: None,
@@ -750,8 +954,8 @@ impl Tool for ShellTool {
 
         match result {
             Ok(Ok((status, mut stdout, mut stderr))) => {
-                super::super::background_registry::publish(
-                    super::super::background_registry::BackgroundShellSignal::Exited {
+                super::super::background::registry::publish(
+                    super::super::background::registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: status.code(),
@@ -790,48 +994,35 @@ impl Tool for ShellTool {
                 stdout = compacted.stdout;
                 stderr = compacted.stderr;
 
-                if stdout.len() > DEFAULT_LLM_OUTPUT_CAP {
-                    let total = stdout.len();
-                    let mut b = DEFAULT_LLM_OUTPUT_CAP.min(total);
-                    while b > 0 && !stdout.is_char_boundary(b) {
-                        b -= 1;
-                    }
+                if let Some(clipped) =
+                    crate::util::truncate_head_tail(&stdout, DEFAULT_LLM_OUTPUT_CAP, 25)
+                {
                     tracing::debug!(
                         target: "shell.output_truncated",
                         command = %command,
-                        total_bytes = total,
-                        shown_bytes = b,
+                        total_bytes = stdout.len(),
                         stdout_full = %stdout,
                         "shell stdout exceeded LLM cap; full content logged at debug",
                     );
-                    stdout.truncate(b);
+                    stdout = clipped;
                     let filter_hint = if cfg!(target_os = "windows") {
                         "Use `findstr`/`more` or the `content_search` tool to filter if needed"
                     } else {
                         "Use `head`/`tail`/`grep` to filter if needed"
                     };
-                    stdout.push_str(&format!(
-                        "\n... [output truncated: showing {b}/{total} bytes. {filter_hint}]"
-                    ));
+                    stdout.push_str(&format!("\n[{filter_hint}]"));
                 }
-                if stderr.len() > DEFAULT_LLM_OUTPUT_CAP {
-                    let total = stderr.len();
-                    let mut b = DEFAULT_LLM_OUTPUT_CAP.min(total);
-                    while b > 0 && !stderr.is_char_boundary(b) {
-                        b -= 1;
-                    }
+                if let Some(clipped) =
+                    crate::util::truncate_head_tail(&stderr, DEFAULT_LLM_OUTPUT_CAP, 25)
+                {
                     tracing::debug!(
                         target: "shell.output_truncated",
                         command = %command,
-                        total_bytes = total,
-                        shown_bytes = b,
+                        total_bytes = stderr.len(),
                         stderr_full = %stderr,
                         "shell stderr exceeded LLM cap; full content logged at debug",
                     );
-                    stderr.truncate(b);
-                    stderr.push_str(&format!(
-                        "\n... [stderr truncated: showing {b}/{total} bytes]"
-                    ));
+                    stderr = clipped;
                 }
 
                 Ok(ToolResult {
@@ -849,11 +1040,11 @@ impl Tool for ShellTool {
                 emit_mirror_chunks(
                     &mirror_id,
                     &format!("{error_text}\n"),
-                    super::super::background_registry::BgStream::Stderr,
+                    super::super::background::registry::BgStream::Stderr,
                     mirror_session_id.as_deref(),
                 );
-                super::super::background_registry::publish(
-                    super::super::background_registry::BackgroundShellSignal::Exited {
+                super::super::background::registry::publish(
+                    super::super::background::registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: None,
@@ -867,6 +1058,18 @@ impl Tool for ShellTool {
                 })
             }
             Err((partial_stdout, partial_stderr)) => {
+                let partial_stdout = crate::util::truncate_head_tail(
+                    &partial_stdout,
+                    DEFAULT_LLM_OUTPUT_CAP / 2,
+                    25,
+                )
+                .unwrap_or(partial_stdout);
+                let partial_stderr = crate::util::truncate_head_tail(
+                    &partial_stderr,
+                    DEFAULT_LLM_OUTPUT_CAP / 2,
+                    25,
+                )
+                .unwrap_or(partial_stderr);
                 let mut detail = String::new();
                 if !partial_stdout.is_empty() {
                     detail.push_str("--- partial stdout before timeout ---\n");
@@ -899,11 +1102,11 @@ impl Tool for ShellTool {
                 emit_mirror_chunks(
                     &mirror_id,
                     &format!("{banner}\n"),
-                    super::super::background_registry::BgStream::Stderr,
+                    super::super::background::registry::BgStream::Stderr,
                     mirror_session_id.as_deref(),
                 );
-                super::super::background_registry::publish(
-                    super::super::background_registry::BackgroundShellSignal::Exited {
+                super::super::background::registry::publish(
+                    super::super::background::registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: None,

@@ -3,31 +3,11 @@
 // Licensed under the MIT License.
 
 use std::collections::HashMap;
-use std::sync::Arc;
-
-use async_trait::async_trait;
-
-#[async_trait]
-pub trait SampleProducer: Send + Sync {
-    async fn sample(&self, prompt: &str, temperature: f32) -> anyhow::Result<String>;
-}
 
 #[derive(Debug, Clone)]
 pub enum Aggregator {
     MajorityVote,
     EmbeddingCluster { similarity_threshold: f32 },
-}
-
-impl Aggregator {
-    pub fn majority_vote() -> Self {
-        Aggregator::MajorityVote
-    }
-
-    pub fn embedding_cluster(threshold: f32) -> Self {
-        Aggregator::EmbeddingCluster {
-            similarity_threshold: threshold,
-        }
-    }
 }
 
 #[derive(Debug, Clone)]
@@ -42,76 +22,6 @@ pub struct SelfConsistencyResult {
     pub candidates: Vec<String>,
 }
 
-#[derive(Debug, Clone)]
-pub struct SelfConsistencyConfig {
-    pub samples: u32,
-
-    pub temperature_jitter: f32,
-    pub base_temperature: f32,
-    pub aggregator: Aggregator,
-}
-
-impl Default for SelfConsistencyConfig {
-    fn default() -> Self {
-        Self {
-            samples: 1,
-            temperature_jitter: 0.0,
-            base_temperature: 0.7,
-            aggregator: Aggregator::MajorityVote,
-        }
-    }
-}
-
-pub struct SelfConsistency {
-    config: SelfConsistencyConfig,
-    producer: Arc<dyn SampleProducer>,
-}
-
-impl SelfConsistency {
-    pub fn new(config: SelfConsistencyConfig, producer: Arc<dyn SampleProducer>) -> Self {
-        Self { config, producer }
-    }
-
-    pub fn samples(&self) -> u32 {
-        self.config.samples
-    }
-
-    pub async fn run(&self, prompt: &str) -> anyhow::Result<SelfConsistencyResult> {
-        let n = self.config.samples.max(1) as usize;
-        let temps = sample_temperatures(
-            self.config.base_temperature,
-            self.config.temperature_jitter,
-            n,
-        );
-
-        let futs: Vec<_> = temps
-            .into_iter()
-            .map(|t| {
-                let producer = self.producer.clone();
-                let prompt = prompt.to_string();
-                async move { producer.sample(&prompt, t).await }
-            })
-            .collect();
-
-        let mut candidates: Vec<String> = Vec::with_capacity(n);
-        for fut in futs {
-            candidates.push(fut.await?);
-        }
-
-        Ok(aggregate(&self.config.aggregator, candidates))
-    }
-}
-
-fn sample_temperatures(base: f32, jitter: f32, n: usize) -> Vec<f32> {
-    if n <= 1 || jitter == 0.0 {
-        return vec![base; n];
-    }
-    let step = jitter / ((n as f32 - 1.0).max(1.0));
-    (0..n)
-        .map(|i| base - jitter / 2.0 + step * i as f32)
-        .collect()
-}
-
 pub fn aggregate(aggregator: &Aggregator, candidates: Vec<String>) -> SelfConsistencyResult {
     match aggregator {
         Aggregator::MajorityVote => majority_vote(candidates),
@@ -121,27 +31,41 @@ pub fn aggregate(aggregator: &Aggregator, candidates: Vec<String>) -> SelfConsis
     }
 }
 
+fn normalize_for_vote(s: &str) -> String {
+    s.split_whitespace()
+        .map(str::to_lowercase)
+        .collect::<Vec<_>>()
+        .join(" ")
+        .trim_end_matches(['.', '!', '?', '。', '！', '？'])
+        .to_string()
+}
+
 fn majority_vote(candidates: Vec<String>) -> SelfConsistencyResult {
     let total = candidates.len();
-    let mut counts: HashMap<&str, usize> = HashMap::new();
-    for c in &candidates {
-        *counts.entry(c.as_str()).or_insert(0) += 1;
+    if total == 0 {
+        return SelfConsistencyResult {
+            chosen: String::new(),
+            support: 0,
+            samples: 0,
+            agreement: 0.0,
+            candidates,
+        };
     }
-    let (winner, support) = counts
-        .into_iter()
-        .max_by_key(|(_, n)| *n)
-        .map(|(s, n)| (s.to_string(), n))
-        .unwrap_or_default();
+    let normalized: Vec<String> = candidates.iter().map(|c| normalize_for_vote(c)).collect();
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for n in &normalized {
+        *counts.entry(n.as_str()).or_insert(0) += 1;
+    }
+    let (winner_idx, support) = (0..total)
+        .map(|i| (i, counts.get(normalized[i].as_str()).copied().unwrap_or(1)))
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
+        .unwrap_or((0, 1));
 
     SelfConsistencyResult {
-        chosen: winner,
+        chosen: candidates[winner_idx].clone(),
         support,
         samples: total,
-        agreement: if total == 0 {
-            0.0
-        } else {
-            support as f32 / total as f32
-        },
+        agreement: support as f32 / total as f32,
         candidates,
     }
 }
@@ -190,7 +114,7 @@ fn embedding_cluster(candidates: Vec<String>, threshold: f32) -> SelfConsistency
                 .count();
             (i, support)
         })
-        .max_by_key(|(_, s)| *s)
+        .max_by(|a, b| a.1.cmp(&b.1).then_with(|| b.0.cmp(&a.0)))
         .unwrap_or((0, 1));
 
     SelfConsistencyResult {

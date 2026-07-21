@@ -12,12 +12,8 @@ const MAX_OUTPUT_BYTES: usize = 1_048_576;
 const DEFAULT_LLM_OUTPUT_CAP: usize = 32_768;
 
 fn truncate_output(s: &mut String, cap: usize, marker: &str) {
-    if s.len() > cap {
-        let mut b = cap.min(s.len());
-        while b > 0 && !s.is_char_boundary(b) {
-            b -= 1;
-        }
-        s.truncate(b);
+    if let Some(clipped) = crate::util::truncate_head_tail(s, cap, 25) {
+        *s = clipped;
         s.push_str(marker);
     }
 }
@@ -157,6 +153,34 @@ impl Tool for PowerShellTool {
             cmd.current_dir(resolved);
         }
 
+        // Match the shell tool's secret hygiene: either clear the environment to a
+        // vetted allowlist, or strip variables whose names look secret-bearing so a
+        // PowerShell command cannot exfiltrate API keys/tokens from the parent env.
+        if self.security.should_filter_shell_env() {
+            cmd.env_clear();
+            for var in crate::tools::shell::core::collect_allowed_shell_env_vars(&self.security) {
+                if let Ok(val) = std::env::var(&var) {
+                    cmd.env(&var, val);
+                }
+            }
+        } else {
+            let passthrough: std::collections::HashSet<&str> = self
+                .security
+                .shell_env_passthrough
+                .iter()
+                .map(|s| s.as_str())
+                .collect();
+            for (key, _) in std::env::vars_os() {
+                if let Some(k) = key.to_str() {
+                    if crate::tools::shell::core::is_sensitive_env_var(k)
+                        && !passthrough.contains(k)
+                    {
+                        cmd.env_remove(k);
+                    }
+                }
+            }
+        }
+
         for (k, v) in crate::python_env::activation_env(&self.security.workspace_dir()) {
             cmd.env(k, v);
         }
@@ -177,8 +201,8 @@ impl Tool for PowerShellTool {
         );
         let mirror_session_id = crate::session::current_session_context().map(|c| c.session_id);
         let mirror_started = std::time::Instant::now();
-        crate::tools::background_registry::publish(
-            crate::tools::background_registry::BackgroundShellSignal::Spawned {
+        crate::tools::background::registry::publish(
+            crate::tools::background::registry::BackgroundShellSignal::Spawned {
                 id: mirror_id.clone(),
                 command: command.to_string(),
                 session_id: mirror_session_id.clone(),
@@ -192,11 +216,11 @@ impl Tool for PowerShellTool {
                 crate::tools::shell::core::emit_mirror_chunks(
                     &mirror_id,
                     &format!("{error_text}\n"),
-                    crate::tools::background_registry::BgStream::Stderr,
+                    crate::tools::background::registry::BgStream::Stderr,
                     mirror_session_id.as_deref(),
                 );
-                crate::tools::background_registry::publish(
-                    crate::tools::background_registry::BackgroundShellSignal::Exited {
+                crate::tools::background::registry::publish(
+                    crate::tools::background::registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: None,
@@ -224,8 +248,8 @@ impl Tool for PowerShellTool {
 
         match outcome {
             ForegroundOutcome::Cancelled(part_stdout, part_stderr) => {
-                crate::tools::background_registry::publish(
-                    crate::tools::background_registry::BackgroundShellSignal::Exited {
+                crate::tools::background::registry::publish(
+                    crate::tools::background::registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: None,
@@ -243,8 +267,8 @@ impl Tool for PowerShellTool {
             }
             ForegroundOutcome::WaitError(e) => {
                 let error_text = format!("Failed to execute PowerShell: {e}");
-                crate::tools::background_registry::publish(
-                    crate::tools::background_registry::BackgroundShellSignal::Exited {
+                crate::tools::background::registry::publish(
+                    crate::tools::background::registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: None,
@@ -263,8 +287,8 @@ impl Tool for PowerShellTool {
                      DO NOT retry the same command verbatim; pass a larger `timeout_secs` \
                      or split the work into smaller steps."
                 );
-                crate::tools::background_registry::publish(
-                    crate::tools::background_registry::BackgroundShellSignal::Exited {
+                crate::tools::background::registry::publish(
+                    crate::tools::background::registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: None,
@@ -299,8 +323,8 @@ impl Tool for PowerShellTool {
             }
             ForegroundOutcome::Exited(status, mut stdout, mut stderr) => {
                 let exit_code = status.code().unwrap_or(-1);
-                crate::tools::background_registry::publish(
-                    crate::tools::background_registry::BackgroundShellSignal::Exited {
+                crate::tools::background::registry::publish(
+                    crate::tools::background::registry::BackgroundShellSignal::Exited {
                         id: mirror_id.clone(),
                         elapsed_secs: mirror_started.elapsed().as_secs(),
                         exit_code: Some(exit_code),

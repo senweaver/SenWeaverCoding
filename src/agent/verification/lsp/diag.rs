@@ -24,8 +24,6 @@ pub struct LspDiagVerifier {
     fetcher: std::sync::Arc<dyn LspDiagnosticFetcher>,
 
     promote_warnings_to_errors: bool,
-
-    timeout_status_summary: bool,
 }
 
 impl LspDiagVerifier {
@@ -33,7 +31,6 @@ impl LspDiagVerifier {
         Self {
             fetcher,
             promote_warnings_to_errors: false,
-            timeout_status_summary: false,
         }
     }
 
@@ -45,11 +42,6 @@ impl LspDiagVerifier {
     pub fn strict(self) -> Self {
         self.promote_warnings_to_errors()
     }
-
-    pub fn with_timeout_status_summary(mut self, on: bool) -> Self {
-        self.timeout_status_summary = on;
-        self
-    }
 }
 
 #[async_trait]
@@ -60,7 +52,6 @@ impl Verifier for LspDiagVerifier {
 
     async fn verify(&self, artifact: &Artifact) -> anyhow::Result<VerificationReport> {
         let diagnostics = self.fetcher.fetch(&artifact.path).await?;
-        let was_empty = diagnostics.is_empty();
         let issues: Vec<VerificationIssue> = diagnostics
             .into_iter()
             .map(|d| VerificationIssue {
@@ -81,21 +72,14 @@ impl Verifier for LspDiagVerifier {
                 .any(|i| matches!(i.severity, IssueSeverity::Error))
         };
 
-        let summary = if was_empty && self.timeout_status_summary {
-
-            "lsp.status=timeout".to_string()
-        } else {
-            String::new()
-        };
-
         Ok(if is_fail {
-            VerificationReport::failed(self.name(), issues, summary)
+            VerificationReport::failed(self.name(), issues, String::new())
         } else {
             VerificationReport {
                 verifier: self.name(),
                 passed: true,
                 issues,
-                summary,
+                summary: String::new(),
             }
         })
     }

@@ -60,6 +60,14 @@ fn is_payloadless_assistant(msg: &ConversationMessage) -> bool {
     }
 }
 
+const FAILED_TURN_NOTE: &str =
+    "[System note: the MOST RECENT task - the user request immediately above - FAILED with an \
+     error before it could finish. Any assistant/tool records above this note are the partial \
+     work that DID run and are preserved for context so you don't repeat completed steps. Do NOT \
+     silently retry the whole task on your own: treat the user's next message as the authoritative \
+     current request. If they explicitly ask to continue/retry, resume from where it stopped using \
+     the preserved partial work; otherwise answer their new message directly.]";
+
 pub fn is_interrupted_turn_note(content: &str) -> bool {
     content == INTERRUPTED_TURN_NOTE
 }
@@ -68,8 +76,30 @@ pub fn is_orphan_close_note(content: &str) -> bool {
     content == ORPHAN_CLOSE_NOTE
 }
 
+pub fn is_failed_turn_note(content: &str) -> bool {
+    content == FAILED_TURN_NOTE
+}
+
 pub fn is_turn_close_note(content: &str) -> bool {
-    is_interrupted_turn_note(content) || is_orphan_close_note(content)
+    is_interrupted_turn_note(content) || is_orphan_close_note(content) || is_failed_turn_note(content)
+}
+
+pub fn note_failed_turn(history: &mut Vec<ConversationMessage>) {
+    let already_noted = matches!(
+        history.last(),
+        Some(ConversationMessage::Chat(c))
+            if c.role == "assistant" && is_turn_close_note(&c.content)
+    );
+    if already_noted {
+        return;
+    }
+    tracing::info!(
+        target: "agent.dangling_tool_repair",
+        "marking the failed prior turn (partial tool history preserved) before the new user request"
+    );
+    history.push(ConversationMessage::Chat(
+        crate::providers::traits::ChatMessage::assistant(FAILED_TURN_NOTE),
+    ));
 }
 
 pub fn tail_signals_interrupted_turn(history: &[ConversationMessage]) -> bool {

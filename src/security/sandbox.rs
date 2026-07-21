@@ -247,23 +247,37 @@ pub fn sandbox_allows_path(path: &Path) -> bool {
         return false;
     }
 
+    if let Some(svc) = crate::services::try_get_services() {
+        let display = path.to_string_lossy().replace('\\', "/");
+        if !svc.check_write_path_policy(&display) {
+            tracing::warn!(
+                path = %path.display(),
+                "sandbox: write denied by governance RestrictPaths policy"
+            );
+            return false;
+        }
+    }
+
     {
         let guard = confinement().read();
         if guard.enabled {
             let session_root = crate::session::current_session_context()
                 .and_then(|c| guard.session_workspaces.get(&c.session_id).cloned());
+            let session_scoped = session_root.is_some();
             let effective_root = session_root.or_else(|| guard.workspace.clone());
             if let Some(ws) = effective_root.as_ref() {
                 if path_within(path, ws) {
                     return true;
                 }
-                if let Ok(cwd) = std::env::current_dir() {
-                    if path_within(path, &cwd) {
+                if !session_scoped {
+                    if let Ok(cwd) = std::env::current_dir() {
+                        if path_within(path, &cwd) {
+                            return true;
+                        }
+                    }
+                    if path_within(path, &std::env::temp_dir()) {
                         return true;
                     }
-                }
-                if path_within(path, &std::env::temp_dir()) {
-                    return true;
                 }
                 if guard.allowed_roots.iter().any(|root| path_within(path, root)) {
                     return true;
@@ -271,6 +285,7 @@ pub fn sandbox_allows_path(path: &Path) -> bool {
                 tracing::warn!(
                     path = %path.display(),
                     workspace = %ws.display(),
+                    session_scoped,
                     "sandbox: write denied outside workspace confinement (deny-by-default); \
                      add the path to [autonomy].allowed_roots or set \
                      [security.sandbox].confine_filesystem=false to permit it"

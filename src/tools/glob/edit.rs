@@ -175,6 +175,18 @@ impl Tool for GlobEditTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'new_string' parameter"))?;
 
+        if old_string.is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "old_string must not be empty: an empty pattern would insert new_string at \
+                     every character boundary of every matched file"
+                        .into(),
+                ),
+            });
+        }
+
         let filter_contains = args.get("filter_contains").and_then(|v| v.as_str());
 
         let max_files = args
@@ -204,11 +216,27 @@ impl Tool for GlobEditTool {
                     } else {
                         format!("{}/{}", root.display(), pattern_owned)
                     };
+                let deadline = std::time::Instant::now()
+                    + std::time::Duration::from_secs(super::GLOB_WALK_TIMEOUT_SECS);
                 let matches: Vec<PathBuf> = match glob_pattern(&full_pattern) {
-                    Ok(paths) => paths
-                        .filter_map(|entry| entry.ok())
-                        .filter(|path| path.is_file())
-                        .collect(),
+                    Ok(paths) => {
+                        let mut collected: Vec<PathBuf> = Vec::new();
+                        for entry in paths {
+                            if std::time::Instant::now() >= deadline {
+                                break;
+                            }
+                            let Ok(path) = entry else { continue };
+                            // Prune build/vendor/VCS trees so a bulk sweep never edits or even
+                            // stats files under node_modules/target/.git/etc.
+                            if super::crosses_skip_dir(&path) {
+                                continue;
+                            }
+                            if path.is_file() {
+                                collected.push(path);
+                            }
+                        }
+                        collected
+                    }
                     Err(e) => return (Err(anyhow::anyhow!(e)), 0, Vec::new()),
                 };
                 let total = matches.len();
@@ -388,6 +416,14 @@ impl Tool for GlobEditTool {
                 output: results.join("\n"),
                 error: None,
             });
+        }
+
+        if new_string.contains(old_string) {
+            results.push(
+                "  ! Note: new_string contains old_string; re-running this edit would apply \
+                 again (non-idempotent)"
+                    .to_string(),
+            );
         }
 
         let batch_id_for_emit = batch.batch_id.clone();

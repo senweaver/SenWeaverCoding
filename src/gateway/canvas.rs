@@ -10,7 +10,7 @@ use axum::{
         Path, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Json},
 };
 use futures_util::{SinkExt, StreamExt};
@@ -152,41 +152,14 @@ pub async fn handle_canvas_clear(
 pub async fn handle_ws_canvas(
     State(state): State<AppState>,
     Path(id): Path<String>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    if let Some(reject) =
-        crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/canvas")
+    if let Err(reject) =
+        crate::gateway::ws::authorize_ws_request(&state, &headers, Some(peer), None, "/ws/canvas")
     {
         return reject;
-    }
-
-    if state.pairing.require_pairing() {
-        let token = headers
-            .get(header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|auth| auth.strip_prefix("Bearer "))
-            .or_else(|| {
-
-                headers
-                    .get("sec-websocket-protocol")
-                    .and_then(|v| v.to_str().ok())
-                    .and_then(|protos| {
-                        protos
-                            .split(',')
-                            .map(|p| p.trim())
-                            .find_map(|p| p.strip_prefix("bearer."))
-                    })
-            })
-            .unwrap_or("");
-
-        if !state.pairing.is_authenticated(token) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                "Unauthorized  -  provide Authorization header or Sec-WebSocket-Protocol bearer",
-            )
-                .into_response();
-        }
     }
 
     ws.on_upgrade(move |socket| handle_canvas_socket(socket, state, id))

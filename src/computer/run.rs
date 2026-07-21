@@ -10,7 +10,8 @@ use super::action::{ActionType, PlannedAction};
 use super::capture;
 use super::coordinates;
 use super::grounding;
-use super::input::{self, ClickButton, ScrollDirection};
+use super::input;
+use super::input::core::{ClickButton, ScrollDirection};
 use super::planner;
 use super::vision::VisionClient;
 use crate::config::Config;
@@ -199,7 +200,7 @@ pub async fn run_loop(
         let _ = event_tx.send(event);
     };
 
-    let _input_lease = match super::input_lock::try_acquire(super::input_lock::InputActivity::Agent)
+    let _input_lease = match super::input::lock::try_acquire(super::input::lock::InputActivity::Agent)
     {
         Ok(lease) => lease,
         Err(message) => {
@@ -701,7 +702,7 @@ async fn execute_action(
     match planned.action {
         ActionType::Click => {
             let target = primary.ok_or_else(|| anyhow::anyhow!("no target located for click"))?;
-            input::click(target.input_x, target.input_y, ClickButton::Left, 1).await?;
+            input::core::click(target.input_x, target.input_y, ClickButton::Left, 1).await?;
             Ok(format!(
                 "Clicked {}",
                 planned.element_description.as_deref().unwrap_or("element")
@@ -710,7 +711,7 @@ async fn execute_action(
         ActionType::DoubleClick => {
             let target =
                 primary.ok_or_else(|| anyhow::anyhow!("no target located for double click"))?;
-            input::click(target.input_x, target.input_y, ClickButton::Left, 2).await?;
+            input::core::click(target.input_x, target.input_y, ClickButton::Left, 2).await?;
             Ok(format!(
                 "Double-clicked {}",
                 planned.element_description.as_deref().unwrap_or("element")
@@ -719,7 +720,7 @@ async fn execute_action(
         ActionType::RightClick => {
             let target =
                 primary.ok_or_else(|| anyhow::anyhow!("no target located for right click"))?;
-            input::click(target.input_x, target.input_y, ClickButton::Right, 1).await?;
+            input::core::click(target.input_x, target.input_y, ClickButton::Right, 1).await?;
             Ok(format!(
                 "Right-clicked {}",
                 planned.element_description.as_deref().unwrap_or("element")
@@ -728,7 +729,7 @@ async fn execute_action(
         ActionType::MoveMouse => {
             let target =
                 primary.ok_or_else(|| anyhow::anyhow!("no target located for move"))?;
-            input::move_to(target.input_x, target.input_y).await?;
+            input::core::move_to(target.input_x, target.input_y).await?;
             Ok(format!(
                 "Moved cursor to {}",
                 planned.element_description.as_deref().unwrap_or("element")
@@ -739,7 +740,7 @@ async fn execute_action(
                 .value
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("type action requires a value"))?;
-            input::type_text(text.clone()).await?;
+            input::core::type_text(text.clone()).await?;
             Ok(format!("Typed \"{text}\""))
         }
         ActionType::KeyPress => {
@@ -747,7 +748,7 @@ async fn execute_action(
                 .value
                 .clone()
                 .ok_or_else(|| anyhow::anyhow!("key_press action requires a value"))?;
-            input::key_combo(combo.clone()).await?;
+            input::core::key_combo(combo.clone()).await?;
             Ok(format!("Pressed {combo}"))
         }
         ActionType::Scroll => {
@@ -760,13 +761,13 @@ async fn execute_action(
             };
             let direction = parse_scroll_direction(planned.value.as_deref());
             let amount = planned.amount.unwrap_or(DEFAULT_SCROLL_AMOUNT);
-            input::scroll(x, y, direction, amount).await?;
+            input::core::scroll(x, y, direction, amount).await?;
             Ok(format!("Scrolled {:?}", direction))
         }
         ActionType::Drag => {
             let from = primary.ok_or_else(|| anyhow::anyhow!("no source located for drag"))?;
             let to = secondary.ok_or_else(|| anyhow::anyhow!("no destination located for drag"))?;
-            input::drag(from.input_x, from.input_y, to.input_x, to.input_y).await?;
+            input::core::drag(from.input_x, from.input_y, to.input_x, to.input_y).await?;
             Ok("Performed drag".to_string())
         }
         ActionType::Wait => {

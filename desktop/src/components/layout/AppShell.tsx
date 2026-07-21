@@ -56,7 +56,11 @@ const SharePanel = lazy(() =>
   import('../lanShare/SharePanel').then((m) => ({ default: m.SharePanel })),
 )
 import { EmbeddedBrowserPanel } from '../chat/EmbeddedBrowserPanel'
-import { DesignerCanvasPanel } from '../designer/DesignerCanvasPanel'
+const DesignerCanvasPanel = lazy(() =>
+  import('../designer/DesignerCanvasPanel').then((m) => ({
+    default: m.DesignerCanvasPanel,
+  })),
+)
 import { ResizeHandleCanvas } from './ResizeHandleCanvas'
 import { useDesignerCanvasStore } from '../../stores/designerCanvasStore'
 import { DesignerDockCoordinator } from './DesignerDockCoordinator'
@@ -281,11 +285,11 @@ export function AppShell() {
           import(/* @vite-ignore */ '@tauri-apps/api/window'),
         ])
         if (cancelled) return
+        void import('../../stores/settingsStore').then(({ syncLocaleToShell, useSettingsStore }) =>
+          syncLocaleToShell(useSettingsStore.getState().locale),
+        )
         try {
           await invoke('signal_frontend_ready')
-          void import('../../stores/settingsStore').then(({ syncTrayLabels, useSettingsStore }) =>
-            syncTrayLabels(useSettingsStore.getState().locale),
-          )
         } catch {
           const win = getCurrentWindow()
           try {
@@ -951,7 +955,9 @@ export function AppShell() {
           {designerCanvasVisible && (
             <>
               <ResizeHandleCanvas />
-              <DesignerCanvasPanel />
+              <Suspense fallback={null}>
+                <DesignerCanvasPanel />
+              </Suspense>
             </>
           )}
           <div

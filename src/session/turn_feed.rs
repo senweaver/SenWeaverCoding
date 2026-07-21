@@ -56,6 +56,22 @@ impl SessionTurnFeed {
         self.tx.subscribe()
     }
 
+    /// Whether any other connection is currently mirroring this session's live
+    /// stream. Lets the hot path skip serializing per-token deltas for the feed
+    /// when only the originating connection is attached.
+    #[must_use]
+    pub fn has_subscribers(&self) -> bool {
+        self.tx.receiver_count() > 0
+    }
+
+    /// The current turn's cancellation token. Child work (e.g. delegated
+    /// subagents) can derive a child token from this so a turn/session cancel
+    /// propagates down and never leaves orphaned in-flight subagents.
+    #[must_use]
+    pub fn current_cancel_token(&self) -> CancellationToken {
+        self.cancel_signal.load_full().as_ref().clone()
+    }
+
     /// Signal the running turn to cancel (cross-connection stop). Mirrors what a
     /// reader's `stop_generation` does to its own agent, but targets the turn that
     /// actually owns this session right now.

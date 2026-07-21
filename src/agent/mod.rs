@@ -36,7 +36,6 @@ pub mod mode;
 pub mod model_switch;
 pub mod multi_agent_runtime;
 pub mod observe;
-pub mod pipeline;
 pub mod plan_mode;
 #[cfg(feature = "tool-curator")]
 pub mod curator_mode_enforcement;
@@ -67,10 +66,6 @@ pub mod verification;
 pub mod workflow_loader;
 
 pub use agent::{Agent, AgentBuilder, SubagentChunkKind, TurnEvent};
-pub use context::manager::{
-    AgentId, ConflictStrategy, ContextSnapshot, ContextValue, LayerPriority, LayeredContext, Scope,
-    TeamId,
-};
 pub use coordination::{Coordinator, CoordinatorHandle};
 pub use loop_::{
     ToolLoopCostTrackingContext, process_message, run, scope_tool_loop_cost_tracking,
@@ -80,10 +75,6 @@ pub use multi_agent_runtime::{
     MultiAgentRuntime, MultiAgentRuntimeBuilder, MultiAgentRuntimeConfig, MultiAgentRuntimeHandle,
     MultiAgentRuntimeManager, MultiAgentRuntimeManagerError, global_manager, global_runtime,
     init_global_runtime,
-};
-pub use pipeline::{
-    Pipeline, PipelineBuilder, PipelineConfig, PipelineResult, PipelineStage, PipelineTask,
-    StageErrorStrategy, StageKind, StageResult, TaskResult,
 };
 pub use registry::{AgentRegistry, AgentRegistryHandle};
 pub use supervisor::{Supervisor, SupervisorHandle};

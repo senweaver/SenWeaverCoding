@@ -287,6 +287,20 @@ impl Tool for DelegateParallelTool {
         let multimodal_exec = self.multimodal_config.clone();
         let workspace_root_exec = Arc::clone(&self.workspace_root);
         let delegate_cfg_exec = self.delegate_config.clone();
+        let parent_workspace_dir_exec = crate::session::current_session_context()
+            .map(|c| c.workspace_dir)
+            .filter(|d| !d.trim().is_empty())
+            .unwrap_or_else(|| {
+                self.workspace_root.read().to_string_lossy().into_owned()
+            });
+
+        // Resolve a single runtime the executor and the submit path both share.
+        // Without this the executor re-queried `global_runtime()` and, in embedded
+        // library builds where no global runtime exists, always fell through to the
+        // fallback even though the submit path had just built a local runtime.
+        let effective_runtime: Arc<MultiAgentRuntime> =
+            global_runtime().unwrap_or_else(|| Arc::new(MultiAgentRuntime::new()));
+        let runtime_exec = Arc::clone(&effective_runtime);
 
         let exec: TaskExecutor = Arc::new(move |task, ct| {
             let id = task.id.clone();
@@ -301,7 +315,13 @@ impl Tool for DelegateParallelTool {
             let workspace_root = Arc::clone(&workspace_root_exec);
             let delegate_cfg = delegate_cfg_exec.clone();
             let delegation_root = delegation_root_for_exec.clone();
-            Box::pin(async move {
+            let rt = Arc::clone(&runtime_exec);
+            let subagent_ctx = crate::session::subagent_session_context(
+                "delegate-parallel",
+                &id,
+                std::path::Path::new(&parent_workspace_dir_exec),
+            );
+            Box::pin(crate::session::scope_session_context(subagent_ctx, async move {
 
                 let _lineage = limiter.register(
                     id.clone(),
@@ -342,51 +362,63 @@ impl Tool for DelegateParallelTool {
                         ));
                     }
                 };
-                let Some(rt) = crate::agent::multi_agent_runtime::global_runtime() else {
-                    coordination_metrics::incr_delegate_parallel_no_runtime();
-                    if allow_fallback {
-                        coordination_metrics::incr_delegate_parallel_fallback();
-                        lock_degraded_notes(&notes).insert(
-                            id.clone(),
-                            (
-                                true,
-                                Some(
-                                    "no multi_agent_runtime; single-agent fallback".to_string(),
-                                ),
-                            ),
-                        );
-                        return single_agent_fallback(&id, &prompt, cancel.clone(), call_timeout)
-                            .await;
-                    }
-                    return Err(format!(
-                        "delegate_parallel: multi_agent_runtime not initialized (task '{id}')"
-                    ));
-                };
+                let rt = rt.as_ref();
 
-                let Some(agent_info) = rt.registry.find_best_available(&capability) else {
-                    coordination_metrics::incr_delegate_parallel_no_capability();
-                    tracing::debug!(
-                        capability = %capability,
-                        task_id = %id,
-                        "delegate_parallel: no agent matches capability"
-                    );
-                    if allow_fallback {
-                        coordination_metrics::incr_delegate_parallel_fallback();
-                        lock_degraded_notes(&notes).insert(
-                            id.clone(),
-                            (
-                                true,
-                                Some(format!(
-                                    "no agent matches capability '{capability}'; single-agent fallback"
-                                )),
-                            ),
-                        );
-                        return single_agent_fallback(&id, &prompt, cancel.clone(), call_timeout)
-                            .await;
+                // Pick an agent AND reserve its capacity together. `find_best_available`
+                // scores by current load, so if the reservation loses a race (the agent
+                // went busy/unavailable in between) we re-pick the next-best instead of
+                // silently proceeding without counting the load (which would let the
+                // scorer keep over-subscribing the same agent).
+                let (agent_info, reserved) = {
+                    let mut chosen: Option<(
+                        crate::agent::registry::AgentInfo,
+                        crate::agent::registry::TaskAssignmentGuard,
+                    )> = None;
+                    for _ in 0..4 {
+                        let Some(candidate) = rt.registry.find_best_available(&capability) else {
+                            break;
+                        };
+                        match rt.registry.assign_task_guarded(&candidate.id, &id) {
+                            Ok(guard) => {
+                                chosen = Some((candidate, guard));
+                                break;
+                            }
+                            Err(_) => continue,
+                        }
                     }
-                    return Err(format!(
-                        "delegate_parallel: no agent matches capability '{capability}' for task '{id}'"
-                    ));
+                    match chosen {
+                        Some(pair) => pair,
+                        None => {
+                            coordination_metrics::incr_delegate_parallel_no_capability();
+                            tracing::debug!(
+                                capability = %capability,
+                                task_id = %id,
+                                "delegate_parallel: no agent matches capability"
+                            );
+                            if allow_fallback {
+                                coordination_metrics::incr_delegate_parallel_fallback();
+                                lock_degraded_notes(&notes).insert(
+                                    id.clone(),
+                                    (
+                                        true,
+                                        Some(format!(
+                                            "no agent matches capability '{capability}'; single-agent fallback"
+                                        )),
+                                    ),
+                                );
+                                return single_agent_fallback(
+                                    &id,
+                                    &prompt,
+                                    cancel.clone(),
+                                    call_timeout,
+                                )
+                                .await;
+                            }
+                            return Err(format!(
+                                "delegate_parallel: no agent matches capability '{capability}' for task '{id}'"
+                            ));
+                        }
+                    }
                 };
 
                 let (
@@ -476,7 +508,7 @@ impl Tool for DelegateParallelTool {
                     }
                 };
 
-                let _ = rt.registry.assign_task(&agent_info.id, &id);
+                let mut assignment = Some(reserved);
                 rt.blackboard.inner().write(
                     crate::agent::multi_agent_runtime::session_scoped_key(&id),
                     serde_json::json!({
@@ -506,7 +538,9 @@ impl Tool for DelegateParallelTool {
                 {
                     Ok(p) => p,
                     Err(e) => {
-                        rt.registry.complete_task(&agent_info.id, false);
+                        if let Some(guard) = assignment.take() {
+                            guard.complete(false);
+                        }
                         return Err(format!("provider build failed for '{provider_name}': {e}"));
                     }
                 };
@@ -552,13 +586,17 @@ impl Tool for DelegateParallelTool {
                         tokio::select! {
                             biased;
                             _ = cancel.cancelled() => {
-                                rt.registry.complete_task(&agent_info.id, false);
+                                if let Some(guard) = assignment.take() {
+                                    guard.complete(false);
+                                }
                                 return Err(format!(
                                     "sub-agent '{}' cancelled mid-call", agent_info.id
                                 ));
                             }
                             _ = tokio::time::sleep(timeout) => {
-                                rt.registry.complete_task(&agent_info.id, false);
+                                if let Some(guard) = assignment.take() {
+                                    guard.complete(false);
+                                }
 
                                 limiter.on_overrun(&id);
                                 return Err(format!(
@@ -572,7 +610,9 @@ impl Tool for DelegateParallelTool {
                         tokio::select! {
                             biased;
                             _ = cancel.cancelled() => {
-                                rt.registry.complete_task(&agent_info.id, false);
+                                if let Some(guard) = assignment.take() {
+                                    guard.complete(false);
+                                }
                                 return Err(format!(
                                     "sub-agent '{}' cancelled mid-call", agent_info.id
                                 ));
@@ -585,7 +625,9 @@ impl Tool for DelegateParallelTool {
 
                 match result {
                     Ok(output) => {
-                        rt.registry.complete_task(&agent_info.id, true);
+                        if let Some(guard) = assignment.take() {
+                            guard.complete(true);
+                        }
 
                         rt.blackboard.inner().write(
                             crate::agent::multi_agent_runtime::session_scoped_key(&id),
@@ -601,34 +643,21 @@ impl Tool for DelegateParallelTool {
                         Ok(output)
                     }
                     Err(e) => {
-                        rt.registry.complete_task(&agent_info.id, false);
+                        if let Some(guard) = assignment.take() {
+                            guard.complete(false);
+                        }
                         Err(format!("sub-agent '{}' failed: {e}", agent_info.id))
                     }
                 }
-            })
+            }))
         });
 
-        let outcomes = match global_runtime() {
-            Some(rt) => {
-                match rt
-                    .submit_task_graph(schedulable, args.max_parallel, exec)
-                    .await
-                {
-                    Ok(o) => o,
-                    Err(e) => return Ok(err_result(format!("Task graph rejected: {e}"))),
-                }
-            }
-            None => {
-
-                let rt = MultiAgentRuntime::new();
-                match rt
-                    .submit_task_graph(schedulable, args.max_parallel, exec)
-                    .await
-                {
-                    Ok(o) => o,
-                    Err(e) => return Ok(err_result(format!("Task graph rejected: {e}"))),
-                }
-            }
+        let outcomes = match effective_runtime
+            .submit_task_graph(schedulable, args.max_parallel, exec)
+            .await
+        {
+            Ok(o) => o,
+            Err(e) => return Ok(err_result(format!("Task graph rejected: {e}"))),
         };
 
         let notes_snapshot = lock_degraded_notes(&degraded_notes).clone();
@@ -861,7 +890,8 @@ async fn run_role_agentic(ctx: RoleAgenticCtx<'_>) -> Result<String, String> {
             .filter(|tool| allowed.contains(tool.name()))
 
             .filter(|tool| {
-                tool.name() != "delegate" && tool.name() != "delegate_parallel"
+                let n = tool.name();
+                n != "delegate" && n != "delegate_parallel" && n != "spawn_workers"
             })
             .map(|tool| {
                 Box::new(crate::tools::ArcToolRef(tool.clone())) as Box<dyn Tool>

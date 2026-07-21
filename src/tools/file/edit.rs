@@ -11,6 +11,8 @@ use memchr::memmem::Finder;
 use serde_json::json;
 use std::sync::Arc;
 
+const WHOLE_FILE_EMIT_THRESHOLD: usize = 256 * 1024;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditMode {
 
@@ -33,6 +35,60 @@ pub struct FileEditTool {
     security: Arc<SecurityPolicy>,
     edit_history: Option<Arc<EditHistory>>,
     ops_applier: Arc<OpsApplier>,
+}
+
+async fn fresh_mtime_note(path: &std::path::Path) -> String {
+    match tokio::fs::metadata(path).await {
+        Ok(meta) => meta
+            .modified()
+            .ok()
+            .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+            .map(|d| format!("\n[mtime_ms: {}]", d.as_millis() as u64))
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    }
+}
+
+fn find_eol_insensitive_unique(content: &str, old_string: &str) -> Option<(usize, usize, bool)> {
+    if !content.contains('\r') && !old_string.contains('\r') {
+        return None;
+    }
+    let old_lf = old_string.replace("\r\n", "\n");
+    if old_lf.is_empty() {
+        return None;
+    }
+
+    let bytes = content.as_bytes();
+    let mut normalized: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut offsets: Vec<usize> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
+            offsets.push(i);
+            normalized.push(b'\n');
+            i += 2;
+        } else {
+            offsets.push(i);
+            normalized.push(bytes[i]);
+            i += 1;
+        }
+    }
+
+    let finder = Finder::new(old_lf.as_bytes());
+    let mut matches = finder.find_iter(&normalized);
+    let first = matches.next()?;
+    if matches.next().is_some() {
+        return None;
+    }
+
+    let norm_end = first + old_lf.len();
+    let orig_start = offsets[first];
+    let last_norm_idx = norm_end - 1;
+    let last_orig_idx = offsets[last_norm_idx];
+    let last_width = if bytes[last_orig_idx] == b'\r' { 2 } else { 1 };
+    let orig_end = last_orig_idx + last_width;
+    let span_had_crlf = content[orig_start..orig_end].contains("\r\n");
+    Some((orig_start, orig_end, span_had_crlf))
 }
 
 impl FileEditTool {
@@ -116,8 +172,13 @@ impl Tool for FileEditTool {
                     "description": "Optional function or method name (e.g. \"calculate\" or \"fn calculate\") \
                                     that restricts the replacement to the named scope's byte range. \
                                     When provided, only matches within that function/method body are \
-                                    replaced; matches outside are left untouched. Falls back to \
-                                    whole-file replace when the scope cannot be located."
+                                    replaced; matches outside are left untouched. If the scope cannot \
+                                    be located, the edit fails unless force_whole_file is true."
+                },
+                "force_whole_file": {
+                    "type": "boolean",
+                    "description": "When true and scope cannot be located, search/replace across the \
+                                    whole file instead of failing (default false)."
                 },
                 "expected_mtime_ms": {
                     "type": "integer",
@@ -383,17 +444,91 @@ impl FileEditTool {
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
                 crate::session::record_write_for_current_session(path);
-                crate::agent::file_edit_emitter::emit_file_edit(
+                Self::emit_edit_if_small(
                     path,
-                    Some(original.as_bytes()),
-                    Some(new_content.as_bytes()),
-                    Some(batch_id),
+                    original.as_bytes(),
+                    new_content.as_bytes(),
+                    batch_id,
                 )
                 .await;
                 Ok(())
             }
             Err(e) => Err(format!("{e}")),
         }
+    }
+
+    /// Apply a single contiguous slice replacement as a range-scoped `EditOp::Replace`
+    /// (carrying only the changed bytes, not the whole file). `whole_before` is the
+    /// current full file content, used to render the UI diff only when the file is
+    /// small enough; above the threshold the whole-file emit is skipped entirely.
+    async fn dispatch_range_replace(
+        &self,
+        path: &std::path::Path,
+        byte_range: std::ops::Range<usize>,
+        old_slice: &str,
+        new_slice: &str,
+        whole_before: &str,
+    ) -> Result<(), String> {
+        self.snapshot_before_write(path).await;
+        let batch = EditBatch::new(EditOrigin::FileEditTool).with_op(EditOp::Replace {
+            path: path.to_path_buf(),
+            byte_range: byte_range.clone(),
+            old_text: old_slice.to_string(),
+            new_text: new_slice.to_string(),
+            anchor: None,
+        });
+        let batch_id = batch.batch_id.clone();
+        match self.ops_applier.apply_batch(batch).await {
+            Ok(_) => {
+                crate::session::record_write_for_current_session(path);
+                if whole_before.len() <= WHOLE_FILE_EMIT_THRESHOLD {
+                    let mut whole_after =
+                        String::with_capacity(whole_before.len() + new_slice.len());
+                    whole_after.push_str(&whole_before[..byte_range.start]);
+                    whole_after.push_str(new_slice);
+                    whole_after.push_str(&whole_before[byte_range.end..]);
+                    Self::emit_edit_if_small(
+                        path,
+                        whole_before.as_bytes(),
+                        whole_after.as_bytes(),
+                        batch_id,
+                    )
+                    .await;
+                } else {
+                    tracing::debug!(
+                        target: "tools.file_edit",
+                        path = %path.display(),
+                        bytes = whole_before.len(),
+                        "skipping whole-file edit emit for a large file; range op applied and journaled"
+                    );
+                }
+                Ok(())
+            }
+            Err(e) => Err(format!("{e}")),
+        }
+    }
+
+    async fn emit_edit_if_small(
+        path: &std::path::Path,
+        before: &[u8],
+        after: &[u8],
+        batch_id: String,
+    ) {
+        if before.len() > WHOLE_FILE_EMIT_THRESHOLD && after.len() > WHOLE_FILE_EMIT_THRESHOLD {
+            tracing::debug!(
+                target: "tools.file_edit",
+                path = %path.display(),
+                "skipping whole-file edit emit for a large file"
+            );
+            return;
+        }
+        crate::agent::file_edit_emitter::emit_file_edit(
+            path,
+            Some(before),
+            Some(after),
+            Some(batch_id),
+        )
+        .await;
     }
 
     async fn execute_replace(
@@ -414,6 +549,11 @@ impl FileEditTool {
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_string);
+
+        let force_whole_file = args
+            .get("force_whole_file")
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false);
 
         if old_string.is_empty() {
             return Ok(ToolResult {
@@ -438,13 +578,26 @@ impl FileEditTool {
             let range = crate::code_intel::outline::locate_named_scope_in(&content, name)
                 .map(|r| r.start.min(content.len())..r.end.min(content.len()));
             if range.is_none() {
-                tracing::warn!(
-                    scope = %name,
-                    path = %display_path,
-                    "scope not found  - falling back to whole-file replace"
-                );
+                if force_whole_file {
+                    tracing::warn!(
+                        scope = %name,
+                        path = %display_path,
+                        "scope not found - force_whole_file enabled, searching whole file"
+                    );
+                    None
+                } else {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "scope '{name}' not found in {display_path}; \
+                             refuse whole-file replace (pass force_whole_file=true to override)"
+                        )),
+                    });
+                }
+            } else {
+                range
             }
-            range
         } else {
             None
         };
@@ -464,6 +617,46 @@ impl FileEditTool {
         }
 
         if hits.is_empty() {
+            if !replace_all && scope_name.is_none() {
+                if let Some((span_start, span_end, span_had_crlf)) =
+                    find_eol_insensitive_unique(&content, old_string)
+                {
+                    let adapted_new = if span_had_crlf {
+                        new_string.replace("\r\n", "\n").replace('\n', "\r\n")
+                    } else {
+                        new_string.replace("\r\n", "\n")
+                    };
+                    let mut out = String::with_capacity(
+                        content.len() + adapted_new.len(),
+                    );
+                    out.push_str(&content[..span_start]);
+                    out.push_str(&adapted_new);
+                    out.push_str(&content[span_end..]);
+                    return match self
+                        .dispatch_full_file_rewrite(resolved_target, &content, &out)
+                        .await
+                    {
+                        Ok(()) => {
+                            let diff =
+                                self.generate_diff(display_path, old_string, &adapted_new);
+                            Ok(ToolResult {
+                                success: true,
+                                output: format!(
+                                    "Edited {display_path}: replaced 1 occurrence(s) \
+                                     [auto-recovered a CRLF/LF line-ending mismatch between old_string and the file; the replacement uses the file's original line endings]{}\n{diff}",
+                                    fresh_mtime_note(resolved_target).await
+                                ),
+                                error: None,
+                            })
+                        }
+                        Err(e) => Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("Failed to write file: {e}")),
+                        }),
+                    };
+                }
+            }
             let error = if let Some(name) = scope_name.as_deref() {
                 // Scoped search failed inside the named scope; still analyze the
                 // whole file so the model sees where the text actually lives.
@@ -519,8 +712,43 @@ impl FileEditTool {
             });
         }
 
-        let new_content = if replace_all {
+        // Single, unambiguous occurrence: emit a range-scoped Replace carrying only
+        // the changed slice instead of the whole file (avoids sending/logging the
+        // entire file for a small edit). replace_all still rewrites whole-file since
+        // its multiple non-contiguous slices cannot be one contiguous range op.
+        if !replace_all {
+            let pos = hits[0];
+            let range = pos..(pos + old_string.len());
+            return match self
+                .dispatch_range_replace(
+                    resolved_target,
+                    range,
+                    old_string,
+                    new_string,
+                    &content,
+                )
+                .await
+            {
+                Ok(()) => {
+                    let diff = self.generate_diff(display_path, old_string, new_string);
+                    Ok(ToolResult {
+                        success: true,
+                        output: format!(
+                            "Edited {display_path}: replaced 1 occurrence(s){}\n{diff}",
+                            fresh_mtime_note(resolved_target).await
+                        ),
+                        error: None,
+                    })
+                }
+                Err(e) => Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Failed to write file: {e}")),
+                }),
+            };
+        }
 
+        let new_content = {
             let mut out = String::with_capacity(bytes.len() + new_string.len());
             let mut cursor = 0usize;
             for pos in finder.find_iter(&bytes[search_range.clone()]) {
@@ -531,21 +759,10 @@ impl FileEditTool {
             }
             out.push_str(&content[cursor..]);
             out
-        } else {
-            let pos = hits[0];
-            let mut out = String::with_capacity(bytes.len() + new_string.len());
-            out.push_str(&content[..pos]);
-            out.push_str(new_string);
-            out.push_str(&content[pos + old_string.len()..]);
-            out
         };
 
-        let replaced_count = if replace_all {
-            // `hits` is capped at 4 for the ambiguity check; count the real total.
-            finder.find_iter(&bytes[search_range.clone()]).count()
-        } else {
-            1
-        };
+        // `hits` is capped at 4 for the ambiguity check; count the real total.
+        let replaced_count = finder.find_iter(&bytes[search_range.clone()]).count();
 
         match self
             .dispatch_full_file_rewrite(resolved_target, &content, &new_content)
@@ -556,7 +773,8 @@ impl FileEditTool {
                 Ok(ToolResult {
                     success: true,
                     output: format!(
-                        "Edited {display_path}: replaced {replaced_count} occurrence(s)\n{diff}"
+                        "Edited {display_path}: replaced {replaced_count} occurrence(s){}\n{diff}",
+                        fresh_mtime_note(resolved_target).await
                     ),
                     error: None,
                 })

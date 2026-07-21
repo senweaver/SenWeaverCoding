@@ -167,6 +167,13 @@ export type ServerMessage =
       }>
     }
   | { type: 'session_title_updated'; sessionId: string; title: string }
+  | {
+      type: 'session_history_changed'
+      sessionId: string
+      reason?: 'rewind' | 'rewind_restore' | 'rewind_commit' | string
+      rewindId?: string
+      userMessageIndex?: number
+    }
   | { type: 'persist_lag'; sessionId: string }
   | {
       type: 'worker_spawned'

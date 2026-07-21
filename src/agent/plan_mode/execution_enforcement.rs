@@ -69,8 +69,10 @@ pub fn detect_completion_claim(text: &str) -> bool {
         "all five passed",
     ];
     for pat in EN_STRONG {
-        if lower.contains(pat) {
-            return true;
+        if let Some(pos) = lower.find(pat) {
+            if !negation_near(&lower, pos, pat.len()) {
+                return true;
+            }
         }
     }
     const CN_STRONG: &[&str] = &[
@@ -118,11 +120,49 @@ pub fn detect_completion_claim(text: &str) -> bool {
         "通过验证",
     ];
     for pat in CN_STRONG {
-        if text.contains(pat) {
-            return true;
+        if let Some(pos) = text.find(pat) {
+            if !negation_near(text, pos, pat.len()) {
+                return true;
+            }
         }
     }
     false
+}
+
+// Negation markers that, when they appear near a completion phrase, flip its
+// meaning ("所有任务中仍有 2 个被阻塞，无法完成" contains "所有任务" but is NOT a
+// completion claim). Checked in a small window around the matched phrase.
+const NEGATION_MARKERS: &[&str] = &[
+    // English (checked against a lowercased window)
+    "not ", "n't", "cannot", "can not", "unable", "fail", "still ", "remaining",
+    "remain ", "blocked", "pending", "except", " yet", "couldn", "won't", "without",
+    // Chinese
+    "未", "没", "无法", "还没", "尚未", "仍", "不能", "失败", "还需", "还要", "剩余",
+    "阻塞", "不通过", "除了", "但", "however",
+];
+
+fn negation_near(haystack: &str, match_start: usize, match_len: usize) -> bool {
+    const WINDOW_CHARS: usize = 24;
+    let mut before_start = match_start;
+    let mut count = 0;
+    while before_start > 0 && count < WINDOW_CHARS {
+        before_start -= 1;
+        while before_start > 0 && !haystack.is_char_boundary(before_start) {
+            before_start -= 1;
+        }
+        count += 1;
+    }
+    let mut after_end = (match_start + match_len).min(haystack.len());
+    let mut count = 0;
+    while after_end < haystack.len() && count < WINDOW_CHARS {
+        after_end += 1;
+        while after_end < haystack.len() && !haystack.is_char_boundary(after_end) {
+            after_end += 1;
+        }
+        count += 1;
+    }
+    let window = haystack[before_start..after_end].to_ascii_lowercase();
+    NEGATION_MARKERS.iter().any(|n| window.contains(n))
 }
 
 pub fn classify_auto_finalize_intent(recent_assistant_text: &str) -> AutoFinalizeIntent {

@@ -75,6 +75,8 @@ struct ApiChatRequest<'a> {
     tools: Option<Vec<NativeToolSpec<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    stream: Option<bool>,
 }
 
 #[derive(Debug, Serialize)]
@@ -156,6 +158,8 @@ struct UsageInfo {
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: ResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -166,6 +170,7 @@ struct ResponseMessage {
     tool_calls: Option<Vec<NativeToolCall>>,
 }
 
+#[derive(Clone)]
 pub struct CopilotProvider {
     github_token: Option<String>,
 
@@ -221,6 +226,24 @@ impl CopilotProvider {
         crate::services::require_services()
             .proxy_runtime()
             .build_client_with_timeouts("provider.copilot", 120, 10)
+    }
+
+    fn stream_http_client(&self) -> Client {
+        // Streaming must use a read-idle timeout, not a total-request timeout:
+        // a 120s overall cap truncates long tool-heavy responses mid-stream even
+        // while tokens are still flowing.
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (header, value) in &Self::COPILOT_HEADERS {
+            if let (Ok(name), Ok(val)) = (
+                reqwest::header::HeaderName::from_bytes(header.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                headers.insert(name, val);
+            }
+        }
+        crate::services::require_services()
+            .proxy_runtime()
+            .build_stream_client("provider.copilot.stream", 300, 10, &headers)
     }
 
     const COPILOT_HEADERS: [(&str, &str); 4] = [
@@ -360,6 +383,7 @@ impl CopilotProvider {
             temperature,
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
             tools: native_tools,
+            stream: None,
         };
 
         let mut req = self
@@ -416,6 +440,11 @@ impl CopilotProvider {
             tool_calls,
             usage,
             reasoning_content: None,
+            thinking_signature: None,
+            stop_reason: choice
+                .finish_reason
+                .as_deref()
+                .and_then(crate::providers::traits::StopReason::from_wire),
         })
     }
 
@@ -485,8 +514,12 @@ impl CopilotProvider {
         }
 
         let access_token_path = self.token_dir.join("access-token");
+        let secrets = crate::security::secrets::SecretStore::new(&self.token_dir, true);
         if let Ok(cached) = tokio::fs::read_to_string(&access_token_path).await {
-            let token = cached.trim();
+            // decrypt() returns unprefixed values verbatim, so a pre-existing
+            // plaintext token still loads and is re-encrypted on next write.
+            let decrypted = secrets.decrypt(cached.trim()).unwrap_or_else(|_| cached.clone());
+            let token = decrypted.trim();
             if !token.is_empty() {
                 return Ok(token.to_string());
             }
@@ -501,7 +534,8 @@ impl CopilotProvider {
         }
 
         let token = self.device_code_login().await?;
-        write_file_secure(&access_token_path, &token).await;
+        let to_store = secrets.encrypt(&token).unwrap_or_else(|_| token.clone());
+        write_file_secure(&access_token_path, &to_store).await;
         Ok(token)
     }
 
@@ -762,6 +796,121 @@ impl Provider for CopilotProvider {
 
     fn supports_native_tools(&self) -> bool {
         true
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn supports_streaming_tool_events(&self) -> bool {
+        // stream_chat below emits native tool-call events via sse_bytes_to_events.
+        // Without declaring this, ReliableProvider drops Copilot from the streaming
+        // candidate set whenever the request carries tools, forcing non-streaming
+        // (or erroring with "No provider supports streaming tool events").
+        true
+    }
+
+    fn stream_chat(
+        &self,
+        request: ProviderChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        options: crate::providers::traits::StreamOptions,
+    ) -> futures_util::stream::BoxStream<
+        'static,
+        crate::providers::traits::StreamResult<crate::providers::traits::StreamEvent>,
+    > {
+        use crate::providers::traits::{StreamError, StreamEvent};
+        use futures_util::StreamExt;
+        use futures_util::stream;
+
+        if !options.enabled {
+            return stream::once(async { Ok(StreamEvent::Final) }).boxed();
+        }
+
+        let sanitized_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            request.messages.to_vec(),
+            model,
+            0,
+            None,
+        );
+        let api_messages = Self::convert_messages(&sanitized_messages);
+        let tools_owned: Option<Vec<ToolSpec>> = request.tools.map(<[ToolSpec]>::to_vec);
+        let model_owned = model.to_string();
+        let provider = self.clone();
+        let count_tokens = options.count_tokens;
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<
+            crate::providers::traits::StreamResult<StreamEvent>,
+        >(100);
+
+        crate::runtime::spawn_supervised("providers.copilot.stream", async move {
+            let (token, endpoint) = match provider.get_api_key().await {
+                Ok(v) => v,
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(StreamError::Provider(format!(
+                            "GitHub Copilot auth failed: {e}"
+                        ))))
+                        .await;
+                    return;
+                }
+            };
+            let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
+            let native_tools = Self::convert_tools(tools_owned.as_deref());
+            let body = ApiChatRequest {
+                model: model_owned,
+                messages: api_messages,
+                temperature,
+                tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
+                tools: native_tools,
+                stream: Some(true),
+            };
+            let mut req = provider
+                .stream_http_client()
+                .post(&url)
+                .header("Authorization", format!("Bearer {token}"))
+                .json(&body);
+            for (header, value) in &Self::COPILOT_HEADERS {
+                req = req.header(*header, *value);
+            }
+            let response = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(StreamError::Provider(format!(
+                            "GitHub Copilot stream request failed: {e}"
+                        ))))
+                        .await;
+                    return;
+                }
+            };
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                let _ = tx
+                    .send(Err(StreamError::Provider(format!(
+                        "GitHub Copilot API error ({status}): {}",
+                        crate::providers::sanitize_api_error(&text)
+                    ))))
+                    .await;
+                return;
+            }
+
+            let mut event_stream =
+                crate::providers::core::openai_sse::sse_bytes_to_events(response, count_tokens);
+            while let Some(event) = event_stream.next().await {
+                if tx.send(event).await.is_err() {
+                    break;
+                }
+            }
+        });
+
+        stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed()
     }
 
     async fn warmup(&self) -> anyhow::Result<()> {

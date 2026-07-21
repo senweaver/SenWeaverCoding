@@ -5,6 +5,7 @@
 import { create } from 'zustand'
 import { sessionsApi } from '../api/sessions'
 import { useUIStore } from './uiStore'
+import { useTerminalPanelStore } from './terminalPanelStore'
 
 const TAB_STORAGE_KEY = 'sen-open-tabs'
 
@@ -107,6 +108,7 @@ export const useTabStore = create<TabStore>((set, get) => ({
 
     set({ tabs: newTabs, activeTabId: newActiveId })
     get().saveTabs()
+    useTerminalPanelStore.getState().removeAgentMirrorForSession(sessionId)
   },
 
   setActiveTab: (sessionId) => {

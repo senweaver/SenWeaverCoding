@@ -20,6 +20,8 @@ pub struct SessionSyncHub {
     inner: RwLock<HashMap<SessionId, broadcast::Sender<SessionDelta>>>,
 
     transport: RwLock<Option<Arc<dyn super::rpc::SessionRpcTransport>>>,
+
+    transport_queues: RwLock<HashMap<SessionId, tokio::sync::mpsc::UnboundedSender<SessionDelta>>>,
 }
 
 impl SessionSyncHub {
@@ -27,6 +29,7 @@ impl SessionSyncHub {
         Self {
             inner: RwLock::new(HashMap::new()),
             transport: RwLock::new(None),
+            transport_queues: RwLock::new(HashMap::new()),
         }
     }
 
@@ -56,6 +59,8 @@ impl SessionSyncHub {
         let mut guard = self.inner.write();
         guard.remove(id);
         session_write_mode_metrics::set_session_hub_active_sessions(guard.len() as u64);
+        drop(guard);
+        self.transport_queues.write().remove(id);
     }
 
     pub fn subscribe(&self, id: &str) -> broadcast::Receiver<SessionDelta> {
@@ -67,18 +72,47 @@ impl SessionSyncHub {
     pub fn publish(&self, id: &str, delta: SessionDelta) {
         self.publish_local(id, &delta);
         let transport = self.transport.read().clone();
-        if let Some(transport) = transport {
-            let session_id = id.to_string();
-            crate::runtime::spawn_supervised("session.sync_transport", async move {
-                if let Err(e) = transport.send(&delta).await {
-                    tracing::warn!(
-                        target: "session.sync",
-                        session_id = %session_id,
-                        error = %e,
-                        "cross-process transport send failed"
-                    );
+        let Some(transport) = transport else {
+            return;
+        };
+        let tx = {
+            let guard = self.transport_queues.read();
+            guard.get(id).cloned()
+        };
+        let tx = match tx {
+            Some(tx) => tx,
+            None => {
+                let mut guard = self.transport_queues.write();
+                match guard.entry(id.to_string()) {
+                    std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        let (tx, mut rx) =
+                            tokio::sync::mpsc::unbounded_channel::<SessionDelta>();
+                        let session_id = id.to_string();
+                        let transport_for_task = Arc::clone(&transport);
+                        crate::runtime::spawn_supervised(
+                            "session.sync_transport",
+                            async move {
+                                while let Some(delta) = rx.recv().await {
+                                    if let Err(e) = transport_for_task.send(&delta).await {
+                                        tracing::warn!(
+                                            target: "session.sync",
+                                            session_id = %session_id,
+                                            error = %e,
+                                            "cross-process transport send failed"
+                                        );
+                                    }
+                                }
+                            },
+                        );
+                        slot.insert(tx.clone());
+                        tx
+                    }
                 }
-            });
+            }
+        };
+        if tx.send(delta).is_err() {
+            self.transport_queues.write().remove(id);
         }
     }
 
@@ -99,11 +133,13 @@ impl SessionSyncHub {
 
     pub fn with_transport(&self, transport: Arc<dyn super::rpc::SessionRpcTransport>) {
         *self.transport.write() = Some(transport);
+        self.transport_queues.write().clear();
         tracing::debug!(target: "session.sync", "cross-process transport registered");
     }
 
     pub fn clear_transport(&self) {
         *self.transport.write() = None;
+        self.transport_queues.write().clear();
     }
 }
 

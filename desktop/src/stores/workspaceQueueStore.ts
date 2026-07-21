@@ -57,6 +57,7 @@ type WorkspaceQueueStore = {
   ) => string
   cancel: (itemId: string) => void
   cancelAllForSession: (sessionId: string) => void
+  moveToFront: (itemId: string) => void
   toggleExpanded: (sessionId: string) => void
   setExpanded: (sessionId: string, expanded: boolean) => void
   setKeepDraining: (sessionId: string, on: boolean) => void
@@ -137,6 +138,21 @@ export const useWorkspaceQueueStore = create<WorkspaceQueueStore>((set, get) => 
       }
       if (!touched) return s
       return { queues: next }
+    })
+  },
+
+  moveToFront: (itemId) => {
+    set((s) => {
+      for (const [key, list] of Object.entries(s.queues)) {
+        const idx = list.findIndex((i) => i.id === itemId)
+        if (idx < 0) continue
+        if (idx === 0) return s
+        const item = list[idx]
+        if (!item) return s
+        const next = [item, ...list.slice(0, idx), ...list.slice(idx + 1)]
+        return { queues: { ...s.queues, [key]: next } }
+      }
+      return s
     })
   },
 

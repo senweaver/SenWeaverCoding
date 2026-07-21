@@ -18,7 +18,7 @@ fn plugin_cache() -> &'static PluginCache {
     CACHE.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
 }
 
-fn load_plugin(plugin_path: &str) -> anyhow::Result<Arc<parking_lot::Mutex<extism::Plugin>>> {
+pub(crate) fn load_plugin(plugin_path: &str) -> anyhow::Result<Arc<parking_lot::Mutex<extism::Plugin>>> {
     if let Some(plugin) = plugin_cache().lock().get(plugin_path).cloned() {
         return Ok(plugin);
     }
@@ -31,6 +31,23 @@ fn load_plugin(plugin_path: &str) -> anyhow::Result<Arc<parking_lot::Mutex<extis
         .lock()
         .insert(plugin_path.to_string(), plugin.clone());
     Ok(plugin)
+}
+
+pub(crate) fn invoke_wasm_export(
+    plugin_path: &str,
+    function_name: &str,
+    input: &[u8],
+) -> anyhow::Result<String> {
+    let plugin = load_plugin(plugin_path)?;
+    let mut guard = plugin.lock();
+    match guard.call::<&[u8], &[u8]>(function_name, input) {
+        Ok(output) => Ok(String::from_utf8_lossy(output).to_string()),
+        Err(e) => {
+            drop(guard);
+            evict_plugin(plugin_path);
+            Err(anyhow::anyhow!("WASM execution error: {e}"))
+        }
+    }
 }
 
 fn evict_plugin(plugin_path: &str) {

@@ -216,7 +216,7 @@ impl SqliteSessionBackend {
         message: &ChatMessage,
         hidden_for_ui: bool,
     ) -> std::io::Result<()> {
-        let conn = self.writer.lock();
+        let mut conn = self.writer.lock();
         let now = Utc::now().to_rfc3339();
         let metadata_json = if message.metadata.is_empty() {
             None
@@ -224,7 +224,10 @@ impl SqliteSessionBackend {
             serde_json::to_string(&message.metadata).ok()
         };
 
-        conn.execute(
+        let tx = conn
+            .transaction()
+            .map_err(std::io::Error::other)?;
+        tx.execute(
             "INSERT INTO sessions (session_key, role, content, created_at, hidden_for_ui, metadata)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
@@ -237,8 +240,7 @@ impl SqliteSessionBackend {
             ],
         )
         .map_err(std::io::Error::other)?;
-
-        conn.execute(
+        tx.execute(
             "INSERT INTO session_metadata (session_key, created_at, last_activity, message_count)
              VALUES (?1, ?2, ?3, 1)
              ON CONFLICT(session_key) DO UPDATE SET
@@ -247,6 +249,7 @@ impl SqliteSessionBackend {
             params![session_key, now, now],
         )
         .map_err(std::io::Error::other)?;
+        tx.commit().map_err(std::io::Error::other)?;
 
         Ok(())
     }
@@ -395,7 +398,8 @@ impl SessionBackend for SqliteSessionBackend {
     fn load_with_tombstones(&self, session_key: &str) -> Vec<LoadedMessage> {
         let conn = self.read_conn();
         let mut stmt = match conn.prepare(
-            "SELECT id, role, content, tombstoned_at, hidden_for_ui, metadata FROM sessions
+            "SELECT id, role, content, tombstoned_at, hidden_for_ui, metadata, created_at
+             FROM sessions
              WHERE session_key = ?1 ORDER BY id ASC",
         ) {
             Ok(s) => s,
@@ -409,6 +413,7 @@ impl SessionBackend for SqliteSessionBackend {
             let tombstoned_at: Option<String> = row.get(3)?;
             let hidden_for_ui: i64 = row.get(4).unwrap_or(0);
             let metadata_raw: Option<String> = row.get(5).unwrap_or(None);
+            let created_at: Option<String> = row.get(6).unwrap_or(None);
             Ok(LoadedMessage {
                 id,
                 message: ChatMessage {
@@ -418,6 +423,7 @@ impl SessionBackend for SqliteSessionBackend {
                 },
                 tombstoned_at,
                 hidden_for_ui: hidden_for_ui != 0,
+                created_at,
             })
         }) {
             Ok(r) => r,
@@ -605,6 +611,92 @@ impl SessionBackend for SqliteSessionBackend {
         .unwrap_or(0)
     }
 
+    fn load_page_with_counts(
+        &self,
+        session_key: &str,
+        before: Option<usize>,
+        limit: usize,
+    ) -> (Vec<LoadedMessage>, usize, usize, usize) {
+        let conn = self.read_conn();
+        // One deferred transaction = one WAL snapshot for all three reads, so a
+        // purge/delete committing mid-page can't shift the OFFSET window and
+        // mislabel the served indexes.
+        if conn.execute_batch("BEGIN DEFERRED").is_err() {
+            drop(conn);
+            let total = self.count_messages(session_key);
+            let end = before.unwrap_or(total).min(total);
+            let start = end.saturating_sub(limit.max(1));
+            let loaded = self.load_with_tombstones_range(session_key, start, end - start);
+            let base = loaded
+                .first()
+                .map(|m| self.count_live_user_messages_before_id(session_key, m.id))
+                .unwrap_or(0);
+            return (loaded, start, total, base);
+        }
+        let result = (|| -> rusqlite::Result<(Vec<LoadedMessage>, usize, usize, usize)> {
+            let total: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM sessions WHERE session_key = ?1",
+                params![session_key],
+                |row| row.get(0),
+            )?;
+            let total = usize::try_from(total).unwrap_or(0);
+            let end = before.unwrap_or(total).min(total);
+            let start = end.saturating_sub(limit.max(1));
+            let count = end - start;
+
+            let mut stmt = conn.prepare(
+                "SELECT id, role, content, tombstoned_at, hidden_for_ui, metadata, created_at
+                 FROM sessions
+                 WHERE session_key = ?1 ORDER BY id ASC LIMIT ?2 OFFSET ?3",
+            )?;
+            #[allow(clippy::cast_possible_wrap)]
+            let rows = stmt.query_map(
+                params![session_key, count as i64, start as i64],
+                |row| {
+                    let id: i64 = row.get(0)?;
+                    let role: String = row.get(1)?;
+                    let content: String = row.get(2)?;
+                    let tombstoned_at: Option<String> = row.get(3)?;
+                    let hidden_for_ui: i64 = row.get(4).unwrap_or(0);
+                    let metadata_raw: Option<String> = row.get(5).unwrap_or(None);
+                    let created_at: Option<String> = row.get(6).unwrap_or(None);
+                    Ok(LoadedMessage {
+                        id,
+                        message: ChatMessage {
+                            role,
+                            content,
+                            metadata: Self::parse_metadata_cell(metadata_raw),
+                        },
+                        tombstoned_at,
+                        hidden_for_ui: hidden_for_ui != 0,
+                        created_at,
+                    })
+                },
+            )?;
+            let loaded: Vec<LoadedMessage> = rows.filter_map(|r| r.ok()).collect();
+
+            let base_user_index = match loaded.first() {
+                Some(first) => {
+                    let n: i64 = conn.query_row(
+                        "SELECT COUNT(*) FROM sessions
+                          WHERE session_key = ?1
+                            AND role = 'user'
+                            AND tombstoned_at IS NULL
+                            AND COALESCE(hidden_for_ui, 0) = 0
+                            AND id < ?2",
+                        params![session_key, first.id],
+                        |row| row.get(0),
+                    )?;
+                    usize::try_from(n).unwrap_or(0)
+                }
+                None => 0,
+            };
+            Ok((loaded, start, total, base_user_index))
+        })();
+        let _ = conn.execute_batch("COMMIT");
+        result.unwrap_or_else(|_| (Vec::new(), 0, 0, 0))
+    }
+
     fn load_tail(&self, session_key: &str, limit: usize) -> Vec<ChatMessage> {
         let conn = self.read_conn();
         let mut stmt = match conn.prepare(
@@ -644,7 +736,8 @@ impl SessionBackend for SqliteSessionBackend {
     ) -> Vec<LoadedMessage> {
         let conn = self.read_conn();
         let mut stmt = match conn.prepare(
-            "SELECT id, role, content, tombstoned_at, hidden_for_ui, metadata FROM sessions
+            "SELECT id, role, content, tombstoned_at, hidden_for_ui, metadata, created_at
+             FROM sessions
              WHERE session_key = ?1 ORDER BY id ASC LIMIT ?2 OFFSET ?3",
         ) {
             Ok(s) => s,
@@ -661,6 +754,7 @@ impl SessionBackend for SqliteSessionBackend {
                 let tombstoned_at: Option<String> = row.get(3)?;
                 let hidden_for_ui: i64 = row.get(4).unwrap_or(0);
                 let metadata_raw: Option<String> = row.get(5).unwrap_or(None);
+                let created_at: Option<String> = row.get(6).unwrap_or(None);
                 Ok(LoadedMessage {
                     id,
                     message: ChatMessage {
@@ -670,6 +764,7 @@ impl SessionBackend for SqliteSessionBackend {
                     },
                     tombstoned_at,
                     hidden_for_ui: hidden_for_ui != 0,
+                    created_at,
                 })
             },
         ) {
@@ -695,12 +790,12 @@ impl SessionBackend for SqliteSessionBackend {
         };
 
         let count = stale_keys.len();
-        for key in &stale_keys {
-            let _ = conn.execute("DELETE FROM sessions WHERE session_key = ?1", params![key]);
-            let _ = conn.execute(
-                "DELETE FROM session_metadata WHERE session_key = ?1",
-                params![key],
-            );
+        if count > 0 {
+            let tx = conn.unchecked_transaction().map_err(std::io::Error::other)?;
+            for key in &stale_keys {
+                Self::delete_session_rows(&tx, key).map_err(std::io::Error::other)?;
+            }
+            tx.commit().map_err(std::io::Error::other)?;
         }
 
         Ok(count)
@@ -1038,10 +1133,18 @@ impl SessionBackend for SqliteSessionBackend {
                 },
             )
             .ok()?;
-        let _ = conn.execute(
+        if let Err(e) = conn.execute(
             "DELETE FROM session_rewind_stash WHERE rewind_id = ?1",
             params![rewind_id],
-        );
+        ) {
+            tracing::error!(
+                target: "session.sqlite",
+                rewind_id,
+                error = %e,
+                "failed to delete rewind stash row; treating it as not taken to avoid replay loops"
+            );
+            return None;
+        }
         Some(stash)
     }
 

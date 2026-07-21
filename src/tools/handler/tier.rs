@@ -119,6 +119,7 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
         ("git_operations", MODERATE, "Run common git operations"),
         ("code_to_spec", SAFE, "Generate or fetch code specifications"),
         ("code_graph_query", SAFE, "Query the code graph"),
+        ("codebase_search", SAFE, "Semantic + lexical search over the indexed codebase"),
         ("code_outline", SAFE, "Return the structural outline of a source file"),
         ("code_xfile_refactor", MODERATE, "Cross-file refactor operation"),
         ("incremental_optimize", SAFE, "Incremental optimization helper"),
@@ -219,7 +220,7 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
         (
             "workspace_deep_search",
             SAFE,
-            "Local workspace DeepSearch with planner + BM25 + vector + structural + fuzzy recall and paragraph-level traced output",
+            "Local workspace DeepSearch with planner + lexical/structural/fuzzy recall and paragraph-level traced output",
         ),
         #[cfg(feature = "tool-curator")]
         (

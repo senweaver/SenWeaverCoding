@@ -334,7 +334,7 @@ jobs:
             done
           }
           set -x
-          cargo_retry build --release --target ${{ matrix.cli_target }} --bin sen --features channels-lite
+          cargo_retry build --release --target ${{ matrix.cli_target }} --bin sen --features channels-lite,tui
           mkdir -p "$(dirname "${{ matrix.cli_dst }}")"
           cp "${{ matrix.cli_src }}" "${{ matrix.cli_dst }}"
           ls -la "${{ matrix.cli_dst }}"
@@ -367,8 +367,8 @@ jobs:
             done
           }
           set -x
-          cargo_retry build --release --target aarch64-apple-darwin --bin sen --features channels-lite
-          cargo_retry build --release --target x86_64-apple-darwin  --bin sen --features channels-lite
+          cargo_retry build --release --target aarch64-apple-darwin --bin sen --features channels-lite,tui
+          cargo_retry build --release --target x86_64-apple-darwin  --bin sen --features channels-lite,tui
           mkdir -p "$(dirname "${{ matrix.cli_dst }}")"
           lipo -create \
             -output "${{ matrix.cli_dst }}" \

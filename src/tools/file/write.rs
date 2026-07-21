@@ -149,18 +149,7 @@ impl Tool for FileWriteTool {
             });
         };
 
-        tokio::fs::create_dir_all(parent).await?;
-
-        let resolved_parent = match tokio::fs::canonicalize(parent).await {
-            Ok(p) => p,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("Failed to resolve file path: {e}")),
-                });
-            }
-        };
+        let resolved_parent = crate::util::normalize_path_for_containment(parent);
 
         if !self.security.is_resolved_path_allowed(&resolved_parent) {
             return Ok(ToolResult {
@@ -280,26 +269,52 @@ impl Tool for FileWriteTool {
         } else {
             None
         };
-        let op = if existed {
-            let original_text = original_bytes
-                .as_deref()
-                .map(String::from_utf8_lossy)
-                .map(|s| s.into_owned())
-                .unwrap_or_default();
-            let original_len = original_bytes.as_ref().map(|b| b.len()).unwrap_or(0);
-            EditOp::Replace {
-                path: resolved_target.clone(),
-                byte_range: 0..original_len,
-                old_text: original_text,
-                new_text: content.to_string(),
-                anchor: None,
+        let original_text: Option<String> = original_bytes
+            .as_deref()
+            .and_then(|b| std::str::from_utf8(b).ok().map(str::to_string));
+
+        if let Some(sentinel) = crate::agent::profile::pii_sanitize::introduced_redaction_sentinel(
+            original_text.as_deref(),
+            content,
+        ) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(crate::agent::profile::pii_sanitize::redaction_writeback_error(
+                    sentinel, path,
+                )),
+            });
+        }
+        // When the file already exists in a non-UTF-8 encoding (e.g. GBK), preserve
+        // that encoding on write so we don't corrupt it by forcing UTF-8 bytes.
+        let preserved_encoding: Option<String> = match (&original_bytes, &original_text) {
+            (Some(bytes), None) => {
+                let label = crate::tools::file::encoding::detect_label(bytes);
+                if crate::tools::file::encoding::is_utf8_label(label) {
+                    None
+                } else {
+                    Some(label.to_string())
+                }
             }
-        } else {
-            EditOp::CreateFile {
+            _ => None,
+        };
+        let op = match (existed, original_text) {
+            (true, Some(original_text)) => {
+                let original_len = original_text.len();
+                EditOp::Replace {
+                    path: resolved_target.clone(),
+                    byte_range: 0..original_len,
+                    old_text: original_text,
+                    new_text: content.to_string(),
+                    anchor: None,
+                }
+            }
+            _ => EditOp::CreateFile {
                 path: resolved_target.clone(),
                 contents: content.to_string(),
                 overwrite: true,
-            }
+                encoding: preserved_encoding,
+            },
         };
         let batch = EditBatch::new(EditOrigin::FileWriteTool).with_op(op);
         let batch_id = batch.batch_id.clone();
@@ -320,10 +335,21 @@ impl Tool for FileWriteTool {
                     String::new()
                 };
                 let preview = preview_lines.join("\n");
+                let mtime_note = match tokio::fs::metadata(&resolved_target).await {
+                    Ok(meta) => meta
+                        .modified()
+                        .ok()
+                        .and_then(|t| {
+                            t.duration_since(std::time::UNIX_EPOCH).ok()
+                        })
+                        .map(|d| format!(" [mtime_ms: {}]", d.as_millis() as u64))
+                        .unwrap_or_default(),
+                    Err(_) => String::new(),
+                };
                 Ok(ToolResult {
                     success: true,
                     output: format!(
-                        "Written {} bytes to {path}\n+++ b/{path}\n{preview}{suffix}",
+                        "Written {} bytes to {path}{mtime_note}\n+++ b/{path}\n{preview}{suffix}",
                         content.len()
                     ),
                     error: None,

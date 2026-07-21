@@ -146,7 +146,18 @@ impl QdrantMemory {
 
         match resp {
             Ok(r) if r.status().is_success() => {
-
+                if let Ok(info) = r.json::<serde_json::Value>().await {
+                    let existing_dims = info
+                        .pointer("/result/config/params/vectors/size")
+                        .and_then(|v| v.as_u64())
+                        .unwrap_or(0) as usize;
+                    if existing_dims != 0 && existing_dims != dims {
+                        anyhow::bail!(
+                            "Qdrant collection '{}' was created with {existing_dims} dimensions but the current embedder produces {dims}; recreate the collection or switch back to the original embedding model",
+                            self.collection
+                        );
+                    }
+                }
                 return Ok(());
             }
             Ok(r) if r.status().as_u16() == 404 => {

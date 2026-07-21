@@ -311,9 +311,13 @@ const TDD_KEYWORDS: &[&str] = &[
     "测试驱动", "先写测试",
 ];
 
+// Deliberately excludes weak connectives like "then"/"steps" that appear in
+// ordinary coding requests ("fix the bug then run tests"): they used to push the
+// keyword fallback into read-only Plan mode under Auto. Kept signals are ones
+// that genuinely indicate a planning request.
 const PLAN_KEYWORDS: &[&str] = &[
-    "plan", "step by step", "steps", "roadmap", "milestone", "then", "after that", "phase",
-    "计划", "步骤", "路线",
+    "plan", "step by step", "roadmap", "milestone", "after that", "phase",
+    "计划", "路线",
 ];
 
 const QA_PREFIXES: &[&str] = &[
@@ -358,11 +362,36 @@ pub fn analyze_intent(message: &str) -> IntentAnalysis {
         .max_by_key(|(_, hits)| *hits)
         .filter(|(_, hits)| *hits > 0);
 
-    let plan_worthy =
-        plan_hits > 0 || matches!(complexity, ComplexityTier::Complex) && coding_hits > 0;
+    // Require a strong plan signal (>=2 keyword hits) before overriding a coding
+    // intent, so a single incidental planning word can't route a write task into
+    // read-only Plan mode. A genuinely complex coding request with an explicit
+    // plan word still qualifies.
+    let plan_worthy = plan_hits >= 2
+        || (matches!(complexity, ComplexityTier::Complex) && coding_hits > 0 && plan_hits > 0);
 
     let (intent, base) = match best {
-        Some((TaskIntent::Plan, hits)) => (TaskIntent::Plan, hits),
+        // Plan wins as the max only when its signal is strong; otherwise defer to
+        // the next-best coding-ish intent on ties (array order put Plan last, so a
+        // 1-1 tie previously handed the turn to Plan).
+        Some((TaskIntent::Plan, hits)) if plan_worthy => (TaskIntent::Plan, hits),
+        Some((TaskIntent::Plan, _)) => {
+            let coding_like = [
+                (TaskIntent::Debug, debug_hits),
+                (TaskIntent::Coding, coding_hits),
+                (TaskIntent::Tdd, tdd_hits),
+                (TaskIntent::Design, design_hits),
+                (TaskIntent::UiDesign, ui_hits),
+                (TaskIntent::Curate, curator_hits),
+            ]
+            .into_iter()
+            .filter(|(_, h)| *h > 0)
+            .max_by_key(|(_, h)| *h);
+            match coding_like {
+                Some((intent, hits)) => (intent, hits),
+                None if is_question => (TaskIntent::Qa, 1),
+                None => (TaskIntent::General, 0),
+            }
+        }
         Some((_intent, hits)) if plan_worthy && plan_hits >= hits => (TaskIntent::Plan, plan_hits),
         Some((intent, hits)) => (intent, hits),
         None if is_question => (TaskIntent::Qa, 1),

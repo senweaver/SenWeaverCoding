@@ -61,6 +61,26 @@ pub trait LlmRefiner: Send + Sync {
         2
     }
 
+    /// Full-file merge (Morph/Relace-style fast-apply): given the original file and
+    /// a lazy edit snippet (which may use `// ... existing code ...` markers), return
+    /// the COMPLETE merged file. This is the last-resort fallback when diff-based
+    /// application keeps failing — the model reasons over whole content instead of
+    /// re-emitting a fragile patch. Default: unsupported.
+    async fn merge_full_file(
+        &self,
+        _source: &str,
+        _edit_snippet: &str,
+        _instruction: Option<&str>,
+    ) -> Result<String, ApplyError> {
+        Err(ApplyError::LlmError(
+            "full-file merge not supported by this refiner".to_string(),
+        ))
+    }
+
+    fn supports_full_file_merge(&self) -> bool {
+        false
+    }
+
     fn name(&self) -> &'static str;
 }
 
@@ -220,9 +240,74 @@ impl LlmRefiner for HttpLlmRefiner {
         self.max_recursive_attempts
     }
 
+    async fn merge_full_file(
+        &self,
+        source: &str,
+        edit_snippet: &str,
+        instruction: Option<&str>,
+    ) -> Result<String, ApplyError> {
+        let user = build_full_file_merge_prompt(source, edit_snippet, instruction);
+        // The merge system prompt asks for the whole file verbatim, no fences.
+        let fut = self.provider.chat_with_system(
+            Some(FULL_FILE_MERGE_SYSTEM_PROMPT),
+            &user,
+            &self.model,
+            self.temperature,
+        );
+        let reply = match tokio::time::timeout(self.timeout, fut).await {
+            Ok(Ok(r)) => r,
+            Ok(Err(err)) => {
+                return Err(ApplyError::LlmError(format!("full-file merge error: {err}")));
+            }
+            Err(_) => {
+                return Err(ApplyError::LlmError(format!(
+                    "full-file merge timed out after {:?}",
+                    self.timeout
+                )));
+            }
+        };
+        let merged = strip_markdown_fence(&reply);
+        if merged.trim().is_empty() {
+            return Err(ApplyError::LlmError(
+                "full-file merge returned empty output".to_string(),
+            ));
+        }
+        Ok(merged)
+    }
+
+    fn supports_full_file_merge(&self) -> bool {
+        true
+    }
+
     fn name(&self) -> &'static str {
         "http_llm_refiner"
     }
+}
+
+const FULL_FILE_MERGE_SYSTEM_PROMPT: &str =
+    "You merge a lazy code edit into a source file and return the COMPLETE resulting file. \
+     Expand any `// ... existing code ...` (or similar) markers back into the original code \
+     they stand for. Output ONLY the full merged file content with no explanations, no \
+     markdown fences, and no commentary. Preserve the original file's indentation, line \
+     endings, and any unedited regions exactly.";
+
+fn build_full_file_merge_prompt(
+    source: &str,
+    edit_snippet: &str,
+    instruction: Option<&str>,
+) -> String {
+    let mut out = String::new();
+    if let Some(instr) = instruction.filter(|s| !s.trim().is_empty()) {
+        out.push_str("<instruction>\n");
+        out.push_str(instr.trim());
+        out.push_str("\n</instruction>\n");
+    }
+    out.push_str("<original_file>\n");
+    out.push_str(source);
+    out.push_str("\n</original_file>\n<edit_snippet>\n");
+    out.push_str(edit_snippet);
+    out.push_str("\n</edit_snippet>\n\nReturn the complete merged file:");
+    out
 }
 
 fn strip_markdown_fence(raw: &str) -> String {

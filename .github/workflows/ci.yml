@@ -1,0 +1,87 @@
+name: CI
+
+# Runs the enforced acceptance matrix from AGENTS.md on every push / PR so a
+# feature-gated combination (extras, crdt, no-default-features, tui) can never
+# rot until a release tag. Mirrors the "五条 check" plus clippy and the
+# front-end type-check.
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+    branches: ["**"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_NET_RETRY: "10"
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  cargo-checks:
+    name: cargo checks (${{ matrix.label }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: lib
+            cmd: cargo check --lib
+          - label: lib --no-default-features
+            cmd: cargo check --lib --no-default-features
+          - label: lib --features extras
+            cmd: cargo check --lib --features extras
+          - label: bin sen
+            cmd: cargo check --bin sen
+          - label: bin sen --features crdt-coordination
+            cmd: cargo check --bin sen --features crdt-coordination
+          - label: lib --features tui
+            cmd: cargo check --lib --features tui
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf pkg-config libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: ${{ matrix.label }}
+        run: ${{ matrix.cmd }}
+
+  clippy:
+    name: clippy (lib + extras)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Linux build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev \
+            libayatana-appindicator3-dev librsvg2-dev patchelf pkg-config libssl-dev
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: clippy
+        run: cargo clippy --lib --features extras -- -D warnings
+
+  desktop-typecheck:
+    name: desktop tsc --noEmit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: oven-sh/setup-bun@v2
+      - name: Install desktop deps
+        working-directory: desktop
+        run: bun install --frozen-lockfile
+      - name: Type-check
+        working-directory: desktop
+        run: bunx tsc --noEmit

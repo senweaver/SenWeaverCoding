@@ -20,7 +20,6 @@ use chrono::{Datelike, Timelike};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
-use uuid::Uuid;
 
 pub(crate) const TURN_EVENT_DRAIN_BUFFER: usize = 1024;
 
@@ -192,6 +191,13 @@ struct UnfinishedTask {
     progress: String,
 }
 
+struct RollingSummaryRefreshJob {
+    recent_dropped: Vec<crate::providers::traits::ChatMessage>,
+    fingerprint: u64,
+    dropped_turns: usize,
+    model: String,
+}
+
 pub struct Agent {
     provider: Box<dyn Provider>,
     tools: Vec<Box<dyn Tool>>,
@@ -265,7 +271,15 @@ pub struct Agent {
 
     resuming_from_ask: std::sync::atomic::AtomicBool,
 
-    rolling_summary: std::sync::Mutex<Option<(u64, usize, String)>>,
+    rolling_summary: Arc<std::sync::Mutex<Option<(u64, usize, String)>>>,
+
+    rolling_summary_refresh: std::sync::Mutex<Option<RollingSummaryRefreshJob>>,
+
+    rolling_summary_refresh_inflight: Arc<std::sync::atomic::AtomicBool>,
+
+    pending_mcp_registry: std::sync::Arc<
+        parking_lot::Mutex<Option<(u64, std::sync::Arc<crate::tools::McpRegistry>)>>,
+    >,
 
     hook_runner: Option<std::sync::Arc<crate::hooks::HotHookRunner>>,
 
@@ -277,8 +291,13 @@ pub struct Agent {
 
     unfinished_task: std::sync::Mutex<Option<UnfinishedTask>>,
 
-    pending_intent_decision:
-        std::sync::Mutex<Option<(String, crate::agent::intent::LlmIntentDecision)>>,
+    pending_intent_decision: std::sync::Mutex<
+        Option<(
+            String,
+            std::time::Instant,
+            crate::agent::intent::LlmIntentDecision,
+        )>,
+    >,
 
     last_turn_resumed: bool,
 }
@@ -606,7 +625,7 @@ impl AgentBuilder {
             model_name: self
                 .model_name
                 .ok_or_else(|| anyhow::anyhow!(
-                    "no_model_configured: AgentBuilder.model_name is required; 请先在提供商设置页添加至少一个模型 (please add at least one model in Provider settings)"
+                    "no_model_configured: AgentBuilder.model_name is required; please add at least one model in Provider settings"
                 ))?,
             temperature: self.temperature.unwrap_or(0.7),
             workspace_dir: self
@@ -660,7 +679,12 @@ impl AgentBuilder {
             desktop_security_policy: self.desktop_security_policy,
             plan_execution_armed: parking_lot::Mutex::new(None),
             resuming_from_ask: std::sync::atomic::AtomicBool::new(false),
-            rolling_summary: std::sync::Mutex::new(None),
+            rolling_summary: Arc::new(std::sync::Mutex::new(None)),
+            rolling_summary_refresh: std::sync::Mutex::new(None),
+            rolling_summary_refresh_inflight: Arc::new(std::sync::atomic::AtomicBool::new(
+                false,
+            )),
+            pending_mcp_registry: std::sync::Arc::new(parking_lot::Mutex::new(None)),
             hook_runner: self.hook_runner,
             cached_tools_signature: 0,
             plan_mode_flag: self.plan_mode_flag.unwrap_or_default(),
@@ -755,6 +779,7 @@ impl Agent {
         event_tx: tokio::sync::mpsc::Sender<TurnEvent>,
     ) -> Result<String, AgentError> {
         self.sync_tools_from_config_if_changed().await;
+        self.try_attach_pending_mcp().await;
 
         let user_message_owned = user_message.to_string();
         let user_message_for_turn = if let Some(ref runner) = self.hook_runner {
@@ -775,10 +800,101 @@ impl Agent {
         };
         let user_message: &str = user_message_for_turn.as_str();
 
-        crate::agent::model_switch::scope_model_switch(
+        let result = crate::agent::model_switch::scope_model_switch(
             self.turn_streamed_inner(user_message, event_tx),
         )
-        .await
+        .await;
+        self.spawn_pending_rolling_summary_refresh();
+        result
+    }
+
+    fn spawn_pending_rolling_summary_refresh(&self) {
+        if self
+            .rolling_summary_refresh_inflight
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            return;
+        }
+        let job = {
+            let mut guard = self
+                .rolling_summary_refresh
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            guard.take()
+        };
+        let Some(job) = job else {
+            return;
+        };
+        let provider_name = self.cached_provider.clone();
+        if provider_name.trim().is_empty() {
+            return;
+        }
+        let api_key = {
+            let key = self.cached_api_key.expose();
+            (!key.is_empty()).then(|| key.to_string())
+        };
+        let api_url = {
+            let url = self.cached_api_url.clone();
+            (!url.is_empty()).then_some(url)
+        };
+        let compression_cfg = self.config.context_compression.clone();
+        let summary_slot = Arc::clone(&self.rolling_summary);
+        let inflight = Arc::clone(&self.rolling_summary_refresh_inflight);
+        inflight.store(true, std::sync::atomic::Ordering::Release);
+
+        struct InflightReset(Arc<std::sync::atomic::AtomicBool>);
+        impl Drop for InflightReset {
+            fn drop(&mut self) {
+                self.0.store(false, std::sync::atomic::Ordering::Release);
+            }
+        }
+
+        let _ = crate::runtime::spawn_supervised("agent.summary.rolling_refresh", async move {
+            let _done_guard = InflightReset(inflight);
+            let provider = match crate::providers::create_provider_with_url_async(
+                provider_name,
+                api_key,
+                api_url,
+            )
+            .await
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::debug!(
+                        target: "agent.summary",
+                        error = %e,
+                        "rolling summary refresh skipped: provider rebuild failed"
+                    );
+                    return;
+                }
+            };
+            let window =
+                crate::constants::api_limits::context_window_for_model(&job.model) as usize;
+            let compressor = crate::agent::context::compressor::ContextCompressor::new(
+                compression_cfg,
+                window,
+            );
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(60),
+                compressor.summarize_messages(&job.recent_dropped, provider.as_ref(), &job.model),
+            )
+            .await
+            {
+                Ok(Ok(text)) if !text.trim().is_empty() => {
+                    let mut guard = summary_slot
+                        .lock()
+                        .unwrap_or_else(std::sync::PoisonError::into_inner);
+                    *guard = Some((job.fingerprint, job.dropped_turns, text));
+                }
+                Ok(_) => {}
+                Err(_) => {
+                    tracing::debug!(
+                        target: "agent.summary",
+                        "background rolling summary refresh timed out; keeping stale summary"
+                    );
+                }
+            }
+        });
     }
 
     async fn turn_streamed_inner(
@@ -804,8 +920,6 @@ impl Agent {
 
         let armed_plan_path: Option<String> = self.plan_execution_armed.lock().take();
 
-        let failed_turn_rollback_len = self.history.len().saturating_sub(1);
-
         let mut history_chat = self.tool_dispatcher.to_provider_messages(&self.history);
 
         let is_design_trigger = user_message
@@ -826,9 +940,10 @@ impl Agent {
                 let min_turns = self.config.recent_turn_window;
                 let max_turns = self.config.recent_window_max_turns;
                 let ratio = self.config.recent_window_token_ratio;
+                let window_model = self.resolve_window_model(&effective_model);
                 match Self::focus_history_for_new_turn(
                     &history_chat,
-                    &effective_model,
+                    &window_model,
                     min_turns,
                     max_turns,
                     ratio,
@@ -973,15 +1088,17 @@ impl Agent {
                         return Err(AgentError::StreamInterrupted(msg));
                     }
                     self.record_failed_turn_reinforcement(&msg);
-                    let merged_interrupted = Self::merge_interrupted_flat(
+                    // Preserve the partial assistant/tool records that DID execute this turn
+                    // (like the interrupted paths) instead of discarding them, then mark the
+                    // turn as failed so the model treats the next message as authoritative and
+                    // never silently re-runs already-completed tool work.
+                    self.commit_interrupted_turn_history(
                         full_history_for_merge.clone(),
                         history_chat.clone(),
                         focus_base_len,
                     );
-                    let mut interrupted_view: Vec<ConversationMessage> = Vec::new();
-                    Self::replace_history_from_flat(&mut interrupted_view, merged_interrupted);
-                    self.capture_unfinished_task_from(&interrupted_view);
-                    self.rollback_failed_turn_history(failed_turn_rollback_len);
+                    crate::agent::dangling_tool_repair::note_failed_turn(&mut self.history);
+                    self.capture_unfinished_task();
                     self.trim_history();
                     self.last_turn_interrupted = true;
                     return Err(AgentError::ToolDispatchFailed(msg));
@@ -1026,9 +1143,7 @@ impl Agent {
     ) -> usize {
         partial_history
             .iter()
-            .rposition(|m| {
-                Self::is_user_turn_boundary(m) && m.content.contains("[CURRENT REQUEST")
-            })
+            .rposition(|m| Self::is_user_turn_boundary(m) && m.has_current_request_marker())
             .map(|i| i + 1)
             .unwrap_or_else(|| focus_base_len.min(partial_history.len()))
     }
@@ -1293,14 +1408,14 @@ impl Agent {
             }
         }
         note.push_str(
-            "\nResume THIS task ONLY if the [CURRENT REQUEST] above explicitly asks to continue or \
+            "\nResume THIS task ONLY if the latest user message explicitly asks to continue or \
              finish it (e.g. \"继续\" / \"continue\" / \"接着\" / \"go on\") or clearly refers to it. \
              When you resume, CONTINUE FROM WHERE IT STOPPED: build on the results already obtained \
              above, do the NEXT step toward finishing the request, and do NOT re-issue the same \
              tool calls already listed under ALREADY DONE or restart the task from the beginning. \
              If the listed work is enough to answer, synthesize the final answer directly instead \
              of searching again. Otherwise (the latest message is a greeting, small talk, or a new \
-             or unrelated request) follow [CURRENT REQUEST] literally and do NOT resume this task on \
+             or unrelated request) answer that message literally and do NOT resume this task on \
              your own. The full earlier transcript stays in memory and is available on demand via \
              sessions_outline + sessions_history.]",
         );
@@ -1318,7 +1433,11 @@ impl Agent {
             return None;
         }
 
-        let flat = self.tool_dispatcher.to_provider_messages(&self.history);
+        const RECENT_SOURCE_WINDOW: usize = 30;
+        let window_start = self.history.len().saturating_sub(RECENT_SOURCE_WINDOW);
+        let flat = self
+            .tool_dispatcher
+            .to_provider_messages(&self.history[window_start..]);
         const RECENT_TAIL_MESSAGES: usize = 6;
         let mut recent_tail: Vec<(String, String)> = Vec::new();
         for m in flat.iter().rev() {
@@ -1374,7 +1493,7 @@ impl Agent {
             .map(str::trim)
             .filter(|m| !m.is_empty())
             .unwrap_or(&self.model_name);
-        let timeout = std::time::Duration::from_secs(20);
+        let timeout = std::time::Duration::from_secs(5);
         let raw = match tokio::time::timeout(
             timeout,
             self.provider.chat_with_system(
@@ -1435,7 +1554,11 @@ impl Agent {
         if let Some(decision) = self.analyze_intent_llm(user_message).await {
             let mode = decision.coding_mode();
             if let Ok(mut guard) = self.pending_intent_decision.lock() {
-                *guard = Some((user_message.to_string(), decision));
+                *guard = Some((
+                    user_message.to_string(),
+                    std::time::Instant::now(),
+                    decision,
+                ));
             }
             return mode;
         }
@@ -1446,9 +1569,16 @@ impl Agent {
         &self,
         user_message: &str,
     ) -> Option<crate::agent::intent::LlmIntentDecision> {
+        const PENDING_DECISION_FRESH_WINDOW: std::time::Duration =
+            std::time::Duration::from_secs(3);
         let mut guard = self.pending_intent_decision.lock().ok()?;
         match guard.take() {
-            Some((msg, decision)) if msg == user_message => Some(decision),
+            Some((msg, stashed_at, decision))
+                if msg == user_message
+                    || stashed_at.elapsed() < PENDING_DECISION_FRESH_WINDOW =>
+            {
+                Some(decision)
+            }
             _ => None,
         }
     }
@@ -1753,6 +1883,51 @@ impl Agent {
         }
     }
 
+    /// Resolves the optional dedicated evaluator provider for the independent
+    /// critic, mirroring the CLI path: only when `self_eval.evaluator_model` names
+    /// a model owned by a different provider than the main one.
+    async fn build_critic_eval_provider(
+        config: &Config,
+        provider_name: &str,
+        provider_runtime_options: &providers::ProviderRuntimeOptions,
+    ) -> Option<std::sync::Arc<dyn Provider>> {
+        let eval_model = config
+            .self_eval
+            .evaluator_model
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())?;
+        let eval_provider_id =
+            crate::tools::media::credentials::provider_for_model(config, eval_model)?;
+        if eval_provider_id == provider_name {
+            return None;
+        }
+        let resolved =
+            crate::tools::media::credentials::resolve(config, Some(&eval_provider_id), eval_model);
+        let eval_wire_name =
+            providers::resolve_runtime_provider_name(&eval_provider_id, config);
+        match providers::create_resilient_provider_with_options_async(
+            eval_wire_name,
+            resolved.api_key.clone(),
+            Some(resolved.base_url.clone()),
+            config.reliability.clone(),
+            provider_runtime_options.clone(),
+        )
+        .await
+        {
+            Ok(p) => Some(std::sync::Arc::from(p)),
+            Err(e) => {
+                tracing::warn!(
+                    provider = eval_provider_id.as_str(),
+                    model = eval_model,
+                    error = %e,
+                    "failed to build dedicated evaluator provider; reusing main provider"
+                );
+                None
+            }
+        }
+    }
+
     pub async fn reload_provider(&mut self) -> Result<()> {
 
         let config = self.shared_config.load_ref();
@@ -1878,7 +2053,7 @@ impl Agent {
             }
         };
         if let Some(ConversationMessage::Chat(chat)) = self.history.first_mut() {
-            if chat.role == "system" {
+            if chat.role == "system" && chat.content != new_prompt {
                 chat.content = new_prompt;
             }
         }
@@ -2121,6 +2296,100 @@ impl Agent {
             .collect();
     }
 
+    fn compute_mcp_signature(config: &crate::config::Config) -> u64 {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        config.mcp.enabled.hash(&mut hasher);
+        config.mcp.deferred_loading.hash(&mut hasher);
+        serde_json::to_string(&config.mcp.servers)
+            .unwrap_or_default()
+            .hash(&mut hasher);
+        hasher.finish()
+    }
+
+    async fn attach_mcp_registry(
+        &mut self,
+        registry: std::sync::Arc<crate::tools::McpRegistry>,
+        deferred_loading: bool,
+    ) {
+        crate::tools::mcp::client::register_global_registry(std::sync::Arc::clone(&registry));
+        if deferred_loading {
+            let deferred_set = crate::tools::DeferredMcpToolSet::from_registry(
+                std::sync::Arc::clone(&registry),
+            )
+            .await;
+            let activated = std::sync::Arc::new(parking_lot::Mutex::new(
+                crate::tools::ActivatedToolSet::new(),
+            ));
+            self.activated_tools = Some(std::sync::Arc::clone(&activated));
+            self.tools.push(Box::new(crate::tools::ToolSearchTool::new(
+                deferred_set,
+                activated,
+            )));
+        } else {
+            let names = registry.tool_names();
+            let mut registered = 0usize;
+            for name in names {
+                if let Some(def) = registry.get_tool_def(&name).await {
+                    let wrapper: std::sync::Arc<dyn crate::tools::Tool> =
+                        std::sync::Arc::new(crate::tools::McpToolWrapper::new(
+                            name,
+                            def,
+                            std::sync::Arc::clone(&registry),
+                        ));
+                    self.tools
+                        .push(Box::new(crate::tools::ArcToolRef(wrapper)));
+                    registered += 1;
+                }
+            }
+            tracing::info!(
+                registered,
+                servers = registry.server_count(),
+                "MCP reload: tools registered"
+            );
+        }
+    }
+
+    pub async fn try_attach_pending_mcp(&mut self) {
+        let config_arc = self.shared_config.load_ref();
+        let current_sig = Self::compute_mcp_signature(&config_arc);
+        let pending = {
+            let mut guard = self.pending_mcp_registry.lock();
+            match guard.take() {
+                Some((sig, registry)) if sig == current_sig => Some(registry),
+                Some(other) => {
+                    *guard = Some(other);
+                    None
+                }
+                None => None,
+            }
+        };
+        let Some(registry) = pending else {
+            return;
+        };
+        let has_mcp_tools = self.tools.iter().any(|t| {
+            let name = t.name();
+            name == "tool_search"
+                || (name.contains("__")
+                    && name.split_once("__").map_or(false, |(h, _)| !h.is_empty()))
+                || name.starts_with("mcp_")
+        });
+        if has_mcp_tools {
+            return;
+        }
+        tracing::info!(
+            target: "agent.tools",
+            servers = registry.server_count(),
+            "attaching MCP registry pre-warmed in the background"
+        );
+        self.attach_mcp_registry(registry, config_arc.mcp.deferred_loading)
+            .await;
+        let specs: Vec<crate::tools::ToolSpec> = self.tools.iter().map(|t| t.spec()).collect();
+        self.tool_specs = std::sync::Arc::new(crate::tools::dedupe_tool_specs(&specs));
+        self.rebuild_tool_index();
+        self.mode_filter_dirty = true;
+    }
+
     async fn reload_mcp_tools_inner(&mut self, config: &crate::config::Config) {
 
         self.tools.retain(|t| {
@@ -2132,48 +2401,61 @@ impl Agent {
         if !config.mcp.enabled || config.mcp.servers.is_empty() {
             return;
         }
-        match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
-            Ok(registry) => {
-                let registry = std::sync::Arc::new(registry);
-                if config.mcp.deferred_loading {
-                    let deferred_set =
-                        crate::tools::DeferredMcpToolSet::from_registry(std::sync::Arc::clone(
-                            &registry,
-                        ))
-                        .await;
-                    let activated = std::sync::Arc::new(parking_lot::Mutex::new(
-                        crate::tools::ActivatedToolSet::new(),
-                    ));
-                    self.activated_tools = Some(std::sync::Arc::clone(&activated));
-                    self.tools.push(Box::new(crate::tools::ToolSearchTool::new(
-                        deferred_set,
-                        activated,
-                    )));
-                } else {
-                    let names = registry.tool_names();
-                    let mut registered = 0usize;
-                    for name in names {
-                        if let Some(def) = registry.get_tool_def(&name).await {
-                            let wrapper: std::sync::Arc<dyn crate::tools::Tool> =
-                                std::sync::Arc::new(crate::tools::McpToolWrapper::new(
-                                    name,
-                                    def,
-                                    std::sync::Arc::clone(&registry),
-                                ));
-                            self.tools
-                                .push(Box::new(crate::tools::ArcToolRef(wrapper)));
-                            registered += 1;
+        let mcp_sig = Self::compute_mcp_signature(config);
+        let prewarmed = {
+            let mut guard = self.pending_mcp_registry.lock();
+            match guard.take() {
+                Some((sig, registry)) if sig == mcp_sig => Some(registry),
+                Some(other) => {
+                    *guard = Some(other);
+                    None
+                }
+                None => None,
+            }
+        };
+        if let Some(registry) = prewarmed {
+            self.attach_mcp_registry(registry, config.mcp.deferred_loading)
+                .await;
+            return;
+        }
+        const MCP_RELOAD_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+        match tokio::time::timeout(
+            MCP_RELOAD_DEADLINE,
+            crate::tools::McpRegistry::connect_all(&config.mcp.servers),
+        )
+        .await
+        {
+            Ok(Ok(registry)) => {
+                self.attach_mcp_registry(
+                    std::sync::Arc::new(registry),
+                    config.mcp.deferred_loading,
+                )
+                .await;
+            }
+            Ok(Err(e)) => {
+                tracing::error!("MCP reload failed to initialise registry: {e:#}");
+            }
+            Err(_) => {
+                tracing::warn!(
+                    deadline_secs = MCP_RELOAD_DEADLINE.as_secs(),
+                    "MCP reload exceeded deadline; continuing this turn without MCP tools and \
+                     pre-warming the registry in the background"
+                );
+                let pending_slot = std::sync::Arc::clone(&self.pending_mcp_registry);
+                let servers = config.mcp.servers.clone();
+                let _ = crate::runtime::spawn_supervised("agent.mcp.prewarm", async move {
+                    match crate::tools::McpRegistry::connect_all(&servers).await {
+                        Ok(registry) => {
+                            *pending_slot.lock() =
+                                Some((mcp_sig, std::sync::Arc::new(registry)));
+                        }
+                        Err(e) => {
+                            tracing::error!(
+                                "background MCP pre-warm failed to initialise registry: {e:#}"
+                            );
                         }
                     }
-                    tracing::info!(
-                        registered,
-                        servers = registry.server_count(),
-                        "MCP reload: tools registered"
-                    );
-                }
-            }
-            Err(e) => {
-                tracing::error!("MCP reload failed to initialise registry: {e:#}");
+                });
             }
         }
     }
@@ -2300,11 +2582,20 @@ impl Agent {
             super::sqlite_gateway_hydrate::hydrate_gateway_sqlite_messages(&cleaned);
         Self::repair_orphan_tool_result_messages(&mut expanded);
         crate::agent::dangling_tool_repair::drop_payloadless_assistant_messages(&mut expanded);
-        if crate::agent::dangling_tool_repair::tail_signals_interrupted_turn(&expanded) {
+        let tail_interrupted =
+            crate::agent::dangling_tool_repair::tail_signals_interrupted_turn(&expanded);
+        if tail_interrupted {
             self.last_turn_interrupted = true;
         }
         self.activate_deferred_tools_from_history(&expanded);
         self.history.extend(expanded);
+        // The unfinished-task marker is an in-memory cache, but the history it is
+        // derived from is durably persisted. Re-derive it here on restore so
+        // "continue" after an app restart still targets the most recent
+        // interrupted task instead of falling back to "no unfinished task".
+        if tail_interrupted && !self.has_unfinished_task() {
+            self.capture_unfinished_task_from(&self.history);
+        }
     }
 
     fn is_user_turn_boundary(m: &crate::providers::traits::ChatMessage) -> bool {
@@ -2569,11 +2860,31 @@ impl Agent {
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
             if let Some((fp, covered, text)) = guard.as_ref() {
-                if *fp == fingerprint
-                    && *covered <= dropped_turns
-                    && dropped_turns - *covered < batch
-                    && !text.is_empty()
-                {
+                if *fp == fingerprint && !text.is_empty() {
+                    let stale = *covered > dropped_turns || dropped_turns - *covered >= batch;
+                    if stale {
+                        let source_budget =
+                            self.config.context_compression.source_max_chars.max(1);
+                        let mut acc_chars = 0usize;
+                        let mut slice_start = dropped.len();
+                        for (i, m) in dropped.iter().enumerate().rev() {
+                            acc_chars = acc_chars.saturating_add(m.content.len());
+                            slice_start = i;
+                            if acc_chars >= source_budget {
+                                break;
+                            }
+                        }
+                        let mut refresh = self
+                            .rolling_summary_refresh
+                            .lock()
+                            .unwrap_or_else(std::sync::PoisonError::into_inner);
+                        *refresh = Some(RollingSummaryRefreshJob {
+                            recent_dropped: dropped[slice_start..].to_vec(),
+                            fingerprint,
+                            dropped_turns,
+                            model: model.to_string(),
+                        });
+                    }
                     return Some(text.clone());
                 }
             }
@@ -2589,34 +2900,74 @@ impl Agent {
             }
         }
         let recent_dropped = &dropped[slice_start..];
-        let window = crate::constants::api_limits::context_window_for_model(model) as usize;
-        let compressor = crate::agent::context::compressor::ContextCompressor::new(
-            self.config.context_compression.clone(),
-            window,
-        );
-        match compressor
-            .summarize_messages(recent_dropped, self.provider.as_ref(), model)
-            .await
+
+        // First window shrink for this fingerprint: do NOT block the turn on a
+        // full summarization LLM call (up to 60s to first token). Return an
+        // instant degraded excerpt now and enqueue a background job that
+        // generates the real structured summary; the next turn swaps it in from
+        // cache. The placeholder is cached with covered=0 so it is always treated
+        // as stale until the background summary (covered=dropped_turns) lands.
         {
-            Ok(text) if !text.trim().is_empty() => {
-                let mut guard = self
-                    .rolling_summary
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                *guard = Some((fingerprint, dropped_turns, text.clone()));
-                Some(text)
-            }
-            _ => {
-                let guard = self
-                    .rolling_summary
-                    .lock()
-                    .unwrap_or_else(std::sync::PoisonError::into_inner);
-                guard
-                    .as_ref()
-                    .filter(|(fp, _, _)| *fp == fingerprint)
-                    .map(|(_, _, t)| t.clone())
-            }
+            let mut refresh = self
+                .rolling_summary_refresh
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            *refresh = Some(RollingSummaryRefreshJob {
+                recent_dropped: recent_dropped.to_vec(),
+                fingerprint,
+                dropped_turns,
+                model: model.to_string(),
+            });
         }
+        let placeholder = Self::degraded_rolling_summary_placeholder(recent_dropped, dropped_turns);
+        {
+            let mut guard = self
+                .rolling_summary
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            // Only install the placeholder if nothing better is already cached
+            // for this fingerprint (avoid clobbering a real background summary
+            // that may have landed between the miss check and here).
+            let keep_existing = guard
+                .as_ref()
+                .is_some_and(|(fp, covered, t)| *fp == fingerprint && *covered > 0 && !t.is_empty());
+            if !keep_existing {
+                *guard = Some((fingerprint, 0, placeholder.clone()));
+            }
+            guard
+                .as_ref()
+                .filter(|(fp, _, _)| *fp == fingerprint)
+                .map(|(_, _, t)| t.clone())
+                .or(Some(placeholder))
+        }
+    }
+
+    // Instant, LLM-free stand-in for the rolling summary used on the first window
+    // shrink so the turn is not blocked while the real structured summary is
+    // generated in the background.
+    fn degraded_rolling_summary_placeholder(
+        recent_dropped: &[crate::providers::traits::ChatMessage],
+        dropped_turns: usize,
+    ) -> String {
+        const PER_MSG_CHARS: usize = 500;
+        const MAX_MSGS: usize = 12;
+        let mut lines: Vec<String> = Vec::new();
+        let start = recent_dropped.len().saturating_sub(MAX_MSGS);
+        for m in &recent_dropped[start..] {
+            let body = m.content.trim();
+            if body.is_empty() {
+                continue;
+            }
+            let snippet = crate::util::truncate_str_bytes(body, PER_MSG_CHARS);
+            let ellipsis = if body.len() > snippet.len() { "\u{2026}" } else { "" };
+            lines.push(format!("- {}: {}{}", m.role, snippet.replace('\n', " "), ellipsis));
+        }
+        format!(
+            "[CONTEXT SUMMARY \u{2014} {dropped_turns} earlier turn(s), full summary pending] \
+             (degraded excerpt; a complete structured summary is being generated in the \
+             background and will replace this next turn)\n{}",
+            lines.join("\n")
+        )
     }
 
     fn focus_history_for_plan_execution(
@@ -2834,6 +3185,9 @@ impl Agent {
             match tools::McpRegistry::connect_all(&config.mcp.servers).await {
                 Ok(registry) => {
                     let registry = std::sync::Arc::new(registry);
+                    crate::tools::mcp::client::register_global_registry(std::sync::Arc::clone(
+                        &registry,
+                    ));
                     if mcp_deferred_enabled {
                         let deferred_set = tools::DeferredMcpToolSet::from_registry(
                             std::sync::Arc::clone(&registry),
@@ -2951,6 +3305,46 @@ impl Agent {
         )
         .await?;
 
+        // Register the independent-critic context for the GUI/gateway path too.
+        // Previously only the CLI `run()` set this, so the desktop app's
+        // `self_eval` toggle silently did nothing (`global_critic_context()` was
+        // always None). Build a dedicated Arc provider for the critic since the
+        // agent's own `provider` is a Box.
+        if config.self_eval.enabled {
+            match providers::create_resilient_provider_with_options_async(
+                provider_name.clone(),
+                config.api_key.clone(),
+                config.api_url.clone(),
+                config.reliability.clone(),
+                provider_runtime_options.clone(),
+            )
+            .await
+            {
+                Ok(critic_provider) => {
+                    let critic_eval_provider = Self::build_critic_eval_provider(
+                        config,
+                        &provider_name,
+                        &provider_runtime_options,
+                    )
+                    .await;
+                    crate::agent::flows::set_global_critic_context(
+                        crate::agent::self_assess::critic::CriticContext::new(
+                            std::sync::Arc::from(critic_provider),
+                            model_name.clone(),
+                            config.self_eval.clone(),
+                        )
+                        .with_eval_provider(critic_eval_provider),
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        error = %e,
+                        "failed to build critic provider for GUI session; self-eval gate disabled this session"
+                    );
+                }
+            }
+        }
+
         let dispatcher_choice = config.agent.tool_dispatcher.as_str();
         let tool_dispatcher: Box<dyn ToolDispatcher> = match dispatcher_choice {
             "native" => Box::new(NativeToolDispatcher),
@@ -3065,40 +3459,48 @@ impl Agent {
 
         const MAX_CHARS: usize = 400_000;
 
-        let mut system_messages = Vec::new();
-        let mut other_messages = Vec::new();
+        // Preserve chronological order. Only the LEADING run of system messages
+        // (the stable system prefix) is pinned at the front; mid-conversation
+        // system reminders keep their temporal position. Hoisting every system
+        // message to the front used to strip the time anchor from mid-stream
+        // [Mode Switch] contracts (the model could treat a superseded mode as
+        // current) and rewrote the prefix each turn, defeating provider prompt
+        // caching — the exact opposite of replace_or_push_system_reminder's
+        // in-place update design.
+        let lead_system_end = self
+            .history
+            .iter()
+            .position(
+                |m| !matches!(m, ConversationMessage::Chat(chat) if chat.role == "system"),
+            )
+            .unwrap_or(self.history.len());
 
-        for msg in self.history.drain(..) {
-            match &msg {
-                ConversationMessage::Chat(chat) if chat.role == "system" => {
-                    system_messages.push(msg);
-                }
-                _ => other_messages.push(msg),
-            }
+        let mut lead: Vec<ConversationMessage> =
+            self.history.drain(0..lead_system_end).collect();
+        let mut body: Vec<ConversationMessage> = self.history.drain(..).collect();
+
+        if body.len() > max_messages {
+            let drop_count = body.len() - max_messages;
+            body.drain(0..drop_count);
         }
 
-        if other_messages.len() > max_messages {
-            let drop_count = other_messages.len() - max_messages;
-            other_messages.drain(0..drop_count);
-        }
-
-        let system_chars: usize = system_messages.iter().map(|m| Self::msg_char_len(m)).sum();
-        let mut acc = system_chars;
-        let mut keep_from = other_messages.len();
-        for i in (0..other_messages.len()).rev() {
-            let prospective = acc + Self::msg_char_len(&other_messages[i]);
-            if prospective > MAX_CHARS && keep_from < other_messages.len() {
+        let lead_chars: usize = lead.iter().map(|m| Self::msg_char_len(m)).sum();
+        let mut acc = lead_chars;
+        let mut keep_from = body.len();
+        for i in (0..body.len()).rev() {
+            let prospective = acc + Self::msg_char_len(&body[i]);
+            if prospective > MAX_CHARS && keep_from < body.len() {
                 break;
             }
             acc = prospective;
             keep_from = i;
         }
         if keep_from > 0 {
-            other_messages.drain(0..keep_from);
+            body.drain(0..keep_from);
         }
 
-        self.history = system_messages;
-        self.history.extend(other_messages);
+        lead.append(&mut body);
+        self.history = lead;
         Self::repair_orphan_tool_result_messages(&mut self.history);
     }
 
@@ -3294,7 +3696,27 @@ impl Agent {
     fn msg_char_len(msg: &ConversationMessage) -> usize {
         match msg {
             ConversationMessage::Chat(chat) => chat.content.len(),
-            _ => 200,
+            // Tool results are the largest payloads in a transcript (a single
+            // batch can be tens of KB). Charging a flat 200 chars made the
+            // char-budget guard blind to them and let long sessions blow far
+            // past the intended cap; sum the real content instead.
+            ConversationMessage::ToolResults(rows) => rows
+                .iter()
+                .map(|r| r.content.len() + r.tool_call_id.len())
+                .sum::<usize>()
+                .max(1),
+            ConversationMessage::AssistantToolCalls {
+                text,
+                tool_calls,
+                reasoning_content,
+            } => {
+                text.as_ref().map(String::len).unwrap_or(0)
+                    + reasoning_content.as_ref().map(String::len).unwrap_or(0)
+                    + tool_calls
+                        .iter()
+                        .map(|tc| tc.name.len() + tc.arguments.len() + tc.id.len())
+                        .sum::<usize>()
+            }
         }
     }
 
@@ -3330,13 +3752,13 @@ impl Agent {
         }
 
         let skill_engine =
-            crate::agent::skill_evolution::SkillEvolutionEngine::new(&self.skill_evolution_config);
+            crate::agent::skill_evolution::ensure_global_engine(&self.skill_evolution_config);
         if let Some(skill_text) = skill_engine.prompt_injection() {
             prompt.push_str(&skill_text);
         }
 
         let prompt_optimizer =
-            crate::agent::prompt::optimizer::PromptOptimizer::new(&self.prompt_optimizer_config);
+            crate::agent::prompt::optimizer::ensure_global_optimizer(&self.prompt_optimizer_config);
         if let Some(po_text) = prompt_optimizer.prompt_injection() {
             prompt.push_str(&po_text);
         }
@@ -3370,7 +3792,6 @@ impl Agent {
             prompt.push_str(&crate::buddy::prompt::buddy_system_prompt(
                 &live_cfg.buddy.name,
                 &live_cfg.buddy.personality,
-                crate::buddy::current_mood(&live_cfg.buddy),
             ));
         }
 
@@ -3554,7 +3975,9 @@ impl Agent {
         };
         let mode_auto_approved = effective_coding_mode
             .map(crate::agent::mode::effects::mode_auto_approves)
-            .unwrap_or(false);
+            .unwrap_or(false)
+            && crate::approval::session_surface_approval_manager()
+                .is_none_or(|m| m.mode_auto_approve_allows(&call.name));
         match crate::guardrails::evaluate_tool_guardrails(&call.name, Some(&guardrail_ctx)) {
             crate::guardrails::GuardrailDecision::Allow => {}
             crate::guardrails::GuardrailDecision::Deny(reason) => {
@@ -3763,7 +4186,7 @@ impl Agent {
                         success: r.success,
                     });
                     if r.success {
-                        let scrubbed = crate::agent::profile::pii_sanitize::scrub_credentials(&r.output);
+                        let scrubbed = crate::agent::profile::pii_sanitize::scrub_tool_output(&call.name, &r.output);
                         let fallback = scrubbed.clone();
                         let call_name_owned = call.name.clone();
                         let out = tokio::task::spawn_blocking(move || {
@@ -3875,7 +4298,7 @@ impl Agent {
         }
     }
 
-    fn build_user_envelope(user_message: &str, context: &str) -> String {
+    fn build_turn_companion(user_message: &str, expanded_user: &str, context: &str) -> String {
         let now = chrono::Local::now();
         let (year, month, day) = (now.year(), now.month(), now.day());
         let (hour, minute, second) = (now.hour(), now.minute(), now.second());
@@ -3883,24 +4306,69 @@ impl Agent {
         let date_str =
             format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}:{second:02} {tz}");
 
-        let current_request = format!(
-            "[CURRENT REQUEST - the user's latest message; this is the ONLY thing you must act \
-             on right now. Take it literally and at face value. Continue or resume earlier / \
-             unfinished work ONLY when this message explicitly says so (e.g. \"继续\", \
-             \"continue\", \"接着\", \"go on\") or directly references that earlier task. If this \
-             message is a greeting (e.g. \"你好\", \"hi\", \"在吗\"), small talk, a short \
-             acknowledgement, or any new or unrelated request, respond to IT directly (for a \
-             greeting, greet back and ask what they need) and do NOT resume, re-run, or push \
-             forward any earlier task on your own - even if your own previous message offered to \
-             continue, and even if earlier work was left unfinished. Never treat a short or \
-             ambiguous message as implicit consent to keep going.]\n{user_message}"
+        let mut companion = format!(
+            "[CURRENT REQUEST CONTEXT - this note belongs to the user message directly above it. \
+             If (and only if) that message is the LAST user message in this conversation, it is \
+             the one request you must act on right now: take it literally and at face value; \
+             continue or resume earlier / unfinished work ONLY when it explicitly says so (e.g. \
+             \"继续\", \"continue\", \"接着\", \"go on\") or directly references that earlier \
+             task; if it is a greeting (e.g. \"你好\", \"hi\", \"在吗\"), small talk, a short \
+             acknowledgement, or any new or unrelated request, respond to IT directly and do NOT \
+             resume, re-run, or push forward any earlier task on your own - even if your own \
+             previous message offered to continue, and even if earlier work was left unfinished. \
+             Never treat a short or ambiguous message as implicit consent to keep going. For any \
+             EARLIER user message, this note is historical context only.]\
+             \n\n[MESSAGE DATE & TIME: {date_str}]"
         );
 
-        if context.is_empty() {
-            format!("[CURRENT DATE & TIME: {date_str}]\n\n{current_request}")
-        } else {
-            format!("[CURRENT DATE & TIME: {date_str}]\n\n{context}\n\n{current_request}")
+        if !context.is_empty() {
+            companion.push_str("\n\n");
+            companion.push_str(context);
         }
+
+        if expanded_user != user_message {
+            let appended_only = expanded_user
+                .strip_prefix(user_message)
+                .map(str::trim)
+                .filter(|extra| !extra.is_empty());
+            if let Some(extra) = appended_only {
+                companion.push_str(
+                    "\n\n[ATTACHED CONTEXT - resolved from the references in the user message \
+                     above]\n",
+                );
+                companion.push_str(extra);
+            } else if let Some(idx) = expanded_user.find("<context ") {
+                let attachments = expanded_user[idx..].trim();
+                if !attachments.is_empty() {
+                    companion.push_str(
+                        "\n\n[ATTACHED CONTEXT - resolved from the @references in the user \
+                         message above]\n",
+                    );
+                    companion.push_str(attachments);
+                }
+            } else {
+                companion.push_str(
+                    "\n\n[EXPANDED REQUEST - the user message above with its references \
+                     resolved]\n",
+                );
+                companion.push_str(expanded_user);
+            }
+        }
+
+        companion
+    }
+
+    /// Resolves a `route:<hint>` pseudo-model (as produced by `classify_model`)
+    /// to the concrete model name so context-window lookups don't fall back to
+    /// the default window. Plain model names pass through unchanged.
+    fn resolve_window_model(&self, model: &str) -> String {
+        if let Some(hint) = model.strip_prefix("route:") {
+            if let Some(real) = self.route_model_by_hint.get(hint) {
+                return real.clone();
+            }
+            return self.model_name.clone();
+        }
+        model.to_string()
     }
 
     fn classify_model(&self, user_message: &str) -> String {
@@ -4044,6 +4512,12 @@ impl Agent {
             self.refresh_history_system_prompt();
         }
 
+        for msg in self.history.iter_mut() {
+            if let ConversationMessage::Chat(chat) = msg {
+                chat.strip_ephemeral_context();
+            }
+        }
+
         let plan_armed = self.plan_execution_armed.lock().is_some();
         let is_design_trigger = user_message
             .trim_start()
@@ -4056,23 +4530,67 @@ impl Agent {
             Self::neutralize_stale_turn_directives(&mut self.history);
         }
 
-        let context = if plan_armed || is_design_trigger {
-            String::new()
+        let intent_pass_active =
+            self.intent_analysis_config.enabled && !plan_armed && !is_design_trigger;
+        let pending_decision = if intent_pass_active {
+            self.take_pending_intent_decision(user_message)
         } else {
-            let raw = self
-                .memory_loader
-                .load_context(
+            None
+        };
+        let has_unfinished_for_intent = self.has_unfinished_task();
+
+        let memory_fut = async {
+            if plan_armed || is_design_trigger {
+                return String::new();
+            }
+            let raw = match tokio::time::timeout(
+                std::time::Duration::from_secs(5),
+                self.memory_loader.load_context(
                     self.memory.as_ref(),
                     user_message,
                     self.memory_session_id.as_deref(),
-                )
-                .await
-                .unwrap_or_default();
+                ),
+            )
+            .await
+            {
+                Ok(result) => result.unwrap_or_default(),
+                Err(_) => {
+                    tracing::warn!(
+                        target: "agent.memory",
+                        "memory recall timed out; continuing turn without recalled context"
+                    );
+                    String::new()
+                }
+            };
             Self::cap_memory_context(raw)
         };
 
+        let intent_fut = async {
+            if !intent_pass_active {
+                return None;
+            }
+            if pending_decision.is_some() {
+                return pending_decision.clone();
+            }
+            if !has_unfinished_for_intent {
+                return None;
+            }
+            self.analyze_intent_llm(user_message).await
+        };
+
+        let expansion_fut = crate::agent::context::expansion::expand_input(
+            user_message,
+            &self.workspace_dir,
+            crate::context::builder::FocusPathRegistry::current(),
+            String::new(),
+        );
+
+        let (context, llm_decision, expanded_user) =
+            tokio::join!(memory_fut, intent_fut, expansion_fut);
+
         if self.auto_save && !plan_armed && !is_design_trigger {
-            let autosave_key = format!("user_msg_{}", Uuid::new_v4());
+            let autosave_key =
+                crate::agent::loop_::autosave_content_key("user_msg", user_message);
             let memory = Arc::clone(&self.memory);
             let user_message_owned = user_message.to_string();
             let memory_session_id = self.memory_session_id.clone();
@@ -4100,18 +4618,7 @@ impl Agent {
             crate::agent::dangling_tool_repair::note_interrupted_turn(&mut self.history);
         }
 
-        // Resolve @file/@folder/@codebase tags into inline <context> blocks
-        // (Cursor-style attachments). Memory recall and intent analysis above
-        // keep the raw text; only the model-facing envelope is expanded.
-        let expanded_user = crate::agent::context::expansion::expand_input(
-            user_message,
-            &self.workspace_dir,
-            crate::context::builder::FocusPathRegistry::current(),
-            String::new(),
-        )
-        .await;
-
-        let mut enriched = Self::build_user_envelope(&expanded_user, &context);
+        let mut enriched = Self::build_turn_companion(user_message, &expanded_user, &context);
 
         if let Ok(guard) = self.unfinished_task.lock() {
             if let Some(task) = guard.as_ref() {
@@ -4127,18 +4634,6 @@ impl Agent {
         }
 
         self.last_turn_resumed = false;
-
-        let intent_pass_active =
-            self.intent_analysis_config.enabled && !plan_armed && !is_design_trigger;
-
-        let llm_decision = if intent_pass_active {
-            match self.take_pending_intent_decision(user_message) {
-                Some(decision) => Some(decision),
-                None => self.analyze_intent_llm(user_message).await,
-            }
-        } else {
-            None
-        };
 
         if !intent_pass_active && !plan_armed && !is_design_trigger {
             let resumed =
@@ -4219,35 +4714,6 @@ impl Agent {
             }
         }
 
-        if let Some(svc) = crate::services::try_get_services() {
-            let mode = crate::agent::coding_mode::active_coding_mode();
-            if let Some(reminder) = crate::agent::mode::effects::pre_turn_reminder(mode) {
-                enriched.push_str("\n\n");
-                enriched.push_str(reminder);
-            }
-            if !plan_armed {
-                let cfg = svc.config();
-                if let Some(web_reminder) =
-                    crate::agent::mode::effects::web_research_disabled_reminder(
-                        mode,
-                        cfg.web_search.enabled,
-                        cfg.web_fetch.enabled,
-                    )
-                {
-                    enriched.push_str("\n\n");
-                    enriched.push_str(web_reminder);
-                }
-                if let Some(web_active) = crate::agent::mode::effects::web_research_active_reminder(
-                    mode,
-                    cfg.web_search.enabled,
-                    cfg.web_fetch.enabled,
-                ) {
-                    enriched.push_str("\n\n");
-                    enriched.push_str(web_active);
-                }
-            }
-        }
-
         if intent_pass_active {
             let intent_note = match &llm_decision {
                 Some(decision)
@@ -4286,8 +4752,9 @@ impl Agent {
             }
         }
 
-        self.history
-            .push(ConversationMessage::Chat(ChatMessage::user(enriched)));
+        self.history.push(ConversationMessage::Chat(
+            ChatMessage::user(user_message).with_turn_companion(enriched),
+        ));
 
         self.history = crate::agent::dangling_tool_repair::repair_dangling_tool_calls(
             std::mem::take(&mut self.history),
@@ -4379,64 +4846,61 @@ impl Agent {
         }
 
         let request_id = format!("guardrail_{}", uuid::Uuid::new_v4().simple());
+        // Register before emitting so the session-scoped bus forwarder (desktop
+        // ws turn loop) can attribute the prompt, and so an instant reply is
+        // never lost; the mailbox-aware wait survives lagged broadcasts.
         let mut rx = bus.subscribe();
+        let request_payload = serde_json::json!({
+            "kind": "guardrail_approval",
+            "reason": reason,
+            "input": arguments,
+        });
+        crate::approval::register_pending_gateway_approval_with_replay(
+            request_id.clone(),
+            serde_json::json!({
+                "type": "permission_request",
+                "requestId": request_id,
+                "toolName": tool_name,
+                "input": request_payload,
+                "description": reason,
+            }),
+        );
         let sink = crate::gateway::ws::gateway_approval_sink_handle();
         sink.emit_kind(SessionEventKind::ApprovalRequested {
             id: request_id.clone(),
             tool_name: tool_name.to_string(),
-            arguments: serde_json::json!({
-                "kind": "guardrail_approval",
-                "reason": reason,
-                "input": arguments,
-            }),
+            arguments: request_payload,
             issued_at: chrono::Utc::now(),
         });
-        crate::approval::register_pending_gateway_approval(request_id.clone());
 
-        const GUARDRAIL_APPROVAL_TIMEOUT_MS: u64 = 300_000;
         let cancel_token = self.cancel_signal();
-        let deadline = std::time::Instant::now()
-            + std::time::Duration::from_millis(GUARDRAIL_APPROVAL_TIMEOUT_MS);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
+        let verdict =
+            crate::approval::wait_for_session_decision(&request_id, &mut rx, Some(&cancel_token))
+                .await;
+        let _ = crate::approval::drop_pending_gateway_approval(&request_id);
+        match verdict {
+            crate::approval::SessionApprovalVerdict::Decision(response) => match response {
+                crate::approval::ApprovalResponse::Yes
+                | crate::approval::ApprovalResponse::Always => {
+                    GuardrailApprovalOutcome::Approved
+                }
+                crate::approval::ApprovalResponse::No => GuardrailApprovalOutcome::Denied,
+            },
+            crate::approval::SessionApprovalVerdict::Cancelled => {
+                tracing::warn!(
+                    tool = tool_name,
+                    request_id = %request_id,
+                    "guardrail approval cancelled by user; cancelling turn"
+                );
+                GuardrailApprovalOutcome::Cancelled
+            }
+            crate::approval::SessionApprovalVerdict::TimedOut => {
                 tracing::warn!(
                     tool = tool_name,
                     request_id = %request_id,
                     "guardrail approval timed out; denying"
                 );
-                return GuardrailApprovalOutcome::Denied;
-            }
-            let received = tokio::select! {
-                () = cancel_token.cancelled() => {
-                    tracing::warn!(
-                        tool = tool_name,
-                        request_id = %request_id,
-                        "guardrail approval cancelled by user; cancelling turn"
-                    );
-                    return GuardrailApprovalOutcome::Cancelled;
-                }
-                outcome = tokio::time::timeout(remaining, rx.recv()) => outcome,
-            };
-            match received {
-                Ok(Ok(evt)) => {
-                    if let SessionEventKind::ApprovalResponded { id, decision, .. } = &evt.kind {
-                        if id == &request_id {
-                            return if matches!(
-                                decision.to_ascii_lowercase().as_str(),
-                                "yes" | "y" | "always" | "a"
-                            ) {
-                                GuardrailApprovalOutcome::Approved
-                            } else {
-                                GuardrailApprovalOutcome::Denied
-                            };
-                        }
-                    }
-                }
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => {
-                    return GuardrailApprovalOutcome::Denied;
-                }
+                GuardrailApprovalOutcome::Denied
             }
         }
     }
@@ -4477,7 +4941,7 @@ impl Agent {
             let _ = event_tx
                 .send(TurnEvent::StatusUpdate {
                     action: "model_override".to_string(),
-                    detail: "未找到可用的 fast 模型配置：请在 model_routes 中配置 hint=\"fast\" 的路由，或设置 agent_runtime.fast_apply_model。".to_string(),
+                    detail: "No usable fast model configuration found: add a model_routes entry with hint=\"fast\", or set agent_runtime.fast_apply_model.".to_string(),
                 })
                 .await;
             bs.write(|s| s.main_loop_model_override = None);
@@ -4568,17 +5032,15 @@ impl crate::agent::loop_::traits::ResponseCacheHook for GuiHooksFromAgent {
             // message: otherwise a repeated short prompt (e.g. "continue") in
             // different contexts within the same session collides and returns a
             // stale answer.
-            let conversation = messages
-                .iter()
-                .filter(|m| m.role != "system")
-                .map(|m| format!("{}:{}", m.role, m.content))
-                .collect::<Vec<_>>()
-                .join("\u{1f}");
             let system = messages
                 .iter()
                 .find(|m| m.role == "system")
                 .map(|m| m.content.as_str());
-            crate::memory::response_cache::ResponseCache::cache_key(model, system, &conversation)
+            let parts = messages
+                .iter()
+                .filter(|m| m.role != "system")
+                .flat_map(|m| [m.role.as_str(), ":", m.content.as_str(), "\u{1f}"]);
+            crate::memory::response_cache::ResponseCache::cache_key_parts(model, system, parts)
         })
     }
 
@@ -4636,27 +5098,14 @@ impl crate::agent::loop_::traits::ResponseCacheHook for GuiHooksFromAgent {
 
 #[async_trait::async_trait]
 impl crate::agent::loop_::traits::MemorySessionHook for GuiHooksFromAgent {
-    async fn on_turn_start(&self, user_message: &str) {
-        if !self.auto_save {
-            return;
-        }
-        let key = format!("user_msg_{}", Uuid::new_v4());
-        let _ = self
-            .memory
-            .store(
-                &key,
-                user_message,
-                MemoryCategory::Conversation,
-                self.memory_session_id.as_deref(),
-            )
-            .await;
-    }
+    async fn on_turn_start(&self, _user_message: &str) {}
 
     async fn on_turn_end(&self, assistant_message: &str, _tools_used: &[String]) {
         if !self.auto_save {
             return;
         }
-        let key = format!("assistant_msg_{}", Uuid::new_v4());
+        let key =
+            crate::agent::loop_::autosave_content_key("assistant_msg", assistant_message);
         let _ = self
             .memory
             .store(

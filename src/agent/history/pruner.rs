@@ -57,7 +57,13 @@ pub struct PruneStats {
 }
 
 fn estimate_tokens(messages: &[ChatMessage]) -> usize {
-    messages.iter().map(|m| m.content.len() / 4).sum()
+    // Use the shared estimator (ASCII/4 + one token per wide char) so pruning
+    // thresholds agree with the compaction estimator instead of a byte/4 guess
+    // that badly overcounts CJK.
+    messages
+        .iter()
+        .map(crate::providers::traits::estimate_message_tokens)
+        .sum()
 }
 
 fn is_native_tool_pair(assistant: &ChatMessage, tool: &ChatMessage) -> bool {
@@ -100,19 +106,12 @@ fn truncate_native_tool_result(message: &mut ChatMessage) -> bool {
     true
 }
 
-fn protected_indices(messages: &[ChatMessage], keep_recent: usize) -> Vec<bool> {
-    let len = messages.len();
-    let mut protected = vec![false; len];
-    for (i, msg) in messages.iter().enumerate() {
-        if msg.role == "system" {
-            protected[i] = true;
-        }
+fn group_is_protected(messages: &[ChatMessage], start: usize, end: usize, keep_recent: usize) -> bool {
+    let recent_start = messages.len().saturating_sub(keep_recent);
+    if end > recent_start {
+        return true;
     }
-    let recent_start = len.saturating_sub(keep_recent);
-    for p in protected.iter_mut().skip(recent_start) {
-        *p = true;
-    }
-    protected
+    (start..end).any(|idx| messages[idx].role == "system")
 }
 
 pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConfig) -> PruneStats {
@@ -126,11 +125,21 @@ pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConf
         };
     }
 
+    let mut total_tokens = estimate_tokens(messages);
+    if total_tokens <= config.max_tokens {
+        return PruneStats {
+            messages_before,
+            messages_after: messages_before,
+            collapsed_pairs: 0,
+            dropped_messages: 0,
+        };
+    }
+
     let mut collapsed_pairs: usize = 0;
 
     if config.collapse_tool_results {
         let mut i = 0;
-        while i < messages.len() {
+        while i < messages.len() && total_tokens > config.max_tokens {
             if messages[i].role != "assistant"
                 || i + 1 >= messages.len()
                 || messages[i + 1].role != "tool"
@@ -144,18 +153,19 @@ pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConf
                 run_end += 1;
             }
 
-            let protected = protected_indices(messages, config.keep_recent);
-            let group_protected = (i..run_end).any(|idx| protected[idx]);
-            if group_protected {
+            if group_is_protected(messages, i, run_end, config.keep_recent) {
                 i = run_end;
                 continue;
             }
 
             if is_native_tool_pair(&messages[i], &messages[i + 1]) {
                 let mut collapsed_any = false;
-                for idx in (i + 1)..run_end {
-                    if truncate_native_tool_result(&mut messages[idx]) {
+                for message in messages.iter_mut().take(run_end).skip(i + 1) {
+                    let before = crate::providers::traits::estimate_message_tokens(message);
+                    if truncate_native_tool_result(message) {
                         collapsed_any = true;
+                        let after = crate::providers::traits::estimate_message_tokens(message);
+                        total_tokens = total_tokens.saturating_sub(before.saturating_sub(after));
                     }
                 }
                 if collapsed_any {
@@ -165,53 +175,59 @@ pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConf
                 continue;
             }
 
+            let group_tokens: usize = (i..run_end)
+                .map(|idx| crate::providers::traits::estimate_message_tokens(&messages[idx]))
+                .sum();
             let first_tool = &messages[i + 1].content;
             let truncated: String = first_tool.chars().take(100).collect();
-            let summary = format!("[Tool result: {truncated}...]");
+            let original_text = messages[i].content.trim().to_string();
+            let summary = if original_text.is_empty() {
+                format!("[Tool result: {truncated}...]")
+            } else {
+                format!("{original_text}\n[Tool result: {truncated}...]")
+            };
             messages[i] = ChatMessage {
                 role: "assistant".to_string(),
                 content: summary,
                 metadata: Default::default(),
             };
             messages.drain(i + 1..run_end);
+            let kept = crate::providers::traits::estimate_message_tokens(&messages[i]);
+            total_tokens = total_tokens.saturating_sub(group_tokens.saturating_sub(kept));
             collapsed_pairs += 1;
             i += 1;
         }
     }
 
     let mut dropped_messages: usize = 0;
-    while estimate_tokens(messages) > config.max_tokens {
-        let protected = protected_indices(messages, config.keep_recent);
-        let Some(idx) = protected
-            .iter()
-            .enumerate()
-            .find(|(_, p)| !**p)
-            .map(|(i, _)| i)
-        else {
-            break;
-        };
-
-        // Drop whole tool_call/tool_result groups together so we never leave an
-        // orphan `tool` message (no preceding assistant tool_calls) or a dangling
-        // assistant(tool_calls) with its results removed — either shape is a hard
-        // 400 on the OpenAI wire. If the drop candidate is a `tool` result whose
-        // parent assistant is protected, skip past the whole group instead.
-        let mut end = idx + 1;
-        if messages[idx].role == "assistant" {
-            while end < messages.len() && messages[end].role == "tool" && !protected[end] {
-                end += 1;
+    if total_tokens > config.max_tokens {
+        let mut drop_flags = vec![false; messages.len()];
+        let mut i = 0;
+        while i < messages.len() && total_tokens > config.max_tokens {
+            let mut end = i + 1;
+            if messages[i].role == "assistant" || messages[i].role == "tool" {
+                while end < messages.len() && messages[end].role == "tool" {
+                    end += 1;
+                }
             }
-        } else if messages[idx].role == "tool" {
-            // Orphan tool without a droppable parent assistant: extend across the
-            // contiguous tool run so we don't split a pair.
-            while end < messages.len() && messages[end].role == "tool" && !protected[end] {
-                end += 1;
+            if group_is_protected(messages, i, end, config.keep_recent) {
+                i = end;
+                continue;
             }
+            let group_tokens: usize = (i..end)
+                .map(|idx| crate::providers::traits::estimate_message_tokens(&messages[idx]))
+                .sum();
+            for flag in drop_flags.iter_mut().take(end).skip(i) {
+                *flag = true;
+            }
+            dropped_messages += end - i;
+            total_tokens = total_tokens.saturating_sub(group_tokens);
+            i = end;
         }
-
-        let removed = end - idx;
-        messages.drain(idx..end);
-        dropped_messages += removed;
+        if dropped_messages > 0 {
+            let mut keep_iter = drop_flags.into_iter();
+            messages.retain(|_| !keep_iter.next().unwrap_or(false));
+        }
     }
 
     PruneStats {

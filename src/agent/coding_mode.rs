@@ -470,6 +470,12 @@ impl CodingMode {
                  quote the URL and the relevant excerpt rather than \
                  paraphrasing without sources.\n\n{web_research}\n\n{verification}"
             ),
+            Self::Tdd if builtin_skills::workspace_forbids_tests() => format!(
+                "\n\n## Mode: TDD (adapted: this workspace forbids test code)\n\n{}{}\n\n{}",
+                builtin_skills::tdd_forbidden_tests_override(),
+                builtin_skills::tdd_rules(),
+                builtin_skills::verification_rules()
+            ),
             Self::Tdd => format!(
                 "\n\n## Mode: TDD (test-driven development with cycle tracking)\n\n\
                  CRITICAL: You MUST follow the Red-Green-Refactor cycle strictly.\n\
@@ -1711,11 +1717,7 @@ pub fn active_coding_mode() -> CodingMode {
             return mode;
         }
     }
-    tracing::warn!(
-        target: "isolation",
-        "active_coding_mode() called without session scope; using Agent default instead of shared global mode"
-    );
-    CodingMode::default()
+    svc.resolve_coding_mode_for(None)
 }
 
 pub fn new_coding_mode_handle() -> CodingModeHandle {

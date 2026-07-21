@@ -60,9 +60,10 @@ fn rule_trailing_todo(req: &NepRequest) -> Option<NepSuggestion> {
     let file = edit.file_path.display().to_string();
     let line = req.cursor_line.max(1);
     let diff = format!(
-        "--- a/{file}\n+++ b/{file}\n@@ -{line},0 +{line},1 @@\n+\n",
+        "--- a/{file}\n+++ b/{file}\n@@ -{line},0 +{new_line},1 @@\n+\n",
         file = file,
-        line = line + 1,
+        line = line,
+        new_line = line + 1,
     );
     Some(NepSuggestion {
         file_path: edit.file_path.clone(),

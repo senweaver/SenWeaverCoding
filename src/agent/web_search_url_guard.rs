@@ -278,10 +278,10 @@ pub fn refusal_message(
     let directive = if web_search_enabled {
         match misuse.kind {
             MisuseKind::SearchEngine => format!(
-                "First call `web_search` with the same intent (e.g. \
-                 web_search(query=\"{}\")). web_search has built-in multi-provider failover \
+                "First call `web_search_tool` with the same intent (e.g. \
+                 web_search_tool(query=\"{}\")). web_search_tool has built-in multi-provider failover \
                  (DuckDuckGo \u{2192} Baidu \u{2192} Bing \u{2192} SearXNG \u{2192} Brave \u{2192} \
-                 Jina \u{2192} Tavily etc.) and returns structured results. ONLY if web_search \
+                 Jina \u{2192} Tavily etc.) and returns structured results. ONLY if web_search_tool \
                  comes back with a real failure (\"All web search providers failed: ...\") may you \
                  fall back to opening a search-engine results page in `browser` / `web_fetch` \
                  \u{2014} the runtime will then automatically allow that for the next 10 minutes.",
@@ -289,11 +289,11 @@ pub fn refusal_message(
             ),
             MisuseKind::Aggregator => format!(
                 "This URL is a hot-list / trending aggregator page; fetching it directly returns \
-                 raw HTML that is rarely useful. INSTEAD call `web_search` with the appropriate \
-                 category, e.g. web_search(query=\"{q}\", category=\"{cat}\") \u{2014} the registry \
+                 raw HTML that is rarely useful. INSTEAD call `web_search_tool` with the appropriate \
+                 category, e.g. web_search_tool(query=\"{q}\", category=\"{cat}\") \u{2014} the registry \
                  already includes Google News, Bing News, Sohu News, ThePaper, etc. on the news \
                  fallback chain. Use multi-engine fan-out to get structured per-article results \
-                 you can then web_fetch ONE BY ONE if you need full text. If web_search fails (\
+                 you can then web_fetch ONE BY ONE if you need full text. If web_search_tool fails (\
                  \"All providers failed\") the runtime will allow this fetch automatically for the \
                  next 10 minutes.",
                 q = misuse.query.replace('"', "'"),
@@ -312,10 +312,10 @@ pub fn refusal_message(
     };
     format!(
         "[Refused] `{tool_name}` was called with a {kind_label} ({}, query: \"{}\") \
-         but `web_search` has not been tried yet in this session.\n\
+         but `web_search_tool` has not been tried yet in this session.\n\
          Note: the embedded browser usually renders such pages as blank \
          (X-Frame-Options / cross-origin protections), so this fallback is only useful if \
-         `web_search` itself is unreachable. {directive}",
+         `web_search_tool` itself is unreachable. {directive}",
         misuse.host, misuse.query
     )
 }

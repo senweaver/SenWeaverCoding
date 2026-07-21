@@ -45,7 +45,7 @@ struct RecordingSession {
     phase: Phase,
     stop_tx: Option<oneshot::Sender<()>>,
     join: Option<JoinHandle<RecordingManifest>>,
-    input_lease: Option<crate::computer::input_lock::InputLease>,
+    input_lease: Option<crate::computer::input::lock::InputLease>,
 }
 
 static SESSION: Lazy<Mutex<Option<RecordingSession>>> = Lazy::new(|| Mutex::new(None));
@@ -120,7 +120,7 @@ pub async fn start_recording(
     SESSION.lock().take();
 
     let input_lease =
-        crate::computer::input_lock::try_acquire(crate::computer::input_lock::InputActivity::Recording)
+        crate::computer::input::lock::try_acquire(crate::computer::input::lock::InputActivity::Recording)
             .map_err(|e| anyhow!(e))?;
 
     let legacy_root = workspace_dir.join(".sen").join("computer_recordings");
@@ -134,7 +134,7 @@ pub async fn start_recording(
     let (dir, name) = unique_recording_dir(&workspace_dir, &base).await;
     tokio::fs::create_dir_all(dir.join("shots")).await?;
 
-    let (dw, dh) = input::main_display_size().await.unwrap_or((0, 0));
+    let (dw, dh) = input::core::main_display_size().await.unwrap_or((0, 0));
     let monitors = crate::computer::capture::list_monitors().await;
     let (hook_handle, raw_rx) = match hook::start_capture() {
         Ok(pair) => pair,

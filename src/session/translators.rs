@@ -121,6 +121,7 @@ pub fn session_to_agent_events(event: &SessionEvent) -> Vec<AgentEvent> {
                     s
                 }
             },
+            arguments: arguments.clone(),
         }],
         SessionEventKind::ApprovalResponded {
             id,
@@ -230,9 +231,3 @@ pub fn session_to_agent_events(event: &SessionEvent) -> Vec<AgentEvent> {
     }
 }
 
-pub fn is_forwardable(event: &SessionEvent) -> bool {
-    !matches!(
-        event.kind,
-        SessionEventKind::TurnStarted { .. }
-    )
-}

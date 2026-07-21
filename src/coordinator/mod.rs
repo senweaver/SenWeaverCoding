@@ -20,6 +20,10 @@ use std::collections::HashSet;
 
 const COORDINATOR_ALLOWED_TOOLS: &[&str] = &[
     "delegate",
+    // The coordinator's whole job is orchestration, so it must be able to reach
+    // the two strongest parallel primitives, not just single delegate.
+    "delegate_parallel",
+    "spawn_workers",
     "send_message",
     "team_create",
     "team_delete",

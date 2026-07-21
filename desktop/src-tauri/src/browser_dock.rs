@@ -3382,7 +3382,9 @@ pub async fn browser_dock_park(
     state: tauri::State<'_, DockSharedState>,
 ) -> Result<(), String> {
     state.set_parked(true);
-    update_dock_layout(&app, state.inner())?;
+    if let Err(err) = update_dock_layout(&app, state.inner()) {
+        tracing::warn!("[browser_dock] park update_dock_layout failed: {err}");
+    }
     Ok(())
 }
 
@@ -3701,10 +3703,22 @@ pub async fn browser_dock_present_session(
     let target = inner.present_session_internal(&trimmed);
     if let Some(tab_id) = target {
         let _ = inner.set_active(tab_id);
-        ensure_dock_webview(&app, inner)?;
+        if let Err(err) = ensure_dock_webview(&app, inner) {
+            inner.set_parked(true);
+            let _ = update_dock_layout(&app, inner);
+            emit_tabs_event(&app, inner);
+            return Err(err);
+        }
         inner.set_parked(false);
-        dock_navigate_active(&app, inner)?;
-        update_dock_layout(&app, inner)?;
+        if let Err(err) = dock_navigate_active(&app, inner) {
+            inner.set_parked(true);
+            let _ = update_dock_layout(&app, inner);
+            emit_tabs_event(&app, inner);
+            return Err(err);
+        }
+        if let Err(err) = update_dock_layout(&app, inner) {
+            tracing::warn!("[browser_dock] present_session update_dock_layout failed: {err}");
+        }
         focus_dock_webview(&app);
         emit_tabs_event(&app, inner);
     } else {

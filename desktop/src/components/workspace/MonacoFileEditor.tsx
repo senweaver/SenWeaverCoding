@@ -32,6 +32,28 @@ import '../../lib/monacoSetup'
 
 const EDITOR_PREFS_STORAGE_KEY = 'sen-workspace-editor-prefs'
 
+const lspProvidersRegistered = new Set<string>()
+
+// Monaco language providers are registered once per language (module-level
+// guard) but their closures read the editor context. Back that context with a
+// module-level singleton so a remounted editor updates the SAME object the
+// already-registered providers captured — otherwise providers keep reading a
+// frozen ref from a stale (unmounted) instance and hover/completion/go-to
+// resolve against the wrong file.
+const sharedLspCtx: {
+  uri: string | null
+  languageId: string
+  workspaceRoot: string | null
+  inlayHintsEnabled: boolean
+  hoverDelayMs: number
+} = {
+  uri: null,
+  languageId: 'plaintext',
+  workspaceRoot: null,
+  inlayHintsEnabled: true,
+  hoverDelayMs: 250,
+}
+
 const LARGE_FILE_BYTE_THRESHOLD = 2 * 1024 * 1024
 
 const LARGE_FILE_LINE_THRESHOLD = 50_000
@@ -1018,19 +1040,7 @@ export function MonacoFileEditor({ workDir }: Props) {
   const editorRef = useRef<MonacoNs.editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<typeof MonacoNs | null>(null)
 
-  const ctxRef = useRef<{
-    uri: string | null
-    languageId: string
-    workspaceRoot: string | null
-    inlayHintsEnabled: boolean
-    hoverDelayMs: number
-  }>({
-    uri: null,
-    languageId: 'plaintext',
-    workspaceRoot: null,
-    inlayHintsEnabled: true,
-    hoverDelayMs: 250,
-  })
+  const ctxRef = useRef(sharedLspCtx)
   ctxRef.current.uri = fileUri
   ctxRef.current.languageId = languageId
   ctxRef.current.workspaceRoot = root
@@ -1230,7 +1240,6 @@ export function MonacoFileEditor({ workDir }: Props) {
     editor.updateOptions({ hover: { enabled: true, delay: hoverDelayMs } })
   }, [hoverDelayMs])
 
-  const providersRegistered = useRef<Set<string>>(new Set())
   const applyCodeActionCmdId = useRef<string | null>(null)
 
   const applyLspCodeAction = useCallback(
@@ -1513,8 +1522,8 @@ export function MonacoFileEditor({ workDir }: Props) {
     }
 
     const ensureProviders = (lang: string) => {
-      if (providersRegistered.current.has(lang)) return
-      providersRegistered.current.add(lang)
+      if (lspProvidersRegistered.has(lang)) return
+      lspProvidersRegistered.add(lang)
 
       monaco.languages.registerHoverProvider(lang, {
         provideHover: async (

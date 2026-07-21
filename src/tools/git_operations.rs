@@ -126,24 +126,37 @@ impl GitOperationsTool {
         let mut staged = Vec::new();
         let mut unstaged = Vec::new();
         let mut untracked = Vec::new();
+        let mut conflicted = Vec::new();
+
+        let mut push_xy_entry = |xy: &str, path: &str| {
+            let status_char = xy.chars().next().unwrap_or(' ');
+            if status_char != '.' && status_char != ' ' {
+                staged.push(json!({"path": path, "status": status_char}));
+            }
+            let status_char = xy.chars().nth(1).unwrap_or(' ');
+            if status_char != '.' && status_char != ' ' {
+                unstaged.push(json!({"path": path, "status": status_char}));
+            }
+        };
 
         for line in output.lines() {
             if line.starts_with("# branch.head ") {
                 branch = line.trim_start_matches("# branch.head ").to_string();
             } else if let Some(rest) = line.strip_prefix("1 ") {
-
-                let mut parts = rest.splitn(3, ' ');
-                if let (Some(staging), Some(path)) = (parts.next(), parts.next()) {
-                    if !staging.is_empty() {
-                        let status_char = staging.chars().next().unwrap_or(' ');
-                        if status_char != '.' && status_char != ' ' {
-                            staged.push(json!({"path": path, "status": status_char}));
-                        }
-                        let status_char = staging.chars().nth(1).unwrap_or(' ');
-                        if status_char != '.' && status_char != ' ' {
-                            unstaged.push(json!({"path": path, "status": status_char}));
-                        }
-                    }
+                let fields: Vec<&str> = rest.splitn(8, ' ').collect();
+                if fields.len() == 8 {
+                    push_xy_entry(fields[0], fields[7]);
+                }
+            } else if let Some(rest) = line.strip_prefix("2 ") {
+                let fields: Vec<&str> = rest.splitn(9, ' ').collect();
+                if fields.len() == 9 {
+                    let path = fields[8].split('\t').next().unwrap_or(fields[8]);
+                    push_xy_entry(fields[0], path);
+                }
+            } else if let Some(rest) = line.strip_prefix("u ") {
+                let fields: Vec<&str> = rest.splitn(10, ' ').collect();
+                if fields.len() == 10 {
+                    conflicted.push(json!({"path": fields[9], "status": fields[0]}));
                 }
             } else if let Some(rest) = line.strip_prefix("? ") {
                 untracked.push(rest.to_string());
@@ -154,9 +167,15 @@ impl GitOperationsTool {
         result.insert("staged".to_string(), json!(staged));
         result.insert("unstaged".to_string(), json!(unstaged));
         result.insert("untracked".to_string(), json!(untracked));
+        result.insert("conflicted".to_string(), json!(conflicted));
         result.insert(
             "clean".to_string(),
-            json!(staged.is_empty() && unstaged.is_empty() && untracked.is_empty()),
+            json!(
+                staged.is_empty()
+                    && unstaged.is_empty()
+                    && untracked.is_empty()
+                    && conflicted.is_empty()
+            ),
         );
 
         Ok(ToolResult {
@@ -177,14 +196,14 @@ impl GitOperationsTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
 
-        self.sanitize_git_args(files)?;
+        let sanitized = self.sanitize_git_args(files)?;
 
         let mut git_args = vec!["diff", "--unified=3"];
         if cached {
             git_args.push("--cached");
         }
         git_args.push("--");
-        git_args.push(files);
+        git_args.extend(sanitized.iter().map(String::as_str));
 
         let output = match self.run_git_command(&git_args, working_dir).await {
             Ok(out) => out,
@@ -290,8 +309,8 @@ impl GitOperationsTool {
         let mut commits = Vec::new();
 
         for line in output.lines() {
-            let parts: Vec<&str> = line.split('|').collect();
-            if parts.len() >= 5 {
+            let parts: Vec<&str> = line.splitn(5, '|').collect();
+            if parts.len() == 5 {
                 commits.push(json!({
                     "hash": parts[0],
                     "author": parts[1],
@@ -377,14 +396,16 @@ impl GitOperationsTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'message' parameter"))?;
 
-        let sanitized = message
-            .lines()
-            .map(|l| l.trim())
-            .filter(|l| !l.is_empty())
-            .collect::<Vec<_>>()
-            .join("\n");
+        let mut lines: Vec<&str> = message.lines().map(str::trim_end).collect();
+        while lines.first().is_some_and(|l| l.is_empty()) {
+            lines.remove(0);
+        }
+        while lines.last().is_some_and(|l| l.is_empty()) {
+            lines.pop();
+        }
+        let sanitized = lines.join("\n");
 
-        if sanitized.is_empty() {
+        if sanitized.trim().is_empty() {
             anyhow::bail!("Commit message cannot be empty");
         }
 
@@ -418,11 +439,14 @@ impl GitOperationsTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'paths' parameter"))?;
 
-        self.sanitize_git_args(paths)?;
+        let sanitized = self.sanitize_git_args(paths)?;
+        if sanitized.is_empty() {
+            anyhow::bail!("'paths' parameter must contain at least one pathspec");
+        }
 
-        let output = self
-            .run_git_command(&["add", "--", paths], working_dir)
-            .await;
+        let mut git_args: Vec<&str> = vec!["add", "--"];
+        git_args.extend(sanitized.iter().map(String::as_str));
+        let output = self.run_git_command(&git_args, working_dir).await;
 
         match output {
             Ok(_) => Ok(ToolResult {
@@ -548,7 +572,7 @@ impl Tool for GitOperationsTool {
                 },
                 "paths": {
                     "type": "string",
-                    "description": "File paths to stage (for 'add' operation)"
+                    "description": "Whitespace-separated pathspecs to stage (for 'add' operation); each token is passed to git as its own argument, so quote-free paths must not contain spaces"
                 },
                 "branch": {
                     "type": "string",
@@ -556,7 +580,7 @@ impl Tool for GitOperationsTool {
                 },
                 "files": {
                     "type": "string",
-                    "description": "File or path to diff (for 'diff' operation, default: '.')"
+                    "description": "Whitespace-separated paths to diff (for 'diff' operation, default: '.')"
                 },
                 "cached": {
                     "type": "boolean",

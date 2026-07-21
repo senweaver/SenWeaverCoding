@@ -325,10 +325,83 @@ impl McpServer {
     }
 }
 
+pub struct McpCallOutcome {
+    pub text: String,
+    pub is_error: bool,
+}
+
+fn extract_call_outcome(result: &serde_json::Value, prefixed_name: &str) -> McpCallOutcome {
+    let is_error = result
+        .get("isError")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let text = match result.get("content").and_then(|c| c.as_array()) {
+        Some(blocks) if !blocks.is_empty() => {
+            let mut parts: Vec<String> = Vec::with_capacity(blocks.len());
+            for block in blocks {
+                match block.get("type").and_then(|t| t.as_str()) {
+                    Some("text") => {
+                        if let Some(t) = block.get("text").and_then(|t| t.as_str()) {
+                            parts.push(t.to_string());
+                        }
+                    }
+                    Some("resource") => {
+                        let uri = block
+                            .get("resource")
+                            .and_then(|r| r.get("uri"))
+                            .and_then(|u| u.as_str())
+                            .unwrap_or("(unknown)");
+                        let body = block
+                            .get("resource")
+                            .and_then(|r| r.get("text"))
+                            .and_then(|t| t.as_str())
+                            .unwrap_or("");
+                        parts.push(format!("[resource {uri}]\n{body}"));
+                    }
+                    Some("image") => {
+                        let mime = block
+                            .get("mimeType")
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("image");
+                        parts.push(format!("[inline {mime} content omitted]"));
+                    }
+                    _ => {
+                        parts.push(
+                            serde_json::to_string(block).unwrap_or_default(),
+                        );
+                    }
+                }
+            }
+            parts.join("\n")
+        }
+        _ => serde_json::to_string_pretty(result).unwrap_or_else(|_| {
+            format!("(unserializable result from MCP tool `{prefixed_name}`)")
+        }),
+    };
+    McpCallOutcome { text, is_error }
+}
+
 pub struct McpRegistry {
     servers: Vec<McpServer>,
 
     tool_index: HashMap<String, (usize, String)>,
+}
+
+static GLOBAL_MCP_REGISTRY: once_cell::sync::Lazy<
+    parking_lot::RwLock<Option<Arc<McpRegistry>>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(None));
+
+/// Publishes the live MCP registry so tools that were constructed before the
+/// connection existed (e.g. `mcp_resources_read`, built with `None` in the tool
+/// factory) can still reach a connected registry. The most recently connected
+/// registry wins.
+pub fn register_global_registry(registry: Arc<McpRegistry>) {
+    *GLOBAL_MCP_REGISTRY.write() = Some(registry);
+}
+
+/// Returns the live MCP registry if one has been connected this process.
+pub fn global_registry() -> Option<Arc<McpRegistry>> {
+    GLOBAL_MCP_REGISTRY.read().clone()
 }
 
 impl McpRegistry {
@@ -416,7 +489,9 @@ impl McpRegistry {
     }
 
     pub fn tool_names(&self) -> Vec<String> {
-        self.tool_index.keys().cloned().collect()
+        let mut names: Vec<String> = self.tool_index.keys().cloned().collect();
+        names.sort();
+        names
     }
 
     pub async fn get_tool_def(&self, prefixed_name: &str) -> Option<McpToolDef> {
@@ -433,7 +508,7 @@ impl McpRegistry {
         &self,
         prefixed_name: &str,
         arguments: serde_json::Value,
-    ) -> Result<String> {
+    ) -> Result<McpCallOutcome> {
         let (server_idx, original_name) = self
             .tool_index
             .get(prefixed_name)
@@ -441,8 +516,7 @@ impl McpRegistry {
         let result = self.servers[*server_idx]
             .call_tool(original_name, arguments)
             .await?;
-        serde_json::to_string_pretty(&result)
-            .with_context(|| format!("failed to serialize result of MCP tool `{prefixed_name}`"))
+        Ok(extract_call_outcome(&result, prefixed_name))
     }
 
     pub async fn list_resources(&self, server_name: Option<&str>) -> Result<Vec<McpResource>> {

@@ -87,6 +87,10 @@ impl Tool for MultiEditTool {
                             "new_string": {
                                 "type": "string",
                                 "description": "Replacement text (or full file content if old_string is omitted)"
+                            },
+                            "expected_mtime_ms": {
+                                "type": "integer",
+                                "description": "Optional file mtime (ms since epoch, from file_read) for conflict detection; the edit is rejected if the file changed since."
                             }
                         },
                         "required": ["path", "new_string"]
@@ -154,27 +158,7 @@ impl Tool for MultiEditTool {
                 });
             };
 
-            if let Err(e) = tokio::fs::create_dir_all(parent).await {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!(
-                        "Edit {i}: cannot create parent directory for '{}': {e}",
-                        full_path.display()
-                    )),
-                });
-            }
-
-            let resolved_parent = match tokio::fs::canonicalize(parent).await {
-                Ok(p) => p,
-                Err(e) => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("Edit {i}: failed to resolve file path: {e}")),
-                    });
-                }
-            };
+            let resolved_parent = crate::util::normalize_path_for_containment(parent);
 
             if !self.security.is_resolved_path_allowed(&resolved_parent) {
                 return Ok(ToolResult {
@@ -246,8 +230,6 @@ impl Tool for MultiEditTool {
         }
 
         let mut batch = EditBatch::new(EditOrigin::MultiEditTool).with_atomic(true);
-        let mut summary_paths: Vec<std::path::PathBuf> = Vec::new();
-        let mut emit_records: Vec<(Option<Vec<u8>>, Vec<u8>)> = Vec::new();
         let _resource_guards = match crate::session::acquire_many_file_writes_for_current_session(
             planned_paths.clone(),
         )
@@ -273,6 +255,14 @@ impl Tool for MultiEditTool {
                 });
             }
         }
+
+        let mut file_order: Vec<std::path::PathBuf> = Vec::new();
+        let mut originals: std::collections::HashMap<std::path::PathBuf, Option<String>> =
+            std::collections::HashMap::new();
+        let mut currents: std::collections::HashMap<std::path::PathBuf, String> =
+            std::collections::HashMap::new();
+        let mut edit_counts: std::collections::HashMap<std::path::PathBuf, usize> =
+            std::collections::HashMap::new();
 
         for (i, edit) in edits.iter().enumerate() {
             let new_string = edit
@@ -311,19 +301,10 @@ impl Tool for MultiEditTool {
                 }
             }
 
-            let (original, new_content) = if let Some(old) = old_string {
-                let content = match tokio::fs::read_to_string(&path).await {
-                    Ok(c) => c,
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                        return Ok(ToolResult {
-                            success: false,
-                            output: String::new(),
-                            error: Some(format!(
-                                "Edit {i}: file '{}' does not exist",
-                                path.display()
-                            )),
-                        });
-                    }
+            if !originals.contains_key(&path) {
+                let existing = match tokio::fs::read_to_string(&path).await {
+                    Ok(c) => Some(c),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
                     Err(e) => {
                         return Ok(ToolResult {
                             success: false,
@@ -332,11 +313,39 @@ impl Tool for MultiEditTool {
                         });
                     }
                 };
+                file_order.push(path.clone());
+                if let Some(ref c) = existing {
+                    currents.insert(path.clone(), c.clone());
+                }
+                originals.insert(path.clone(), existing);
+            }
+
+            let next_content = if let Some(old) = old_string {
+                if old.is_empty() {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "Edit {i}: old_string must not be empty; omit old_string to write \
+                             full file content instead"
+                        )),
+                    });
+                }
+                let Some(content) = currents.get(&path) else {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "Edit {i}: file '{}' does not exist",
+                            path.display()
+                        )),
+                    });
+                };
                 let count = content.matches(old).count();
                 if count == 0 {
                     let had_read = crate::session::has_read_in_current_session(&path);
                     let detail = super::super::file::match_diagnostics::failure_message(
-                        &content,
+                        content,
                         old,
                         &path.display().to_string(),
                         had_read,
@@ -359,40 +368,63 @@ impl Tool for MultiEditTool {
                         )),
                     });
                 }
-                let new_content = content.replacen(old, new_string, 1);
-                (Some(content), new_content)
+                content.replacen(old, new_string, 1)
             } else {
-                let existing = tokio::fs::read_to_string(&path).await.ok();
-                (existing, new_string.to_string())
+                new_string.to_string()
             };
+            currents.insert(path.clone(), next_content);
+            *edit_counts.entry(path).or_insert(0) += 1;
+        }
+
+        let mut summary_paths: Vec<std::path::PathBuf> = Vec::new();
+        let mut emit_records: Vec<(Option<Vec<u8>>, Vec<u8>)> = Vec::new();
+        for path in file_order {
+            let original = originals.remove(&path).flatten();
+            let Some(final_content) = currents.remove(&path) else {
+                continue;
+            };
+
+            if let Some(sentinel) =
+                crate::agent::profile::pii_sanitize::introduced_redaction_sentinel(
+                    original.as_deref(),
+                    &final_content,
+                )
+            {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(
+                        crate::agent::profile::pii_sanitize::redaction_writeback_error(
+                            sentinel,
+                            &path.display().to_string(),
+                        ),
+                    ),
+                });
+            }
 
             self.snapshot_before_write(&path).await;
 
-            if let Some(parent) = path.parent() {
-                tokio::fs::create_dir_all(parent).await.ok();
-            }
-
-            let mut emit_payload: (Option<Vec<u8>>, Vec<u8>) = (
+            emit_records.push((
                 original.as_ref().map(|s| s.as_bytes().to_vec()),
-                new_content.as_bytes().to_vec(),
-            );
+                final_content.as_bytes().to_vec(),
+            ));
             let op = match original {
                 Some(orig) => EditOp::Replace {
                     path: path.clone(),
                     byte_range: 0..orig.len(),
                     old_text: orig,
-                    new_text: new_content,
+                    new_text: final_content,
                     anchor: None,
                 },
                 None => EditOp::CreateFile {
                     path: path.clone(),
-                    contents: new_content,
+                    contents: final_content,
                     overwrite: true,
+                    encoding: None,
                 },
             };
             batch.push(op);
             summary_paths.push(path);
-            emit_records.push(std::mem::take(&mut emit_payload));
         }
 
         let emit_records_for_apply = emit_records;
@@ -411,14 +443,35 @@ impl Tool for MultiEditTool {
                     )
                     .await;
                 }
-                let summary: Vec<String> = summary_paths
-                    .iter()
-                    .map(|p| format!("  \u{2713} {}", p.display()))
-                    .collect();
+                let total_edits: usize = edit_counts.values().sum();
+                let mut summary: Vec<String> = Vec::with_capacity(summary_paths.len());
+                for p in &summary_paths {
+                    let n = edit_counts.get(p).copied().unwrap_or(1);
+                    let mtime_note = match tokio::fs::metadata(p).await {
+                        Ok(meta) => meta
+                            .modified()
+                            .ok()
+                            .and_then(|t| {
+                                t.duration_since(std::time::UNIX_EPOCH).ok()
+                            })
+                            .map(|d| format!(" [mtime_ms: {}]", d.as_millis() as u64))
+                            .unwrap_or_default(),
+                        Err(_) => String::new(),
+                    };
+                    if n > 1 {
+                        summary.push(format!(
+                            "  \u{2713} {} ({n} edits){mtime_note}",
+                            p.display()
+                        ));
+                    } else {
+                        summary.push(format!("  \u{2713} {}{mtime_note}", p.display()));
+                    }
+                }
                 Ok(ToolResult {
                     success: true,
                     output: format!(
-                        "Applied {} edit(s) atomically:\n{}",
+                        "Applied {} edit(s) across {} file(s) atomically:\n{}",
+                        total_edits,
                         summary_paths.len(),
                         summary.join("\n")
                     ),

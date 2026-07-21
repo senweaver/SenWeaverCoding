@@ -153,6 +153,13 @@ struct LspServerHandle {
 
     #[cfg(feature = "lsp-push-diagnostics")]
     notification_listeners: Arc<std::sync::RwLock<Vec<Arc<dyn DiagnosticsListener>>>>,
+
+    // Server-initiated notifications (publishDiagnostics) are routed here by the
+    // reader instead of the request/response channel, so they are drained by a
+    // dedicated pump the moment they arrive rather than only while some request
+    // happens to be in flight. Taken by ensure_server_started to start the pump.
+    #[cfg(feature = "lsp-push-diagnostics")]
+    notifications: Option<tokio::sync::mpsc::Receiver<serde_json::Value>>,
 }
 
 impl Drop for LspServerHandle {
@@ -169,13 +176,18 @@ impl LspServerHandle {
     }
 }
 
-fn spawn_stdout_reader(
-    stdout: ChildStdout,
-) -> (
-    tokio::sync::mpsc::Receiver<serde_json::Value>,
-    tokio::task::JoinHandle<()>,
-) {
+struct StdoutReader {
+    incoming: tokio::sync::mpsc::Receiver<serde_json::Value>,
+    task: tokio::task::JoinHandle<()>,
+    #[cfg(feature = "lsp-push-diagnostics")]
+    notifications: tokio::sync::mpsc::Receiver<serde_json::Value>,
+}
+
+fn spawn_stdout_reader(stdout: ChildStdout) -> StdoutReader {
     let (tx, rx) = tokio::sync::mpsc::channel(INCOMING_CHANNEL_CAPACITY);
+    #[cfg(feature = "lsp-push-diagnostics")]
+    let (notif_tx, notif_rx) =
+        tokio::sync::mpsc::channel::<serde_json::Value>(INCOMING_CHANNEL_CAPACITY);
     let task = tokio::spawn(async move {
         let mut reader = BufReader::new(stdout);
         loop {
@@ -184,17 +196,32 @@ fn spawn_stdout_reader(
                 Err(_) => break,
             };
             if msg.get("id").is_some() {
+                // Request/response traffic (and server->client requests, which
+                // also carry an id) stay on the request channel.
                 if tx.send(msg).await.is_err() {
                     break;
                 }
-            } else if msg.get("method").and_then(|m| m.as_str())
+                continue;
+            }
+            // Server-initiated notification. Route publishDiagnostics to the
+            // dedicated notification pump; drop other notifications we don't act
+            // on so they can never back up the request channel.
+            #[cfg(feature = "lsp-push-diagnostics")]
+            if msg.get("method").and_then(|m| m.as_str())
                 == Some("textDocument/publishDiagnostics")
             {
-                let _ = tx.try_send(msg);
+                if notif_tx.send(msg).await.is_err() {
+                    break;
+                }
             }
         }
     });
-    (rx, task)
+    StdoutReader {
+        incoming: rx,
+        task,
+        #[cfg(feature = "lsp-push-diagnostics")]
+        notifications: notif_rx,
+    }
 }
 
 struct LspServiceInner {
@@ -306,8 +333,21 @@ impl LspService {
 
         #[cfg(feature = "lsp-push-diagnostics")]
         {
-            let inner = self.inner.lock().await;
-            handle.notification_listeners = Arc::clone(&inner.diagnostics_listeners);
+            let listeners = {
+                let inner = self.inner.lock().await;
+                Arc::clone(&inner.diagnostics_listeners)
+            };
+            handle.notification_listeners = Arc::clone(&listeners);
+            // Drain server-pushed diagnostics independently of request traffic so
+            // an edit's fresh diagnostics are dispatched to the cache the moment
+            // the server emits them, not only when the next request happens.
+            if let Some(mut notifications) = handle.notifications.take() {
+                crate::runtime::spawn_supervised("lsp.diagnostics_pump", async move {
+                    while let Some(msg) = notifications.recv().await {
+                        LspServerHandle::dispatch_push_notification(&msg, &listeners);
+                    }
+                });
+            }
         }
 
         let arc = Arc::new(Mutex::new(handle));
@@ -487,6 +527,43 @@ impl LspService {
         .await
     }
 
+    /// Notify a running server that a file changed OUT OF BAND (user save, git
+    /// checkout, formatter). Only fires when a server is already running for the
+    /// file's `(language, workspace_root)` AND the file is already open — it never
+    /// spawns a server and never opens new documents. This keeps LSP diagnostics /
+    /// definitions from drifting after external edits, without triggering cold
+    /// starts from the passive fs watcher.
+    pub async fn notify_external_change_if_open(&self, path: &Path) {
+        let Some(language) = lsp_language_id_from_path(path) else {
+            return;
+        };
+        let workspace_root = infer_workspace_root(path)
+            .unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf());
+        let key = ServerKey::new(&language, &workspace_root);
+        let Some(handle) = self.existing_handle(&key).await else {
+            return;
+        };
+        let uri = path_to_uri(path);
+        let text = match tokio::fs::read_to_string(path).await {
+            Ok(t) => t,
+            Err(_) => return,
+        };
+        let mut h = handle.lock().await;
+        if !h.opened_files.contains(&uri) {
+            return;
+        }
+        let change_version = h.next_doc_version(&uri);
+        let _ = h
+            .send_notification(
+                "textDocument/didChange",
+                json!({
+                    "textDocument": { "uri": uri, "version": change_version },
+                    "contentChanges": [{ "text": text }],
+                }),
+            )
+            .await;
+    }
+
     pub async fn save_text_document(
         &self,
         path: &Path,
@@ -608,14 +685,23 @@ impl LspService {
     }
 
     pub async fn get_diagnostics(&self, file: &PathBuf) -> Vec<LspDiagnostic> {
+        // refresh_diagnostics stores under canonical_diag_key; look that up
+        // first (with the raw path as fallback) so a non-canonical caller path
+        // never misses diagnostics that are actually present.
+        let canonical = canonical_diag_key(file);
         let inner = self.inner.lock().await;
         #[cfg(feature = "lsp-push-diagnostics")]
         if let Ok(push) = inner.push_diagnostics.read() {
-            if let Some(diags) = push.get(file) {
+            if let Some(diags) = push.get(&canonical).or_else(|| push.get(file)) {
                 return diags.clone();
             }
         }
-        inner.diagnostics.get(file).cloned().unwrap_or_default()
+        inner
+            .diagnostics
+            .get(&canonical)
+            .or_else(|| inner.diagnostics.get(file))
+            .cloned()
+            .unwrap_or_default()
     }
 
     pub async fn get_all_diagnostics(&self) -> HashMap<PathBuf, Vec<LspDiagnostic>> {
@@ -669,6 +755,46 @@ impl LspService {
         {
             Ok(result) => {
                 let text = format_hover(&result);
+                if text == "No hover information available." {
+                    None
+                } else {
+                    Some(text)
+                }
+            }
+            Err(_) => None,
+        }
+    }
+
+    /// Hover that NEVER spawns a language server: it only queries a server that
+    /// is already running for this file's `(language, workspace_root)`. The
+    /// per-turn context-injection path uses this so a passive hover under a 3s
+    /// timeout can't trigger (and then abandon) a heavyweight cold start of e.g.
+    /// rust-analyzer on every user message.
+    pub async fn hover_if_running(
+        &self,
+        path: impl AsRef<Path>,
+        line: u32,
+        character: u32,
+    ) -> Option<String> {
+        let path = path.as_ref();
+        let language = lsp_language_id_from_path(path)?;
+        let workspace_root =
+            infer_workspace_root(path).unwrap_or_else(|| path.parent().unwrap_or(path).to_path_buf());
+        let key = ServerKey::new(&language, &workspace_root);
+        let handle = self.existing_handle(&key).await?;
+        let file_uri = path_to_uri(path);
+        let params = json!({
+            "textDocument": { "uri": file_uri },
+            "position": { "line": line, "character": character },
+        });
+        let result = {
+            let mut h = handle.lock().await;
+            h.execute_with_open(Some(path), &key.language_id, "textDocument/hover", params)
+                .await
+        };
+        match result {
+            Ok(value) => {
+                let text = format_hover(&value);
                 if text == "No hover information available." {
                     None
                 } else {
@@ -763,18 +889,20 @@ impl LspServerHandle {
             .take()
             .context("Failed to capture server stdout")?;
 
-        let (incoming, reader_task) = spawn_stdout_reader(stdout);
+        let reader = spawn_stdout_reader(stdout);
         let mut handle = Self {
             _process: process,
             stdin,
-            incoming,
-            reader_task,
+            incoming: reader.incoming,
+            reader_task: reader.task,
             next_id: 1,
             initialized: false,
             opened_files: HashSet::new(),
             doc_versions: HashMap::new(),
             #[cfg(feature = "lsp-push-diagnostics")]
             notification_listeners: Arc::new(std::sync::RwLock::new(Vec::new())),
+            #[cfg(feature = "lsp-push-diagnostics")]
+            notifications: Some(reader.notifications),
         };
 
         handle.initialize(workspace_root).await?;
@@ -815,18 +943,20 @@ impl LspServerHandle {
             .take()
             .context("Failed to capture server stdout")?;
 
-        let (incoming, reader_task) = spawn_stdout_reader(stdout);
+        let reader = spawn_stdout_reader(stdout);
         let mut handle = Self {
             _process: process,
             stdin,
-            incoming,
-            reader_task,
+            incoming: reader.incoming,
+            reader_task: reader.task,
             next_id: 1,
             initialized: false,
             opened_files: HashSet::new(),
             doc_versions: HashMap::new(),
             #[cfg(feature = "lsp-push-diagnostics")]
             notification_listeners: Arc::new(std::sync::RwLock::new(Vec::new())),
+            #[cfg(feature = "lsp-push-diagnostics")]
+            notifications: Some(reader.notifications),
         };
 
         handle.initialize(&config.root_path).await?;
@@ -1920,7 +2050,7 @@ impl crate::context::builder::LspContextSource for LspServiceContextSource {
                 .collect::<Vec<_>>()
                 .join("; ");
 
-            let hover = self.inner.hover(path, 0, 0).await;
+            let hover = self.inner.hover_if_running(path, 0, 0).await;
             out.push(LspSnapshot {
                 path: path.clone(),
                 diagnostics: diagnostics.len(),

@@ -57,6 +57,49 @@ pub fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     path
 }
 
+pub fn normalize_path_for_containment(path: &Path) -> PathBuf {
+    let mut existing = path.to_path_buf();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    // Canonicalize the deepest ancestor that exists, then re-attach the
+    // remaining (not-yet-created) components. This gives a stable absolute
+    // path even for new files, which plain canonicalize() cannot do.
+    loop {
+        if let Ok(c) = existing.canonicalize() {
+            let mut base = strip_verbatim_prefix(c);
+            for comp in tail.iter().rev() {
+                base.push(comp);
+            }
+            return lexically_normalize(&base);
+        }
+        match existing.file_name() {
+            Some(name) => {
+                tail.push(name.to_os_string());
+                if !existing.pop() {
+                    break;
+                }
+            }
+            None => break,
+        }
+    }
+    lexically_normalize(&strip_verbatim_prefix(path.to_path_buf()))
+}
+
+fn lexically_normalize(path: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for comp in path.components() {
+        match comp {
+            std::path::Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
 pub fn path_is_within(child: &Path, ancestor: &Path) -> bool {
     let c = strip_verbatim_prefix(child.to_path_buf());
     let a = strip_verbatim_prefix(ancestor.to_path_buf());
@@ -266,7 +309,76 @@ pub fn hidden_async_command<S: AsRef<OsStr>>(program: S) -> tokio::process::Comm
     cmd
 }
 
+pub fn truncate_head_tail(text: &str, cap: usize, head_share_percent: usize) -> Option<String> {
+    if text.len() <= cap || cap == 0 {
+        return None;
+    }
+    let head_budget = (cap * head_share_percent.min(100) / 100).min(text.len());
+    let tail_budget = cap.saturating_sub(head_budget);
+    let mut head_end = head_budget;
+    while head_end > 0 && !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = text.len().saturating_sub(tail_budget);
+    while tail_start < text.len() && !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    if tail_start <= head_end {
+        return None;
+    }
+    let elided = tail_start - head_end;
+    Some(format!(
+        "{}\n... [{} bytes elided of {} total; head and tail preserved] ...\n{}",
+        &text[..head_end],
+        elided,
+        text.len(),
+        &text[tail_start..]
+    ))
+}
+
 pub fn decode_subprocess_bytes(raw: &[u8]) -> String {
+    match std::str::from_utf8(raw) {
+        Ok(s) => s.to_owned(),
+        Err(_) => decode_with_active_codepage(raw),
+    }
+}
+
+#[cfg(windows)]
+fn decode_with_active_codepage(raw: &[u8]) -> String {
+    let encoding = active_ansi_encoding();
+    let (decoded, _, had_errors) = encoding.decode(raw);
+    if had_errors && !std::ptr::eq(encoding, encoding_rs::GBK) {
+        let (gbk, _, gbk_errors) = encoding_rs::GBK.decode(raw);
+        if !gbk_errors {
+            return gbk.into_owned();
+        }
+    }
+    decoded.into_owned()
+}
+
+#[cfg(windows)]
+fn active_ansi_encoding() -> &'static encoding_rs::Encoding {
+    use std::sync::OnceLock;
+    static ENCODING: OnceLock<&'static encoding_rs::Encoding> = OnceLock::new();
+    ENCODING.get_or_init(|| {
+        let acp = unsafe { windows_sys::Win32::Globalization::GetACP() };
+        match acp {
+            936 => encoding_rs::GBK,
+            950 => encoding_rs::BIG5,
+            932 => encoding_rs::SHIFT_JIS,
+            949 => encoding_rs::EUC_KR,
+            1250 => encoding_rs::WINDOWS_1250,
+            1251 => encoding_rs::WINDOWS_1251,
+            1253 => encoding_rs::WINDOWS_1253,
+            1254 => encoding_rs::WINDOWS_1254,
+            65001 => encoding_rs::UTF_8,
+            _ => encoding_rs::WINDOWS_1252,
+        }
+    })
+}
+
+#[cfg(not(windows))]
+fn decode_with_active_codepage(raw: &[u8]) -> String {
     String::from_utf8_lossy(raw).into_owned()
 }
 
@@ -361,5 +473,5 @@ pub async fn atomic_write_async(
     let bytes = bytes.into();
     tokio::task::spawn_blocking(move || atomic_write(&path, &bytes))
         .await
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?
+        .map_err(std::io::Error::other)?
 }

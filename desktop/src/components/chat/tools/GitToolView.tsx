@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import type { ToolViewProps } from './ToolViewProps'
+import { useTranslation } from '../../../i18n'
 import { CodeViewer } from '../CodeViewer'
 import { CopyButton } from '../../shared/CopyButton'
 import { TerminalChrome } from '../TerminalChrome'
@@ -50,6 +51,7 @@ export function GitHeader({ toolName, input }: ToolViewProps) {
 }
 
 export function GitDetail({ input, result }: ToolViewProps) {
+  const t = useTranslation()
   const action = readString(input, [
     'action',
     'op',
@@ -88,7 +90,7 @@ export function GitDetail({ input, result }: ToolViewProps) {
       ) : (
         <div className="overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-surface)]">
           <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-1.5 text-[10px] uppercase tracking-[0.18em] text-[var(--color-outline)]">
-            <span>Tool Input</span>
+            <span>{t('tool.toolInput')}</span>
             <CopyButton
               text={inputJson}
               className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] normal-case tracking-normal text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"

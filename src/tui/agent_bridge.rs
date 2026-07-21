@@ -679,7 +679,12 @@ pub fn spawn_agent_task(config: Config) -> AgentBridge {
 
                 UserInput::ApprovalResponse { tool_id, approved } => {
                     let decision = if approved { "yes" } else { "no" };
-                    let _ = crate::approval::claim_pending_gateway_approval(&tool_id);
+                    // Record into the reliable-delivery mailbox BEFORE
+                    // broadcasting (like the HTTP/desktop responders): a lagged
+                    // broadcast waiter falls back to the mailbox, otherwise the
+                    // user's verdict is lost and the turn blocks until timeout.
+                    crate::approval::record_session_decision_delivery(&tool_id, decision);
+                    let _ = crate::approval::drop_pending_gateway_approval(&tool_id);
                     let event = crate::session::SessionEvent::new(
                         crate::session::SessionEventKind::ApprovalResponded {
                             id: tool_id.clone(),

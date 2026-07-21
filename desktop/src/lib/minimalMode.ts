@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import { isTauriRuntime } from './desktopRuntime'
+import { t } from '../i18n'
 import { useUIStore, type AppMode } from '../stores/uiStore'
 import { useTabStore, SCHEDULED_TAB_ID } from '../stores/tabStore'
 import type { AttachmentRef } from '../types/chat'
@@ -181,7 +182,7 @@ export async function enterMinimalMode(variant?: MinimalVariant): Promise<void> 
 
     const minimal = await WebviewWindow.getByLabel(MINIMAL_WINDOW_LABEL)
     if (!minimal) {
-      notifyMinimal('error', '极简窗口未初始化（配置窗口缺失），无法进入极简模式')
+      notifyMinimal('error', t('minimal.error.windowMissing'))
       return
     }
 
@@ -206,11 +207,21 @@ export async function enterMinimalMode(variant?: MinimalVariant): Promise<void> 
       void prewarmMinimalInputWindow()
     } catch (err) {
       console.warn('[minimalMode] reveal minimal window failed', err)
-      notifyMinimal('error', `进入极简模式失败：${err instanceof Error ? err.message : String(err)}`)
+      notifyMinimal(
+        'error',
+        t('minimal.error.enterFailed', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      )
     }
   } catch (err) {
     console.warn('[minimalMode] enterMinimalMode failed', err)
-    notifyMinimal('error', `进入极简模式失败：${err instanceof Error ? err.message : String(err)}`)
+    notifyMinimal(
+      'error',
+      t('minimal.error.enterFailed', {
+        error: err instanceof Error ? err.message : String(err),
+      }),
+    )
   }
 }
 

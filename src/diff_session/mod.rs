@@ -7,14 +7,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::apply_model::{
-    ApplyError, ApplyOptions, EditBatch, EditOp, EditOrigin, OpsApplier,
+    ApplyBatchError, ApplyError, ApplyOptions, EditBatch, EditOp, EditOrigin, OpsApplier,
 };
 use crate::observability::session_write_mode_metrics;
 
 #[derive(Debug, Clone)]
 struct FileBackup {
 
-    original: Option<String>,
+    original: Option<Vec<u8>>,
 }
 
 #[derive(Debug, Clone)]
@@ -103,6 +103,7 @@ impl DiffSession {
                 max_fuzz: 3,
                 dry_run: false,
                 validate: true,
+                path: None,
             },
             ops_applier: None,
             last_batch_id: None,
@@ -131,7 +132,7 @@ impl DiffSession {
         if let Some(o) = self.ops_applier.clone() {
             return o;
         }
-        Arc::new(OpsApplier::default_for_workspace(self.root.clone()))
+        Arc::new(OpsApplier::locked_for_workspace(self.root.clone()))
     }
 
     pub fn stage(
@@ -185,16 +186,27 @@ impl DiffSession {
                 to_backup
                     .into_iter()
                     .map(|p| {
-                        let original = std::fs::read_to_string(&p).ok();
+                        let original = match std::fs::read(&p) {
+                            Ok(bytes) => Ok(Some(bytes)),
+                            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+                            Err(e) => Err((p.clone(), e)),
+                        };
                         (p, original)
                     })
-                    .collect::<Vec<(PathBuf, Option<String>)>>()
+                    .collect::<Vec<(
+                        PathBuf,
+                        Result<Option<Vec<u8>>, (PathBuf, std::io::Error)>,
+                    )>>()
             })
             .await
             .map_err(|e| DiffSessionError::OpsApplier {
                 reason: format!("backup read task failed: {e}"),
             })?;
             for (path, original) in reads {
+                let original = original.map_err(|(path, source)| DiffSessionError::Io {
+                    path,
+                    source,
+                })?;
                 self.backups
                     .entry(path)
                     .or_insert(FileBackup { original });
@@ -233,12 +245,14 @@ impl DiffSession {
                 })
             }
             Err(e) => {
-                let root = self.root.clone();
-                let backups = self.backups.clone();
-                let _ = tokio::task::spawn_blocking(move || {
-                    recover_with_atomic_fallback(&root, &backups)
-                })
-                .await;
+                if matches!(e, ApplyBatchError::RollbackFailed { .. }) {
+                    let root = self.root.clone();
+                    let backups = self.backups.clone();
+                    let _ = tokio::task::spawn_blocking(move || {
+                        recover_with_atomic_fallback(&root, &backups)
+                    })
+                    .await;
+                }
                 Err(DiffSessionError::OpsApplier {
                     reason: e.to_string(),
                 })

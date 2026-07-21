@@ -21,16 +21,27 @@ pub fn status(
     let mut unstaged = 0u32;
     let mut untracked = 0u32;
     let mut branch: Option<String> = None;
+    // Track the current long-format section so `\t modified:` lines are attributed
+    // to staged vs unstaged correctly. Without this, every entry was counted as
+    // unstaged and staged was always 0 (misleading the agent into re-`git add`).
+    #[derive(Clone, Copy, PartialEq)]
+    enum Section {
+        None,
+        Staged,
+        Unstaged,
+        Untracked,
+    }
+    let mut section = Section::None;
     for line in scrub.lines() {
         let t = line.trim_start();
         if let Some(b) = t.strip_prefix("On branch ") {
             branch = Some(b.trim().to_string());
         } else if t.starts_with("Changes to be committed:") {
-
+            section = Section::Staged;
         } else if t.starts_with("Changes not staged") {
-
+            section = Section::Unstaged;
         } else if t.starts_with("Untracked files:") {
-
+            section = Section::Untracked;
         }
 
         if line.starts_with('\t') {
@@ -42,8 +53,10 @@ pub fn status(
                 || entry.starts_with("deleted:")
                 || entry.starts_with("typechange:")
             {
-
-                unstaged = unstaged.saturating_add(1);
+                match section {
+                    Section::Staged => staged = staged.saturating_add(1),
+                    _ => unstaged = unstaged.saturating_add(1),
+                }
             } else if !entry.is_empty() {
                 untracked = untracked.saturating_add(1);
             }

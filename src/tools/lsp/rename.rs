@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 use super::super::traits::{Tool, ToolResult};
+use crate::apply_model::{EditBatch, EditOp, EditOrigin, OpsApplier};
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use regex::Regex;
@@ -14,6 +15,13 @@ use std::sync::Arc;
 struct WorkspaceEditOutcome {
     applied: usize,
     errors: Vec<String>,
+}
+
+struct PendingFileEdit {
+    resolved: PathBuf,
+    old_text: String,
+    new_text: String,
+    applied: usize,
 }
 
 fn secure_resolve_target(security: &SecurityPolicy, file: &Path) -> Result<PathBuf, String> {
@@ -35,11 +43,25 @@ fn secure_resolve_target(security: &SecurityPolicy, file: &Path) -> Result<PathB
 
 pub struct LspRenameTool {
     security: Arc<SecurityPolicy>,
+    ops_applier: Arc<OpsApplier>,
 }
 
 impl LspRenameTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        Self { security }
+        let ops_applier = Arc::new(
+            OpsApplier::default_for_shared_workspace(security.workspace_root_handle())
+                .with_allowed_roots(security.allowed_roots.clone()),
+        );
+        Self {
+            security,
+            ops_applier,
+        }
+    }
+
+    #[must_use]
+    pub fn with_ops_applier(mut self, ops_applier: Arc<OpsApplier>) -> Self {
+        self.ops_applier = ops_applier;
+        self
     }
 
     fn resolve_path(&self, file_path: &str) -> PathBuf {
@@ -64,16 +86,42 @@ impl LspRenameTool {
         Ok(())
     }
 
-    async fn secure_write(&self, file_path: &Path, content: &str) -> Result<(), String> {
+    async fn secure_write(
+        &self,
+        file_path: &Path,
+        old_content: &str,
+        new_content: &str,
+    ) -> Result<(), String> {
         let security = self.security.clone();
         let probe = file_path.to_path_buf();
         let resolved =
             tokio::task::spawn_blocking(move || secure_resolve_target(&security, &probe))
                 .await
                 .map_err(|e| format!("Path resolution task failed: {e}"))??;
-        crate::util::atomic_write_async(resolved, content.as_bytes().to_vec())
+        self.apply_full_file_replace(&resolved, old_content, new_content)
             .await
-            .map_err(|e| format!("Failed to write {}: {e}", file_path.display()))
+    }
+
+    async fn apply_full_file_replace(
+        &self,
+        resolved: &Path,
+        old_content: &str,
+        new_content: &str,
+    ) -> Result<(), String> {
+        let op = EditOp::Replace {
+            path: resolved.to_path_buf(),
+            byte_range: 0..old_content.len(),
+            old_text: old_content.to_string(),
+            new_text: new_content.to_string(),
+            anchor: None,
+        };
+        let batch = EditBatch::new(EditOrigin::XfileRefactorTool).with_op(op);
+        self.ops_applier
+            .apply_batch(batch)
+            .await
+            .map_err(|e| format!("Failed to write {}: {e}", resolved.display()))?;
+        crate::session::record_write_for_current_session(resolved);
+        Ok(())
     }
 
     async fn text_rename(
@@ -138,7 +186,7 @@ impl LspRenameTool {
             }
 
             let new_content = re.replace_all(&content, new_name).to_string();
-            if let Err(e) = self.secure_write(file_path, &new_content).await {
+            if let Err(e) = self.secure_write(file_path, &content, &new_content).await {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
@@ -236,7 +284,7 @@ impl LspRenameTool {
                 }
 
                 let new_content = re.replace_all(&content, new_name).to_string();
-                if let Err(e) = self.secure_write(path, &new_content).await {
+                if let Err(e) = self.secure_write(path, &content, &new_content).await {
                     results.push(format!("  Error writing {}: {}", path.display(), e));
                     continue;
                 }
@@ -436,10 +484,23 @@ impl LspRenameTool {
         {
             Ok(resp) => {
                 let security = self.security.clone();
-                let outcome =
-                    tokio::task::spawn_blocking(move || apply_workspace_edit(&resp, &security))
+                let (pending, mut compute_errors) =
+                    tokio::task::spawn_blocking(move || compute_workspace_edits(&resp, &security))
                         .await
-                        .unwrap_or_default();
+                        .unwrap_or_else(|_| (Vec::new(), Vec::new()));
+                let mut outcome = WorkspaceEditOutcome {
+                    applied: 0,
+                    errors: std::mem::take(&mut compute_errors),
+                };
+                for edit in pending {
+                    match self
+                        .apply_full_file_replace(&edit.resolved, &edit.old_text, &edit.new_text)
+                        .await
+                    {
+                        Ok(()) => outcome.applied += edit.applied,
+                        Err(e) => outcome.errors.push(e),
+                    }
+                }
                 if outcome.applied > 0 {
                     let mut output = format!(
                         "LSP rename: '{}' -> '{}' ({} edits applied via language server)",
@@ -622,38 +683,39 @@ fn collect_edit_groups(resp: &serde_json::Value) -> Vec<(String, Vec<serde_json:
     groups
 }
 
-fn apply_workspace_edit(resp: &serde_json::Value, security: &SecurityPolicy) -> WorkspaceEditOutcome {
-    let mut outcome = WorkspaceEditOutcome::default();
+fn compute_workspace_edits(
+    resp: &serde_json::Value,
+    security: &SecurityPolicy,
+) -> (Vec<PendingFileEdit>, Vec<String>) {
+    let mut pending: Vec<PendingFileEdit> = Vec::new();
+    let mut errors: Vec<String> = Vec::new();
     for (uri, edits) in collect_edit_groups(resp) {
         let file_path = uri_to_local_path(&uri);
         let resolved = match secure_resolve_target(security, &file_path) {
             Ok(p) => p,
             Err(e) => {
-                outcome.errors.push(e);
+                errors.push(e);
                 continue;
             }
         };
         let content = match std::fs::read_to_string(&resolved) {
             Ok(c) => c,
             Err(e) => {
-                outcome
-                    .errors
-                    .push(format!("Failed to read {}: {e}", resolved.display()));
+                errors.push(format!("Failed to read {}: {e}", resolved.display()));
                 continue;
             }
         };
-        let (new_content, applied, errors) = apply_edits_to_content(&content, &edits);
-        outcome.errors.extend(errors);
+        let (new_content, applied, edit_errors) = apply_edits_to_content(&content, &edits);
+        errors.extend(edit_errors);
         if new_content == content {
             continue;
         }
-        if let Err(e) = crate::util::atomic_write(&resolved, new_content.as_bytes()) {
-            outcome
-                .errors
-                .push(format!("Failed to write {}: {e}", resolved.display()));
-        } else {
-            outcome.applied += applied;
-        }
+        pending.push(PendingFileEdit {
+            resolved,
+            old_text: content,
+            new_text: new_content,
+            applied,
+        });
     }
-    outcome
+    (pending, errors)
 }

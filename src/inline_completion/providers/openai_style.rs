@@ -64,13 +64,37 @@ impl OpenAiStyleProvider {
     }
 
     pub fn build_prompt(req: &InlineCompletionRequest) -> String {
+        // Fold the pre-computed InlineContext (imports + enclosing symbol) into
+        // the prompt. It was previously built by the caller and then discarded
+        // here, so completions had no repo signal beyond the raw prefix/suffix.
+        let mut context_block = String::new();
+        if !req.context.imports.is_empty() {
+            context_block.push_str("--- imports in scope ---\n");
+            for imp in req.context.imports.iter().take(32) {
+                context_block.push_str(imp);
+                context_block.push('\n');
+            }
+            context_block.push('\n');
+        }
+        if let Some(sym) = req.context.enclosing_symbol.as_deref() {
+            if !sym.trim().is_empty() {
+                context_block.push_str(&format!("--- enclosing symbol ---\n{sym}\n\n"));
+            }
+        }
+        for extra in req.context.extra.iter().take(8) {
+            if !extra.trim().is_empty() {
+                context_block.push_str(extra);
+                context_block.push('\n');
+            }
+        }
         format!(
             "You are an expert {lang:?} code completion engine.\n\
              Continue the code at the cursor.  Do not repeat the prefix\n\
              or suffix.  Respond with the insertion text only.\n\n\
-             --- prefix ---\n{p}\n--- cursor ---\n--- suffix ---\n{s}\n\n\
+             {ctx}--- prefix ---\n{p}\n--- cursor ---\n--- suffix ---\n{s}\n\n\
              Insertion:",
             lang = req.language,
+            ctx = context_block,
             p = req.prefix,
             s = req.suffix
         )

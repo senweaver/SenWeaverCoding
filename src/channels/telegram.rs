@@ -84,7 +84,27 @@ fn split_message_for_telegram(message: &str) -> Vec<String> {
         remaining = &remaining[chunk_end..];
     }
 
-    chunks
+    rebalance_code_fences(chunks)
+}
+
+fn rebalance_code_fences(chunks: Vec<String>) -> Vec<String> {
+    if chunks.len() <= 1 {
+        return chunks;
+    }
+    let mut out = Vec::with_capacity(chunks.len());
+    let mut carry_open = false;
+    for chunk in chunks {
+        let mut piece = chunk;
+        if carry_open {
+            piece = format!("```\n{piece}");
+        }
+        carry_open = piece.matches("```").count() % 2 == 1;
+        if carry_open {
+            piece.push_str("\n```");
+        }
+        out.push(piece);
+    }
+    out
 }
 
 fn pick_uniform_index(len: usize) -> usize {

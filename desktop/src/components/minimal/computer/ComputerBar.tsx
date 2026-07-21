@@ -298,7 +298,7 @@ export function ComputerBar() {
               <>
                 <span className="text-[15px] font-bold text-[#b91c1c]">{recStepCount}</span>
                 <span className="mt-[1px] text-[7px] font-medium uppercase tracking-wide text-[#b91c1c]">
-                  rec
+                  {t('minimal.computer.rec')}
                 </span>
               </>
             ) : busy ? (

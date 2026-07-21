@@ -165,6 +165,8 @@ struct UsageInfo {
 #[derive(Debug, Deserialize)]
 struct NativeChoice {
     message: NativeResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -358,6 +360,8 @@ impl AzureOpenAiProvider {
             tool_calls,
             usage: None,
             reasoning_content,
+            thinking_signature: None,
+            stop_reason: None,
         }
     }
 
@@ -503,14 +507,18 @@ impl Provider for AzureOpenAiProvider {
             cached_input_tokens: None,
             cache_creation_input_tokens: None,
         });
-        let message = native_response
+        let choice = native_response
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from Azure OpenAI"))?;
-        let mut result = Self::parse_native_response(message);
+        let stop_reason = choice
+            .finish_reason
+            .as_deref()
+            .and_then(crate::providers::traits::StopReason::from_wire);
+        let mut result = Self::parse_native_response(choice.message);
         result.usage = usage;
+        result.stop_reason = stop_reason;
         Ok(result)
     }
 
@@ -571,14 +579,18 @@ impl Provider for AzureOpenAiProvider {
             cached_input_tokens: None,
             cache_creation_input_tokens: None,
         });
-        let message = native_response
+        let choice = native_response
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from Azure OpenAI"))?;
-        let mut result = Self::parse_native_response(message);
+        let stop_reason = choice
+            .finish_reason
+            .as_deref()
+            .and_then(crate::providers::traits::StopReason::from_wire);
+        let mut result = Self::parse_native_response(choice.message);
         result.usage = usage;
+        result.stop_reason = stop_reason;
         Ok(result)
     }
 

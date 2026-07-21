@@ -11,8 +11,13 @@ use std::sync::Arc;
 use std::time::SystemTime;
 
 const MAX_SNAPSHOTS_PER_FILE: usize = 20;
+const MAX_TIMELINE_EVENTS: usize = 4096;
 const HISTORY_DIR_NAME: &str = ".sen/edit_history";
 const INDEX_FILE: &str = "index.json";
+
+static SHARED_HISTORIES: once_cell::sync::Lazy<
+    parking_lot::Mutex<HashMap<PathBuf, Arc<EditHistory>>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSnapshot {
@@ -33,11 +38,30 @@ pub struct EditEvent {
 
     #[serde(default)]
     pub edit_batch_id: Option<String>,
+
+    /// SHA-256 of the file *after* the batch landed on disk, captured when the
+    /// batch id is stamped. `revert_batch` compares this against the current disk
+    /// content and refuses to clobber a file that changed after the batch (e.g.
+    /// a concurrent agent edit while a review panel is open).
+    #[serde(default)]
+    pub post_sha256: Option<String>,
+}
+
+/// Result of reverting an edit batch: which files were restored, and which were
+/// left untouched because they changed after the batch (and reverting would have
+/// silently discarded newer work).
+#[derive(Debug, Clone, Default)]
+pub struct RevertOutcome {
+    pub reverted: Vec<String>,
+    pub skipped_stale: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct HistoryIndex {
     files: HashMap<String, Vec<FileSnapshot>>,
+
+    #[serde(default)]
+    timeline: Vec<EditEvent>,
 }
 
 pub struct EditHistory {
@@ -56,6 +80,17 @@ struct EditHistoryState {
 }
 
 impl EditHistory {
+    pub fn shared_for_workspace(workspace_dir: &Path) -> Arc<Self> {
+        let key = crate::util::normalize_path_for_containment(workspace_dir);
+        let mut map = SHARED_HISTORIES.lock();
+        if let Some(history) = map.get(&key) {
+            return Arc::clone(history);
+        }
+        let history = Self::new(key.clone());
+        map.insert(key, Arc::clone(&history));
+        history
+    }
+
     pub fn new(workspace_dir: PathBuf) -> Arc<Self> {
         let storage_dir = workspace_dir.join(HISTORY_DIR_NAME);
         let session_id = format!(
@@ -83,7 +118,8 @@ impl EditHistory {
         let _ = std::fs::create_dir_all(&self.storage_dir);
         let index_path = self.storage_dir.join(INDEX_FILE);
         if let Ok(data) = std::fs::read_to_string(&index_path) {
-            if let Ok(idx) = serde_json::from_str::<HistoryIndex>(&data) {
+            if let Ok(mut idx) = serde_json::from_str::<HistoryIndex>(&data) {
+                state.timeline = std::mem::take(&mut idx.timeline);
                 state.index = idx;
             }
         }
@@ -91,9 +127,17 @@ impl EditHistory {
     }
 
     fn save_index(&self) {
-        let state = self.state.read();
         let index_path = self.storage_dir.join(INDEX_FILE);
-        if let Ok(json) = serde_json::to_string_pretty(&state.index) {
+        let serialized = {
+            let state = self.state.read();
+            let start = state.timeline.len().saturating_sub(MAX_TIMELINE_EVENTS);
+            let snapshot = HistoryIndex {
+                files: state.index.files.clone(),
+                timeline: state.timeline[start..].to_vec(),
+            };
+            serde_json::to_string_pretty(&snapshot)
+        };
+        if let Ok(json) = serialized {
             if let Err(e) = crate::util::atomic_write(&index_path, json.as_bytes()) {
                 tracing::warn!(
                     path = %index_path.display(),
@@ -167,6 +211,7 @@ impl EditHistory {
             tool_name: tool_name.to_string(),
             description: description.to_string(),
             edit_batch_id: edit_batch_id.clone(),
+            post_sha256: None,
         };
 
         {
@@ -205,6 +250,11 @@ impl EditHistory {
             let mut ev = event;
             ev.snapshot_index = idx;
             state.timeline.push(ev);
+
+            let overflow = state.timeline.len().saturating_sub(MAX_TIMELINE_EVENTS * 2);
+            if overflow > 0 {
+                state.timeline.drain(0..overflow);
+            }
         }
 
         self.save_index();
@@ -250,7 +300,7 @@ impl EditHistory {
         } else {
             self.workspace_dir.join(path)
         };
-        std::fs::write(&abs_path, content)?;
+        crate::util::atomic_write(&abs_path, &content)?;
 
         Ok(())
     }
@@ -306,7 +356,7 @@ impl EditHistory {
             let content_path = self.storage_dir.join(&hash);
             if let Ok(content) = std::fs::read(&content_path) {
                 let abs_path = self.workspace_dir.join(&key);
-                if std::fs::write(&abs_path, content).is_ok() {
+                if crate::util::atomic_write(&abs_path, &content).is_ok() {
                     reverted.push(key);
                 }
             }
@@ -331,15 +381,33 @@ impl EditHistory {
         &self,
         paths: impl IntoIterator<Item = P>,
         edit_batch_id: &str,
+        precomputed_post_hashes: &HashMap<PathBuf, String>,
     ) {
         self.ensure_loaded();
-        let keys: Vec<String> = paths
+        let paths: Vec<PathBuf> = paths
             .into_iter()
-            .map(|p| self.relative_key(p.as_ref()))
+            .map(|p| p.as_ref().to_path_buf())
             .collect();
+        let keys: Vec<String> = paths.iter().map(|p| self.relative_key(p)).collect();
         if keys.is_empty() {
             return;
         }
+        // Prefer the exact post-image sha the applier already computed (keyed to
+        // this batch's own write); only re-read from disk as a fallback, which
+        // avoids a TOCTOU where a concurrent external write would poison the
+        // revert freshness guard.
+        let post_hashes: HashMap<String, String> = paths
+            .iter()
+            .zip(keys.iter())
+            .filter_map(|(abs_path, key)| {
+                if let Some(sha) = precomputed_post_hashes.get(abs_path) {
+                    return Some((key.clone(), sha.clone()));
+                }
+                let abs = self.workspace_dir.join(key);
+                std::fs::read(&abs).ok().map(|c| (key.clone(), Self::sha256(&c)))
+            })
+            .collect();
+
         let mut state = self.state.write();
         for key in &keys {
             if let Some(ev) = state
@@ -349,6 +417,7 @@ impl EditHistory {
                 .find(|e| &e.path == key && e.edit_batch_id.is_none())
             {
                 ev.edit_batch_id = Some(edit_batch_id.to_string());
+                ev.post_sha256 = post_hashes.get(key).cloned();
             }
         }
         drop(state);
@@ -371,6 +440,16 @@ impl EditHistory {
         &self,
         edit_batch_id: &str,
     ) -> Vec<(String, FileSnapshot)> {
+        self.snapshots_for_batch_detailed(edit_batch_id)
+            .into_iter()
+            .map(|(path, snap, _)| (path, snap))
+            .collect()
+    }
+
+    fn snapshots_for_batch_detailed(
+        &self,
+        edit_batch_id: &str,
+    ) -> Vec<(String, FileSnapshot, Option<String>)> {
         self.ensure_loaded();
         let state = self.state.read();
         let mut out = Vec::new();
@@ -381,33 +460,72 @@ impl EditHistory {
         {
             if let Some(chain) = state.index.files.get(&ev.path) {
                 if let Some(snap) = chain.get(ev.snapshot_index) {
-                    out.push((ev.path.clone(), snap.clone()));
+                    out.push((ev.path.clone(), snap.clone(), ev.post_sha256.clone()));
                 }
             }
         }
         out
     }
 
+    /// Revert a batch, refusing any file whose current on-disk content no longer
+    /// matches the post-image captured when the batch was stamped (i.e. it was
+    /// changed after the batch). This prevents a review-panel revert from
+    /// silently clobbering a concurrent agent/user edit.
     pub fn revert_batch(&self, edit_batch_id: &str) -> anyhow::Result<Vec<String>> {
-        let snaps = self.snapshots_for_batch(edit_batch_id);
-        let mut reverted = Vec::new();
-        for (rel_path, snap) in snaps {
+        let outcome = self.revert_batch_guarded(edit_batch_id, false)?;
+        if !outcome.skipped_stale.is_empty() {
+            tracing::warn!(
+                batch = %edit_batch_id,
+                skipped = ?outcome.skipped_stale,
+                "revert_batch skipped files changed after the batch; not clobbering newer edits"
+            );
+        }
+        Ok(outcome.reverted)
+    }
+
+    /// Revert a batch unconditionally, ignoring the freshness guard. Only for
+    /// explicit user-confirmed force-revert flows.
+    pub fn revert_batch_force(&self, edit_batch_id: &str) -> anyhow::Result<RevertOutcome> {
+        self.revert_batch_guarded(edit_batch_id, true)
+    }
+
+    pub fn revert_batch_guarded(
+        &self,
+        edit_batch_id: &str,
+        force: bool,
+    ) -> anyhow::Result<RevertOutcome> {
+        let snaps = self.snapshots_for_batch_detailed(edit_batch_id);
+        let mut outcome = RevertOutcome::default();
+        for (rel_path, snap, post_sha) in snaps {
+            let abs = self.workspace_dir.join(&rel_path);
+
+            if !force {
+                if let Some(expected) = post_sha.as_deref() {
+                    match std::fs::read(&abs) {
+                        Ok(current) if Self::sha256(&current) != expected => {
+                            outcome.skipped_stale.push(rel_path);
+                            continue;
+                        }
+                        _ => {}
+                    }
+                }
+            }
+
             let content_path = self.storage_dir.join(&snap.sha256);
             let Ok(content) = std::fs::read(&content_path) else {
                 continue;
             };
-            let abs = self.workspace_dir.join(&rel_path);
             if let Some(parent) = abs.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            if std::fs::write(&abs, content).is_ok() {
-                reverted.push(rel_path);
+            if crate::util::atomic_write(&abs, &content).is_ok() {
+                outcome.reverted.push(rel_path);
             }
         }
-        if !reverted.is_empty() {
+        if !outcome.reverted.is_empty() {
             crate::observability::session_write_mode_metrics::incr_checkpoint_rollback_via_edit_history();
         }
-        Ok(reverted)
+        Ok(outcome)
     }
 
     pub fn read_blob(&self, sha256: &str) -> anyhow::Result<Vec<u8>> {

@@ -87,6 +87,11 @@ pub enum EditOp {
         path: PathBuf,
         #[serde(with = "range_serde")]
         byte_range: Range<usize>,
+        /// Optional expected content of the range being deleted. When present it
+        /// is verified against the file so a stale offset (the file changed after
+        /// the range was computed) is rejected instead of deleting wrong bytes.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        old_text: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         anchor: Option<EditAnchor>,
     },
@@ -95,6 +100,8 @@ pub enum EditOp {
         path: PathBuf,
         contents: String,
         overwrite: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encoding: Option<String>,
     },
 
     DeleteFile {
@@ -192,10 +199,21 @@ impl EditOp {
                 Ok(())
             }
             EditOp::Delete {
-                path, byte_range, ..
+                path,
+                byte_range,
+                old_text,
+                ..
             } => {
                 let bytes = read_bytes(path)?;
                 ensure_range_in_bounds(path, byte_range, bytes.len())?;
+                if let Some(expected) = old_text {
+                    if &bytes[byte_range.clone()] != expected.as_bytes() {
+                        return Err(PreconditionError::ContentMismatch {
+                            path: path.clone(),
+                            byte_range: byte_range.clone(),
+                        });
+                    }
+                }
                 Ok(())
             }
             EditOp::CreateFile {
@@ -252,6 +270,7 @@ pub enum EditOrigin {
     FileWriteTool,
     MultiEditTool,
     GlobEditTool,
+    XfileRefactorTool,
     NotebookEditTool,
     DiffSession,
     Agent { id: String },
@@ -270,9 +289,18 @@ impl EditOrigin {
             EditOrigin::FileWriteTool => "file_write",
             EditOrigin::MultiEditTool => "multi_edit",
             EditOrigin::GlobEditTool => "glob_edit",
+            EditOrigin::XfileRefactorTool => "code_xfile_refactor",
             EditOrigin::NotebookEditTool => "notebook_edit",
             EditOrigin::DiffSession => "diff_session",
             EditOrigin::Agent { .. } => "agent",
+        }
+    }
+
+    #[must_use]
+    pub fn holder_tag(&self) -> String {
+        match self {
+            EditOrigin::Agent { id } => format!("agent:{id}"),
+            other => other.tag().to_string(),
         }
     }
 }

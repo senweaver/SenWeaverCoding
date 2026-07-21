@@ -84,6 +84,9 @@ fn spawn_terminal_blocking(
         .map_err(|err| format!("open terminal pty: {err}"))?;
 
     let mut cmd = CommandBuilder::new(&shell);
+    for arg in utf8_shell_args(&shell) {
+        cmd.arg(arg);
+    }
     cmd.cwd(cwd_path.as_os_str());
     for (key, value) in terminal_environment(&shell, &cwd_path) {
         cmd.env(key, value);
@@ -579,4 +582,27 @@ fn default_shell() -> String {
             }
         })
     }
+}
+
+#[cfg(target_os = "windows")]
+fn utf8_shell_args(shell: &str) -> Vec<String> {
+    let name = std::path::Path::new(shell)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(shell)
+        .to_ascii_lowercase();
+    match name.as_str() {
+        "cmd" => vec!["/K".to_string(), "chcp 65001>nul".to_string()],
+        "powershell" | "pwsh" => vec![
+            "-NoExit".to_string(),
+            "-Command".to_string(),
+            "[Console]::OutputEncoding=[System.Text.Encoding]::UTF8;[Console]::InputEncoding=[System.Text.Encoding]::UTF8;$OutputEncoding=[System.Text.Encoding]::UTF8".to_string(),
+        ],
+        _ => Vec::new(),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn utf8_shell_args(_shell: &str) -> Vec<String> {
+    Vec::new()
 }

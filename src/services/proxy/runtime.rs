@@ -293,6 +293,31 @@ impl ProxyRuntime {
     ) -> reqwest::Client {
         crate::services::proxy::registry::register(service_key);
 
+        // Reuse a pooled client instead of building one per request (the hot
+        // non-streaming provider path called this every request, discarding the
+        // connection pool and re-doing TLS each time). Key on timeouts + a
+        // stable hash of the header set + proxy fingerprint.
+        let headers_fp = {
+            use std::hash::{Hash, Hasher};
+            let mut pairs: Vec<(&String, &String)> = headers.iter().collect();
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for (k, v) in pairs {
+                k.hash(&mut hasher);
+                v.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        let ck = format!(
+            "{}|hdr{:x}|{}",
+            cache_key(service_key, Some(timeout_secs), Some(connect_timeout_secs)),
+            headers_fp,
+            self.proxy_fingerprint(service_key)
+        );
+        if let Some(c) = self.cached_client(&ck) {
+            return c;
+        }
+
         let mut header_map = reqwest::header::HeaderMap::with_capacity(headers.len());
         for (key, value) in headers {
             let trimmed_key = key.trim();
@@ -327,15 +352,18 @@ impl ProxyRuntime {
         let builder = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(timeout_secs))
             .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
             .default_headers(header_map);
         let builder = self.apply_to_builder(builder, service_key);
-        builder.build().unwrap_or_else(|e| {
+        let c = builder.build().unwrap_or_else(|e| {
             tracing::warn!(
                 service_key,
                 "Failed to build proxied timeout client with custom headers: {e}"
             );
             timed_fallback_client(Some(timeout_secs), Some(connect_timeout_secs), false)
-        })
+        });
+        self.set_cached_client(ck, c.clone());
+        c
     }
 
     pub fn build_stream_client(
@@ -346,6 +374,35 @@ impl ProxyRuntime {
         headers: &reqwest::header::HeaderMap,
     ) -> reqwest::Client {
         crate::services::proxy::registry::register(service_key);
+
+        // Reuse a pooled client instead of rebuilding one (and a fresh TLS
+        // connection pool) on every streamed request. Keyed on timeouts + a
+        // stable hash of the header set + proxy fingerprint, matching the
+        // non-streaming client cache.
+        let headers_fp = {
+            use std::hash::{Hash, Hasher};
+            let mut pairs: Vec<(String, &[u8])> = headers
+                .iter()
+                .map(|(k, v)| (k.as_str().to_string(), v.as_bytes()))
+                .collect();
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for (k, v) in pairs {
+                k.hash(&mut hasher);
+                v.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        let ck = format!(
+            "{}|stream|hdr{:x}|{}",
+            cache_key(service_key, Some(read_timeout_secs), Some(connect_timeout_secs)),
+            headers_fp,
+            self.proxy_fingerprint(service_key)
+        );
+        if let Some(c) = self.cached_client(&ck) {
+            return c;
+        }
+
         let build = || {
             let mut builder = reqwest::Client::builder()
                 .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
@@ -356,7 +413,8 @@ impl ProxyRuntime {
             }
             builder
         };
-        self.apply_to_builder(build(), service_key)
+        let c = self
+            .apply_to_builder(build(), service_key)
             .build()
             .or_else(|error| {
                 tracing::warn!(
@@ -372,7 +430,9 @@ impl ProxyRuntime {
                     .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
                     .build()
                     .unwrap_or_else(|_| reqwest::Client::new())
-            })
+            });
+        self.set_cached_client(ck, c.clone());
+        c
     }
 
     pub fn build_channel_client(

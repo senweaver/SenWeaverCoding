@@ -28,6 +28,17 @@ pub enum CommandRiskLevel {
     High,
 }
 
+impl CommandRiskLevel {
+    #[must_use]
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            CommandRiskLevel::Low => "low",
+            CommandRiskLevel::Medium => "medium",
+            CommandRiskLevel::High => "high",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ToolOperation {
     Read,
@@ -227,7 +238,7 @@ impl Default for SecurityPolicy {
             require_approval_for_medium_risk: true,
             block_high_risk_commands: true,
             shell_env_passthrough: vec![],
-            enable_command_policy: Arc::new(AtomicBool::new(false)),
+            enable_command_policy: Arc::new(AtomicBool::new(true)),
             tracker: ActionTracker::new(),
         }
     }
@@ -638,6 +649,11 @@ fn command_basename(raw: &str) -> &str {
     after_fwd.rsplit('\\').next().unwrap_or(after_fwd)
 }
 
+fn is_interpreter_base(base: &str) -> bool {
+    matches!(base, "python" | "python3" | "python2" | "py" | "node" | "nodejs" | "deno" | "bun" | "ruby" | "perl" | "php")
+        || base.starts_with("python3.")
+}
+
 fn strip_windows_exe_suffix(name: &str) -> &str {
     if cfg!(target_os = "windows") {
         name.strip_suffix(".exe")
@@ -797,6 +813,18 @@ impl SecurityPolicy {
                 return CommandRiskLevel::High;
             }
 
+            if is_interpreter_base(base)
+                && args.iter().any(|arg| {
+                    matches!(
+                        arg.as_str(),
+                        "-c" | "-e" | "--eval" | "-eval" | "--command" | "-command"
+                            | "-encodedcommand" | "-enc" | "-"
+                    )
+                })
+            {
+                return CommandRiskLevel::High;
+            }
+
             let medium = match base {
                 "git" => args.first().is_some_and(|verb| {
                     matches!(
@@ -844,6 +872,14 @@ impl SecurityPolicy {
     }
 
     pub fn is_catastrophic_command(command: &str) -> bool {
+        Self::is_catastrophic_command_depth(command, 0)
+    }
+
+    fn is_catastrophic_command_depth(command: &str, depth: u8) -> bool {
+        const MAX_UNWRAP_DEPTH: u8 = 4;
+        if depth > MAX_UNWRAP_DEPTH {
+            return false;
+        }
         let compact: String = command
             .chars()
             .filter(|c| !c.is_whitespace())
@@ -855,56 +891,134 @@ impl SecurityPolicy {
 
         for segment in split_unquoted_segments(command) {
             let cmd_part = skip_env_assignments(segment.trim());
-            let mut words = cmd_part.split_whitespace();
-            let Some(base_raw) = words.next() else {
-                continue;
-            };
-            let base_owned = command_basename(strip_wrapping_quotes(base_raw)).to_ascii_lowercase();
-            let base = strip_windows_exe_suffix(&base_owned);
-            let rest: Vec<String> = words
+            let tokens: Vec<String> = cmd_part
+                .split_whitespace()
                 .map(|w| strip_wrapping_quotes(w).to_ascii_lowercase())
                 .collect();
-
-            if base == "mkfs" || base.starts_with("mkfs.") {
+            if Self::tokens_are_catastrophic(&tokens, depth) {
                 return true;
             }
+        }
 
-            if base == "dd"
-                && rest.iter().any(|a| {
-                    a.starts_with("of=/dev/")
-                        || a.starts_with("of=\\\\.\\physicaldrive")
-                        || a.starts_with("of=\\\\.\\")
-                })
-            {
-                return true;
-            }
+        false
+    }
 
-            if base == "format"
-                && rest
+    fn tokens_are_catastrophic(tokens: &[String], depth: u8) -> bool {
+        const WRAPPERS: &[&str] = &[
+            "sudo", "doas", "env", "nohup", "nice", "ionice", "stdbuf", "time", "timeout",
+            "xargs", "command", "exec", "setsid", "unbuffer",
+        ];
+        const SHELLS: &[&str] = &[
+            "sh", "bash", "zsh", "dash", "ksh", "fish", "pwsh", "powershell", "cmd",
+        ];
+
+        let mut idx = 0usize;
+        loop {
+            let Some(base_raw) = tokens.get(idx) else {
+                return false;
+            };
+            let base_owned = command_basename(base_raw).to_ascii_lowercase();
+            let base = strip_windows_exe_suffix(&base_owned).to_string();
+
+            if SHELLS.contains(&base.as_str()) {
+                let has_command_flag = tokens[idx + 1..]
                     .iter()
-                    .any(|a| a.len() == 2 && a.ends_with(':') && a.as_bytes()[0].is_ascii_alphabetic())
-            {
-                return true;
+                    .any(|t| t == "-c" || t == "/c" || t == "-command");
+                if has_command_flag {
+                    let payload_start = tokens[idx + 1..]
+                        .iter()
+                        .position(|t| t == "-c" || t == "/c" || t == "-command")
+                        .map(|p| idx + 1 + p + 1)
+                        .unwrap_or(tokens.len());
+                    let payload = tokens[payload_start.min(tokens.len())..].join(" ");
+                    let payload = payload.trim_matches(|c| c == '"' || c == '\'');
+                    return !payload.is_empty()
+                        && Self::is_catastrophic_command_depth(payload, depth + 1);
+                }
+                return false;
             }
 
-            if base == "rm" {
-                let recursive_force = rest.iter().any(|a| {
-                    a.starts_with('-')
-                        && !a.starts_with("--")
-                        && a.contains('r')
-                        && a.contains('f')
-                }) || (rest
-                    .iter()
-                    .any(|a| a == "-r" || a == "-rf" || a == "--recursive")
-                    && rest.iter().any(|a| a == "-f" || a == "--force"));
-                if recursive_force {
-                    if rest.iter().any(|a| a == "--no-preserve-root") {
-                        return true;
-                    }
-                    for t in rest.iter().filter(|a| !a.starts_with('-')) {
-                        if matches!(t.as_str(), "/" | "/*" | "~" | "~/" | "$home" | "$home/") {
-                            return true;
+            if WRAPPERS.contains(&base.as_str()) {
+                const VALUE_TAKING_FLAGS: &[&str] = &[
+                    "-u", "-g", "-h", "-p", "-r", "-t", "-a", "-c", "-n", "--user", "--group",
+                    "--host", "--prompt", "--role", "--type", "--chdir", "--login-class",
+                    "-i", "-o", "-e", "-d", "--delimiter", "--max-args", "--max-procs",
+                ];
+                let takes_value = matches!(
+                    base.as_str(),
+                    "sudo" | "doas" | "xargs" | "nice" | "ionice" | "stdbuf"
+                );
+                idx += 1;
+                while let Some(tok) = tokens.get(idx) {
+                    let is_flag = tok.starts_with('-');
+                    let is_env_assign = base == "env" && tok.contains('=');
+                    let is_timeout_duration = base == "timeout"
+                        && tok
+                            .trim_end_matches(['s', 'm', 'h', 'd'])
+                            .parse::<f64>()
+                            .is_ok();
+                    if is_flag {
+                        let consumes_next = takes_value
+                            && !tok.contains('=')
+                            && VALUE_TAKING_FLAGS.contains(&tok.as_str());
+                        idx += 1;
+                        if consumes_next && tokens.get(idx).is_some() {
+                            idx += 1;
                         }
+                    } else if is_env_assign || is_timeout_duration {
+                        idx += 1;
+                    } else {
+                        break;
+                    }
+                }
+                continue;
+            }
+
+            let rest = &tokens[(idx + 1).min(tokens.len())..];
+            return Self::base_command_is_catastrophic(&base, rest);
+        }
+    }
+
+    fn base_command_is_catastrophic(base: &str, rest: &[String]) -> bool {
+        if base == "mkfs" || base.starts_with("mkfs.") {
+            return true;
+        }
+
+        if base == "dd"
+            && rest.iter().any(|a| {
+                a.starts_with("of=/dev/")
+                    || a.starts_with("of=\\\\.\\physicaldrive")
+                    || a.starts_with("of=\\\\.\\")
+            })
+        {
+            return true;
+        }
+
+        if base == "format"
+            && rest
+                .iter()
+                .any(|a| a.len() == 2 && a.ends_with(':') && a.as_bytes()[0].is_ascii_alphabetic())
+        {
+            return true;
+        }
+
+        if base == "rm" {
+            let recursive_force = rest.iter().any(|a| {
+                a.starts_with('-')
+                    && !a.starts_with("--")
+                    && a.contains('r')
+                    && a.contains('f')
+            }) || (rest
+                .iter()
+                .any(|a| a == "-r" || a == "-rf" || a == "--recursive")
+                && rest.iter().any(|a| a == "-f" || a == "--force"));
+            if recursive_force {
+                if rest.iter().any(|a| a == "--no-preserve-root") {
+                    return true;
+                }
+                for t in rest.iter().filter(|a| !a.starts_with('-')) {
+                    if matches!(t.as_str(), "/" | "/*" | "~" | "~/" | "$home" | "$home/") {
+                        return true;
                     }
                 }
             }
@@ -1194,6 +1308,17 @@ impl SecurityPolicy {
         };
         let normalised = lexically_normalise(&absolute);
 
+        // Forbidden paths are checked FIRST so a sensitive location configured
+        // inside the workspace (e.g. `.env`, `secrets/`) is actually denied. It
+        // previously ran after the workspace/allowed-root allow, making
+        // forbidden_paths inside the workspace a no-op.
+        for forbidden in &self.forbidden_paths {
+            let forbidden_path = expand_user_path(forbidden);
+            if crate::util::path_is_within(&normalised, &forbidden_path) {
+                return false;
+            }
+        }
+
         let in_workspace = crate::util::path_is_within(&normalised, &workspace);
         let in_allowed_root = self
             .allowed_roots
@@ -1208,19 +1333,21 @@ impl SecurityPolicy {
             return false;
         }
 
-        for forbidden in &self.forbidden_paths {
-            let forbidden_path = expand_user_path(forbidden);
-            if crate::util::path_is_within(&normalised, &forbidden_path) {
-                return false;
-            }
-        }
-
         true
     }
 
     pub fn is_resolved_path_allowed(&self, resolved: &Path) -> bool {
         if !self.is_command_policy_enabled() {
             return true;
+        }
+
+        // Forbidden paths take precedence over the workspace/allowed-root allow so
+        // a forbidden location nested inside the workspace is still denied.
+        for forbidden in &self.forbidden_paths {
+            let forbidden_path = expand_user_path(forbidden);
+            if crate::util::path_is_within(resolved, &forbidden_path) {
+                return false;
+            }
         }
 
         let ws = self.workspace_dir();
@@ -1233,13 +1360,6 @@ impl SecurityPolicy {
             let canonical = root.canonicalize().unwrap_or_else(|_| root.clone());
             if crate::util::path_is_within(resolved, &canonical) {
                 return true;
-            }
-        }
-
-        for forbidden in &self.forbidden_paths {
-            let forbidden_path = expand_user_path(forbidden);
-            if crate::util::path_is_within(resolved, &forbidden_path) {
-                return false;
             }
         }
 

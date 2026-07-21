@@ -16,15 +16,95 @@ when present in the broken diff.  Preserve context line prefixes
 
 const REFINE_USER_PROMPT_V2_FOOTER: &str = "\n# Task\n\nReturn ONLY the corrected unified diff.\nUse a *small* hunk  -  ideally one or two lines of pre-image context\non each side of the change so the heuristic locator has high\nprecision.  Do NOT rewrite unrelated code.  Do NOT widen the hunk\nbeyond the failure site indicated above.\n";
 
+const REFINE_WINDOW_RADIUS: usize = 40;
+
+fn hunk_target_lines(failed_diff: &str) -> Vec<usize> {
+    let mut targets = Vec::new();
+    for line in failed_diff.lines() {
+        if let Some(rest) = line.strip_prefix("@@ -") {
+            let num: String = rest.chars().take_while(char::is_ascii_digit).collect();
+            if let Ok(n) = num.parse::<usize>() {
+                targets.push(n);
+            }
+        }
+    }
+    targets
+}
+
+fn windowed_source_for_refine(source: &str, failed_diff: &str) -> Option<String> {
+    let targets = hunk_target_lines(failed_diff);
+    if targets.is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = source.lines().collect();
+    if lines.len() <= REFINE_WINDOW_RADIUS * 3 {
+        return None;
+    }
+    let mut ranges: Vec<(usize, usize)> = targets
+        .iter()
+        .map(|&t| {
+            let center = t.saturating_sub(1).min(lines.len().saturating_sub(1));
+            (
+                center.saturating_sub(REFINE_WINDOW_RADIUS),
+                (center + REFINE_WINDOW_RADIUS + 1).min(lines.len()),
+            )
+        })
+        .collect();
+    ranges.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (start, end) in ranges {
+        match merged.last_mut() {
+            Some((_, last_end)) if start <= *last_end => {
+                *last_end = (*last_end).max(end);
+            }
+            _ => merged.push((start, end)),
+        }
+    }
+    let covered: usize = merged.iter().map(|(a, b)| b - a).sum();
+    if covered.saturating_mul(10) >= lines.len().saturating_mul(6) {
+        return None;
+    }
+    let mut out = String::with_capacity(covered * 64);
+    let mut cursor = 0usize;
+    for (start, end) in merged {
+        if start > cursor {
+            out.push_str(&format!("(lines {}-{} omitted)\n", cursor + 1, start));
+        }
+        for (idx, line) in lines.iter().enumerate().take(end).skip(start) {
+            out.push_str(&format!("L{}: {}\n", idx + 1, line));
+        }
+        cursor = end;
+    }
+    if cursor < lines.len() {
+        out.push_str(&format!("(lines {}-{} omitted)\n", cursor + 1, lines.len()));
+    }
+    Some(out)
+}
+
+fn push_source_section(body: &mut String, source: &str, failed_diff: &str) {
+    match windowed_source_for_refine(source, failed_diff) {
+        Some(windowed) => {
+            body.push_str(
+                "# Current file contents (excerpt around the failure sites; `L<n>:` prefixes are the real 1-based file line numbers - use them for the `@@` headers, but do NOT include the `L<n>:` prefix itself in diff lines)\n\n```\n",
+            );
+            body.push_str(&windowed);
+            body.push_str("```\n\n# Failed diff\n\n```diff\n");
+        }
+        None => {
+            body.push_str("# Current file contents\n\n```\n");
+            body.push_str(source);
+            if !source.ends_with('\n') {
+                body.push('\n');
+            }
+            body.push_str("```\n\n# Failed diff\n\n```diff\n");
+        }
+    }
+}
+
 #[must_use]
 pub fn build_refine_user_prompt(source: &str, failed_diff: &str, hint: Option<&str>) -> String {
     let mut body = String::with_capacity(source.len() + failed_diff.len() + 256);
-    body.push_str("# Current file contents\n\n```\n");
-    body.push_str(source);
-    if !source.ends_with('\n') {
-        body.push('\n');
-    }
-    body.push_str("```\n\n# Failed diff\n\n```diff\n");
+    push_source_section(&mut body, source, failed_diff);
     body.push_str(failed_diff);
     if !failed_diff.ends_with('\n') {
         body.push('\n');
@@ -50,12 +130,7 @@ pub fn build_refine_user_prompt_v2(
     prev: Option<&crate::apply_model::llm_refine::PreviousAttempt>,
 ) -> String {
     let mut body = String::with_capacity(source.len() + failed_diff.len() + 512);
-    body.push_str("# Current file contents\n\n```\n");
-    body.push_str(source);
-    if !source.ends_with('\n') {
-        body.push('\n');
-    }
-    body.push_str("```\n\n# Failed diff\n\n```diff\n");
+    push_source_section(&mut body, source, failed_diff);
     body.push_str(failed_diff);
     if !failed_diff.ends_with('\n') {
         body.push('\n');

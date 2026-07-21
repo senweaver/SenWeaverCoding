@@ -4,18 +4,34 @@
 
 use tower_http::cors::{AllowHeaders, AllowMethods, AllowOrigin, CorsLayer};
 
+const LOOPBACK_ORIGIN_HOSTS: [&str; 4] = ["localhost", "tauri.localhost", "127.0.0.1", "::1"];
+
+fn authority_host_is_loopback(authority: &str) -> bool {
+    let authority = authority.split(['/', '?', '#']).next().unwrap_or("");
+    let authority = authority.rsplit('@').next().unwrap_or(authority);
+    let host = if let Some(rest) = authority.strip_prefix('[') {
+        match rest.split_once(']') {
+            Some((inner, after)) if after.is_empty() || after.starts_with(':') => inner,
+            _ => return false,
+        }
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    LOOPBACK_ORIGIN_HOSTS
+        .iter()
+        .any(|allowed| host.eq_ignore_ascii_case(allowed))
+}
+
 pub(crate) fn origin_value_allowed(value: &str) -> bool {
-    let base_allowed = value.starts_with("tauri://")
-        || value.starts_with("http://tauri.localhost")
-        || value.starts_with("https://tauri.localhost")
-        || value.starts_with("http://localhost")
-        || value.starts_with("https://localhost")
-        || value.starts_with("http://127.0.0.1")
-        || value.starts_with("https://127.0.0.1")
-        || value.starts_with("http://[::1]")
-        || value.starts_with("https://[::1]");
-    if base_allowed {
-        return true;
+    let value = value.trim();
+    if let Some(rest) = value.strip_prefix("tauri://") {
+        return authority_host_is_loopback(rest);
+    }
+    if let Some(rest) = value
+        .strip_prefix("http://")
+        .or_else(|| value.strip_prefix("https://"))
+    {
+        return authority_host_is_loopback(rest);
     }
 
     if cfg!(debug_assertions) && value == "null" {

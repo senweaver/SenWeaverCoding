@@ -41,7 +41,7 @@ impl Default for SubagentLimitConfig {
 #[derive(Clone)]
 pub struct SubagentLimiter {
     active: Arc<AtomicUsize>,
-    max_concurrent: usize,
+    max_concurrent: Arc<AtomicUsize>,
     queue_excess: bool,
     lineage: Arc<Mutex<LineageTable>>,
 }
@@ -97,15 +97,24 @@ impl SubagentLimiter {
         let max = config.max_concurrent.clamp(1, 8);
         Self {
             active: Arc::new(AtomicUsize::new(0)),
-            max_concurrent: max,
+            max_concurrent: Arc::new(AtomicUsize::new(max)),
             queue_excess: config.queue_excess,
             lineage: Arc::new(Mutex::new(LineageTable::default())),
         }
     }
 
+    /// Update the concurrency ceiling after construction so the globally-shared
+    /// runtime limiter can adopt the user's configured `subagent_limit` instead of
+    /// being stuck at the built-in default.
+    pub fn set_max_concurrent(&self, max_concurrent: usize) {
+        self.max_concurrent
+            .store(max_concurrent.clamp(1, 8), Ordering::SeqCst);
+    }
+
     pub fn try_acquire(&self) -> PermitResult {
+        let max = self.max_concurrent.load(Ordering::SeqCst);
         let current = self.active.fetch_add(1, Ordering::SeqCst);
-        if current < self.max_concurrent {
+        if current < max {
             PermitResult::Granted(SubagentPermit {
                 active: Arc::clone(&self.active),
             })
@@ -116,7 +125,7 @@ impl SubagentLimiter {
             } else {
                 PermitResult::Rejected {
                     active: current,
-                    max: self.max_concurrent,
+                    max,
                 }
             }
         }
@@ -127,11 +136,11 @@ impl SubagentLimiter {
     }
 
     pub fn max_concurrent(&self) -> usize {
-        self.max_concurrent
+        self.max_concurrent.load(Ordering::SeqCst)
     }
 
     pub fn is_at_capacity(&self) -> bool {
-        self.active_count() >= self.max_concurrent
+        self.active_count() >= self.max_concurrent.load(Ordering::SeqCst)
     }
 
     pub fn register(

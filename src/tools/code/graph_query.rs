@@ -57,15 +57,20 @@ fn resolve_workspace(arg: Option<&str>) -> PathBuf {
     }
 }
 
-fn load_or_build_graph(root: &std::path::Path) -> std::io::Result<SymbolGraph> {
+fn with_graph<R>(
+    root: &std::path::Path,
+    f: impl FnOnce(&SymbolGraph) -> R,
+) -> std::io::Result<R> {
     if let Some(writer) =
         crate::code_intel::symbol_graph::incremental::get_or_build_writer(root)
     {
-        return Ok(writer.graph().read().clone());
+        let graph_arc = writer.graph();
+        let guard = graph_arc.read();
+        return Ok(f(&guard));
     }
     let g = SymbolGraph::build(root)?;
     let _ = g.persist(root);
-    Ok(g)
+    Ok(f(&g))
 }
 
 fn symbol_to_json(sym: &SymbolId) -> serde_json::Value {
@@ -132,26 +137,33 @@ fn run_graph_query(args: serde_json::Value) -> anyhow::Result<ToolResult> {
             .unwrap_or(50);
         let workspace = resolve_workspace(args.get("workspace").and_then(|v| v.as_str()));
 
-        let graph = match load_or_build_graph(&workspace) {
-            Ok(g) => g,
-            Err(e) => {
+        match query {
+            "callers_of" | "implementors_of" if symbol.is_empty() => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some(format!("failed to load/build symbol graph: {e}")),
+                    error: Some(format!("`symbol` is required for {query}")),
                 });
             }
-        };
+            "" => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some("`query` is required".into()),
+                });
+            }
+            "callers_of" | "implementors_of" | "recent_changes" => {}
+            other => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("unknown query kind: {other}")),
+                });
+            }
+        }
 
-        let payload = match query {
+        let payload_result = with_graph(&workspace, |graph| match query {
             "callers_of" => {
-                if symbol.is_empty() {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some("`symbol` is required for callers_of".into()),
-                    });
-                }
                 let mut hits: Vec<&SymbolId> = graph.callers_of(symbol);
                 hits.truncate(limit);
                 json!({
@@ -161,13 +173,6 @@ fn run_graph_query(args: serde_json::Value) -> anyhow::Result<ToolResult> {
                 })
             }
             "implementors_of" => {
-                if symbol.is_empty() {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some("`symbol` is required for implementors_of".into()),
-                    });
-                }
                 let mut hits: Vec<&SymbolId> = graph.implementors_of(symbol);
                 hits.truncate(limit);
                 json!({
@@ -176,8 +181,8 @@ fn run_graph_query(args: serde_json::Value) -> anyhow::Result<ToolResult> {
                     "results": hits.iter().map(|s| symbol_to_json(s)).collect::<Vec<_>>(),
                 })
             }
-            "recent_changes" => {
-                let tl = build_timeline(&workspace, &graph);
+            _ => {
+                let tl = build_timeline(&workspace, graph);
                 let mut rows: Vec<(SymbolId, crate::code_intel::git_timeline::TimelineEntry)> = tl
                     .into_iter()
                     .filter(|(s, _)| symbol.is_empty() || s.name == symbol)
@@ -199,18 +204,14 @@ fn run_graph_query(args: serde_json::Value) -> anyhow::Result<ToolResult> {
                     })).collect::<Vec<_>>(),
                 })
             }
-            "" => {
+        });
+        let payload = match payload_result {
+            Ok(p) => p,
+            Err(e) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
-                    error: Some("`query` is required".into()),
-                });
-            }
-            other => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("unknown query kind: {other}")),
+                    error: Some(format!("failed to load/build symbol graph: {e}")),
                 });
             }
         };

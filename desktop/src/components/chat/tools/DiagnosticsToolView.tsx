@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import type { ToolViewProps } from './ToolViewProps'
+import { useTranslation } from '../../../i18n'
 import { CodeViewer } from '../CodeViewer'
 import {
   extractTextContent,
@@ -111,6 +112,7 @@ export function DiagnosticsHeader({ toolName, result }: ToolViewProps) {
 }
 
 export function DiagnosticsDetail({ result }: ToolViewProps) {
+  const t = useTranslation()
   const text = result ? extractTextContent(result.content) : ''
   const rows = parseDiagnostics(text)
   if (!rows.length) {
@@ -118,7 +120,7 @@ export function DiagnosticsDetail({ result }: ToolViewProps) {
       <CodeViewer code={text} language="plaintext" maxLines={14} />
     ) : (
       <div className="rounded-md border border-[var(--color-border)]/60 bg-[var(--color-surface-container-low)] px-3 py-2 text-[11px] text-[var(--color-text-tertiary)]">
-        No diagnostics.
+        {t('tool.diagnostics.none')}
       </div>
     )
   }

@@ -2,6 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -45,6 +46,8 @@ pub struct PluginService {
 
 struct PluginServiceInner {
     plugins: HashMap<String, PluginInfo>,
+    workspace: Option<PathBuf>,
+    plugins_dir: Option<PathBuf>,
 }
 
 impl PluginService {
@@ -52,13 +55,108 @@ impl PluginService {
         Self {
             inner: Arc::new(RwLock::new(PluginServiceInner {
                 plugins: HashMap::new(),
+                workspace: None,
+                plugins_dir: None,
             })),
         }
+    }
+
+    pub async fn bind_workspace(&self, workspace: &Path, plugins_dir: Option<PathBuf>) {
+        let mut inner = self.inner.write().await;
+        inner.workspace = Some(workspace.to_path_buf());
+        inner.plugins_dir = plugins_dir;
     }
 
     pub async fn register(&self, info: PluginInfo) {
         let mut inner = self.inner.write().await;
         inner.plugins.insert(info.name.clone(), info);
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    pub async fn sync_from_host(&self, host: &crate::plugins::host::PluginHost) {
+        let mut plugins = HashMap::new();
+        for p in host.list_plugins() {
+            let provides_tools = if p
+                .capabilities
+                .iter()
+                .any(|c| matches!(c, crate::plugins::PluginCapability::Tool))
+            {
+                vec![p.name.clone()]
+            } else {
+                Vec::new()
+            };
+            plugins.insert(
+                p.name.clone(),
+                PluginInfo {
+                    name: p.name.clone(),
+                    version: p.version.clone(),
+                    description: p.description.clone().unwrap_or_default(),
+                    author: String::new(),
+                    source: PluginSource::Local {
+                        path: p.wasm_path.display().to_string(),
+                    },
+                    status: if p.loaded {
+                        PluginStatus::Enabled
+                    } else {
+                        PluginStatus::Error
+                    },
+                    provides_tools,
+                    provides_commands: Vec::new(),
+                    provides_hooks: Vec::new(),
+                },
+            );
+        }
+        for name in host.disabled_plugin_names() {
+            plugins
+                .entry(name.clone())
+                .and_modify(|info| info.status = PluginStatus::Disabled)
+                .or_insert(PluginInfo {
+                    name: name.clone(),
+                    version: String::new(),
+                    description: String::new(),
+                    author: String::new(),
+                    source: PluginSource::Local {
+                        path: host.plugins_dir().join(&name).display().to_string(),
+                    },
+                    status: PluginStatus::Disabled,
+                    provides_tools: Vec::new(),
+                    provides_commands: Vec::new(),
+                    provides_hooks: Vec::new(),
+                });
+        }
+        let mut inner = self.inner.write().await;
+        inner.plugins_dir = Some(host.plugins_dir().to_path_buf());
+        inner.plugins = plugins;
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    pub async fn refresh_from_config(
+        &self,
+        workspace: &Path,
+        plugins: &crate::config::schema::PluginsConfig,
+    ) -> anyhow::Result<()> {
+        let host = crate::plugins::host::PluginHost::from_plugins_config(workspace, plugins)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.bind_workspace(workspace, Some(host.plugins_dir().to_path_buf()))
+            .await;
+        self.sync_from_host(&host).await;
+        Ok(())
+    }
+
+    #[cfg(feature = "plugins-wasm")]
+    pub async fn set_enabled_via_host(
+        &self,
+        workspace: &Path,
+        plugins: &crate::config::schema::PluginsConfig,
+        name: &str,
+        enabled: bool,
+    ) -> anyhow::Result<()> {
+        let mut host = crate::plugins::host::PluginHost::from_plugins_config(workspace, plugins)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        host.set_enabled(name, enabled)
+            .map_err(|e| anyhow::anyhow!("{e}"))?;
+        self.sync_from_host(&host).await;
+        Ok(())
     }
 
     pub async fn enable(&self, name: &str) -> bool {

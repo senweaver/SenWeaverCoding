@@ -76,6 +76,14 @@ impl ResponseCache {
     }
 
     pub fn cache_key(model: &str, system_prompt: Option<&str>, user_prompt: &str) -> String {
+        Self::cache_key_parts(model, system_prompt, [user_prompt])
+    }
+
+    pub fn cache_key_parts<'a>(
+        model: &str,
+        system_prompt: Option<&str>,
+        parts: impl IntoIterator<Item = &'a str>,
+    ) -> String {
         let scope = crate::session::current_session_context()
             .map(|c| {
                 if c.workspace_key.is_empty() {
@@ -94,7 +102,9 @@ impl ResponseCache {
             hasher.update(sys.as_bytes());
         }
         hasher.update(b"|");
-        hasher.update(user_prompt.as_bytes());
+        for part in parts {
+            hasher.update(part.as_bytes());
+        }
         let hash = hasher.finalize();
         format!("{:064x}", hash)
     }

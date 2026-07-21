@@ -80,8 +80,7 @@ impl VerificationPipeline {
 
         if let Some(svc) = lsp {
             let fetcher = LspPoolDiagnosticFetcher::new(svc, root.to_path_buf());
-            let verifier = LspDiagVerifier::new(Arc::new(fetcher))
-                .with_timeout_status_summary(true);
+            let verifier = LspDiagVerifier::new(Arc::new(fetcher));
             stages.push(Box::new(verifier));
         }
 

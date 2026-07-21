@@ -128,6 +128,45 @@ fn extract_reminder_marker(msg: &str) -> Option<&str> {
     Some(&trimmed[..=end])
 }
 
+pub const MODE_REMINDER_MARKERS: &[&str] = &[
+    "[Plan-Mode Reminder]",
+    "[Spec Reminder]",
+    "[TDD Reminder]",
+    "[Agent Reminder]",
+    "[Pair Reminder]",
+    "[Architect Reminder]",
+    "[Context Eng Reminder]",
+    "[MVAI Reminder]",
+    "[Harness Reminder]",
+    "[Vibe Reminder]",
+    "[Debug Reminder]",
+    "[Ask Reminder]",
+    "[Curator Reminder]",
+    "[Designer Reminder]",
+];
+
+pub fn remove_stale_mode_reminders(history: &mut Vec<ChatMessage>, mode: CodingMode) {
+    let current_marker = pre_turn_reminder(mode).and_then(extract_reminder_marker);
+    let debug_active = mode == CodingMode::Debug;
+    history.retain(|m| {
+        if m.role != "system" {
+            return true;
+        }
+        let Some(marker) = extract_reminder_marker(&m.content) else {
+            return true;
+        };
+        if MODE_REMINDER_MARKERS.contains(&marker) {
+            return Some(marker) == current_marker;
+        }
+        if !debug_active
+            && (marker == "[Debug Test Target]" || marker.starts_with("[Prototype Reference"))
+        {
+            return false;
+        }
+        true
+    });
+}
+
 pub fn replace_or_push_system_reminder(history: &mut Vec<ChatMessage>, msg: String) {
     if let Some(marker) = extract_reminder_marker(&msg) {
         let marker_owned = marker.to_string();
@@ -210,6 +249,8 @@ pub fn is_file_mutation_tool(name: &str) -> bool {
             | "move_path"
             | "delete_path"
             | "create_directory"
+            | "write_plan"
+            | "write_doc"
     )
 }
 
@@ -218,6 +259,11 @@ pub fn file_mod_auto_verify_nudge(mode: CodingMode) -> Option<&'static str> {
         return None;
     }
     let msg = match mode {
+        CodingMode::Tdd if crate::agent::builtin_skills::workspace_forbids_tests() => {
+            "[TDD Mode - tests forbidden here] File modified. You MUST now run the \
+             project check/build command (e.g. `cargo check` / `bunx tsc --noEmit`) \
+             and report whether it passes. Do NOT add test files."
+        }
         CodingMode::Tdd => {
             "[TDD Mode] File modified. You MUST now run the test suite \
              and report whether the relevant test passes or fails."

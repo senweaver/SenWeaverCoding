@@ -91,6 +91,7 @@ fn classify(body: &str) -> Option<ContextTag> {
             match body.to_ascii_lowercase().as_str() {
                 "recent" => return Some(ContextTag::Recent),
                 "selection" => return Some(ContextTag::Selection),
+                "problems" | "diagnostics" => return Some(ContextTag::Problems),
                 _ => {
                     if looks_like_path(body) {
                         return Some(ContextTag::File(PathBuf::from(body)));

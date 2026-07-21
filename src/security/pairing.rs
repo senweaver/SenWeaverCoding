@@ -165,9 +165,6 @@ impl PairingGuard {
     }
 
     pub fn is_authenticated(&self, token: &str) -> bool {
-        if !self.require_pairing {
-            return true;
-        }
         self.is_authenticated_strict(token)
     }
 

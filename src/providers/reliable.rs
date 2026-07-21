@@ -513,14 +513,24 @@ fn truncate_for_context(messages: &mut Vec<ChatMessage>) -> usize {
         return 0;
     }
 
-    let drop_count = non_system.len() / 2;
-    let indices_to_remove: Vec<usize> = non_system[..drop_count].to_vec();
+    let drop_count = (non_system.len() / 4).max(2).min(non_system.len() - 1);
+    let mut end = drop_count;
+    while end < non_system.len()
+        && messages
+            .get(non_system[end])
+            .is_some_and(|m| m.role == "tool")
+    {
+        end += 1;
+    }
+    let end = end.min(non_system.len() - 1);
+    let indices_to_remove: Vec<usize> = non_system[..end].to_vec();
+    let removed = indices_to_remove.len();
 
     for &idx in indices_to_remove.iter().rev() {
         messages.remove(idx);
     }
 
-    drop_count
+    removed
 }
 
 fn push_failure(
@@ -749,7 +759,13 @@ impl ReliableProvider {
         model: &str,
         messages: &serde_json::Value,
         tools: &serde_json::Value,
-    ) -> crate::providers::core::idempotency::IdempotencyKey {
+    ) {
+        // The fingerprint is used only for a debug trace, so canonicalizing and
+        // hashing the entire message history every request is pure overhead in
+        // production. Compute it on demand, only when DEBUG tracing is active.
+        if !tracing::enabled!(tracing::Level::DEBUG) {
+            return;
+        }
         let key =
             crate::providers::core::idempotency::fingerprint_json(provider, model, messages, tools);
         tracing::debug!(
@@ -758,7 +774,6 @@ impl ReliableProvider {
             model,
             "dispatching provider request"
         );
-        key
     }
 
     fn classify_retry(err: &anyhow::Error) -> crate::providers::core::retry::RetryClass {
@@ -1048,19 +1063,21 @@ impl Provider for ReliableProvider {
         let models = self.model_chain(model);
         let mut failures = Vec::new();
 
-        let _idem_key = self.record_idempotency(
-            self.providers
-                .first()
-                .map(|(n, _)| n.as_str())
-                .unwrap_or("reliable"),
-            model,
-            &serde_json::json!({
-                "system": system_prompt,
-                "message": message,
-                "temperature": temperature,
-            }),
-            &serde_json::Value::Null,
-        );
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            self.record_idempotency(
+                self.providers
+                    .first()
+                    .map(|(n, _)| n.as_str())
+                    .unwrap_or("reliable"),
+                model,
+                &serde_json::json!({
+                    "system": system_prompt,
+                    "message": message,
+                    "temperature": temperature,
+                }),
+                &serde_json::Value::Null,
+            );
+        }
 
         let outer_cap = self.outer_retry_cap();
         let mut state = RetryState::default();
@@ -1168,15 +1185,17 @@ impl Provider for ReliableProvider {
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
 
-        let _idem_key = self.record_idempotency(
-            self.providers
-                .first()
-                .map(|(n, _)| n.as_str())
-                .unwrap_or("reliable"),
-            model,
-            &serde_json::to_value(&effective_messages).unwrap_or(serde_json::Value::Null),
-            &serde_json::Value::Null,
-        );
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            self.record_idempotency(
+                self.providers
+                    .first()
+                    .map(|(n, _)| n.as_str())
+                    .unwrap_or("reliable"),
+                model,
+                &serde_json::to_value(&effective_messages).unwrap_or(serde_json::Value::Null),
+                &serde_json::Value::Null,
+            );
+        }
 
         let outer_cap = self.outer_retry_cap();
         let mut state = RetryState::default();
@@ -1309,15 +1328,17 @@ impl Provider for ReliableProvider {
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
 
-        let _idem_key = self.record_idempotency(
-            self.providers
-                .first()
-                .map(|(n, _)| n.as_str())
-                .unwrap_or("reliable"),
-            model,
-            &serde_json::to_value(&effective_messages).unwrap_or(serde_json::Value::Null),
-            &serde_json::Value::Array(tools.to_vec()),
-        );
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            self.record_idempotency(
+                self.providers
+                    .first()
+                    .map(|(n, _)| n.as_str())
+                    .unwrap_or("reliable"),
+                model,
+                &serde_json::to_value(&effective_messages).unwrap_or(serde_json::Value::Null),
+                &serde_json::Value::Array(tools.to_vec()),
+            );
+        }
 
         let outer_cap = self.outer_retry_cap();
         let mut state = RetryState::default();
@@ -1436,15 +1457,17 @@ impl Provider for ReliableProvider {
         let mut effective_messages = request.messages.to_vec();
         let mut context_truncated = false;
 
-        let _idem_key = self.record_idempotency(
-            self.providers
-                .first()
-                .map(|(n, _)| n.as_str())
-                .unwrap_or("reliable"),
-            model,
-            &serde_json::to_value(&effective_messages).unwrap_or(serde_json::Value::Null),
-            &serde_json::to_value(request.tools).unwrap_or(serde_json::Value::Null),
-        );
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            self.record_idempotency(
+                self.providers
+                    .first()
+                    .map(|(n, _)| n.as_str())
+                    .unwrap_or("reliable"),
+                model,
+                &serde_json::to_value(&effective_messages).unwrap_or(serde_json::Value::Null),
+                &serde_json::to_value(request.tools).unwrap_or(serde_json::Value::Null),
+            );
+        }
 
         let outer_cap = self.outer_retry_cap();
         let mut state = RetryState::default();

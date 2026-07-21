@@ -431,7 +431,28 @@ impl OpenAiCompatibleProvider {
             .flatten()
     }
 
+    fn model_supports_thinking_param(&self, model: &str) -> bool {
+        let vendor = self.name.to_ascii_lowercase();
+        let id = model
+            .rsplit('/')
+            .next()
+            .unwrap_or(model)
+            .to_ascii_lowercase();
+        id.starts_with("glm-")
+            || id.starts_with("minimax")
+            || id.contains("minimax-")
+            || id.starts_with("kimi-thinking")
+            || vendor.contains("zhipu")
+            || vendor.contains("z.ai")
+            || vendor.contains("zai")
+            || vendor.contains("bigmodel")
+            || vendor.contains("minimax")
+    }
+
     fn thinking_param_for_model(&self, model: &str) -> Option<serde_json::Value> {
+        if !self.model_supports_thinking_param(model) {
+            return None;
+        }
         if self.is_thinking_blacklisted(model) {
             return None;
         }
@@ -467,6 +488,7 @@ impl OpenAiCompatibleProvider {
         if let Ok(mut set) = store.write() {
             set.insert(key);
         }
+        persist_probe_cache();
     }
 
     fn is_thinking_param_unsupported(status: reqwest::StatusCode, error: &str) -> bool {
@@ -616,15 +638,58 @@ struct UsageInfo {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+}
+
+impl UsageInfo {
+    fn cached_input_tokens(&self) -> Option<u64> {
+        self.prompt_tokens_details
+            .as_ref()
+            .and_then(|d| d.cached_tokens)
+    }
 }
 
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: ResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 const REASONING_PLACEHOLDER: &str =
     "(chain-of-thought unavailable for this turn  - placeholder injected to satisfy thinking-mode round-trip requirements)";
+
+/// Convert a raw OpenAI-style function tool JSON (`{type:function, function:{name,
+/// description, parameters}}`, or a bare `{name, description, parameters}`) into a
+/// `ToolSpec` so the prompt-guided text protocol can describe it.
+fn tool_spec_from_openai_json(value: &serde_json::Value) -> Option<crate::tools::ToolSpec> {
+    let func = value.get("function").unwrap_or(value);
+    let name = func.get("name").and_then(|v| v.as_str())?.to_string();
+    if name.is_empty() {
+        return None;
+    }
+    let description = func
+        .get("description")
+        .and_then(|v| v.as_str())
+        .unwrap_or_default()
+        .to_string();
+    let parameters = func
+        .get("parameters")
+        .cloned()
+        .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} }));
+    Some(crate::tools::ToolSpec {
+        name,
+        description,
+        parameters,
+    })
+}
 
 fn strip_think_tags(s: &str) -> String {
     const OPEN_TAG: &str = "<think>";
@@ -1077,6 +1142,7 @@ impl OpenAiCompatibleProvider {
         if let Ok(mut set) = store.write() {
             set.insert(key);
         }
+        persist_probe_cache();
     }
 
     fn convert_tool_specs(
@@ -1500,6 +1566,8 @@ impl OpenAiCompatibleProvider {
             tool_calls,
             usage: None,
             reasoning_content,
+            thinking_signature: None,
+            stop_reason: None,
         }
     }
 
@@ -1899,11 +1967,16 @@ impl Provider for OpenAiCompatibleProvider {
         } else {
             Self::normalize_system_for_strict_wire(messages)
         };
+        let json_tools_reserve: usize = tools
+            .iter()
+            .map(|t| t.to_string().len().div_ceil(4))
+            .sum();
         let effective_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
             self,
             pre_budget,
             model,
-            self.reserved_output_tokens(model),
+            self.reserved_output_tokens(model)
+                .saturating_add(json_tools_reserve),
             Some(self.context_window_for(model)),
         );
         let api_messages: Vec<Message> = effective_messages
@@ -1928,9 +2001,25 @@ impl Provider for OpenAiCompatibleProvider {
                 provider = %self.name,
                 model,
                 has_tools,
-                "model is on the legacy/no-tools allowlist; routing through chat_with_history without native tools"
+                "model is on the legacy/no-tools allowlist; routing through chat_with_history with prompt-guided tools"
             );
-            let text = self.chat_with_history(messages, model, temperature).await?;
+            // Inject the prompt-guided tool protocol so a no-native-tools model
+            // still learns the tools exist (previously this public entry dropped
+            // the tool contract entirely, unlike chat()).
+            let guided = if has_tools {
+                let specs: Vec<crate::tools::ToolSpec> = tools
+                    .iter()
+                    .filter_map(tool_spec_from_openai_json)
+                    .collect();
+                if specs.is_empty() {
+                    messages.to_vec()
+                } else {
+                    Self::with_prompt_guided_tool_instructions(messages, Some(&specs))
+                }
+            } else {
+                messages.to_vec()
+            };
+            let text = self.chat_with_history(&guided, model, temperature).await?;
             return Ok(ProviderChatResponse::text_only(Some(text), None));
         }
 
@@ -2013,7 +2102,7 @@ impl Provider for OpenAiCompatibleProvider {
         let usage = chat_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
-            cached_input_tokens: None,
+            cached_input_tokens: u.cached_input_tokens(),
             cache_creation_input_tokens: None,
         });
         let choice = chat_response
@@ -2022,8 +2111,13 @@ impl Provider for OpenAiCompatibleProvider {
             .next()
             .ok_or_else(|| anyhow::anyhow!("No response from {}", self.name))?;
 
+        let stop_reason = choice
+            .finish_reason
+            .as_deref()
+            .and_then(crate::providers::traits::StopReason::from_wire);
         let mut result = Self::parse_native_response(choice.message);
         result.usage = usage;
+        result.stop_reason = stop_reason;
         Ok(result)
     }
 
@@ -2068,6 +2162,14 @@ impl Provider for OpenAiCompatibleProvider {
         } else {
             None
         };
+        let tools_reserve = if allow_native_tools {
+            request
+                .tools
+                .map(crate::providers::traits::estimate_tool_specs_tokens)
+                .unwrap_or(0)
+        } else {
+            0
+        };
         let pre_budget = if self.merge_system_into_user {
             Self::flatten_system_messages(request.messages)
         } else {
@@ -2077,7 +2179,7 @@ impl Provider for OpenAiCompatibleProvider {
             self,
             pre_budget,
             model,
-            self.reserved_output_tokens(model),
+            self.reserved_output_tokens(model).saturating_add(tools_reserve),
             Some(self.context_window_for(model)),
         );
         let mut native_request = NativeChatRequest {
@@ -2195,23 +2297,31 @@ impl Provider for OpenAiCompatibleProvider {
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
-            cached_input_tokens: None,
+            cached_input_tokens: u.cached_input_tokens(),
             cache_creation_input_tokens: None,
         });
-        let message = native_response
+        let choice = native_response
             .choices
             .into_iter()
             .next()
-            .map(|choice| choice.message)
             .ok_or_else(|| anyhow::anyhow!("No response from {}", self.name))?;
 
-        let mut result = Self::parse_native_response(message);
+        let stop_reason = choice
+            .finish_reason
+            .as_deref()
+            .and_then(crate::providers::traits::StopReason::from_wire);
+        let mut result = Self::parse_native_response(choice.message);
         result.usage = usage;
+        result.stop_reason = stop_reason;
         Ok(result)
     }
 
     fn supports_native_tools(&self) -> bool {
         self.native_tool_calling
+    }
+
+    fn consumes_reasoning_envelope(&self) -> bool {
+        true
     }
 
     fn supports_streaming(&self) -> bool {
@@ -2278,11 +2388,15 @@ impl Provider for OpenAiCompatibleProvider {
                 Some(self.context_window_for(model)),
             );
         } else {
+            let tools_reserve = raw_tools_owned
+                .as_deref()
+                .map(crate::providers::traits::estimate_tool_specs_tokens)
+                .unwrap_or(0);
             effective_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
                 self,
                 effective_messages,
                 model,
-                self.reserved_output_tokens(model),
+                self.reserved_output_tokens(model).saturating_add(tools_reserve),
                 Some(self.context_window_for(model)),
             );
         }
@@ -2820,13 +2934,77 @@ impl Provider for OpenAiCompatibleProvider {
     }
 }
 
+fn provider_probe_cache_path() -> Option<std::path::PathBuf> {
+    let home = std::env::var("HOME")
+        .ok()
+        .filter(|h| !h.is_empty())
+        .or_else(|| std::env::var("USERPROFILE").ok().filter(|h| !h.is_empty()))?;
+    Some(
+        std::path::PathBuf::from(home)
+            .join(".senweavercoding")
+            .join("provider_probe_cache.json"),
+    )
+}
+
+#[derive(Default, serde::Serialize, serde::Deserialize)]
+struct ProviderProbeCache {
+    #[serde(default)]
+    thinking_blacklist: Vec<String>,
+    #[serde(default)]
+    responses_endpoint_missing: Vec<String>,
+}
+
+fn load_probe_cache() -> ProviderProbeCache {
+    let Some(path) = provider_probe_cache_path() else {
+        return ProviderProbeCache::default();
+    };
+    std::fs::read_to_string(&path)
+        .ok()
+        .and_then(|data| serde_json::from_str(&data).ok())
+        .unwrap_or_default()
+}
+
+pub(crate) fn persist_probe_cache() {
+    let Some(path) = provider_probe_cache_path() else {
+        return;
+    };
+    let cache = ProviderProbeCache {
+        thinking_blacklist: thinking_blacklist_store()
+            .read()
+            .map(|s| {
+                let mut v: Vec<String> = s.iter().cloned().collect();
+                v.sort();
+                v
+            })
+            .unwrap_or_default(),
+        responses_endpoint_missing: responses_endpoint_missing_store()
+            .read()
+            .map(|s| {
+                let mut v: Vec<String> = s.iter().cloned().collect();
+                v.sort();
+                v
+            })
+            .unwrap_or_default(),
+    };
+    if let Ok(json) = serde_json::to_string_pretty(&cache) {
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = crate::util::atomic_write(&path, json.as_bytes()) {
+            tracing::debug!(error = %e, "failed to persist provider probe cache");
+        }
+    }
+}
+
 fn thinking_blacklist_store()
 -> &'static std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>> {
     static STORE: std::sync::OnceLock<
         std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
     > = std::sync::OnceLock::new();
     STORE.get_or_init(|| {
-        std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()))
+        let seeded: std::collections::HashSet<String> =
+            load_probe_cache().thinking_blacklist.into_iter().collect();
+        std::sync::Arc::new(std::sync::RwLock::new(seeded))
     })
 }
 
@@ -2843,6 +3021,10 @@ fn responses_endpoint_missing_store()
         std::sync::Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
     > = std::sync::OnceLock::new();
     STORE.get_or_init(|| {
-        std::sync::Arc::new(std::sync::RwLock::new(std::collections::HashSet::new()))
+        let seeded: std::collections::HashSet<String> = load_probe_cache()
+            .responses_endpoint_missing
+            .into_iter()
+            .collect();
+        std::sync::Arc::new(std::sync::RwLock::new(seeded))
     })
 }

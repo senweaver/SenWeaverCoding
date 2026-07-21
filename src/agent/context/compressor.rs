@@ -13,6 +13,9 @@ use crate::agent::history::compaction::{
     build_compaction_transcript, estimate_tokens_filtered, replace_history_range_with_assistant,
 };
 
+const SUMMARY_BANNER_PREFIX: &str = "[CONTEXT SUMMARY \u{2014}";
+const COMPACTION_BANNER_PREFIX: &str = "[CONTEXT COMPACTION \u{2014}";
+
 fn default_enabled() -> bool {
     true
 }
@@ -162,22 +165,32 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
 }
 
 const SUMMARIZER_SYSTEM: &str = "\
-You are a conversation compaction engine. Summarize the conversation segment below into concise context.
+You are a conversation compaction engine. Distill the conversation segment below into a
+high-fidelity, STRUCTURED summary. Fill every section; if a section has nothing, write
+`- (none)` rather than omitting it — the sections act as a checklist that prevents silently
+dropping context whose importance only becomes clear later.
 
-PRESERVE exactly:
-- All identifiers (UUIDs, hashes, file paths, URLs, tokens, IPs)
-- Actions taken (tool calls, file operations, commands run)
-- Key information obtained (data, results, error messages)
-- Decisions made and user preferences expressed
-- Current task status and unresolved items
-- Constraints and requirements mentioned
+Use EXACTLY these headings, in this order:
 
-OMIT:
-- Verbose tool output (keep only key results)
-- Repeated greetings or filler
-- Redundant information already stated
+## Session Intent
+- The user's overall goal(s) and the current task, in their own terms.
 
-Output concise bullet points. Be thorough but brief.";
+## Files Modified
+- For each file touched: its FULL path and the LATEST state of the changed region (final
+  content after the most recent edit), so later turns never act on a stale version.
+
+## Key Decisions
+- Decisions made, approaches chosen/rejected, user preferences and constraints expressed.
+
+## Key Findings
+- Concrete facts obtained: data, results, error messages, identifiers (UUIDs, hashes,
+  paths, URLs, tokens, IPs) — preserve identifiers verbatim.
+
+## Active Goals / Next Steps
+- What is still in progress, unresolved items, and the immediate next actions.
+
+OMIT verbose tool output (keep only key results), greetings, and already-restated content.
+Be thorough on the five sections but concise within each bullet.";
 
 #[derive(Debug, Clone, Copy)]
 pub struct CompressionProgress {
@@ -206,6 +219,10 @@ impl ContextCompressor {
 
     pub fn set_context_window(&mut self, window: usize) {
         self.context_window = window;
+    }
+
+    pub fn context_window(&self) -> usize {
+        self.context_window
     }
 
     pub async fn compress_if_needed(
@@ -502,13 +519,13 @@ impl ContextCompressor {
 
         let summary_msg = if degraded {
             format!(
-                "[CONTEXT COMPACTION \u{2014} summarizer unavailable; {message_count} earlier \
+                "{COMPACTION_BANNER_PREFIX} summarizer unavailable; {message_count} earlier \
                  messages were TRUNCATED (not summarized), so middle content may be missing. \
                  Re-read source files/tool outputs if you need details.]\n\n{summary}"
             )
         } else {
             format!(
-                "[CONTEXT SUMMARY \u{2014} {message_count} earlier messages compressed]\n\n{summary}"
+                "{SUMMARY_BANNER_PREFIX} {message_count} earlier messages compressed]\n\n{summary}"
             )
         };
         replace_history_range_with_assistant(history, start, end, summary_msg);
@@ -537,11 +554,19 @@ fn align_boundary_backward(messages: &[ChatMessage], idx: usize) -> usize {
     i
 }
 
+fn is_compaction_banner(content: &str) -> bool {
+    content.starts_with(SUMMARY_BANNER_PREFIX) || content.starts_with(COMPACTION_BANNER_PREFIX)
+}
+
 fn repair_tool_pairs(messages: &mut Vec<ChatMessage>) {
 
     let mut i = 0;
     while i < messages.len() {
-        if messages[i].content.contains("[CONTEXT SUMMARY") {
+        // Match on a banner PREFIX (both summary and degraded-compaction forms)
+        // and only when the message actually starts with it, so a normal
+        // assistant message that merely quotes the banner text is never treated
+        // as a summary boundary.
+        if is_compaction_banner(&messages[i].content) {
 
             while i + 1 < messages.len() && messages[i + 1].role == "tool" {
                 messages.remove(i + 1);

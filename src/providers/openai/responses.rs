@@ -4,11 +4,12 @@
 
 use crate::providers::traits::{
     ChatMessage, ChatRequest as ProviderChatRequest, ChatResponse as ProviderChatResponse,
-    Provider, ProviderCapabilities, StructuredResponse, TokenUsage, parse_first_json_object,
+    Provider, ProviderCapabilities, StructuredResponse, ToolCall as ProviderToolCall, TokenUsage,
+    parse_first_json_object,
 };
 use async_trait::async_trait;
 use reqwest::Client;
-use serde::{Deserialize, Serialize};
+use serde::Deserialize;
 
 pub const RESPONSES_API_MODEL_PREFIXES: &[&str] = &[
     "gpt-5", "gpt-4.1", "gpt-4o", "o1", "o3", "o4",
@@ -26,6 +27,7 @@ pub struct OpenAiResponsesProvider {
     base_url: String,
     credential: Option<String>,
     max_output_tokens: Option<u32>,
+    reasoning_effort: Option<String>,
     extra_headers: std::collections::HashMap<String, String>,
 }
 
@@ -43,6 +45,7 @@ impl OpenAiResponsesProvider {
                 .unwrap_or_else(|| "https://api.openai.com/v1".to_string()),
             credential: credential.map(ToString::to_string),
             max_output_tokens: None,
+            reasoning_effort: None,
             extra_headers: std::collections::HashMap::new(),
         }
     }
@@ -50,6 +53,12 @@ impl OpenAiResponsesProvider {
     #[must_use]
     pub fn with_max_output_tokens(mut self, max_output_tokens: Option<u32>) -> Self {
         self.max_output_tokens = max_output_tokens;
+        self
+    }
+
+    #[must_use]
+    pub fn with_reasoning_effort(mut self, reasoning_effort: Option<String>) -> Self {
+        self.reasoning_effort = reasoning_effort;
         self
     }
 
@@ -73,91 +82,104 @@ impl OpenAiResponsesProvider {
             )
     }
 
-    fn adjust_temperature_for_model(model: &str, requested: f64) -> f64 {
+    fn is_reasoning_model(model: &str) -> bool {
         let m = model.trim().to_ascii_lowercase();
-        let is_reasoning = m.starts_with("gpt-5")
-            || m.starts_with("o1")
-            || m.starts_with("o3")
-            || m.starts_with("o4");
-        if is_reasoning {
-            1.0
-        } else {
-            requested
+        m.starts_with("gpt-5") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
+    }
+
+    /// Set `temperature` on the request body only when the model accepts it.
+    /// Reasoning models (gpt-5/o-series) reject sampling params on the Responses
+    /// endpoint, so the key is omitted entirely for them.
+    fn apply_temperature(body: &mut serde_json::Value, model: &str, requested: f64) {
+        if !Self::is_reasoning_model(model) {
+            body["temperature"] = serde_json::json!(requested);
         }
     }
-}
 
-#[derive(Debug, Serialize)]
-struct ResponsesRequest<'a> {
-    model: &'a str,
-    input: ResponsesInput<'a>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<&'a str>,
-    temperature: f64,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    max_output_tokens: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    reasoning: Option<ReasoningConfig>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum ResponsesInput<'a> {
-
-    Text(&'a str),
-
-    Messages(Vec<ResponsesMessage<'a>>),
-}
-
-#[derive(Debug, Serialize)]
-struct ResponsesMessage<'a> {
-    role: &'a str,
-    content: ResponsesMessageContent<'a>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum ResponsesMessageContent<'a> {
-    Text(&'a str),
-    Parts(Vec<ResponsesContentPart>),
-}
-
-#[derive(Debug, Serialize)]
-struct ResponsesContentPart {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    text: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    image_url: Option<String>,
-}
-
-fn user_message_content(content: &str) -> ResponsesMessageContent<'_> {
-    let (cleaned_text, image_refs) = crate::multimodal::parse_image_markers(content);
-    if image_refs.is_empty() {
-        return ResponsesMessageContent::Text(content);
+    /// Pass the configured reasoning effort through for reasoning models; the
+    /// API rejects the `reasoning` block on non-reasoning models.
+    fn apply_reasoning(&self, body: &mut serde_json::Value, model: &str) {
+        if let Some(effort) = self.reasoning_effort.as_deref() {
+            if Self::is_reasoning_model(model) && !effort.trim().is_empty() {
+                body["reasoning"] = serde_json::json!({ "effort": effort });
+            }
+        }
     }
-    let mut parts = Vec::with_capacity(image_refs.len() + 1);
-    if !cleaned_text.trim().is_empty() {
-        parts.push(ResponsesContentPart {
-            kind: "input_text".to_string(),
-            text: Some(cleaned_text),
-            image_url: None,
+
+    /// Shared request path that carries native function tools through the
+    /// Responses API and parses both text and `function_call` outputs.
+    async fn run_tools_request(
+        &self,
+        messages: &[ChatMessage],
+        tools: Option<Vec<serde_json::Value>>,
+        model: &str,
+        temperature: f64,
+    ) -> anyhow::Result<ProviderChatResponse> {
+        let credential = self.credential.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "OpenAI API key not set. Set OPENAI_API_KEY or edit config.toml \
+                 (provider = openai-responses)."
+            )
+        })?;
+
+        let (instructions, input_items) = build_responses_input_items(messages);
+
+        let mut body = serde_json::json!({
+            "model": model,
+            "input": input_items,
         });
-    }
-    for image_ref in image_refs {
-        parts.push(ResponsesContentPart {
-            kind: "input_image".to_string(),
-            text: None,
-            image_url: Some(image_ref),
-        });
-    }
-    ResponsesMessageContent::Parts(parts)
-}
+        Self::apply_temperature(&mut body, model, temperature);
+        self.apply_reasoning(&mut body, model);
+        if let Some(instr) = instructions {
+            body["instructions"] = serde_json::Value::String(instr);
+        }
+        if let Some(max) = self.max_output_tokens {
+            body["max_output_tokens"] = serde_json::json!(max);
+        }
+        if let Some(tools) = tools {
+            body["tools"] = serde_json::Value::Array(tools);
+            body["tool_choice"] = serde_json::Value::String("auto".to_string());
+        }
 
-#[derive(Debug, Serialize)]
-struct ReasoningConfig {
-    effort: String,
+        let response = self
+            .http_client()
+            .post(format!("{}/responses", self.base_url))
+            .header("Authorization", format!("Bearer {credential}"))
+            .json(&body)
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            return Err(super::super::api_error("OpenAI Responses", response).await);
+        }
+
+        let parsed: ResponsesPayload = response.json().await?;
+        parsed.ensure_not_failed()?;
+        let usage = parsed.usage.as_ref().map(|u| {
+            let cached = u
+                .input_tokens_details
+                .as_ref()
+                .and_then(|d| d.cached_tokens);
+            crate::observability::subsystem_metrics::observe_prompt_cache_usage(cached, None);
+            TokenUsage {
+                input_tokens: u.input_tokens,
+                output_tokens: u.output_tokens,
+                cached_input_tokens: cached,
+                cache_creation_input_tokens: None,
+            }
+        });
+        let text = parsed.collect_text();
+        let tool_calls = parsed.collect_tool_calls();
+        let stop_reason = parsed.stop_reason(!tool_calls.is_empty());
+        Ok(ProviderChatResponse {
+            text: if text.is_empty() { None } else { Some(text) },
+            tool_calls,
+            usage,
+            reasoning_content: None,
+            thinking_signature: None,
+            stop_reason,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -168,6 +190,26 @@ struct ResponsesPayload {
     output: Option<Vec<ResponsesOutputItem>>,
     #[serde(default)]
     usage: Option<ResponsesUsage>,
+    #[serde(default)]
+    status: Option<String>,
+    #[serde(default)]
+    incomplete_details: Option<ResponsesIncompleteDetails>,
+    #[serde(default)]
+    error: Option<ResponsesError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesIncompleteDetails {
+    #[serde(default)]
+    reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesError {
+    #[serde(default)]
+    code: Option<String>,
+    #[serde(default)]
+    message: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -178,6 +220,15 @@ struct ResponsesOutputItem {
     content: Option<Vec<ResponsesOutputContent>>,
     #[serde(default)]
     text: Option<String>,
+    // function_call item fields
+    #[serde(default)]
+    call_id: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -205,6 +256,51 @@ struct ResponsesUsageDetails {
 }
 
 impl ResponsesPayload {
+    /// Surface a failed response as an error instead of an empty success.
+    fn ensure_not_failed(&self) -> anyhow::Result<()> {
+        if self.status.as_deref() == Some("failed") {
+            let code = self
+                .error
+                .as_ref()
+                .and_then(|e| e.code.as_deref())
+                .unwrap_or("unknown");
+            let msg = self
+                .error
+                .as_ref()
+                .and_then(|e| e.message.as_deref())
+                .unwrap_or("no error message");
+            anyhow::bail!("OpenAI Responses request failed ({code}): {msg}");
+        }
+        Ok(())
+    }
+
+    /// Map Responses `status`/`incomplete_details` onto our StopReason so the
+    /// agent loop's length-continuation and content-filter handling fire for
+    /// this provider too (it has no `finish_reason` field).
+    fn stop_reason(&self, has_tool_calls: bool) -> Option<crate::providers::traits::StopReason> {
+        use crate::providers::traits::StopReason;
+        match self.status.as_deref() {
+            Some("incomplete") => {
+                match self
+                    .incomplete_details
+                    .as_ref()
+                    .and_then(|d| d.reason.as_deref())
+                {
+                    Some("max_output_tokens") => Some(StopReason::Length),
+                    Some("content_filter") => Some(StopReason::ContentFilter),
+                    _ => Some(StopReason::Length),
+                }
+            }
+            Some("completed") => {
+                if has_tool_calls {
+                    Some(StopReason::ToolCalls)
+                } else {
+                    Some(StopReason::Stop)
+                }
+            }
+            _ => None,
+        }
+    }
 
     fn collect_text(&self) -> String {
         if let Some(t) = &self.output_text {
@@ -245,17 +341,241 @@ impl ResponsesPayload {
         }
         buf.trim_end().to_string()
     }
+
+    fn collect_tool_calls(&self) -> Vec<ProviderToolCall> {
+        let Some(items) = &self.output else {
+            return Vec::new();
+        };
+        let mut calls = Vec::new();
+        for item in items {
+            if item.kind.as_deref() != Some("function_call") {
+                continue;
+            }
+            let Some(name) = item.name.as_ref().filter(|n| !n.trim().is_empty()) else {
+                continue;
+            };
+            let id = item
+                .call_id
+                .clone()
+                .or_else(|| item.id.clone())
+                .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple()));
+            calls.push(ProviderToolCall {
+                id,
+                name: name.clone(),
+                arguments: item.arguments.clone().unwrap_or_else(|| "{}".to_string()),
+            });
+        }
+        calls
+    }
+}
+
+/// Builds the Responses API `input` item array from transcript messages,
+/// translating our stored envelopes: assistant `tool_calls` become `function_call`
+/// items and `tool` results become `function_call_output` items so multi-turn tool
+/// use round-trips correctly. Returns `(instructions, items)`.
+fn build_responses_input_items(
+    messages: &[ChatMessage],
+) -> (Option<String>, Vec<serde_json::Value>) {
+    let mut instructions: Option<String> = None;
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    for m in messages {
+        match m.role.as_str() {
+            "system" => {
+                // Accumulate ALL system messages into instructions. Sanitize can
+                // inject a `[Context trimmed]` system note after the real prompt;
+                // overwriting with the last one silently dropped the main prompt.
+                match instructions.as_mut() {
+                    Some(existing) => {
+                        existing.push_str("\n\n");
+                        existing.push_str(&m.content);
+                    }
+                    None => instructions = Some(m.content.clone()),
+                }
+            }
+            "user" => {
+                let (cleaned, images) = crate::multimodal::parse_image_markers(&m.content);
+                if images.is_empty() {
+                    items.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": [{ "type": "input_text", "text": m.content }],
+                    }));
+                } else {
+                    let mut parts = Vec::new();
+                    if !cleaned.trim().is_empty() {
+                        parts.push(serde_json::json!({ "type": "input_text", "text": cleaned }));
+                    }
+                    for img in images {
+                        parts.push(serde_json::json!({ "type": "input_image", "image_url": img }));
+                    }
+                    items.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": parts,
+                    }));
+                }
+            }
+            "assistant" => {
+                let envelope =
+                    serde_json::from_str::<serde_json::Value>(m.content.trim()).ok();
+                let tool_calls = envelope
+                    .as_ref()
+                    .and_then(|v| v.get("tool_calls"))
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                let text = envelope
+                    .as_ref()
+                    .and_then(|v| v.get("content"))
+                    .and_then(|v| v.as_str())
+                    .map(ToString::to_string)
+                    .unwrap_or_else(|| {
+                        if tool_calls.is_empty() {
+                            m.content.clone()
+                        } else {
+                            String::new()
+                        }
+                    });
+                if !text.trim().is_empty() {
+                    items.push(serde_json::json!({
+                        "type": "message",
+                        "role": "assistant",
+                        "content": [{ "type": "output_text", "text": text }],
+                    }));
+                }
+                for tc in tool_calls {
+                    // Accept both the flat {id,name,arguments} form and the nested
+                    // OpenAI {id,function:{name,arguments}} form (the plan
+                    // auto-finalize path emits the nested one). Emitting an empty
+                    // name would 400 the whole request.
+                    let func = tc.get("function").unwrap_or(&tc);
+                    let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
+                    if name.trim().is_empty() {
+                        continue;
+                    }
+                    let id = tc
+                        .get("id")
+                        .and_then(|v| v.as_str())
+                        .filter(|s| !s.is_empty())
+                        .map(ToString::to_string)
+                        .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple()));
+                    let args = func
+                        .get("arguments")
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("{}");
+                    items.push(serde_json::json!({
+                        "type": "function_call",
+                        "call_id": id,
+                        "name": name,
+                        "arguments": args,
+                    }));
+                }
+            }
+            "tool" => {
+                let envelope =
+                    serde_json::from_str::<serde_json::Value>(m.content.trim()).ok();
+                let call_id = envelope
+                    .as_ref()
+                    .and_then(|v| {
+                        v.get("tool_call_id")
+                            .or_else(|| v.get("tool_use_id"))
+                            .and_then(|c| c.as_str())
+                    })
+                    .unwrap_or("")
+                    .to_string();
+                let output = envelope
+                    .as_ref()
+                    .and_then(|v| v.get("content"))
+                    .map(|c| match c.as_str() {
+                        Some(s) => s.to_string(),
+                        None => c.to_string(),
+                    })
+                    .unwrap_or_else(|| m.content.clone());
+                if call_id.is_empty() {
+                    // A function_call_output with an empty call_id would 400. This
+                    // happens for cross-provider failover transcripts; degrade to a
+                    // user note so the result content is still visible to the model.
+                    items.push(serde_json::json!({
+                        "type": "message",
+                        "role": "user",
+                        "content": [{ "type": "input_text", "text": format!("[tool result]\n{output}") }],
+                    }));
+                } else {
+                    items.push(serde_json::json!({
+                        "type": "function_call_output",
+                        "call_id": call_id,
+                        "output": output,
+                    }));
+                }
+            }
+            _ => {}
+        }
+    }
+    (instructions, items)
+}
+
+/// Converts our ToolSpec list into the Responses API function tool array.
+fn responses_tools_from_specs(
+    tools: Option<&[crate::tools::ToolSpec]>,
+) -> Option<Vec<serde_json::Value>> {
+    let tools = tools?;
+    if tools.is_empty() {
+        return None;
+    }
+    let out: Vec<serde_json::Value> = tools
+        .iter()
+        .filter(|t| !t.name.trim().is_empty())
+        .map(|t| {
+            serde_json::json!({
+                "type": "function",
+                "name": t.name,
+                "description": t.description,
+                "parameters": t.parameters,
+            })
+        })
+        .collect();
+    if out.is_empty() { None } else { Some(out) }
+}
+
+fn responses_tools_from_json(tools: &[serde_json::Value]) -> Option<Vec<serde_json::Value>> {
+    if tools.is_empty() {
+        return None;
+    }
+    let out: Vec<serde_json::Value> = tools
+        .iter()
+        .filter_map(|t| {
+            let func = t.get("function").unwrap_or(t);
+            let name = func.get("name").and_then(|v| v.as_str()).unwrap_or_default();
+            if name.trim().is_empty() {
+                return None;
+            }
+            Some(serde_json::json!({
+                "type": "function",
+                "name": name,
+                "description": func.get("description").and_then(|v| v.as_str()).unwrap_or_default(),
+                "parameters": func
+                    .get("parameters")
+                    .cloned()
+                    .unwrap_or_else(|| serde_json::json!({ "type": "object", "properties": {} })),
+            }))
+        })
+        .collect();
+    if out.is_empty() { None } else { Some(out) }
 }
 
 #[async_trait]
 impl Provider for OpenAiResponsesProvider {
     fn capabilities(&self) -> ProviderCapabilities {
         ProviderCapabilities {
-            native_tool_calling: false,
+            native_tool_calling: true,
             vision: true,
             prompt_caching: true,
             responses_api: true,
         }
+    }
+
+    fn supports_native_tools(&self) -> bool {
+        true
     }
 
     async fn chat_with_system(
@@ -272,16 +592,18 @@ impl Provider for OpenAiResponsesProvider {
             )
         })?;
 
-        let adjusted_temperature = Self::adjust_temperature_for_model(model, temperature);
-
-        let request = ResponsesRequest {
-            model,
-            input: ResponsesInput::Text(message),
-            instructions: system_prompt,
-            temperature: adjusted_temperature,
-            max_output_tokens: self.max_output_tokens,
-            reasoning: None,
-        };
+        let mut request = serde_json::json!({
+            "model": model,
+            "input": message,
+        });
+        Self::apply_temperature(&mut request, model, temperature);
+        self.apply_reasoning(&mut request, model);
+        if let Some(sys) = system_prompt {
+            request["instructions"] = serde_json::Value::String(sys.to_string());
+        }
+        if let Some(max) = self.max_output_tokens {
+            request["max_output_tokens"] = serde_json::json!(max);
+        }
 
         let response = self
             .http_client()
@@ -296,6 +618,7 @@ impl Provider for OpenAiResponsesProvider {
         }
 
         let payload: ResponsesPayload = response.json().await?;
+        payload.ensure_not_failed()?;
         let text = payload.collect_text();
         if text.is_empty() {
             anyhow::bail!("OpenAI Responses returned an empty payload");
@@ -309,15 +632,6 @@ impl Provider for OpenAiResponsesProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ProviderChatResponse> {
-        let credential = self.credential.as_ref().ok_or_else(|| {
-            anyhow::anyhow!(
-                "OpenAI API key not set. Set OPENAI_API_KEY or edit config.toml \
-                 (provider = openai-responses)."
-            )
-        })?;
-
-        let adjusted_temperature = Self::adjust_temperature_for_model(model, temperature);
-
         let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
             self,
             request.messages.to_vec(),
@@ -325,77 +639,28 @@ impl Provider for OpenAiResponsesProvider {
             self.max_output_tokens.unwrap_or(0) as usize,
             None,
         );
+        let tools = responses_tools_from_specs(request.tools);
+        self.run_tools_request(&sanitized, tools, model, temperature)
+            .await
+    }
 
-        let mut instructions: Option<&str> = None;
-        let mut messages: Vec<ResponsesMessage<'_>> = Vec::new();
-        for m in &sanitized {
-            match m.role.as_str() {
-                "system" => {
-                    instructions = Some(m.content.as_str());
-                }
-                "user" => {
-                    messages.push(ResponsesMessage {
-                        role: "user",
-                        content: user_message_content(m.content.as_str()),
-                    });
-                }
-                "assistant" => {
-                    messages.push(ResponsesMessage {
-                        role: "assistant",
-                        content: ResponsesMessageContent::Text(m.content.as_str()),
-                    });
-                }
-
-                "tool" => {
-                    messages.push(ResponsesMessage {
-                        role: "assistant",
-                        content: ResponsesMessageContent::Text(m.content.as_str()),
-                    });
-                }
-                _ => {}
-            }
-        }
-
-        let payload = ResponsesRequest {
+    async fn chat_with_tools(
+        &self,
+        messages: &[ChatMessage],
+        tools: &[serde_json::Value],
+        model: &str,
+        temperature: f64,
+    ) -> anyhow::Result<ProviderChatResponse> {
+        let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            messages.to_vec(),
             model,
-            input: ResponsesInput::Messages(messages),
-            instructions,
-            temperature: adjusted_temperature,
-            max_output_tokens: self.max_output_tokens,
-            reasoning: None,
-        };
-
-        let response = self
-            .http_client()
-            .post(format!("{}/responses", self.base_url))
-            .header("Authorization", format!("Bearer {credential}"))
-            .json(&payload)
-            .send()
-            .await?;
-
-        if !response.status().is_success() {
-            return Err(super::super::api_error("OpenAI Responses", response).await);
-        }
-
-        let parsed: ResponsesPayload = response.json().await?;
-        let usage = parsed.usage.as_ref().map(|u| {
-            let cached = u
-                .input_tokens_details
-                .as_ref()
-                .and_then(|d| d.cached_tokens);
-            crate::observability::subsystem_metrics::observe_prompt_cache_usage(cached, None);
-            TokenUsage {
-                input_tokens: u.input_tokens,
-                output_tokens: u.output_tokens,
-                cached_input_tokens: cached,
-                cache_creation_input_tokens: None,
-            }
-        });
-        let text = parsed.collect_text();
-        Ok(ProviderChatResponse::text_only(
-            if text.is_empty() { None } else { Some(text) },
-            usage,
-        ))
+            self.max_output_tokens.unwrap_or(0) as usize,
+            None,
+        );
+        let tools = responses_tools_from_json(tools);
+        self.run_tools_request(&sanitized, tools, model, temperature)
+            .await
     }
 
     async fn chat_structured(
@@ -412,31 +677,11 @@ impl Provider for OpenAiResponsesProvider {
             )
         })?;
 
-        let adjusted_temperature = Self::adjust_temperature_for_model(model, temperature);
+        let (instructions, input_items) = build_responses_input_items(messages);
 
-        let mut instructions: Option<&str> = None;
-        let mut input_msgs: Vec<ResponsesMessage<'_>> = Vec::new();
-        for m in messages {
-            match m.role.as_str() {
-                "system" => instructions = Some(m.content.as_str()),
-                "user" => input_msgs.push(ResponsesMessage {
-                    role: "user",
-                    content: user_message_content(m.content.as_str()),
-                }),
-                "assistant" => input_msgs.push(ResponsesMessage {
-                    role: "assistant",
-                    content: ResponsesMessageContent::Text(m.content.as_str()),
-                }),
-                _ => {}
-            }
-        }
-
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
-            "input": input_msgs,
-            "instructions": instructions,
-            "temperature": adjusted_temperature,
-            "max_output_tokens": self.max_output_tokens,
+            "input": input_items,
             "text": {
                 "format": {
                     "type": "json_schema",
@@ -446,6 +691,14 @@ impl Provider for OpenAiResponsesProvider {
                 }
             }
         });
+        Self::apply_temperature(&mut body, model, temperature);
+        self.apply_reasoning(&mut body, model);
+        if let Some(max) = self.max_output_tokens {
+            body["max_output_tokens"] = serde_json::json!(max);
+        }
+        if let Some(instr) = instructions {
+            body["instructions"] = serde_json::Value::String(instr);
+        }
 
         let response = self
             .http_client()
@@ -460,6 +713,7 @@ impl Provider for OpenAiResponsesProvider {
         }
 
         let parsed: ResponsesPayload = response.json().await?;
+        parsed.ensure_not_failed()?;
         let usage = parsed.usage.as_ref().map(|u| {
             let cached = u
                 .input_tokens_details

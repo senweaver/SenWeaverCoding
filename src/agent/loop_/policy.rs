@@ -334,6 +334,19 @@ impl<'a> PolicyBundle<'a> {
                         *queue = compacted;
                     }
 
+                    fn droppable_under_backpressure(event: &TurnEvent) -> bool {
+                        matches!(
+                            event,
+                            TurnEvent::Chunk { .. }
+                                | TurnEvent::Thinking { .. }
+                                | TurnEvent::StatusUpdate { .. }
+                                | TurnEvent::ProgressTick { .. }
+                                | TurnEvent::SubagentChunk { .. }
+                                | TurnEvent::WorkerProgress { .. }
+                                | TurnEvent::CommandPreview { .. }
+                        )
+                    }
+
                     fn enqueue(
                         queue: &mut VecDeque<TurnEvent>,
                         event: TurnEvent,
@@ -362,17 +375,34 @@ impl<'a> PolicyBundle<'a> {
                             compact_text_events(queue);
                             if queue.len() > MAX_BRIDGE_QUEUE_EVENTS {
                                 let overflow = queue.len() - MAX_BRIDGE_QUEUE_EVENTS;
-                                for _ in 0..overflow {
-                                    queue.pop_front();
+                                let mut dropped = 0usize;
+                                let mut idx = 0usize;
+                                while dropped < overflow && idx < queue.len() {
+                                    if droppable_under_backpressure(&queue[idx]) {
+                                        queue.remove(idx);
+                                        dropped += 1;
+                                    } else {
+                                        idx += 1;
+                                    }
                                 }
-                                *dropped_total += overflow as u64;
-                                tracing::warn!(
-                                    target: "agent.event_bridge",
-                                    dropped = overflow,
-                                    dropped_total = *dropped_total,
-                                    cap = MAX_BRIDGE_QUEUE_EVENTS,
-                                    "turn event bridge queue exceeded cap after text compaction; dropped oldest events (consumer too slow)"
-                                );
+                                if dropped > 0 {
+                                    *dropped_total += dropped as u64;
+                                    tracing::warn!(
+                                        target: "agent.event_bridge",
+                                        dropped,
+                                        dropped_total = *dropped_total,
+                                        cap = MAX_BRIDGE_QUEUE_EVENTS,
+                                        "turn event bridge queue exceeded cap after text compaction; dropped oldest droppable events (consumer too slow)"
+                                    );
+                                }
+                                if queue.len() > MAX_BRIDGE_QUEUE_EVENTS {
+                                    tracing::warn!(
+                                        target: "agent.event_bridge",
+                                        len = queue.len(),
+                                        cap = MAX_BRIDGE_QUEUE_EVENTS,
+                                        "turn event bridge queue over cap with only critical events; retaining all to avoid losing permission/tool events"
+                                    );
+                                }
                             }
                         }
                     }

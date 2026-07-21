@@ -1058,6 +1058,8 @@ fn compact_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) -> bool
         if turn.content.chars().count() > CHANNEL_HISTORY_COMPACT_CONTENT_CHARS {
             turn.content =
                 truncate_with_ellipsis(&turn.content, CHANNEL_HISTORY_COMPACT_CONTENT_CHARS);
+            turn.metadata
+                .remove(crate::providers::traits::TURN_COMPANION_KEY);
         }
     }
 
@@ -1070,8 +1072,16 @@ fn compact_sender_history(ctx: &ChannelRuntimeContext, sender_key: &str) -> bool
     true
 }
 
+fn cached_turn_chars(turn: &ChatMessage) -> usize {
+    turn.content.chars().count()
+        + turn
+            .turn_companion()
+            .map(|c| c.chars().count())
+            .unwrap_or(0)
+}
+
 fn proactive_trim_turns(turns: &mut Vec<ChatMessage>, budget: usize) -> usize {
-    let total_chars: usize = turns.iter().map(|t| t.content.chars().count()).sum();
+    let total_chars: usize = turns.iter().map(cached_turn_chars).sum();
     if total_chars <= budget || turns.len() <= 1 {
         return 0;
     }
@@ -1080,7 +1090,7 @@ fn proactive_trim_turns(turns: &mut Vec<ChatMessage>, budget: usize) -> usize {
     let mut drop_count = 0;
 
     while excess > 0 && drop_count < turns.len().saturating_sub(1) {
-        excess = excess.saturating_sub(turns[drop_count].content.chars().count());
+        excess = excess.saturating_sub(cached_turn_chars(&turns[drop_count]));
         drop_count += 1;
     }
 
@@ -1867,6 +1877,7 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         match tools::McpRegistry::connect_all(&config.mcp.servers).await {
             Ok(registry) => {
                 let registry = Arc::new(registry);
+                tools::mcp::client::register_global_registry(Arc::clone(&registry));
                 if mcp_deferred_enabled {
                     let deferred_set =
                         tools::DeferredMcpToolSet::from_registry(Arc::clone(&registry)).await;
@@ -1946,16 +1957,15 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
             None
         };
 
+    // Channel daemons have no stdin approval surface for the requesting chat
+    // user: construct with non-interactive semantics so approval fallbacks
+    // deny cleanly instead of blocking the daemon process on its own terminal.
     let approval_manager = Arc::new({
         let audit_path = config
             .config_path
             .parent()
             .map(|p| p.join("approval_audit.jsonl"));
-        let mut mgr = ApprovalManager::from_config(&config.autonomy);
-        if let Some(p) = audit_path {
-            mgr = mgr.with_audit_log_path(p);
-        }
-        mgr
+        ApprovalManager::for_surface(&config.autonomy, false, audit_path)
     });
 
     let skills_for_prompt = crate::skills::load_skills_with_config(&workspace_dir, &config);
@@ -2295,6 +2305,37 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         }
     }
 
+    #[cfg(feature = "plugins-wasm")]
+    if config.plugins.enabled {
+        let plugin_workspace = workspace_dir.clone();
+        match crate::plugins::host::PluginHost::from_plugins_config(
+            &plugin_workspace,
+            &config.plugins,
+        ) {
+            Ok(host) => {
+                if let Some(svc) = crate::services::try_get_services() {
+                    svc.plugin_service.sync_from_host(&host).await;
+                }
+                for (name, _desc, wasm_path) in host.channel_plugin_specs() {
+                    let channel_name = format!("wasm:{name}");
+                    let ch = Arc::new(crate::plugins::wasm::channel::WasmChannel::new(
+                        channel_name.clone(),
+                        name,
+                        wasm_path,
+                    ));
+                    channels_map.insert(channel_name, ch as Arc<dyn Channel>);
+                }
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "channels",
+                    error = %e,
+                    "failed to load WASM channel plugins"
+                );
+            }
+        }
+    }
+
     if channels_map.is_empty() {
         if background_listeners_started {
             tracing::info!(
@@ -2595,13 +2636,13 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                     )
                     .await
                 };
-                let user_content = if memory_ctx.is_empty() {
-                    enriched_content
-                } else {
-                    format!("{memory_ctx}{enriched_content}")
-                };
-
-                let user_turn = ChatMessage::user(user_content.clone());
+                let companion = crate::agent::loop_::build_cli_turn_companion(
+                    &msg_clone.content,
+                    &enriched_content,
+                    &memory_ctx,
+                );
+                let user_turn =
+                    ChatMessage::user(msg_clone.content.clone()).with_turn_companion(companion);
                 history.push(user_turn.clone());
                 append_sender_turn(&ctx_clone, &sender_key_clone, user_turn).await;
 
@@ -2736,7 +2777,7 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                                 rollback_orphan_user_turn(
                                     &ctx_clone,
                                     &sender_key_clone,
-                                    &user_content,
+                                    &msg_clone.content,
                                 )
                                 .await;
                             }
@@ -2752,7 +2793,7 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                                 rollback_orphan_user_turn(
                                     &ctx_clone,
                                     &sender_key_clone,
-                                    &user_content,
+                                    &msg_clone.content,
                                 )
                                 .await;
                             }

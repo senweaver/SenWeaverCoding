@@ -37,5 +37,6 @@ pub use ops_applier::{
 };
 pub use traits::{Applier, ApplyError, ApplyOptions, ApplyOutcome};
 pub use validator::{
-    ValidationIssue, ValidationKind, ValidationReport, validate_bytes, validate_bytes_with_lang,
+    ValidationIssue, ValidationKind, ValidationReport, bracket_checkable_path,
+    grammar_id_for_path, validate_bytes, validate_bytes_with_lang, validate_edit,
 };

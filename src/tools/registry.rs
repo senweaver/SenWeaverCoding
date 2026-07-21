@@ -56,7 +56,9 @@ impl ToolRegistry {
     }
 
     pub fn schema_snapshot(&self) -> Vec<ToolSpec> {
-        self.by_name.iter().map(|entry| entry.spec()).collect()
+        let mut specs: Vec<ToolSpec> = self.by_name.iter().map(|entry| entry.spec()).collect();
+        specs.sort_by(|a, b| a.name.cmp(&b.name));
+        specs
     }
 
     pub fn schema_snapshot_arc(&self) -> Arc<[ToolSpec]> {
@@ -65,10 +67,13 @@ impl ToolRegistry {
     }
 
     pub fn tool_names(&self) -> Vec<String> {
-        self.by_name
+        let mut names: Vec<String> = self
+            .by_name
             .iter()
             .map(|entry| entry.key().clone())
-            .collect()
+            .collect();
+        names.sort();
+        names
     }
 
     #[inline]

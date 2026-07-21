@@ -90,7 +90,7 @@ export function ListDetail({ input, result }: ToolViewProps) {
         result &&
         !result.isError && (
           <div className="rounded-md border border-[var(--color-border)]/60 bg-[var(--color-surface-container-low)] px-3 py-2 text-[11px] text-[var(--color-text-tertiary)]">
-            No output
+            {t('tool.noOutput')}
           </div>
         )
       )}

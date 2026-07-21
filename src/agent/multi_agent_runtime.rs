@@ -47,6 +47,36 @@ impl MultiAgentRuntime {
         let registry = AgentRegistryHandle::new(AgentRegistry::new());
         let supervisor =
             SupervisorHandle::new(Supervisor::new(supervisor_config, registry.clone()));
+        {
+            let reg = registry.clone();
+            supervisor.set_restart_callback(Box::new(move |info| {
+                let id = info.id.as_str();
+                // A "stale" agent that still holds a task is almost always a
+                // false positive: subagents emit no heartbeat during a single
+                // long LLM call (minutes are common), so check_stale flags them
+                // as dead. Resetting such an agent to Idle here would let
+                // find_best_available hand it a SECOND task (double-dispatch past
+                // max_concurrency, then a load underflow masked by saturating_sub).
+                // Treat the heartbeat as a lease: for a busy agent just renew it;
+                // only genuinely task-free agents are restored to Idle.
+                if reg.get(id).and_then(|a| a.current_task).is_some() {
+                    let _ = reg.heartbeat(id);
+                    tracing::debug!(
+                        agent_id = %id,
+                        "Supervisor: agent flagged stale but still holds a task; renewing lease instead of resetting"
+                    );
+                    return true;
+                }
+                if reg.heartbeat(id).is_err() {
+                    return false;
+                }
+                if reg.set_state(id, crate::agent::registry::AgentState::Idle).is_err() {
+                    return false;
+                }
+                tracing::info!(agent_id = %id, "Supervisor restart: registry agent restored to Idle");
+                true
+            }));
+        }
         let task_queue = TaskQueueHandle::new(TaskQueue::new());
         let coordinator = CoordinatorHandle::new(Coordinator::new());
         let blackboard = BlackboardHandle::new(Blackboard::with_persistence(
@@ -99,10 +129,11 @@ impl MultiAgentRuntime {
                     let event = match rx.recv().await {
                         Ok(event) => event,
                         Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                            debug!(
+                            warn!(
                                 skipped,
-                                "event registry bridge lagged behind event bus; continuing"
+                                "event registry bridge lagged behind event bus; reconciling agent loads"
                             );
+                            registry.reconcile_loads_after_event_lag();
                             continue;
                         }
                         Err(tokio::sync::broadcast::error::RecvError::Closed) => {
@@ -178,13 +209,45 @@ impl MultiAgentRuntime {
     pub const STALE_RUNNING_TASK_MAX: std::time::Duration =
         std::time::Duration::from_secs(30 * 60);
 
+    pub const FINISHED_TASK_MAX_AGE: std::time::Duration =
+        std::time::Duration::from_secs(6 * 60 * 60);
+
     pub fn maintenance(&self) -> MaintenanceReport {
         let supervisor_events = self.supervisor.health_check();
+        // When an agent is confirmed dead (restart failed / shut down), release
+        // the region locks it still holds instead of waiting out their TTL, so a
+        // sibling agent is not blocked on a corpse.
+        for event in &supervisor_events {
+            if matches!(
+                event.kind,
+                crate::agent::supervisor::SupervisorEventKind::RestartFailed
+                    | crate::agent::supervisor::SupervisorEventKind::ShutDown
+            ) {
+                let released = self
+                    .coordinator
+                    .locks()
+                    .release_all_for_agent(event.agent_id.as_str());
+                if released > 0 {
+                    debug!(
+                        agent_id = %event.agent_id,
+                        released,
+                        "released region locks held by dead agent"
+                    );
+                }
+            }
+        }
         let expired_tasks = self.task_queue.inner().expire_overdue();
         let reclaimed_tasks = self
             .task_queue
             .inner()
             .reclaim_stale_running(Self::STALE_RUNNING_TASK_MAX);
+        // Drop long-finished tasks so the in-memory task map cannot grow without
+        // bound across a long-lived multi-agent session.
+        let purged_tasks = self
+            .task_queue
+            .inner()
+            .purge_old(Self::FINISHED_TASK_MAX_AGE);
+        let _ = purged_tasks;
         let expired_entries = self.blackboard.inner().evict_expired();
         let (expired_locks, expired_barriers, expired_votes) = self.coordinator.maintenance();
 
@@ -268,8 +331,10 @@ impl MultiAgentRuntime {
         let mut scheduler = TaskScheduler::new(max_parallel.max(1));
         scheduler.add_tasks(tasks.clone())?;
 
+        const DELEGATION_RECORD_TTL: std::time::Duration =
+            std::time::Duration::from_secs(24 * 60 * 60);
         for t in &tasks {
-            self.blackboard.inner().write(
+            self.blackboard.inner().write_with_ttl(
                 format!("delegation/{}", t.id),
                 serde_json::json!({
                     "task_id": &t.id,
@@ -283,6 +348,7 @@ impl MultiAgentRuntime {
                 }),
                 "multi_agent_runtime",
                 "delegations",
+                DELEGATION_RECORD_TTL,
             );
         }
 
@@ -295,7 +361,7 @@ impl MultiAgentRuntime {
         let outcomes = runtime.run_with_context(executor, span_ctx).await;
 
         for outcome in &outcomes {
-            self.blackboard.inner().write(
+            self.blackboard.inner().write_with_ttl(
                 format!("result/{}", outcome.task_id),
                 serde_json::json!({
                     "task_id": &outcome.task_id,
@@ -308,6 +374,7 @@ impl MultiAgentRuntime {
                 }),
                 "multi_agent_runtime",
                 "task_results",
+                DELEGATION_RECORD_TTL,
             );
         }
 
@@ -553,9 +620,17 @@ impl MultiAgentRuntimeBuilder {
     }
 
     pub fn build(self) -> Arc<MultiAgentRuntime> {
-        Arc::new(MultiAgentRuntime::with_config(
-            self.config.supervisor_config,
-        ))
+        match init_global_runtime_with_config(self.config) {
+            Ok(runtime) => runtime,
+            Err(e) => {
+                tracing::error!(
+                    error = %e,
+                    "MultiAgentRuntimeBuilder rejected shared identities; \
+                     falling back to a fresh runtime with default supervisor config"
+                );
+                Arc::new(MultiAgentRuntime::with_config(SupervisorConfig::default()))
+            }
+        }
     }
 
     pub fn build_handle(self) -> MultiAgentRuntimeHandle {
@@ -628,6 +703,15 @@ pub fn session_scoped_key(key: &str) -> String {
     }
 }
 
+pub fn workspace_scoped_key(key: &str) -> String {
+    match crate::session::current_session_context() {
+        Some(ctx) if !ctx.workspace_key.is_empty() => {
+            format!("ws::{}::{}", ctx.workspace_key, key)
+        }
+        _ => format!("__global__::{key}"),
+    }
+}
+
 pub fn session_scoped_namespace(namespace: &str) -> String {
     match crate::session::current_session_context() {
         Some(ctx) if !ctx.session_id.is_empty() => format!("{namespace}:{}", ctx.session_id),
@@ -637,6 +721,11 @@ pub fn session_scoped_namespace(namespace: &str) -> String {
 
 pub fn register_configured_agents(rt: &MultiAgentRuntime, config: &crate::config::Config) {
     use crate::agent::registry::{AgentCapability, AgentInfo};
+
+    // Adopt the user's configured subagent concurrency ceiling (the global runtime
+    // limiter is built with the default before config is available).
+    rt.subagent_limiter
+        .set_max_concurrent(config.agent_runtime.subagent_limit.max_concurrent);
 
     if rt.registry.get("primary").is_none() {
         let mut primary = AgentInfo::new("primary", "Primary Agent", "coder");

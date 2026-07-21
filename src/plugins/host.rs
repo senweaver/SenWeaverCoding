@@ -343,6 +343,20 @@ impl PluginHost {
             .collect()
     }
 
+    pub fn channel_plugin_specs(&self) -> Vec<(String, Option<String>, PathBuf)> {
+        self.loaded
+            .values()
+            .filter(|p| p.manifest.capabilities.contains(&PluginCapability::Channel))
+            .map(|p| {
+                (
+                    p.manifest.name.clone(),
+                    p.manifest.description.clone(),
+                    p.wasm_path.clone(),
+                )
+            })
+            .collect()
+    }
+
     pub fn plugins_dir(&self) -> &Path {
         &self.plugins_dir
     }

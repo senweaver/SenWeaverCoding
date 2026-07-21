@@ -17,7 +17,6 @@ use sha2::{Digest, Sha256};
 use super::edit_op::{EditBatch, EditOp, NotebookCellOp, PreconditionError};
 use super::heuristic::apply_unified_diff;
 use super::traits::{ApplyError, ApplyOptions};
-use super::validator::validate_bytes;
 
 pub trait LockGuard: Send + Sync {}
 
@@ -228,18 +227,55 @@ struct JournalRecord {
     ts: DateTime<Utc>,
 }
 
+mod journal_bytes {
+    use base64::Engine as _;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(
+        value: &Option<Vec<u8>>,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        match value {
+            Some(bytes) => serializer
+                .serialize_some(&base64::engine::general_purpose::STANDARD.encode(bytes)),
+            None => serializer.serialize_none(),
+        }
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<Option<Vec<u8>>, D::Error> {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Text(String),
+            Raw(Vec<u8>),
+        }
+        Ok(match Option::<Repr>::deserialize(deserializer)? {
+            None => None,
+            Some(Repr::Raw(v)) => Some(v),
+            Some(Repr::Text(t)) => Some(
+                base64::engine::general_purpose::STANDARD
+                    .decode(t.as_bytes())
+                    .map_err(serde::de::Error::custom)?,
+            ),
+        })
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct PreImage {
 
     path: PathBuf,
 
+    #[serde(default, with = "journal_bytes")]
     bytes: Option<Vec<u8>>,
 
-    #[serde(default)]
+    #[serde(default, with = "journal_bytes")]
     rename_target_bytes: Option<Vec<u8>>,
     #[serde(default)]
     rename_from: Option<PathBuf>,
-    #[serde(default)]
+    #[serde(default, with = "journal_bytes")]
     rename_from_bytes: Option<Vec<u8>>,
     sha256: Option<String>,
     mtime_ms: Option<u64>,
@@ -276,6 +312,7 @@ pub struct OpsApplier {
     allowed_roots: Vec<PathBuf>,
     lock_provider: Arc<dyn LockProvider>,
     validator: Arc<dyn BatchValidator>,
+    validator_is_noop: bool,
     apply_opts: ApplyOptions,
     journal_retention: usize,
 
@@ -328,6 +365,36 @@ impl OpsApplier {
         Self::default_for_shared_workspace(Arc::new(RwLock::new(canon)))
     }
 
+    /// Build an applier wired to the real concurrency guards: the region lock
+    /// provider from the global multi-agent runtime (so two agents / a user and
+    /// an agent editing the same file serialize instead of clobbering each
+    /// other) plus the workspace's shared edit-history (for journal + revert).
+    ///
+    /// This is the correct constructor for every edit path outside the main tool
+    /// surface (inline-edit, CodeEditFlow, NEP apply, write_mode, diff_session,
+    /// TUI hunk revert). Prefer it over `default_for_workspace`, which installs a
+    /// `NoopLockProvider` and therefore offers no cross-writer protection.
+    #[must_use]
+    pub fn locked_for_workspace(workspace_root: impl Into<PathBuf>) -> Self {
+        let raw = workspace_root.into();
+        let canon = std::fs::canonicalize(&raw).unwrap_or(raw);
+        let history_root = if canon.as_os_str().is_empty() {
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+        } else {
+            canon.clone()
+        };
+        // Resolve the runtime lazily on every acquire: an applier built before
+        // the multi-agent runtime comes up would otherwise be pinned to a no-op
+        // provider forever and never serialize with other writers.
+        let lock_provider: Arc<dyn LockProvider> = Arc::new(
+            crate::apply_model::lock_manager_provider::LazyRuntimeLockProvider::new("edit_path"),
+        );
+        let history = crate::tools::edit_history::EditHistory::shared_for_workspace(&history_root);
+        Self::default_for_shared_workspace(Arc::new(RwLock::new(canon)))
+            .with_lock_provider(lock_provider)
+            .with_edit_history(history)
+    }
+
     #[must_use]
     pub fn default_for_shared_workspace(workspace_root: Arc<RwLock<PathBuf>>) -> Self {
         Self {
@@ -335,6 +402,7 @@ impl OpsApplier {
             allowed_roots: Vec::new(),
             lock_provider: Arc::new(NoopLockProvider),
             validator: Arc::new(NoopBatchValidator),
+            validator_is_noop: true,
             apply_opts: ApplyOptions::default(),
             journal_retention: 64,
             symbol_graph_writer: None,
@@ -385,6 +453,7 @@ impl OpsApplier {
     #[must_use]
     pub fn with_validator(mut self, validator: Arc<dyn BatchValidator>) -> Self {
         self.validator = validator;
+        self.validator_is_noop = false;
         self
     }
 
@@ -410,9 +479,37 @@ impl OpsApplier {
         batch: EditBatch,
     ) -> Result<BatchOutcome, ApplyBatchError> {
         let ws = self.workspace_snapshot();
+
+        // Reject a batch that carries more than one byte-offset mutation
+        // (Replace/Insert/Delete) against the same file: their offsets are all
+        // computed against the original text, so applying the second against the
+        // already-mutated file corrupts it (or trips the old_text guard and
+        // rolls the whole batch back). Callers that need multiple edits per file
+        // must pre-merge them into one op (as multi_edit already does).
+        if let Some(dup) = first_conflicting_multi_op_path(&batch) {
+            return Err(ApplyBatchError::Apply {
+                op_index: 0,
+                path: dup.clone(),
+                source: anyhow::anyhow!(
+                    "batch contains multiple byte-offset edits to the same file ({}); \
+                     merge them into a single op before applying (offsets would collide)",
+                    dup.display()
+                ),
+            });
+        }
+
+        let unique_paths = unique_touched_paths(&batch);
+        let region_requests = region_requests_for_batch(&batch);
+        let _guard = self
+            .lock_provider
+            .acquire_for_regions(&region_requests, &batch.origin.holder_tag())
+            .await?;
+
         {
             // Precondition checks read files from disk; run them on the blocking pool so the
             // async worker thread (and the agent loop sharing it) is never stalled per edit.
+            // Crucially this runs AFTER the region lock is held, so a concurrent
+            // writer cannot slip in between the check and the apply.
             let batch_for_validate = batch.clone();
             let allowed_roots = self.allowed_roots.clone();
             let validate = tokio::task::spawn_blocking(move || -> Result<(), ApplyBatchError> {
@@ -437,13 +534,6 @@ impl OpsApplier {
             }
         }
 
-        let unique_paths = unique_touched_paths(&batch);
-        let region_requests = region_requests_for_batch(&batch);
-        let _guard = self
-            .lock_provider
-            .acquire_for_regions(&region_requests, batch.origin.tag())
-            .await?;
-
         let pre_images: Arc<BTreeMap<PathBuf, PreImage>> = {
             let batch_clone = batch.clone();
             match tokio::task::spawn_blocking(move || capture_pre_images(&batch_clone)).await {
@@ -464,16 +554,30 @@ impl OpsApplier {
             .write_journal_pending(&batch, Arc::clone(&pre_images))
             .await?;
 
-        let preview = self.build_preview(&batch).await?;
+        let preview = if self.validator_is_noop {
+            BatchPreview {
+                batch_id: batch.batch_id.clone(),
+                diffs: Vec::new(),
+                created: Vec::new(),
+                deleted: Vec::new(),
+                renamed: Vec::new(),
+            }
+        } else {
+            self.build_preview(&batch).await?
+        };
 
         let mut per_op: Vec<OpOutcome> = Vec::with_capacity(batch.ops.len());
         let mut degraded = false;
         let mut applied_paths: Vec<PathBuf> = Vec::new();
+        let mut post_images: Vec<(usize, String)> = Vec::with_capacity(batch.ops.len());
 
         for (idx, op) in batch.ops.iter().enumerate() {
             let touched = op.primary_path().to_path_buf();
             match self.apply_one(idx, op).await {
-                Ok((before, after)) => {
+                Ok((before, after, post_sha)) => {
+                    if let Some(sha) = post_sha {
+                        post_images.push((idx, sha));
+                    }
                     per_op.push(OpOutcome {
                         op_index: idx,
                         touched_path: touched.clone(),
@@ -553,8 +657,13 @@ impl OpsApplier {
                     tokio::task::spawn_blocking(move || std::fs::read_to_string(&path_for_read))
                         .await;
                 if let Ok(Ok(text)) = read {
-                    let report = validate_bytes(&text);
-                    if !report.is_ok() {
+                    let before_text: Option<String> = pre_images
+                        .get(path)
+                        .and_then(|pre| pre.bytes.as_ref())
+                        .map(|b| String::from_utf8_lossy(b).into_owned());
+                    let report =
+                        super::validator::validate_edit(before_text.as_deref(), &text, Some(path));
+                    if report.is_confident_failure() {
                         if batch.atomic {
                             let _ = restore_pre_images_async(&pre_images).await;
                             self.finalize_journal_async(
@@ -567,26 +676,51 @@ impl OpsApplier {
                                 BatchValidatorError::Rejected(format!(
                                     "{}: {}",
                                     path.display(),
-                                    report
-                                        .issues
-                                        .iter()
-                                        .map(|i| i.message.clone())
-                                        .collect::<Vec<_>>()
-                                        .join("; ")
+                                    report.advisory_summary()
                                 )),
                             ));
                         }
                         degraded = true;
+                    } else if !report.is_ok() {
+                        tracing::debug!(
+                            target: "apply_model.ops_applier",
+                            path = %path.display(),
+                            issues = %report.advisory_summary(),
+                            "post-write validation produced advisory warnings; not rolling back"
+                        );
                     }
                 }
             }
         }
 
-        self.finalize_journal_async(journal_path.clone(), JournalStatus::Committed, degraded)
-            .await;
+        // Build path -> exact post-image sha from the values apply_one already
+        // computed (last op on a file wins). Passing these to the history stamp
+        // avoids a racy re-read of disk, so the revert freshness guard is keyed to
+        // what THIS batch actually wrote, not whatever a concurrent external write
+        // left behind between apply and stamp.
+        let post_hashes_by_path: std::collections::HashMap<PathBuf, String> = post_images
+            .iter()
+            .filter_map(|(idx, sha)| {
+                batch
+                    .ops
+                    .get(*idx)
+                    .map(|op| (op.primary_path().to_path_buf(), sha.clone()))
+            })
+            .collect();
+
+        self.finalize_journal_committed(
+            journal_path.clone(),
+            degraded,
+            std::mem::take(&mut post_images),
+        )
+        .await;
 
         if let Some(history) = self.edit_history.as_ref() {
-            history.stamp_latest_with_batch(unique_paths.iter(), &batch.batch_id);
+            history.stamp_latest_with_batch(
+                unique_paths.iter(),
+                &batch.batch_id,
+                &post_hashes_by_path,
+            );
         }
 
         if let Some(writer) = self.symbol_graph_writer.as_ref() {
@@ -597,6 +731,8 @@ impl OpsApplier {
                 &unique_paths,
             );
         }
+
+        crate::agent::loop_::services::note_code_files_changed(&unique_paths);
 
         if let Some(notifier) = self.lsp_notify.as_ref() {
             let applied_dedup: std::collections::HashSet<PathBuf> =
@@ -647,9 +783,13 @@ impl OpsApplier {
                     source,
                 })?
         };
+        let mut options = options.clone();
+        if options.path.is_none() {
+            options.path = Some(path.clone());
+        }
         let (outcome, _final_diff, tier) =
             super::fast_apply::apply_unified_diff_with_fast_path(
-                &source, raw_diff, options, refiner, hint,
+                &source, raw_diff, &options, refiner, hint,
             )
             .await
             .map_err(|e| ApplyBatchError::Hunk {
@@ -697,18 +837,40 @@ impl OpsApplier {
                 source,
             })?;
             let mut records: Vec<JournalRecord> = Vec::new();
+            let mut last_footer_status: Option<JournalStatus> = None;
             for line in raw.lines().filter(|l| !l.trim().is_empty()) {
                 let parsed: JournalLine = serde_json::from_str(line)
                     .map_err(|e| RollbackError::Parse(e.to_string()))?;
-                if let JournalLineKind::Record = parsed.kind {
-                    if let Some(rec) = parsed.record {
-                        records.push(rec);
+                match parsed.kind {
+                    JournalLineKind::Record => {
+                        if let Some(rec) = parsed.record {
+                            records.push(rec);
+                        }
                     }
+                    JournalLineKind::Footer => {
+                        if let Some(footer) = parsed.footer {
+                            last_footer_status = Some(footer.status);
+                        }
+                    }
+                    JournalLineKind::Header => {}
                 }
+            }
+
+            if last_footer_status == Some(JournalStatus::RolledBack) {
+                return Ok(());
             }
 
             for record in records.into_iter().rev() {
                 if let Some(pre) = &record.pre_image {
+                    if !post_image_is_fresh(&pre.path, record.post_image_sha256.as_deref()) {
+                        tracing::warn!(
+                            target: "apply_model.ops_applier",
+                            path = %pre.path.display(),
+                            "skipping rollback of a file that changed after this batch was applied \
+                             (post-image mismatch); refusing to clobber newer content"
+                        );
+                        continue;
+                    }
                     // restore_one now fully undoes renames (restores `from`, and
                     // restores/removes `to`), so no extra remove_file is needed.
                     restore_one(pre).map_err(|source| RollbackError::Io {
@@ -739,7 +901,7 @@ impl OpsApplier {
         &self,
         op_index: usize,
         op: &EditOp,
-    ) -> Result<(Option<usize>, Option<usize>), ApplyBatchError> {
+    ) -> Result<(Option<usize>, Option<usize>, Option<String>), ApplyBatchError> {
         let op = op.clone();
         let apply_opts = self.apply_opts.clone();
         let join = tokio::task::spawn_blocking(move || {
@@ -749,9 +911,14 @@ impl OpsApplier {
             EditOp::Replace {
                 path,
                 byte_range,
+                old_text,
                 new_text,
                 ..
             } => {
+                #[cfg(feature = "crdt-coordination")]
+                let remote_merged = crate::crdt::pull_remote_before_edit(path);
+                #[cfg(not(feature = "crdt-coordination"))]
+                let remote_merged = false;
                 let bytes = std::fs::read(path).map_err(|source| ApplyBatchError::Io {
                     op_index,
                     path: path.clone(),
@@ -759,6 +926,29 @@ impl OpsApplier {
                 })?;
                 let before = bytes.len();
                 validate_byte_range_for_apply(op_index, path, byte_range, before)?;
+                if remote_merged && old_text.is_empty() {
+                    return Err(ApplyBatchError::Apply {
+                        op_index,
+                        path: path.clone(),
+                        source: anyhow::anyhow!(
+                            "concurrent remote edit merged into this file; byte offsets are stale and the op carries no old_text to verify against; re-read the file and retry"
+                        ),
+                    });
+                }
+                if !old_text.is_empty()
+                    && bytes.get(byte_range.start..byte_range.end)
+                        != Some(old_text.as_bytes())
+                {
+                    return Err(ApplyBatchError::Apply {
+                        op_index,
+                        path: path.clone(),
+                        source: anyhow::anyhow!(
+                            "stale byte range: file content at {}..{} no longer matches the op's old_text (file changed since the range was computed); re-read the file and retry",
+                            byte_range.start,
+                            byte_range.end
+                        ),
+                    });
+                }
                 let mut out = Vec::with_capacity(
                     before - (byte_range.end - byte_range.start) + new_text.len(),
                 );
@@ -770,9 +960,24 @@ impl OpsApplier {
                     path: path.clone(),
                     source,
                 })?;
-                Ok((Some(before), Some(out.len())))
+                #[cfg(feature = "crdt-coordination")]
+                {
+                    let _ = crate::crdt::observe_after_disk_write(op);
+                }
+                let post = sha256_hex(&out);
+                Ok((Some(before), Some(out.len()), Some(post)))
             }
             EditOp::Insert { path, at_byte, text, .. } => {
+                #[cfg(feature = "crdt-coordination")]
+                if crate::crdt::pull_remote_before_edit(path) {
+                    return Err(ApplyBatchError::Apply {
+                        op_index,
+                        path: path.clone(),
+                        source: anyhow::anyhow!(
+                            "concurrent remote edit merged into this file; insertion offset is stale; re-read the file and retry"
+                        ),
+                    });
+                }
                 let bytes = std::fs::read(path).map_err(|source| ApplyBatchError::Io {
                     op_index,
                     path: path.clone(),
@@ -789,11 +994,29 @@ impl OpsApplier {
                     path: path.clone(),
                     source,
                 })?;
-                Ok((Some(before), Some(out.len())))
+                #[cfg(feature = "crdt-coordination")]
+                {
+                    let _ = crate::crdt::observe_after_disk_write(op);
+                }
+                let post = sha256_hex(&out);
+                Ok((Some(before), Some(out.len()), Some(post)))
             }
             EditOp::Delete {
-                path, byte_range, ..
+                path,
+                byte_range,
+                old_text,
+                ..
             } => {
+                #[cfg(feature = "crdt-coordination")]
+                if crate::crdt::pull_remote_before_edit(path) {
+                    return Err(ApplyBatchError::Apply {
+                        op_index,
+                        path: path.clone(),
+                        source: anyhow::anyhow!(
+                            "concurrent remote edit merged into this file; deletion range is stale; re-read the file and retry"
+                        ),
+                    });
+                }
                 let bytes = std::fs::read(path).map_err(|source| ApplyBatchError::Io {
                     op_index,
                     path: path.clone(),
@@ -801,6 +1024,21 @@ impl OpsApplier {
                 })?;
                 let before = bytes.len();
                 validate_byte_range_for_apply(op_index, path, byte_range, before)?;
+                // Re-verify old_text at apply time (mirrors Replace): guards against
+                // an earlier op in the same batch or an external write shifting the
+                // range between precheck and apply, so we never delete wrong bytes.
+                if let Some(expected) = old_text.as_ref() {
+                    if &bytes[byte_range.clone()] != expected.as_bytes() {
+                        return Err(ApplyBatchError::Apply {
+                            op_index,
+                            path: path.clone(),
+                            source: anyhow::anyhow!(
+                                "delete range content no longer matches expected old_text; \
+                                 file changed since the range was computed; re-read and retry"
+                            ),
+                        });
+                    }
+                }
                 let mut out =
                     Vec::with_capacity(before - (byte_range.end - byte_range.start));
                 out.extend_from_slice(&bytes[..byte_range.start]);
@@ -810,12 +1048,18 @@ impl OpsApplier {
                     path: path.clone(),
                     source,
                 })?;
-                Ok((Some(before), Some(out.len())))
+                #[cfg(feature = "crdt-coordination")]
+                {
+                    let _ = crate::crdt::observe_after_disk_write(op);
+                }
+                let post = sha256_hex(&out);
+                Ok((Some(before), Some(out.len()), Some(post)))
             }
             EditOp::CreateFile {
                 path,
                 contents,
                 overwrite: _,
+                encoding,
             } => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).map_err(|source| ApplyBatchError::Io {
@@ -824,19 +1068,32 @@ impl OpsApplier {
                         source,
                     })?;
                 }
-                atomic_write(path, contents.as_bytes()).map_err(|source| {
+                // Preserve the file's original on-disk encoding (e.g. GBK) instead
+                // of silently rewriting it as UTF-8 and corrupting every non-ASCII
+                // byte. Falls back to UTF-8 when re-encoding is impossible.
+                let out_bytes: Vec<u8> = match encoding.as_deref() {
+                    Some(label)
+                        if !crate::tools::file::encoding::is_utf8_label(label) =>
+                    {
+                        crate::tools::file::encoding::encode_with_label(label, contents)
+                            .unwrap_or_else(|| contents.as_bytes().to_vec())
+                    }
+                    _ => contents.as_bytes().to_vec(),
+                };
+                atomic_write(path, &out_bytes).map_err(|source| {
                     ApplyBatchError::Io {
                         op_index,
                         path: path.clone(),
                         source,
                     }
                 })?;
-                Ok((None, Some(contents.len())))
+                let post = sha256_hex(&out_bytes);
+                Ok((None, Some(out_bytes.len()), Some(post)))
             }
             EditOp::DeleteFile { path, missing_ok } => match std::fs::remove_file(path) {
-                Ok(()) => Ok((None, None)),
+                Ok(()) => Ok((None, None, None)),
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound && *missing_ok => {
-                    Ok((None, None))
+                    Ok((None, None, None))
                 }
                 Err(source) => Err(ApplyBatchError::Io {
                     op_index,
@@ -857,7 +1114,7 @@ impl OpsApplier {
                     })?;
                 }
                 match std::fs::rename(from, to) {
-                    Ok(()) => Ok((None, None)),
+                    Ok(()) => Ok((None, None, None)),
                     Err(_) => {
 
                         std::fs::copy(from, to).map_err(|source| ApplyBatchError::Io {
@@ -870,7 +1127,7 @@ impl OpsApplier {
                             path: from.clone(),
                             source,
                         })?;
-                        Ok((None, None))
+                        Ok((None, None, None))
                     }
                 }
             }
@@ -880,17 +1137,38 @@ impl OpsApplier {
                 fuzz,
                 scope_anchor,
             } => {
-                let source = std::fs::read_to_string(path).map_err(|source| {
-                    ApplyBatchError::Io {
+                // Read bytes and decode best-effort so GBK/Latin-1/etc. files can be
+                // patched (previously read_to_string hard-failed with InvalidData on
+                // any non-UTF-8 file, unlike CreateFile which preserves encoding).
+                let raw_bytes = std::fs::read(path).map_err(|source| ApplyBatchError::Io {
+                    op_index,
+                    path: path.clone(),
+                    source,
+                })?;
+                // UTF-16 cannot be re-encoded by encoding_rs (its encoder emits
+                // UTF-8), so patching would silently transcode + drop the BOM.
+                // Refuse rather than corrupt — matches the pre-change safety of
+                // hard-failing on non-UTF-8.
+                if raw_bytes.starts_with(&[0xFF, 0xFE]) || raw_bytes.starts_with(&[0xFE, 0xFF]) {
+                    return Err(ApplyBatchError::Apply {
                         op_index,
                         path: path.clone(),
-                        source,
-                    }
-                })?;
+                        source: anyhow::anyhow!(
+                            "refusing to patch UTF-16 file {} (re-encoding would corrupt it); \
+                             convert to UTF-8 first",
+                            path.display()
+                        ),
+                    });
+                }
+                // Preserve a leading UTF-8 BOM across the round-trip (decode strips it).
+                let had_utf8_bom = raw_bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
+                let (source, encoding_label) =
+                    crate::tools::file::encoding::decode_best_effort(&raw_bytes);
                 let before = source.len();
                 let mut opts = apply_opts.clone();
                 opts.max_fuzz = *fuzz as usize;
                 opts.dry_run = false;
+                opts.path = Some(path.clone());
 
                 let outcome = if let Some(anchor) = scope_anchor.as_ref() {
                     let named = build_named_scopes_for(path, anchor);
@@ -898,7 +1176,7 @@ impl OpsApplier {
                         ideal_line: 0,
                         cursor_scope: None,
                         named_scopes: &named,
-                        allow_full_scan: true,
+                        allow_full_scan: false,
                     };
                     crate::observability::code_intel_metrics::incr_apply_hunk_with_anchor();
                     crate::apply_model::heuristic::apply_unified_diff_with_ctx(
@@ -912,14 +1190,26 @@ impl OpsApplier {
                     path: path.clone(),
                     source,
                 })?;
-                atomic_write(path, outcome.applied.as_bytes()).map_err(|source| {
-                    ApplyBatchError::Io {
-                        op_index,
-                        path: path.clone(),
-                        source,
-                    }
+                // Re-encode in the file's original encoding so a non-UTF-8 file
+                // stays in its encoding after patching, restoring a stripped BOM.
+                let mut out_bytes = crate::tools::file::encoding::encode_with_label(
+                    encoding_label,
+                    &outcome.applied,
+                )
+                .unwrap_or_else(|| outcome.applied.as_bytes().to_vec());
+                if had_utf8_bom && !out_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
+                    let mut with_bom = Vec::with_capacity(out_bytes.len() + 3);
+                    with_bom.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
+                    with_bom.append(&mut out_bytes);
+                    out_bytes = with_bom;
+                }
+                atomic_write(path, &out_bytes).map_err(|source| ApplyBatchError::Io {
+                    op_index,
+                    path: path.clone(),
+                    source,
                 })?;
-                Ok((Some(before), Some(outcome.applied.len())))
+                let post = sha256_hex(&out_bytes);
+                Ok((Some(before), Some(out_bytes.len()), Some(post)))
             }
             EditOp::NotebookCell { path, cell: cell_op } => {
                 let raw = std::fs::read_to_string(path).map_err(|source| {
@@ -954,7 +1244,8 @@ impl OpsApplier {
                     source,
                 })?;
                 let _ = cell_op_label(cell_op);
-                Ok((Some(raw.len()), Some(out.len())))
+                let post = sha256_hex(out.as_bytes());
+                Ok((Some(raw.len()), Some(out.len()), Some(post)))
             }
             }
         })
@@ -1097,7 +1388,7 @@ impl OpsApplier {
                             ideal_line: 0,
                             cursor_scope: None,
                             named_scopes: &named,
-                            allow_full_scan: true,
+                            allow_full_scan: false,
                         };
                         crate::apply_model::heuristic::apply_unified_diff_with_ctx(
                             &source, diff, &opts, &ctx,
@@ -1233,6 +1524,77 @@ impl OpsApplier {
         .await;
     }
 
+    /// Commit the journal: stamp each record with the post-image SHA-256 captured
+    /// during apply (so rollback can detect files that changed after our edit),
+    /// then append the committed footer and rotate old journals.
+    async fn finalize_journal_committed(
+        &self,
+        journal_path: Option<PathBuf>,
+        degraded: bool,
+        post_images: Vec<(usize, String)>,
+    ) {
+        let dir = self.journal_dir_snapshot();
+        let retention = self.journal_retention;
+        let _ = tokio::task::spawn_blocking(move || {
+            if let Some(p) = journal_path {
+                if !post_images.is_empty() {
+                    stamp_post_images_in_journal(&p, &post_images);
+                }
+                append_footer_to_path(&p, JournalStatus::Committed, degraded);
+            }
+            rotate_journals_in(&dir, retention);
+        })
+        .await;
+    }
+
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    format!("{:x}", hasher.finalize())
+}
+
+fn stamp_post_images_in_journal(path: &Path, post_images: &[(usize, String)]) {
+    let Ok(existing) = std::fs::read_to_string(path) else {
+        return;
+    };
+    let lookup: std::collections::HashMap<usize, &str> = post_images
+        .iter()
+        .map(|(idx, sha)| (*idx, sha.as_str()))
+        .collect();
+    let mut out = String::with_capacity(existing.len());
+    for line in existing.lines() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        match serde_json::from_str::<JournalLine>(line) {
+            Ok(mut parsed) => {
+                if let JournalLineKind::Record = parsed.kind {
+                    if let Some(rec) = parsed.record.as_mut() {
+                        if let Some(sha) = lookup.get(&rec.op_index) {
+                            rec.post_image_sha256 = Some((*sha).to_string());
+                        }
+                    }
+                }
+                match serde_json::to_string(&parsed) {
+                    Ok(rewritten) => {
+                        out.push_str(&rewritten);
+                        out.push('\n');
+                    }
+                    Err(_) => {
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                }
+            }
+            Err(_) => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    let _ = atomic_write(path, out.as_bytes());
 }
 
 fn build_named_scopes_for(
@@ -1244,15 +1606,18 @@ fn build_named_scopes_for(
 
     let kind = scope_kind_from_str(&anchor.kind);
     if let Some(byte_range) = anchor.byte_range.clone() {
-
-        let line_range = Range {
-            start: 1,
-            end: 1,
+        let Ok(src) = std::fs::read_to_string(path) else {
+            return Vec::new();
         };
+        let clamped = byte_range.start.min(src.len())..byte_range.end.min(src.len());
+        if clamped.start >= clamped.end {
+            return Vec::new();
+        }
+        let line_range = byte_range_to_line_range(&src, &clamped);
         return vec![NamedScope {
             kind,
             name: anchor.name.clone(),
-            byte_range,
+            byte_range: clamped,
             line_range,
         }];
     }
@@ -1358,6 +1723,20 @@ fn clamp_byte_range(byte_range: &std::ops::Range<usize>, len: usize) -> std::ops
     start..end
 }
 
+fn byte_range_to_line_range(
+    source: &str,
+    byte_range: &std::ops::Range<usize>,
+) -> std::ops::Range<usize> {
+    let start = byte_range.start.min(source.len());
+    let end = byte_range.end.min(source.len());
+    let start_line = source[..start].bytes().filter(|b| *b == b'\n').count() + 1;
+    let mut end_line = source[..end].bytes().filter(|b| *b == b'\n').count() + 1;
+    if end > 0 && source.as_bytes()[end - 1] == b'\n' {
+        end_line = end_line.saturating_sub(1);
+    }
+    start_line..end_line.max(start_line)
+}
+
 fn line_range_to_byte_range(
     source: &str,
     start_line_1: usize,
@@ -1393,28 +1772,41 @@ fn unique_touched_paths(batch: &EditBatch) -> Vec<PathBuf> {
     set.into_iter().collect()
 }
 
+/// Returns a path if the batch has 2+ byte-offset mutations (Replace/Insert/
+/// Delete) against it. Those ops all address the *original* file layout, so a
+/// second one applied after the first shifts everything and corrupts the file;
+/// callers must coalesce them into one op first.
+fn first_conflicting_multi_op_path(batch: &EditBatch) -> Option<PathBuf> {
+    let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for op in &batch.ops {
+        let path = match op {
+            EditOp::Replace { path, .. }
+            | EditOp::Insert { path, .. }
+            | EditOp::Delete { path, .. } => path.clone(),
+            _ => continue,
+        };
+        if !seen.insert(path.clone()) {
+            return Some(path);
+        }
+    }
+    None
+}
+
 fn region_requests_for_batch(batch: &EditBatch) -> Vec<RegionLockRequest> {
     let mut out: Vec<RegionLockRequest> = Vec::with_capacity(batch.ops.len());
     for op in &batch.ops {
         match op {
-            EditOp::Replace {
-                path, byte_range, ..
-            } => out.push(RegionLockRequest {
+            // Byte ops apply as a whole-file read-modify-write (read → splice →
+            // atomic_write), so a byte-range lock would let two batches touching
+            // disjoint ranges of the SAME file run concurrently and clobber each
+            // other on write-back. Lock the whole file (like ApplyHunk/CreateFile)
+            // to actually serialize same-file batches — this is what
+            // `locked_for_workspace` promises for multi-agent same-file edits.
+            EditOp::Replace { path, .. }
+            | EditOp::Insert { path, .. }
+            | EditOp::Delete { path, .. } => out.push(RegionLockRequest {
                 path: path.clone(),
-                range: byte_range.clone(),
-                exclusive: true,
-            }),
-            EditOp::Insert { path, at_byte, .. } => out.push(RegionLockRequest {
-                path: path.clone(),
-
-                range: *at_byte..at_byte.saturating_add(1),
-                exclusive: true,
-            }),
-            EditOp::Delete {
-                path, byte_range, ..
-            } => out.push(RegionLockRequest {
-                path: path.clone(),
-                range: byte_range.clone(),
+                range: 0..usize::MAX,
                 exclusive: true,
             }),
             EditOp::ApplyHunk { path, .. } => out.push(RegionLockRequest {
@@ -1569,6 +1961,18 @@ fn restore_path_bytes(path: &Path, bytes: &Option<Vec<u8>>) -> Result<(), std::i
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
             Err(e) => Err(e),
         },
+    }
+}
+
+fn post_image_is_fresh(path: &Path, expected_sha256: Option<&str>) -> bool {
+    let Some(expected) = expected_sha256 else {
+        return true;
+    };
+    match std::fs::read(path) {
+        Ok(bytes) => sha256_hex(&bytes) == expected,
+        // The file is gone (e.g. our op created it and it was later deleted, or it
+        // was removed out from under us): there is nothing newer to protect.
+        Err(_) => true,
     }
 }
 

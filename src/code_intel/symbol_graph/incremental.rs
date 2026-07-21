@@ -318,6 +318,17 @@ fn spawn_fs_watcher_for_root(root: PathBuf, entry: Arc<GlobalWriterEntry>) {
                 entry.writer.on_files_removed(&removed);
             }
             schedule_global_drain(Arc::clone(&entry));
+            // Keep any already-running LSP server in sync with external edits
+            // (user save, git checkout, formatter) so diagnostics/definitions
+            // don't drift. Guarded so it never spawns a server.
+            if let Some(svc) = crate::services::try_get_services() {
+                for p in &changed {
+                    svc.lsp.notify_external_change_if_open(p).await;
+                }
+            }
+            let mut all_touched = changed;
+            all_touched.extend(removed);
+            crate::agent::loop_::services::note_code_files_changed(&all_touched);
         }
     });
 }
@@ -356,6 +367,69 @@ pub fn get_or_build_writer(root: &Path) -> Option<Arc<SymbolGraphWriter>> {
     entry_for_root(root, true).map(|e| Arc::clone(&e.writer))
 }
 
+pub enum WriterAvailability {
+    Ready(Arc<SymbolGraphWriter>),
+    Building,
+    Unavailable,
+}
+
+static BACKGROUND_BUILDS: std::sync::OnceLock<Mutex<HashSet<PathBuf>>> =
+    std::sync::OnceLock::new();
+
+fn background_builds() -> &'static Mutex<HashSet<PathBuf>> {
+    BACKGROUND_BUILDS.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+#[must_use]
+pub fn get_writer_nonblocking(root: &Path) -> WriterAvailability {
+    if let Some(entry) = global_writers().read().get(root) {
+        return WriterAvailability::Ready(Arc::clone(&entry.writer));
+    }
+    if background_builds().lock().contains(root) {
+        return WriterAvailability::Building;
+    }
+    if persisted_graph_path(root).is_file() {
+        return match entry_for_root(root, false) {
+            Some(entry) => WriterAvailability::Ready(Arc::clone(&entry.writer)),
+            None => WriterAvailability::Unavailable,
+        };
+    }
+    if spawn_background_build(root) {
+        WriterAvailability::Building
+    } else {
+        WriterAvailability::Unavailable
+    }
+}
+
+fn spawn_background_build(root: &Path) -> bool {
+    {
+        let mut guard = background_builds().lock();
+        if !guard.insert(root.to_path_buf()) {
+            return true;
+        }
+    }
+    let root_owned = root.to_path_buf();
+    let spawned = std::thread::Builder::new()
+        .name("symbol-graph-build".to_string())
+        .spawn(move || {
+            let started = Instant::now();
+            let built = entry_for_root(&root_owned, true).is_some();
+            background_builds().lock().remove(&root_owned);
+            tracing::info!(
+                target: "code_intel.symbol_graph",
+                root = %root_owned.display(),
+                built,
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "background symbol graph seed finished"
+            );
+        })
+        .is_ok();
+    if !spawned {
+        background_builds().lock().remove(root);
+    }
+    spawned
+}
+
 // Called from the edit-apply layer after files change on disk. Marks the
 // owning workspace's graph dirty and schedules a debounced partial rebuild so
 // context injection sees fresh symbols without a manual re-index.
@@ -380,6 +454,26 @@ pub fn note_files_changed_global(paths: &[PathBuf]) {
         // read-side (context injection) path runs in spawn_blocking and cannot.
         #[cfg(feature = "fs-watch")]
         ensure_workspace_watcher(&root);
+    }
+}
+
+pub fn note_files_removed_global(paths: &[PathBuf]) {
+    if paths.is_empty() {
+        return;
+    }
+    let mut grouped: std::collections::HashMap<PathBuf, Vec<PathBuf>> =
+        std::collections::HashMap::new();
+    for p in paths {
+        if let Some(root) = find_graph_root(p) {
+            grouped.entry(root).or_default().push(p.clone());
+        }
+    }
+    for (root, group) in grouped {
+        let Some(entry) = entry_for_root(&root, false) else {
+            continue;
+        };
+        entry.writer.on_files_removed(&group);
+        schedule_global_drain(entry);
     }
 }
 

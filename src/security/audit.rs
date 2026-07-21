@@ -11,9 +11,61 @@ use sha2::{Digest, Sha256};
 use std::fs::OpenOptions;
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 use uuid::Uuid;
 
 const GENESIS_PREV_HASH: &str = "0000000000000000000000000000000000000000000000000000000000000000";
+
+static GLOBAL_AUDIT: OnceLock<Arc<AuditLogger>> = OnceLock::new();
+
+/// Returns the process-wide tamper-evident audit logger, lazily building it from
+/// the active service config on first successful call. Returns `None` until
+/// services + config are available or when auditing is disabled; callers should
+/// treat `None` as "auditing off" and continue.
+pub fn global_audit_logger() -> Option<&'static Arc<AuditLogger>> {
+    if let Some(existing) = GLOBAL_AUDIT.get() {
+        return Some(existing);
+    }
+    let svc = crate::services::try_get_services()?;
+    let cfg = svc.config();
+    if !cfg.security.audit.enabled {
+        return None;
+    }
+    let sen_dir = cfg
+        .config_path
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    let logger = AuditLogger::new(cfg.security.audit.clone(), sen_dir).ok()?;
+    let _ = GLOBAL_AUDIT.set(Arc::new(logger));
+    GLOBAL_AUDIT.get()
+}
+
+/// Append a command-execution entry to the tamper-evident audit chain. No-op
+/// when auditing is disabled or not yet initialized.
+pub fn record_command_execution(
+    channel: &str,
+    command: &str,
+    risk_level: &str,
+    approved: bool,
+    allowed: bool,
+    success: bool,
+    duration_ms: u64,
+) {
+    if let Some(logger) = global_audit_logger() {
+        if let Err(e) = logger.log_command(
+            channel,
+            command,
+            risk_level,
+            approved,
+            allowed,
+            success,
+            duration_ms,
+        ) {
+            tracing::debug!(error = %e, "audit log_command failed");
+        }
+    }
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

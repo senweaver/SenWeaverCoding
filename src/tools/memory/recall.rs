@@ -51,7 +51,7 @@ impl Tool for MemoryRecallTool {
                 "search_mode": {
                     "type": "string",
                     "enum": ["bm25", "embedding", "hybrid"],
-                    "description": "Search strategy: bm25 (keyword), embedding (semantic), or hybrid (both). Defaults to config value."
+                    "description": "Preferred search strategy hint (bm25/embedding/hybrid). The effective strategy is determined by the configured memory backend and embedding availability; this hint is validated but the backend config decides the actual mode."
                 }
             }
         })
@@ -118,6 +118,31 @@ impl Tool for MemoryRecallTool {
 
         let session_id = crate::session::current_session_context().map(|c| c.session_id);
 
+        if let Some(mode) = args.get("search_mode").and_then(|v| v.as_str()) {
+            let provider = std::env::var("SEN_MEMORY_EMBEDDING_PROVIDER")
+                .ok()
+                .or_else(|| {
+                    crate::services::try_get_services().and_then(|svc| {
+                        let cfg = svc.shared_config.load();
+                        let p = cfg.memory.embedding_provider.trim().to_string();
+                        if p.is_empty() { None } else { Some(p) }
+                    })
+                })
+                .unwrap_or_else(|| "none".into())
+                .to_ascii_lowercase();
+            let embedding_ready = !(provider.is_empty() || provider == "none");
+            if matches!(mode, "embedding" | "hybrid") && !embedding_ready {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "search_mode={mode} requires a configured memory embedding provider \
+                         (current embedding_provider={provider})"
+                    )),
+                });
+            }
+        }
+
         match self
             .memory
             .recall(query, limit, session_id.as_deref(), since, until)
@@ -134,7 +159,7 @@ impl Tool for MemoryRecallTool {
                 for entry in &entries {
                     let score = entry
                         .score
-                        .map_or_else(String::new, |s| format!(" [{s:.0}%]"));
+                        .map_or_else(String::new, |s| format!(" [{:.0}%]", s * 100.0));
                     let _ = writeln!(
                         output,
                         "- [{}] {}: {}{score}",

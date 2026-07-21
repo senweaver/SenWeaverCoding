@@ -10,6 +10,10 @@ pub trait EmbeddingProvider: Send + Sync {
 
     fn dimensions(&self) -> usize;
 
+    fn fingerprint(&self) -> String {
+        format!("{}:{}", self.name(), self.dimensions())
+    }
+
     async fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>>;
 
     async fn embed_one(&self, text: &str) -> anyhow::Result<Vec<f32>> {
@@ -100,15 +104,27 @@ impl EmbeddingProvider for OpenAiEmbedding {
         self.dims
     }
 
+    fn fingerprint(&self) -> String {
+        format!("openai:{}:{}", self.model, self.dims)
+    }
+
     async fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());
         }
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": self.model,
             "input": texts,
         });
+        // Pin the output dimensionality for models that support it (text-embedding-3-*)
+        // so the returned vectors actually match the configured `dims`. Without
+        // this the model returns its native size (e.g. 1536 for 3-small) while the
+        // fingerprint/snapshot expects `dims` (e.g. 768), so every cold start
+        // discarded the snapshot and re-embedded the whole corpus.
+        if self.model.starts_with("text-embedding-3") {
+            body["dimensions"] = serde_json::json!(self.dims);
+        }
 
         let policy = crate::util::retry::RetryPolicy::embedding();
         let resp = crate::util::retry::retry(&policy, |attempt| {
@@ -214,6 +230,10 @@ impl EmbeddingProvider for CohereEmbedding {
 
     fn dimensions(&self) -> usize {
         self.dims
+    }
+
+    fn fingerprint(&self) -> String {
+        format!("cohere:{}:{}", self.model, self.dims)
     }
 
     async fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
@@ -327,6 +347,24 @@ pub fn create_embedding_provider(
                 dims,
             ))
         }
+        "ollama" => {
+            // Local Ollama exposes an OpenAI-compatible embeddings endpoint and needs
+            // no API key, so dense retrieval works out of the box on the default build
+            // for anyone running Ollama with an embedding model (e.g. nomic-embed-text,
+            // bge-m3). Honour OLLAMA_HOST / SEN_OLLAMA_HOST for non-default hosts.
+            let base = crate::util::get_runtime_var("OLLAMA_HOST")
+                .or_else(|| crate::util::get_runtime_var("SEN_OLLAMA_HOST"))
+                .map(|h| {
+                    let h = h.trim().trim_end_matches('/');
+                    if h.contains("://") {
+                        format!("{h}/v1")
+                    } else {
+                        format!("http://{h}/v1")
+                    }
+                })
+                .unwrap_or_else(|| "http://localhost:11434/v1".to_string());
+            Box::new(OpenAiEmbedding::new(&base, api_key.unwrap_or(""), model, dims))
+        }
         "none" => Box::new(NoopEmbedding),
         name if name.starts_with("custom:") => {
             let base_url = name.strip_prefix("custom:").unwrap_or("");
@@ -335,7 +373,7 @@ pub fn create_embedding_provider(
         }
         other => {
             tracing::warn!(
-                "Unknown embedding provider '{}', falling back to noop (vector/semantic search disabled). Supported: none, openai, openrouter, cohere, custom:<url>. Run `sen doctor` for details.",
+                "Unknown embedding provider '{}', falling back to noop (vector/semantic search disabled). Supported: none, openai, openrouter, cohere, ollama, custom:<url>. Run `sen doctor` for details.",
                 other
             );
             Box::new(NoopEmbedding)

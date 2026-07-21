@@ -65,11 +65,39 @@ impl SkillShellTool {
         if let Some(obj) = args.as_object() {
             for (key, value) in obj {
                 let placeholder = format!("{{{{{}}}}}", key);
-                let replacement = value.as_str().unwrap_or_default();
-                command = command.replace(&placeholder, replacement);
+                let raw = value.as_str().unwrap_or_default();
+                // Shell-escape the model-supplied value so it can only ever be a
+                // single argument to the skill author's command, never break out
+                // of it (e.g. `& del ...`, `; rm -rf`, `$(...)`, backticks).
+                let replacement = shell_escape_arg(raw);
+                command = command.replace(&placeholder, &replacement);
             }
         }
         command
+    }
+}
+
+/// Quote an argument value for safe interpolation into a shell command line.
+/// Windows uses double quotes with `"` doubled; POSIX uses single quotes with the
+/// close-quote trick for embedded single quotes. Empty values become explicit
+/// empty quotes so a placeholder never vanishes into an adjacent token.
+fn shell_escape_arg(value: &str) -> String {
+    #[cfg(windows)]
+    {
+        // Reject control characters outright; there is no safe cmd.exe quoting.
+        if value.contains(['\r', '\n', '\0']) {
+            return "\"\"".to_string();
+        }
+        let escaped = value.replace('"', "\"\"");
+        format!("\"{escaped}\"")
+    }
+    #[cfg(not(windows))]
+    {
+        if value.contains('\0') {
+            return "''".to_string();
+        }
+        let escaped = value.replace('\'', "'\\''");
+        format!("'{escaped}'")
     }
 }
 

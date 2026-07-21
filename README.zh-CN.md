@@ -19,7 +19,7 @@ SenWeaverCoding 是一款桌面端 AI 代码编辑器：整套 Agent 运行时�
 | **桌面优先** | Tauri 2 外壳，原生菜单 / 多 Tab 会话 / 内嵌 PTY 终端 / 文件浏览 / 用于实时 Web·UI 调试的嵌入式浏览器面板。 |
 | **进程内 Rust 运行时** | 与无头部署完全相同的 crate，通过 `crate-type = ["cdylib", "staticlib", "rlib"]` 进程内加载；UI 通过本地回环 WebSocket/HTTP 网关与之通信 —— 无重量级 IPC 序列化、无外部守护进程。 |
 | **意图路由的 Coding Mode** | `Auto` 按每轮意图自动选择最合适的模式；也可显式锁定：**Agent**（默认，完全自治 + 完整工具集）、**Plan**（只读的计划撰写）、**Ask**（带引用的只读问答）、**Debug**（四阶段根因分析 + 应用内浏览器 QA）、**Curator**（研究 → DOCX/实现蓝图）、**Designer**（十种 UI/设计画布）。每种模式都会重写系统提示、工具白名单、审批策略与自动验证行为。 |
-| **130+ 工具** | 文件操作、PTY 镜像 Shell、Git、ripgrep/内容检索、glob/multi-edit/patch-apply、**代码智能**（tree-sitter 大纲 + 符号图 callers/implementors/uses + 可选 Tantivy 全文索引）、多引擎 Web 搜索/获取、无头与嵌入式浏览器、SQLite + 向量记忆、Todo/计划跟踪、图像生成、Office 文档（xlsx/pdf/docx）、MCP、Skill、Subagent 委派。 |
+| **130+ 工具** | 文件操作、PTY 镜像 Shell、Git、ripgrep/内容检索、glob/multi-edit/patch-apply、**代码智能**（tree-sitter 大纲 + 符号图 callers/implementors/uses + 倒排/mtime 增量索引）、多引擎 Web 搜索/获取、无头与嵌入式浏览器、SQLite + 向量记忆、Todo/计划跟踪、图像生成、Office 文档（xlsx/pdf/docx）、MCP、Skill、Subagent 委派。 |
 | **多 Provider** | OpenAI 兼容（含 DeepSeek / Gemini 兼容端点）、Anthropic、OpenRouter、GitHub Copilot、Claude Code、Ollama、Azure OpenAI、AWS Bedrock、Telnyx，以及本地 CLI 桥接。Provider 密钥与会话级模型路由均在应用内配置。 |
 | **持久化记忆与检查点** | SQLite + Markdown 双后端 + 向量索引，会话级工作目录隔离，rewind/restore 检查点；中断的任务会被修复，输入"继续"时续跑的是**最近一次**被中断的任务。 |
 | **自动化与可扩展** | Cron 定时自动化、Hooks、用户 Rules、Skills、MCP 服务器、多通道适配（Slack / Telegram / Discord / Matrix / Lark / …），以及基于 `/v1/agents` REST 接口的官方 TypeScript & Python SDK。 |
@@ -134,7 +134,6 @@ crate 全面按 feature 门控，无头与桌面构建只编译各自需要的�
 | --- | --- | --- |
 | **default** | `observability-prometheus`、`skill-creation`、`fs-watch`、`sandbox`、`lsp-push-diagnostics`、`tool-image`、`tool-utility-misc`、`tool-search-broad`、`tool-workspace-deep`、`tool-curator`、`lan-comms`、`office-docs` | 常规构建默认启用项。 |
 | **code-intel** | tree-sitter 语法（rust/js/ts/python/go/java/c/cpp/…） | 启用 AST 大纲 + 符号图；关闭时回退启发式。 |
-| **code-search** | `tantivy` | 增量全文代码索引。 |
 | **extras** | `tool-cron`、`tool-sop`、`tool-team`、`tool-reports`、`tool-cloud-ops`、`computer-use`… | 可选工具族（桌面端也启用这些）。 |
 | **channels** | `channel-slack`、`channel-telegram`、`channel-matrix`、`channel-lark`… | 多通道适配。 |
 
@@ -163,7 +162,7 @@ SenWeaverCoding/
 │   ├── agent/               # Turn 循环、工具分发、模式、上下文压缩
 │   ├── providers/           # OpenAI 兼容 / Anthropic / OpenRouter / Copilot / …
 │   ├── tools/               # 130+ 工具（文件/Shell/Git/Web/代码智能/…）
-│   ├── code_intel/          # tree-sitter 大纲、符号图、Tantivy 检索
+│   ├── code_intel/          # tree-sitter 大纲、符号图、倒排/mtime 增量检索
 │   ├── context/ · rag/      # 上下文组装、检索、RAG
 │   ├── gateway/             # axum HTTP + WebSocket 路由（本地回环）
 │   ├── memory/              # SQLite + Markdown + 向量索引后端
@@ -189,8 +188,8 @@ SenWeaverCoding/
 桌面应用在进程内启动 gateway 路由，React 前端通过 `127.0.0.1` 的
 WebSocket / HTTP 回环与之对话。因为后端以库（`sen_desktop_lib.{cdylib,
 staticlib}`）形式加载，UI 与 Agent 运行时之间**无 IPC 序列化开销**。
-同一网关还对外暴露 `/v1/agents` REST 接口，供 `sdk/` 下的 TypeScript 与
-Python SDK 调用。
+编程访问走 JSON-RPC 2.0 服务（`sen rpc`，HTTP `/rpc` 或 stdio/UDS），
+供 `sdk/` 下的 TypeScript 与 Python SDK 调用。
 
 ---
 

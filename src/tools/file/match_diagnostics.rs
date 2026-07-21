@@ -2,27 +2,16 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-//! Edit-match diagnostics.
-//!
-//! When an exact `old_string` match fails, a bare "not found" forces the model
-//! to guess blindly. Instead we analyze the file's ACTUAL content, locate the
-//! closest region, classify why it did not match (whitespace/indentation,
-//! line endings, or genuine drift), and return the real text with line numbers
-//! so the next edit can be grounded in the document rather than a hallucination.
 
 const MAX_SNIPPET_LINES: usize = 24;
 const MAX_OLD_PREVIEW_LINES: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MismatchKind {
-    // Content matches after trimming each line: only leading/trailing
-    // whitespace or indentation differs.
     WhitespaceOnly,
-    // Only line endings differ (CRLF vs LF) once whitespace is normalized.
     LineEndingOnly,
-    // A close-but-not-identical region exists (some lines differ).
+    ByteOrderMark,
     NearMatch,
-    // Nothing resembling old_string was found.
     NotFound,
 }
 
@@ -35,10 +24,6 @@ fn norm_line(s: &str) -> &str {
     s.trim_end_matches(['\r', '\n']).trim()
 }
 
-// Similarity of two line slices, scored over NON-BLANK target lines only, in
-// order. Blank lines carry no content signal, so counting them would let a
-// coincidental run of empty lines inflate the score and point at the wrong
-// region. Returns 0 when the target has no meaningful (non-blank) lines.
 fn window_similarity(window: &[&str], target: &[&str]) -> f32 {
     let mut meaningful = 0usize;
     let mut matched = 0usize;
@@ -58,8 +43,6 @@ fn window_similarity(window: &[&str], target: &[&str]) -> f32 {
     matched as f32 / meaningful as f32
 }
 
-// True when every line matches after trimming: the two blocks are identical
-// apart from leading/trailing whitespace and indentation.
 fn is_trimmed_equal(window: &[&str], target: &[&str]) -> bool {
     if window.len() != target.len() {
         return false;
@@ -98,15 +81,24 @@ fn old_preview(old_lines: &[&str]) -> String {
     out
 }
 
-// Analyzes why `old_string` did not match `content` and produces actionable,
-// document-grounded guidance. Returns None only when old_string is empty.
 pub fn diagnose(content: &str, old_string: &str) -> Option<MatchDiagnosis> {
     if old_string.is_empty() {
         return None;
     }
 
-    // CRLF-normalized whole-string containment: the content is present but the
-    // file uses different line endings than the supplied old_string.
+    if let Some(stripped) = content.strip_prefix('\u{feff}') {
+        if !old_string.starts_with('\u{feff}') && stripped.contains(old_string) {
+            return Some(MatchDiagnosis {
+                kind: MismatchKind::ByteOrderMark,
+                message:
+                    "The text exists but the file begins with a UTF-8 byte-order mark (BOM) that \
+                     your old_string does not include. Target text after the BOM, or edit a \
+                     unique region that does not start at the very first byte of the file."
+                        .to_string(),
+            });
+        }
+    }
+
     let content_lf = content.replace("\r\n", "\n");
     let old_lf = old_string.replace("\r\n", "\n");
     if content.contains('\r') != old_string.contains('\r') && content_lf.contains(&old_lf) {
@@ -122,9 +114,6 @@ pub fn diagnose(content: &str, old_string: &str) -> Option<MatchDiagnosis> {
 
     let source_lines: Vec<&str> = content.split_inclusive('\n').collect();
     let mut old_lines: Vec<&str> = old_lf.split('\n').collect();
-    // Drop the empty element produced by a trailing newline so the window
-    // length matches the visible content (keeps whitespace detection and the
-    // echoed snippet aligned with what the model actually supplied).
     if old_lf.ends_with('\n') && old_lines.last() == Some(&"") {
         old_lines.pop();
     }
@@ -133,9 +122,6 @@ pub fn diagnose(content: &str, old_string: &str) -> Option<MatchDiagnosis> {
     }
     let win_len = old_lines.len().max(1);
 
-    // Bound the sliding-window scan so a failed match on a very large file
-    // cannot cost hundreds of ms. Beyond the budget we skip straight to the
-    // cheaper first-line anchor search below.
     const SCAN_BUDGET: usize = 4_000_000;
     let mut best_start = 0usize;
     let mut best_score = 0.0f32;
@@ -155,14 +141,9 @@ pub fn diagnose(content: &str, old_string: &str) -> Option<MatchDiagnosis> {
             }
         }
     } else {
-        // old_string is longer than the file: compare against the whole file.
         best_score = window_similarity(&source_lines, &old_lines);
     }
 
-    // Only leading/trailing whitespace differs when EVERY line of the best
-    // window (blanks included) is trimmed-equal to old_string. Checking the
-    // real window — not just the (blank-ignoring) score — avoids mislabeling a
-    // near match as whitespace-only.
     let best_window_trimmed_equal = source_lines.len() >= win_len
         && best_start + win_len <= source_lines.len()
         && is_trimmed_equal(&source_lines[best_start..best_start + win_len], &old_lines);
@@ -179,7 +160,6 @@ pub fn diagnose(content: &str, old_string: &str) -> Option<MatchDiagnosis> {
         });
     }
 
-    // A reasonably similar region exists: show it so the model can correct.
     if best_score >= 0.34 {
         let snippet = render_snippet(&source_lines, best_start, win_len);
         let pct = (best_score * 100.0).round() as u32;
@@ -196,7 +176,6 @@ pub fn diagnose(content: &str, old_string: &str) -> Option<MatchDiagnosis> {
         });
     }
 
-    // Nothing close: maybe the first line exists elsewhere; point at it.
     let anchor = old_lines.iter().map(|l| norm_line(l)).find(|l| !l.is_empty());
     if let Some(anchor) = anchor {
         if let Some((idx, _)) = source_lines
@@ -227,11 +206,6 @@ pub fn diagnose(content: &str, old_string: &str) -> Option<MatchDiagnosis> {
     })
 }
 
-// Convenience wrapper producing the full error body appended after a
-// "not found" headline. The read-before-edit hint is added only when the text
-// is genuinely absent (NotFound): if a whitespace/near match was located the
-// file obviously contains related content, so nagging to re-read would be
-// noise and the concrete snippet is the actionable guidance instead.
 pub fn failure_message(content: &str, old_string: &str, path_display: &str, had_read: bool) -> String {
     let mut msg = format!("old_string not found in '{path_display}'.");
     let kind = match diagnose(content, old_string) {

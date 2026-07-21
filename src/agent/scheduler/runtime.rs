@@ -7,11 +7,18 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use futures_util::FutureExt;
 use parking_lot::Mutex;
 use tokio::sync::Semaphore;
 use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info_span, warn};
+
+/// Absolute ceiling for a single scheduler run. The per-subagent timeout is the
+/// primary guard; this is a defensive backstop so a wedged executor future (one
+/// that neither completes, fails, nor observes cancellation) can never hang the
+/// caller indefinitely.
+const SCHEDULER_RUN_MAX_SECS: u64 = 3 * 60 * 60;
 
 use super::core::{SchedulableTask, SchedulerEvent, TaskOutcome, TaskScheduler};
 use crate::observability::runtime_trace::{AgentSpanContext, record_event_with_ctx};
@@ -112,8 +119,19 @@ impl TaskSchedulerRuntime {
             handles.push(handle);
         }
 
-        for h in handles {
-            let _ = h.into_inner().await;
+        let join_all = async {
+            for h in handles {
+                let _ = h.into_inner().await;
+            }
+        };
+
+        let deadline = Duration::from_secs(SCHEDULER_RUN_MAX_SECS);
+        if tokio::time::timeout(deadline, join_all).await.is_err() {
+            warn!(
+                max_secs = SCHEDULER_RUN_MAX_SECS,
+                "scheduler run exceeded absolute deadline; cancelling and returning partial outcomes"
+            );
+            self.cancellation.cancel();
         }
 
         self.scheduler.lock().outcomes()
@@ -304,7 +322,21 @@ async fn execute_claimed(
             },
         );
 
-        let result = executor(&task, cancellation.clone()).await;
+        // A panicking executor must not leave the task stuck in `Running`: that
+        // would keep `is_finished()` false forever, block every other worker on
+        // `rx.recv()`, and hang the whole `delegate_parallel` call. Convert the
+        // panic into a normal task failure so the graph still converges.
+        let result = match std::panic::AssertUnwindSafe(executor(&task, cancellation.clone()))
+            .catch_unwind()
+            .await
+        {
+            Ok(r) => r,
+            Err(payload) => {
+                let msg = crate::runtime::panic_message(&payload);
+                warn!(task_id = %task_id, panic = %msg, "task executor panicked");
+                Err(format!("task executor panicked: {msg}"))
+            }
+        };
         let elapsed = busy_start.elapsed();
         add_worker_busy_nanos(worker_idx, elapsed.as_nanos().min(u128::from(u64::MAX)) as u64);
 

@@ -2,39 +2,116 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+static TESTS_FORBIDDEN_CACHE: std::sync::OnceLock<
+    parking_lot::Mutex<std::collections::HashMap<std::path::PathBuf, bool>>,
+> = std::sync::OnceLock::new();
+
+fn tests_forbidden_cache()
+-> &'static parking_lot::Mutex<std::collections::HashMap<std::path::PathBuf, bool>> {
+    TESTS_FORBIDDEN_CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn scan_forbids_tests(root: &std::path::Path) -> bool {
+    const PATTERNS: &[&str] = &[
+        "禁止测试",
+        "永久禁止",
+        "不含任何测试",
+        "不写测试",
+        "不要写测试",
+        "no test files",
+        "forbid test",
+        "forbid adding test",
+        "do not add test",
+        "do not write test",
+        "no tests in this repo",
+        "deliberately no test",
+    ];
+    for name in ["AGENTS.md", "CLAUDE.md", ".cursorrules"] {
+        if let Ok(body) = std::fs::read_to_string(root.join(name)) {
+            let lower = body.to_lowercase();
+            if PATTERNS
+                .iter()
+                .any(|p| body.contains(p) || lower.contains(&p.to_lowercase()))
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+pub fn workspace_forbids_tests() -> bool {
+    let root = match crate::session::current_session_context() {
+        Some(ctx) if !ctx.workspace_dir.trim().is_empty() => {
+            std::path::PathBuf::from(ctx.workspace_dir)
+        }
+        _ => match std::env::current_dir() {
+            Ok(d) => d,
+            Err(_) => return false,
+        },
+    };
+    if let Some(hit) = tests_forbidden_cache().lock().get(&root).copied() {
+        return hit;
+    }
+    let result = scan_forbids_tests(&root);
+    tests_forbidden_cache().lock().insert(root, result);
+    result
+}
+
+pub fn tdd_forbidden_tests_override() -> &'static str {
+    "\
+## Mode override: this workspace FORBIDS test code
+
+The workspace rules (AGENTS.md / CLAUDE.md) prohibit adding test code, so the \
+Red-Green-Refactor mandate below is SUSPENDED. Do NOT create `#[test]` / \
+`#[tokio::test]` functions, `#[cfg(test)]` modules, or `tests/*.rs` files.
+
+Use a CHECK-FIRST loop instead:
+1. **Red**: reproduce the problem with a project check/build/repro command \
+   (`cargo check`, `cargo clippy`, `bunx tsc --noEmit`, or a manual repro) and \
+   capture the failing output.
+2. **Green**: make the minimum change so that command passes.
+3. **Refactor**: clean up while keeping the check green.
+
+Every Red/Green transition MUST still be evidenced by a real command run in the \
+same turn — just never by adding test files.\n\n"
+}
+
 pub fn verification_rules() -> &'static str {
     "\
 ## Verification Discipline
 
 1. NEVER claim a fix is complete without showing passing command output.
-2. NEVER say \"tests pass\" without running the test command and quoting the result.
+2. Prefer project check commands first (`cargo check`, `cargo clippy`, \
+   `bunx tsc --noEmit`, lint/build). Only run test suites when the user asks \
+   or the workspace explicitly allows tests.
 3. After every code change that is supposed to fix something, run the relevant \
-   check command (e.g. `cargo check`, `cargo test`, `npm test`, `pytest`) and \
-   report the output verbatim.
+   check command and report the output verbatim.
 4. If a command fails, investigate the root cause before attempting another fix.
-5. Before declaring any task complete, verify by running the appropriate build/test/lint \
-   command and confirming zero errors.
-6. Evidence before assertions  -  always."
+5. Before declaring any task complete, verify by running the appropriate \
+   check/lint/build command and confirming zero errors.
+6. If workspace rules (e.g. AGENTS.md) forbid adding tests, do NOT create \
+   `#[test]` modules or `tests/*.rs`; use `cargo check` instead.
+7. Evidence before assertions  -  always."
 }
 
 pub fn tdd_rules() -> &'static str {
     "\
 ## Test-Driven Development Discipline
 
-Follow strict Red-Green-Refactor:
+Follow Red-Green-Refactor only when the workspace allows tests:
 
-1. **Red**: Write a failing test FIRST that describes the desired behavior. \
-   Run the test suite and confirm the new test fails as expected.
-2. **Green**: Write the MINIMUM code to make the failing test pass. \
-   Do not add extra functionality. Run all tests and confirm they pass.
-3. **Refactor**: Clean up the implementation while keeping all tests green. \
-   Run tests after each refactoring step.
+1. **Red**: Prefer a failing check/repro command first. Write a failing test \
+   only when tests are allowed by the user/workspace rules.
+2. **Green**: Write the MINIMUM code to make the check (or test) pass. \
+   Do not add extra functionality.
+3. **Refactor**: Clean up while keeping checks green.
 
 Rules:
-- Never write implementation code without a failing test.
-- One behavior per test  -  keep tests focused and descriptive.
-- Run the full test suite after each cycle, not just the new test.
-- If you discover a bug while implementing, write a regression test first."
+- Never invent test files when AGENTS.md or user rules forbid tests; use \
+  `cargo check` / project check commands as the verification gate.
+- One behavior per verification step.
+- If you discover a bug while implementing, capture a repro command before fixing."
 }
 
 pub fn debug_rules() -> &'static str {

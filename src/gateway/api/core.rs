@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -73,6 +73,9 @@ pub(in crate::gateway) fn require_auth(
     state: &AppState,
     headers: &HeaderMap,
 ) -> Result<(), (StatusCode, Json<serde_json::Value>)> {
+    if !state.exposed && !state.pairing.require_pairing() {
+        return Ok(());
+    }
     require_auth_with_peer(state, headers, None)
 }
 
@@ -95,12 +98,12 @@ pub(in crate::gateway) fn require_auth_with_peer(
         return Ok(());
     }
 
-    if !state.pairing.require_pairing() && peer_is_loopback(headers, peer) {
+    if peer.map(|addr| addr.ip().is_loopback()).unwrap_or(false) {
         return Ok(());
     }
 
     let token = extract_bearer_token(headers).unwrap_or("");
-    if state.pairing.is_authenticated(token) {
+    if state.pairing.is_authenticated_strict(token) {
         Ok(())
     } else {
         Err(unauthorized(
@@ -114,13 +117,6 @@ fn unauthorized(msg: &str) -> (StatusCode, Json<serde_json::Value>) {
         StatusCode::UNAUTHORIZED,
         Json(serde_json::json!({ "error": msg })),
     )
-}
-
-fn peer_is_loopback(headers: &HeaderMap, peer: Option<std::net::SocketAddr>) -> bool {
-    if let Some(addr) = peer {
-        return addr.ip().is_loopback();
-    }
-    is_request_from_localhost(headers)
 }
 
 fn verify_request_signature(
@@ -179,15 +175,7 @@ fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
     diff == 0
 }
 
-fn is_request_from_localhost(headers: &HeaderMap) -> bool {
-    if let Some(fwd) = headers.get("x-forwarded-for").and_then(|v| v.to_str().ok()) {
-        let first_ip = fwd.split(',').next().unwrap_or("").trim();
-        return first_ip == "127.0.0.1" || first_ip == "::1";
-    }
-    // No peer socket and no XFF header: we cannot prove the request is
-    // loopback, so do NOT grant the no-auth localhost shortcut. Genuine local
-    // callers reach auth through require_auth_with_peer, which sees the real
-    // ConnectInfo socket address.
+fn is_request_from_localhost(_headers: &HeaderMap) -> bool {
     false
 }
 
@@ -2177,28 +2165,6 @@ pub async fn handle_api_session_create(
         .map(|t| t.trim().to_string())
         .filter(|t| !t.is_empty());
 
-    if let Some(ref backend) = state.session_backend {
-        let backend_arc = std::sync::Arc::clone(backend);
-        let session_key_owned = session_key.clone();
-        let title_opt = explicit_title.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            let bootstrap = crate::providers::ChatMessage {
-                role: "system".to_string(),
-                content: String::new(),
-                metadata: Default::default(),
-            };
-            if let Err(e) = backend_arc.append(&session_key_owned, &bootstrap) {
-                tracing::warn!("create_session: bootstrap append failed: {e}");
-            }
-            if let Some(title) = title_opt {
-                if let Err(e) = backend_arc.set_session_name(&session_key_owned, &title) {
-                    tracing::warn!("create_session: set name failed: {e}");
-                }
-            }
-        })
-        .await;
-    }
-
     let work_dir = body
         .as_ref()
         .and_then(|Json(v)| v.get("workDir").and_then(|t| t.as_str()))
@@ -2208,13 +2174,42 @@ pub async fn handle_api_session_create(
     if let Some(ref backend) = state.session_backend {
         let backend_arc = std::sync::Arc::clone(backend);
         let session_key_owned = session_key.clone();
+        let title_opt = explicit_title.clone();
         let work_dir_owned = work_dir.clone();
-        let _ = tokio::task::spawn_blocking(move || {
-            if let Err(e) = backend_arc.set_session_work_dir(&session_key_owned, &work_dir_owned) {
+        let created = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
+            let bootstrap = crate::providers::ChatMessage {
+                role: "system".to_string(),
+                content: String::new(),
+                metadata: Default::default(),
+            };
+            backend_arc.append(&session_key_owned, &bootstrap)?;
+            if let Some(title) = title_opt {
+                if let Err(e) = backend_arc.set_session_name(&session_key_owned, &title) {
+                    tracing::warn!("create_session: set name failed: {e}");
+                }
+            }
+            if let Err(e) =
+                backend_arc.set_session_work_dir(&session_key_owned, &work_dir_owned)
+            {
                 tracing::warn!("create_session: set work_dir failed: {e}");
             }
+            Ok(())
         })
         .await;
+        let created = match created {
+            Ok(result) => result,
+            Err(join_err) => Err(std::io::Error::other(join_err.to_string())),
+        };
+        if let Err(e) = created {
+            tracing::error!("create_session: failed to persist session metadata: {e}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({
+                    "error": format!("Failed to create session: {e}"),
+                })),
+            )
+                .into_response();
+        }
     }
 
     Json(serde_json::json!({
@@ -2242,7 +2237,7 @@ pub async fn handle_api_session_messages(
     let before_param: Option<usize> = params.get("before").and_then(|v| v.parse().ok());
 
     let session_key = format!("{GW_SESSION_PREFIX}{id}");
-    let (loaded, first_index, total_rows, last_activity) = {
+    let load_result = {
         let backend_arc = std::sync::Arc::clone(backend);
         let session_key_owned = session_key.clone();
         tokio::task::spawn_blocking(move || {
@@ -2252,38 +2247,32 @@ pub async fn handle_api_session_messages(
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
             match limit_param {
                 Some(limit) => {
-                    let total = backend_arc.count_messages(&session_key_owned);
-                    let end = before_param.unwrap_or(total).min(total);
-                    let start = end.saturating_sub(limit.max(1));
-                    let loaded = backend_arc.load_with_tombstones_range(
-                        &session_key_owned,
-                        start,
-                        end - start,
-                    );
-                    (loaded, start, total, last_activity)
+                    // Single-snapshot page read: count, window and user-index
+                    // base all come from one transaction, so a concurrent
+                    // purge/delete can't shift the OFFSET mid-composition.
+                    let (loaded, start, total, base_user_index) = backend_arc
+                        .load_page_with_counts(&session_key_owned, before_param, limit);
+                    (loaded, start, total, base_user_index, last_activity)
                 }
                 None => {
                     let loaded = backend_arc.load_with_tombstones(&session_key_owned);
                     let total = loaded.len();
-                    (loaded, 0, total, last_activity)
+                    (loaded, 0, total, 0, last_activity)
                 }
             }
         })
         .await
-        .unwrap_or_else(|_| (Vec::new(), 0, 0, chrono::Utc::now().to_rfc3339()))
     };
-
-    let base_user_index: usize = match loaded.first().map(|m| m.id) {
-        Some(first_row_id) => {
-            let backend_arc = std::sync::Arc::clone(backend);
-            let session_key_owned = session_key.clone();
-            tokio::task::spawn_blocking(move || {
-                backend_arc.count_live_user_messages_before_id(&session_key_owned, first_row_id)
-            })
-            .await
-            .unwrap_or(0)
+    let (loaded, first_index, total_rows, base_user_index, last_activity) = match load_result {
+        Ok(loaded) => loaded,
+        Err(join_err) => {
+            tracing::error!("session messages load task failed: {join_err}");
+            return (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(serde_json::json!({"error": "Failed to load session messages"})),
+            )
+                .into_response();
         }
-        None => 0,
     };
 
     let messages: Vec<serde_json::Value> = {
@@ -2301,11 +2290,15 @@ pub async fn handle_api_session_messages(
             {
                 let is_live_user = lm.message.role == "user" && lm.tombstoned_at.is_none();
                 let user_message_index = is_live_user.then_some(running_user_index);
+                // Per-row created_at gives every entry its real timestamp; the
+                // session's last_activity is only a fallback — stamping ALL rows
+                // with it made whole transcripts share one fake time in the UI.
+                let row_ts = lm.created_at.as_deref().unwrap_or(&last_activity_for_map);
                 out.push(message_entry_with_tombstone(
                     &id_for_map,
                     i,
                     &lm.message,
-                    &last_activity_for_map,
+                    row_ts,
                     lm.tombstoned_at.is_some(),
                     user_message_index,
                 ));
@@ -2332,7 +2325,7 @@ pub async fn handle_api_session_messages(
                     let files_changed: Vec<String> =
                         entries.iter().map(|e| e.rel_path.clone()).collect();
                     let workspace = resolve_session_workspace(&state_cl, &session_key_owned);
-                    let history = crate::tools::edit_history::EditHistory::new(workspace.clone());
+                    let history = crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
                     let batches: Vec<String> = entries
                         .iter()
                         .flat_map(|e| e.edit_batch_ids.clone())
@@ -2723,9 +2716,12 @@ pub async fn handle_api_session_slash_commands(
         return e.into_response();
     }
 
+    // Desktop sessions execute commands over WS without a TTY: advertise only
+    // the commands that surface can actually run (plus /clear, which the WS
+    // handler implements with desktop semantics).
     let registry = crate::commands::registry::CommandRegistry::from_inventory();
-    let commands: Vec<serde_json::Value> = registry
-        .list(None)
+    let mut commands: Vec<serde_json::Value> = registry
+        .available_commands(false, false)
         .into_iter()
         .map(|c| {
             serde_json::json!({
@@ -2734,6 +2730,10 @@ pub async fn handle_api_session_slash_commands(
             })
         })
         .collect();
+    commands.push(serde_json::json!({
+        "name": "clear",
+        "description": "Clear the conversation context for this session",
+    }));
 
     Json(serde_json::json!({ "commands": commands })).into_response()
 }
@@ -2819,6 +2819,47 @@ fn summarise_batches(
     (files_changed, insertions, deletions)
 }
 
+fn rewind_session_locks()
+-> &'static parking_lot::Mutex<
+    std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+> {
+    static LOCKS: std::sync::OnceLock<
+        parking_lot::Mutex<
+            std::collections::HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>,
+        >,
+    > = std::sync::OnceLock::new();
+    LOCKS.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+async fn acquire_rewind_lock(session_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+    let lock = {
+        let mut map = rewind_session_locks().lock();
+        std::sync::Arc::clone(
+            map.entry(session_id.to_string())
+                .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(()))),
+        )
+    };
+    lock.lock_owned().await
+}
+
+/// Returns a 409 response if the session currently has a turn running, so
+/// file-mutating rewind/restore/revert endpoints don't race an in-flight turn's
+/// writes. `None` means it is safe to proceed.
+fn reject_if_session_running(state: &AppState, id: &str) -> Option<axum::response::Response> {
+    if state.session_run_state.is_running(id) {
+        return Some(
+            (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "Cannot modify workspace files while the session is generating; stop the turn first"
+                })),
+            )
+                .into_response(),
+        );
+    }
+    None
+}
+
 pub async fn handle_api_session_rewind(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -2828,6 +2869,10 @@ pub async fn handle_api_session_rewind(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
+    let _rewind_guard = acquire_rewind_lock(&id).await;
 
     let Some(ref backend) = state.session_backend else {
         return (
@@ -2887,7 +2932,7 @@ pub async fn handle_api_session_rewind(
         tokio::task::spawn_blocking(move || {
             let batches_after = backend_arc.edit_batches_after(&sk, target_user_idx);
             let workspace = resolve_session_workspace(&state_cl, &sk);
-            let history = crate::tools::edit_history::EditHistory::new(workspace.clone());
+            let history = crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
             let (files_changed, insertions, deletions) =
                 summarise_batches(&workspace, &history, &batches_after);
             (batches_after, workspace, files_changed, insertions, deletions)
@@ -2940,11 +2985,12 @@ pub async fn handle_api_session_rewind(
         let workspace = workspace.clone();
         let batches_after = batches_after.clone();
         tokio::task::spawn_blocking(move || {
-            let history = crate::tools::edit_history::EditHistory::new(workspace.clone());
+            let history = crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
             let rewind_id = format!("rw-{}", uuid::Uuid::new_v4().simple());
 
             let mut inherited_blobs: std::collections::BTreeMap<String, String> =
                 std::collections::BTreeMap::new();
+            let mut drained = 0u32;
             while let Some(prev) = backend_arc.latest_rewind_stash_for_session(&sk) {
                 if let Ok(entries) =
                     serde_json::from_str::<Vec<RewindStashEntry>>(&prev.stash_json)
@@ -2956,7 +3002,18 @@ pub async fn handle_api_session_rewind(
                     }
                 }
 
-                let _ = backend_arc.take_rewind_stash(&prev.rewind_id);
+                if backend_arc.take_rewind_stash(&prev.rewind_id).is_none() {
+                    tracing::error!(
+                        target: "rewind",
+                        rewind_id = %prev.rewind_id,
+                        "failed to drain rewind stash row; aborting stash inheritance loop"
+                    );
+                    break;
+                }
+                drained += 1;
+                if drained >= 64 {
+                    break;
+                }
             }
 
             let stash_batch_id = format!("rewind-stash-{rewind_id}");
@@ -3039,6 +3096,25 @@ pub async fn handle_api_session_rewind(
         .unwrap_or_else(|_| (String::new(), 0))
     };
 
+    if rewind_id.is_empty() {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({"error": "Rewind worker failed"})),
+        )
+            .into_response();
+    }
+
+    crate::gateway::ws::desktop::broadcast_session_event(
+        &id,
+        &serde_json::json!({
+            "type": "session_history_changed",
+            "sessionId": id,
+            "reason": "rewind",
+            "rewindId": rewind_id,
+            "userMessageIndex": target_user_idx,
+        }),
+    );
+
     Json(serde_json::json!({
         "rewindId": rewind_id,
         "target": {
@@ -3076,6 +3152,10 @@ pub async fn handle_api_session_rewind_restore(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
+    let _rewind_guard = acquire_rewind_lock(&id).await;
 
     let Some(ref backend) = state.session_backend else {
         return (
@@ -3120,7 +3200,7 @@ pub async fn handle_api_session_rewind_restore(
         let sk = session_key.clone();
         tokio::task::spawn_blocking(move || {
             let workspace = resolve_session_workspace(&state_cl, &sk);
-            let history = crate::tools::edit_history::EditHistory::new(workspace.clone());
+            let history = crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
 
             let mut restored: Vec<String> = Vec::new();
             for entry in &entries {
@@ -3130,7 +3210,7 @@ pub async fn handle_api_session_rewind_restore(
                         if let Some(parent) = abs.parent() {
                             let _ = std::fs::create_dir_all(parent);
                         }
-                        if let Err(e) = std::fs::write(&abs, &bytes) {
+                        if let Err(e) = crate::util::atomic_write(&abs, &bytes) {
                             tracing::warn!(
                                 target: "rewind",
                                 "restore: write {} failed: {e}",
@@ -3163,6 +3243,16 @@ pub async fn handle_api_session_rewind_restore(
         .unwrap_or_else(|_| (Vec::new(), 0))
     };
 
+    crate::gateway::ws::desktop::broadcast_session_event(
+        &id,
+        &serde_json::json!({
+            "type": "session_history_changed",
+            "sessionId": id,
+            "reason": "rewind_restore",
+            "rewindId": body.rewind_id,
+        }),
+    );
+
     Json(serde_json::json!({
         "ok": true,
         "rewindId": body.rewind_id,
@@ -3182,6 +3272,13 @@ pub async fn handle_api_session_rewind_commit(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
+    // Purging tombstoned rows compacts the positional id space; doing that while
+    // a turn is appending would shift the running turn's rows mid-flight. Same
+    // guard as rewind/restore.
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
+    let _rewind_guard = acquire_rewind_lock(&id).await;
 
     let Some(ref backend) = state.session_backend else {
         return (
@@ -3217,6 +3314,16 @@ pub async fn handle_api_session_rewind_commit(
         .unwrap_or(0)
     };
 
+    crate::gateway::ws::desktop::broadcast_session_event(
+        &id,
+        &serde_json::json!({
+            "type": "session_history_changed",
+            "sessionId": id,
+            "reason": "rewind_commit",
+            "rewindId": body.rewind_id,
+        }),
+    );
+
     Json(serde_json::json!({
         "ok": true,
         "rewindId": body.rewind_id,
@@ -3234,6 +3341,10 @@ pub async fn handle_api_session_revert_batches(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
+    let _rewind_guard = acquire_rewind_lock(&id).await;
 
     let session_key = format!("{GW_SESSION_PREFIX}{id}");
     let (reverted_paths, failed_batch_ids) = {
@@ -3242,7 +3353,7 @@ pub async fn handle_api_session_revert_batches(
         let batch_ids = body.edit_batch_ids.clone();
         tokio::task::spawn_blocking(move || {
             let workspace = resolve_session_workspace(&state_cl, &sk);
-            let history = crate::tools::edit_history::EditHistory::new(workspace.clone());
+            let history = crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
 
             let mut reverted_paths: Vec<String> = Vec::new();
             let mut failed_batch_ids: Vec<String> = Vec::new();
@@ -3810,11 +3921,6 @@ pub async fn handle_api_learning_features(
             "enabled": config.experience.enabled,
             "capacity": config.experience.capacity,
             "few_shot_count": config.experience.few_shot_count,
-        },
-        "self_reflection": {
-            "enabled": config.self_reflection.enabled,
-            "reflect_interval": config.self_reflection.reflect_interval,
-            "llm_reflection": config.self_reflection.llm_reflection,
         },
         "prompt_optimizer": {
             "enabled": config.prompt_optimizer.enabled,

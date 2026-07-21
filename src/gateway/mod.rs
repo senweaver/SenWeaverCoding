@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -14,8 +14,8 @@ pub mod ws;
 #[cfg(feature = "computer-use")]
 pub mod computer;
 pub mod credential_routes;
-pub mod desktop_bridge;
-pub mod desktop_routes;
+pub mod oauth_routes;
+pub mod desktop;
 pub mod evolution_routes;
 pub mod git_routes;
 #[cfg(feature = "lan-comms")]
@@ -500,8 +500,8 @@ async fn run_gateway_inner(
     prebound: Option<tokio::net::TcpListener>,
     with_scheduler: bool,
 ) -> Result<()> {
-    desktop_bridge::install_remote_controllers();
-    if desktop_bridge::bridge_mode() {
+    desktop::bridge::install_remote_controllers();
+    if desktop::bridge::bridge_mode() {
         config.gateway.require_pairing = false;
         config.gateway.allow_public_bind = false;
         config.gateway.trust_forwarded_headers = false;
@@ -603,7 +603,7 @@ async fn run_gateway_inner(
         }
     }
 
-    if crate::gateway::desktop_routes::sanitize_active_profile_in_place(&mut config) {
+    if crate::gateway::desktop::routes::sanitize_active_profile_in_place(&mut config) {
         tracing::info!(
             "gateway startup: sanitized stale default_provider/default_model in persisted config"
         );
@@ -655,6 +655,24 @@ async fn run_gateway_inner(
     });
     if let Some(svc) = crate::services::try_get_services() {
         svc.update_config(config.clone());
+        svc.oauth
+            .configure_persistence(&svc_data_dir, config.secrets.encrypt)
+            .await;
+        #[cfg(feature = "plugins-wasm")]
+        {
+            let workspace = if config.workspace_dir.as_os_str().is_empty() {
+                std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+            } else {
+                config.workspace_dir.clone()
+            };
+            if let Err(e) = svc
+                .plugin_service
+                .refresh_from_config(&workspace, &config.plugins)
+                .await
+            {
+                tracing::warn!(error = %e, "failed to sync PluginService from PluginHost");
+            }
+        }
     }
     {
         let legacy_path = svc_data_dir.join("auto_dream.json");
@@ -991,6 +1009,7 @@ async fn run_gateway_inner(
         match mcp_outcome {
             Ok(registry) => {
                 let registry = std::sync::Arc::new(registry);
+                tools::mcp::client::register_global_registry(std::sync::Arc::clone(&registry));
                 if gateway_mcp_deferred_enabled {
                     let deferred_set =
                         tools::DeferredMcpToolSet::from_registry(std::sync::Arc::clone(&registry))
@@ -1831,23 +1850,23 @@ async fn run_gateway_inner(
         )
         .route(
             "/api/sessions/{id}/design-artifacts",
-            get(desktop_routes::handle_session_design_artifacts),
+            get(desktop::routes::handle_session_design_artifacts),
         )
         .route(
             "/api/sessions/{id}/design-artifacts/delete",
-            post(desktop_routes::handle_session_design_artifact_delete),
+            post(desktop::routes::handle_session_design_artifact_delete),
         )
         .route(
             "/api/sessions/{id}/design-handoff",
-            post(desktop_routes::handle_session_design_handoff),
+            post(desktop::routes::handle_session_design_handoff),
         )
         .route(
             "/api/sessions/{id}/design-lint",
-            post(desktop_routes::handle_session_design_lint),
+            post(desktop::routes::handle_session_design_lint),
         )
         .route(
             "/api/sessions/{id}/design-units",
-            post(desktop_routes::handle_session_design_unit_add),
+            post(desktop::routes::handle_session_design_unit_add),
         )
         .route(
             "/api/sessions/{id}",
@@ -1876,59 +1895,59 @@ async fn run_gateway_inner(
         )
         .route("/hooks/claude-code", post(api::handle_claude_code_hook))
 
-        .route("/api/models", get(desktop_routes::handle_models_list))
+        .route("/api/models", get(desktop::routes::handle_models_list))
         .route(
             "/api/models/available",
-            get(desktop_routes::handle_models_available),
+            get(desktop::routes::handle_models_available),
         )
         .route(
             "/api/models/current",
-            get(desktop_routes::handle_models_current).put(desktop_routes::handle_models_set_current),
+            get(desktop::routes::handle_models_current).put(desktop::routes::handle_models_set_current),
         )
         .route(
             "/api/effort",
-            get(desktop_routes::handle_effort_get).put(desktop_routes::handle_effort_set),
+            get(desktop::routes::handle_effort_get).put(desktop::routes::handle_effort_set),
         )
         .route(
             "/api/providers",
-            get(desktop_routes::handle_providers_list).post(desktop_routes::handle_providers_create),
+            get(desktop::routes::handle_providers_list).post(desktop::routes::handle_providers_create),
         )
         .route(
             "/api/providers/presets",
-            get(desktop_routes::handle_providers_presets),
+            get(desktop::routes::handle_providers_presets),
         )
         .route(
             "/api/providers/auth-status",
-            get(desktop_routes::handle_providers_auth_status),
+            get(desktop::routes::handle_providers_auth_status),
         )
         .route(
             "/api/providers/settings",
-            get(desktop_routes::handle_providers_settings_get)
-                .put(desktop_routes::handle_providers_settings_put),
+            get(desktop::routes::handle_providers_settings_get)
+                .put(desktop::routes::handle_providers_settings_put),
         )
         .route(
             "/api/providers/official",
-            post(desktop_routes::handle_providers_official),
+            post(desktop::routes::handle_providers_official),
         )
         .route(
             "/api/providers/test",
-            post(desktop_routes::handle_providers_test_config),
+            post(desktop::routes::handle_providers_test_config),
         )
         .route(
             "/api/providers/discover-models",
-            post(desktop_routes::handle_providers_discover_models),
+            post(desktop::routes::handle_providers_discover_models),
         )
         .route(
             "/api/providers/{id}",
-            put(desktop_routes::handle_providers_update).delete(desktop_routes::handle_providers_delete),
+            put(desktop::routes::handle_providers_update).delete(desktop::routes::handle_providers_delete),
         )
         .route(
             "/api/providers/{id}/activate",
-            post(desktop_routes::handle_providers_activate),
+            post(desktop::routes::handle_providers_activate),
         )
         .route(
             "/api/providers/{id}/test",
-            post(desktop_routes::handle_providers_test),
+            post(desktop::routes::handle_providers_test),
         )
         .route(
             "/api/credentials",
@@ -1939,78 +1958,91 @@ async fn run_gateway_inner(
             delete(credential_routes::handle_delete),
         )
         .route(
-            "/api/skills",
-            get(desktop_routes::handle_skills_list).put(api::handle_api_skills_put),
+            "/api/oauth/providers",
+            get(oauth_routes::handle_list_providers).post(oauth_routes::handle_register_provider),
         )
-        .route("/api/skills/detail", get(desktop_routes::handle_skills_detail))
+        .route("/api/oauth/start", post(oauth_routes::handle_start))
+        .route(
+            "/api/oauth/callback",
+            get(oauth_routes::handle_callback),
+        )
+        .route(
+            "/api/oauth/tokens/{provider}",
+            get(oauth_routes::handle_get_tokens).delete(oauth_routes::handle_clear_tokens),
+        )
+        .route(
+            "/api/skills",
+            get(desktop::routes::handle_skills_list).put(api::handle_api_skills_put),
+        )
+        .route("/api/skills/detail", get(desktop::routes::handle_skills_detail))
         .route(
             "/api/skills/file",
-            get(desktop_routes::handle_user_skill_get)
-                .post(desktop_routes::handle_user_skill_upsert)
-                .put(desktop_routes::handle_user_skill_upsert)
-                .delete(desktop_routes::handle_user_skill_delete),
+            get(desktop::routes::handle_user_skill_get)
+                .post(desktop::routes::handle_user_skill_upsert)
+                .put(desktop::routes::handle_user_skill_upsert)
+                .delete(desktop::routes::handle_user_skill_delete),
         )
         .route(
             "/api/skills/install",
-            post(desktop_routes::handle_user_skill_install),
+            post(desktop::routes::handle_user_skill_install),
         )
-        .route("/api/rules", get(desktop_routes::handle_user_rules_list))
+        .route("/api/rules", get(desktop::routes::handle_user_rules_list))
         .route(
             "/api/rules/file",
-            get(desktop_routes::handle_user_rule_get)
-                .post(desktop_routes::handle_user_rule_upsert)
-                .put(desktop_routes::handle_user_rule_upsert)
-                .delete(desktop_routes::handle_user_rule_delete),
+            get(desktop::routes::handle_user_rule_get)
+                .post(desktop::routes::handle_user_rule_upsert)
+                .put(desktop::routes::handle_user_rule_upsert)
+                .delete(desktop::routes::handle_user_rule_delete),
         )
         .route(
             "/api/hooks",
-            get(desktop_routes::handle_hooks_get).put(desktop_routes::handle_hooks_put),
+            get(desktop::routes::handle_hooks_get).put(desktop::routes::handle_hooks_put),
         )
         .route(
             "/api/agent-config",
-            get(desktop_routes::handle_agent_config_get)
-                .put(desktop_routes::handle_agent_config_put),
+            get(desktop::routes::handle_agent_config_get)
+                .put(desktop::routes::handle_agent_config_put),
         )
         .route(
             "/api/agent-runtime",
-            get(desktop_routes::handle_agent_runtime_get)
-                .put(desktop_routes::handle_agent_runtime_put),
+            get(desktop::routes::handle_agent_runtime_get)
+                .put(desktop::routes::handle_agent_runtime_put),
         )
         .route(
             "/api/web-search",
-            get(desktop_routes::handle_web_search_get)
-                .put(desktop_routes::handle_web_search_put),
+            get(desktop::routes::handle_web_search_get)
+                .put(desktop::routes::handle_web_search_put),
         )
         .route(
             "/api/web-fetch",
-            get(desktop_routes::handle_web_fetch_get)
-                .put(desktop_routes::handle_web_fetch_put),
+            get(desktop::routes::handle_web_fetch_get)
+                .put(desktop::routes::handle_web_fetch_put),
         )
         .route(
             "/api/guardrails",
-            put(desktop_routes::handle_guardrails_put),
+            put(desktop::routes::handle_guardrails_put),
         )
         .route(
             "/api/agents/{name}",
-            get(desktop_routes::handle_agent_get)
-                .put(desktop_routes::handle_agent_update)
-                .delete(desktop_routes::handle_agent_delete),
+            get(desktop::routes::handle_agent_get)
+                .put(desktop::routes::handle_agent_update)
+                .delete(desktop::routes::handle_agent_delete),
         )
         .route(
             "/api/agents",
-            get(desktop_routes::handle_agents_list).post(desktop_routes::handle_agent_create),
+            get(desktop::routes::handle_agents_list).post(desktop::routes::handle_agent_create),
         )
         .route(
             "/api/custom-tools",
-            get(desktop_routes::handle_custom_tools_list)
-                .post(desktop_routes::handle_custom_tools_create),
+            get(desktop::routes::handle_custom_tools_list)
+                .post(desktop::routes::handle_custom_tools_create),
         )
         .route(
             "/api/custom-tools/{name}",
-            put(desktop_routes::handle_custom_tools_update)
-                .delete(desktop_routes::handle_custom_tools_delete),
+            put(desktop::routes::handle_custom_tools_update)
+                .delete(desktop::routes::handle_custom_tools_delete),
         )
-        .route("/api/usage", get(desktop_routes::handle_usage_get))
+        .route("/api/usage", get(desktop::routes::handle_usage_get))
         .route(
             "/api/evolution/overview",
             get(evolution_routes::handle_overview),
@@ -2108,98 +2140,98 @@ async fn run_gateway_inner(
         )
         .route(
             "/api/mcp",
-            get(desktop_routes::handle_mcp_list).post(desktop_routes::handle_mcp_create),
+            get(desktop::routes::handle_mcp_list).post(desktop::routes::handle_mcp_create),
         )
         .route(
             "/api/mcp/{name}",
-            put(desktop_routes::handle_mcp_update).delete(desktop_routes::handle_mcp_delete),
+            put(desktop::routes::handle_mcp_update).delete(desktop::routes::handle_mcp_delete),
         )
         .route(
             "/api/mcp/{name}/status",
-            get(desktop_routes::handle_mcp_status),
+            get(desktop::routes::handle_mcp_status),
         )
         .route(
             "/api/mcp/{name}/toggle",
-            post(desktop_routes::handle_mcp_toggle),
+            post(desktop::routes::handle_mcp_toggle),
         )
         .route(
             "/api/mcp/{name}/reconnect",
-            post(desktop_routes::handle_mcp_reconnect),
+            post(desktop::routes::handle_mcp_reconnect),
         )
 
         .route(
             "/api/lsp",
-            get(desktop_routes::handle_lsp_list).put(desktop_routes::handle_lsp_global_put),
+            get(desktop::routes::handle_lsp_list).put(desktop::routes::handle_lsp_global_put),
         )
         .route(
             "/api/lsp/preferences",
-            get(desktop_routes::handle_lsp_preferences_get)
-                .put(desktop_routes::handle_lsp_preferences_put),
+            get(desktop::routes::handle_lsp_preferences_get)
+                .put(desktop::routes::handle_lsp_preferences_put),
         )
         .route(
             "/api/lsp/servers",
-            post(desktop_routes::handle_lsp_create),
+            post(desktop::routes::handle_lsp_create),
         )
         .route(
             "/api/lsp/servers/{id}",
-            put(desktop_routes::handle_lsp_update).delete(desktop_routes::handle_lsp_delete),
+            put(desktop::routes::handle_lsp_update).delete(desktop::routes::handle_lsp_delete),
         )
         .route(
             "/api/lsp/servers/{id}/toggle",
-            post(desktop_routes::handle_lsp_toggle),
+            post(desktop::routes::handle_lsp_toggle),
         )
         .route(
             "/api/lsp/servers/{id}/install",
-            post(desktop_routes::handle_lsp_install),
+            post(desktop::routes::handle_lsp_install),
         )
         .route(
             "/api/lsp/servers/{id}/restart",
-            post(desktop_routes::handle_lsp_restart),
+            post(desktop::routes::handle_lsp_restart),
         )
         .route(
             "/api/lsp/textdocument",
-            post(desktop_routes::handle_lsp_notify),
+            post(desktop::routes::handle_lsp_notify),
         )
         .route(
             "/api/lsp/request",
-            post(desktop_routes::handle_lsp_request),
+            post(desktop::routes::handle_lsp_request),
         )
-        .route("/api/plugins", get(desktop_routes::handle_plugins_list))
-        .route("/api/plugins/detail", get(desktop_routes::handle_plugins_detail))
-        .route("/api/plugins/enable", post(desktop_routes::handle_plugins_enable))
-        .route("/api/plugins/disable", post(desktop_routes::handle_plugins_disable))
-        .route("/api/plugins/update", post(desktop_routes::handle_plugins_update))
-        .route("/api/plugins/uninstall", post(desktop_routes::handle_plugins_uninstall))
-        .route("/api/plugins/reload", post(desktop_routes::handle_plugins_reload))
-        .route("/api/teams", get(desktop_routes::handle_teams_list))
+        .route("/api/plugins", get(desktop::routes::handle_plugins_list))
+        .route("/api/plugins/detail", get(desktop::routes::handle_plugins_detail))
+        .route("/api/plugins/enable", post(desktop::routes::handle_plugins_enable))
+        .route("/api/plugins/disable", post(desktop::routes::handle_plugins_disable))
+        .route("/api/plugins/update", post(desktop::routes::handle_plugins_update))
+        .route("/api/plugins/uninstall", post(desktop::routes::handle_plugins_uninstall))
+        .route("/api/plugins/reload", post(desktop::routes::handle_plugins_reload))
+        .route("/api/teams", get(desktop::routes::handle_teams_list))
         .route(
             "/api/teams/{name}",
-            get(desktop_routes::handle_teams_get).delete(desktop_routes::handle_teams_delete),
+            get(desktop::routes::handle_teams_get).delete(desktop::routes::handle_teams_delete),
         )
         .route(
             "/api/teams/{name}/members/{agent}/transcript",
-            get(desktop_routes::handle_teams_member_transcript),
+            get(desktop::routes::handle_teams_member_transcript),
         )
         .route(
             "/api/teams/{name}/members/{agent}/messages",
-            post(desktop_routes::handle_teams_member_send),
+            post(desktop::routes::handle_teams_member_send),
         )
         .route(
             "/api/adapters",
-            get(desktop_routes::handle_adapters_get).put(desktop_routes::handle_adapters_put),
+            get(desktop::routes::handle_adapters_get).put(desktop::routes::handle_adapters_put),
         )
         .route(
             "/api/channels/restart",
-            post(desktop_routes::handle_channels_restart),
+            post(desktop::routes::handle_channels_restart),
         )
-        .route("/api/haha-oauth", get(desktop_routes::handle_haha_oauth_status).delete(desktop_routes::handle_haha_oauth_logout))
-        .route("/api/haha-oauth/start", post(desktop_routes::handle_haha_oauth_start))
+        .route("/api/haha-oauth", get(desktop::routes::handle_haha_oauth_status).delete(desktop::routes::handle_haha_oauth_logout))
+        .route("/api/haha-oauth/start", post(desktop::routes::handle_haha_oauth_start))
         .route(
             "/api/filesystem/browse",
-            get(desktop_routes::handle_filesystem_browse),
+            get(desktop::routes::handle_filesystem_browse),
         )
-        .route("/api/search", post(desktop_routes::handle_search_files))
-        .route("/api/search/sessions", post(desktop_routes::handle_search_sessions))
+        .route("/api/search", post(desktop::routes::handle_search_files))
+        .route("/api/search/sessions", post(desktop::routes::handle_search_sessions))
 
         .route("/api/workspace/tree", get(workspace_files::handle_workspace_tree))
         .route(
@@ -2243,138 +2275,138 @@ async fn run_gateway_inner(
         .route("/api/python/events", get(python_env_routes::handle_events))
         .route(
             "/api/settings/user",
-            get(desktop_routes::handle_settings_user_get).put(desktop_routes::handle_settings_user_put),
+            get(desktop::routes::handle_settings_user_get).put(desktop::routes::handle_settings_user_put),
         )
         .route(
             "/api/permissions/mode",
-            get(desktop_routes::handle_permissions_mode_get).put(desktop_routes::handle_permissions_mode_put),
+            get(desktop::routes::handle_permissions_mode_get).put(desktop::routes::handle_permissions_mode_put),
         )
         .route(
             "/api/permissions/autonomy",
-            get(desktop_routes::handle_permissions_autonomy_get).put(desktop_routes::handle_permissions_autonomy_put),
+            get(desktop::routes::handle_permissions_autonomy_get).put(desktop::routes::handle_permissions_autonomy_put),
         )
         .route(
             "/api/agents/loop-controls",
-            get(desktop_routes::handle_loop_controls_get).put(desktop_routes::handle_loop_controls_put),
+            get(desktop::routes::handle_loop_controls_get).put(desktop::routes::handle_loop_controls_put),
         )
         .route(
             "/api/background-shell/stream",
-            get(desktop_routes::handle_background_shell_stream),
+            get(desktop::routes::handle_background_shell_stream),
         )
         .route(
             "/api/coding-modes",
-            get(desktop_routes::handle_coding_modes_list),
+            get(desktop::routes::handle_coding_modes_list),
         )
         .route(
             "/api/coding-mode",
-            get(desktop_routes::handle_coding_mode_get).put(desktop_routes::handle_coding_mode_put),
+            get(desktop::routes::handle_coding_mode_get).put(desktop::routes::handle_coding_mode_put),
         )
         .route(
             "/api/settings/cli-launcher",
-            get(desktop_routes::handle_settings_cli_launcher),
+            get(desktop::routes::handle_settings_cli_launcher),
         )
-        .route("/api/suggestions", get(desktop_routes::handle_suggestions))
+        .route("/api/suggestions", get(desktop::routes::handle_suggestions))
         .route(
             "/api/designer/submodes",
-            get(desktop_routes::handle_designer_submodes),
+            get(desktop::routes::handle_designer_submodes),
         )
         .route(
             "/api/debug/submodes",
-            get(desktop_routes::handle_debug_submodes),
+            get(desktop::routes::handle_debug_submodes),
         )
         .route(
             "/api/sessions/{id}/debug-report",
-            get(desktop_routes::handle_session_debug_report),
+            get(desktop::routes::handle_session_debug_report),
         )
         .route(
             "/api/designer/design-systems",
-            get(desktop_routes::handle_designer_design_systems),
+            get(desktop::routes::handle_designer_design_systems),
         )
         .route(
             "/api/designer/prompt-templates",
-            get(desktop_routes::handle_designer_prompt_templates),
+            get(desktop::routes::handle_designer_prompt_templates),
         )
         .route(
             "/api/designer/html-templates",
-            get(desktop_routes::handle_designer_html_templates),
+            get(desktop::routes::handle_designer_html_templates),
         )
         .route(
             "/api/template-library/catalog",
-            get(desktop_routes::handle_template_library_catalog),
+            get(desktop::routes::handle_template_library_catalog),
         )
         .route(
             "/api/template-library/file",
-            get(desktop_routes::handle_template_library_file)
-                .put(desktop_routes::handle_template_library_save),
+            get(desktop::routes::handle_template_library_file)
+                .put(desktop::routes::handle_template_library_save),
         )
         .route(
             "/api/template-library/builtin-file",
-            get(desktop_routes::handle_template_library_builtin_file),
+            get(desktop::routes::handle_template_library_builtin_file),
         )
         .route(
             "/api/template-library/reset",
-            post(desktop_routes::handle_template_library_reset),
+            post(desktop::routes::handle_template_library_reset),
         )
         .route(
             "/api/template-library/create",
-            post(desktop_routes::handle_template_library_create),
+            post(desktop::routes::handle_template_library_create),
         )
         .route(
             "/api/template-library/entry",
-            axum::routing::delete(desktop_routes::handle_template_library_delete),
+            axum::routing::delete(desktop::routes::handle_template_library_delete),
         )
         .route(
             "/api/settings/sync/export",
-            get(desktop_routes::handle_settings_sync_export),
+            get(desktop::routes::handle_settings_sync_export),
         )
         .route(
             "/api/settings/sync/import",
-            post(desktop_routes::handle_settings_sync_import),
+            post(desktop::routes::handle_settings_sync_import),
         )
         .route(
             "/api/scheduled-tasks",
-            get(desktop_routes::handle_scheduled_tasks_list)
-                .post(desktop_routes::handle_scheduled_tasks_create),
+            get(desktop::routes::handle_scheduled_tasks_list)
+                .post(desktop::routes::handle_scheduled_tasks_create),
         )
         .route(
             "/api/scheduled-tasks/runs",
-            get(desktop_routes::handle_scheduled_tasks_runs),
+            get(desktop::routes::handle_scheduled_tasks_runs),
         )
         .route(
             "/api/scheduled-tasks/{id}",
-            put(desktop_routes::handle_scheduled_tasks_update)
-                .delete(desktop_routes::handle_scheduled_tasks_delete),
+            put(desktop::routes::handle_scheduled_tasks_update)
+                .delete(desktop::routes::handle_scheduled_tasks_delete),
         )
         .route(
             "/api/scheduled-tasks/{id}/run",
-            post(desktop_routes::handle_scheduled_tasks_run),
+            post(desktop::routes::handle_scheduled_tasks_run),
         )
         .route(
             "/api/scheduled-tasks/{id}/runs",
-            get(desktop_routes::handle_scheduled_tasks_task_runs),
+            get(desktop::routes::handle_scheduled_tasks_task_runs),
         )
-        .route("/api/tasks", get(desktop_routes::handle_cli_tasks_list_all))
-        .route("/api/tasks/lists", get(desktop_routes::handle_cli_task_lists))
+        .route("/api/tasks", get(desktop::routes::handle_cli_tasks_list_all))
+        .route("/api/tasks/lists", get(desktop::routes::handle_cli_task_lists))
         .route(
             "/api/tasks/lists/{list_id}",
-            get(desktop_routes::handle_cli_tasks_for_list),
+            get(desktop::routes::handle_cli_tasks_for_list),
         )
         .route(
             "/api/tasks/lists/{list_id}/{task_id}",
-            get(desktop_routes::handle_cli_task_get),
+            get(desktop::routes::handle_cli_task_get),
         )
         .route(
             "/api/tasks/lists/{list_id}/reset",
-            post(desktop_routes::handle_cli_tasks_reset),
+            post(desktop::routes::handle_cli_tasks_reset),
         )
         .route(
             "/api/conversations",
-            get(desktop_routes::handle_conversations_list),
+            get(desktop::routes::handle_conversations_list),
         )
-        .route("/api/desktop/status", get(desktop_routes::handle_status))
+        .route("/api/desktop/status", get(desktop::routes::handle_status))
         .route(
             "/api/runtime/snapshot",
-            get(desktop_routes::handle_runtime_snapshot),
+            get(desktop::routes::handle_runtime_snapshot),
         )
         .route_layer(middleware::from_fn_with_state(
             state.clone(),
@@ -2464,9 +2496,9 @@ async fn run_gateway_inner(
 
         .route("/ws/{session_id}", get(ws::desktop::handle_ws_desktop))
 
-        .route("/ws/desktop-bridge", get(desktop_bridge::handle_bridge_ws))
+        .route("/ws/desktop-bridge", get(desktop::bridge::handle_bridge_ws))
 
-        .route("/api/debug/test-target", post(desktop_routes::handle_debug_test_target))
+        .route("/api/debug/test-target", post(desktop::routes::handle_debug_test_target))
 
         .route("/approval/{id}/respond", post(ws::handle_approval_respond))
 
@@ -2484,26 +2516,13 @@ async fn run_gateway_inner(
     #[cfg(feature = "lan-comms")]
     let lan_media_state = state.clone();
 
-    let exposed = state.exposed;
-    let workers_router = {
-        let r = crate::workers::router::router();
-        if exposed {
-            r.route_layer(middleware::from_fn_with_state(
-                state.clone(),
-                api::auth_middleware,
-            ))
-        } else {
-            r
-        }
-    };
-    let a2a_router = if exposed {
-        a2a_router.route_layer(middleware::from_fn_with_state(
-            state.clone(),
-            api::auth_middleware,
-        ))
-    } else {
-        a2a_router
-    };
+    let workers_router = crate::workers::router::router().route_layer(
+        middleware::from_fn_with_state(state.clone(), api::auth_middleware),
+    );
+    let a2a_router = a2a_router.route_layer(middleware::from_fn_with_state(
+        state.clone(),
+        api::auth_middleware,
+    ));
 
     let webhook_router = Router::new()
         .route("/webhook", post(handle_webhook))
@@ -3066,6 +3085,12 @@ async fn handle_webhook(
                 return (StatusCode::UNAUTHORIZED, Json(err));
             }
         }
+    } else {
+        tracing::warn!("Webhook: rejected request  -  channels.webhook.secret is not configured");
+        let err = serde_json::json!({
+            "error": "Unauthorized  -  configure channels.webhook.secret before enabling the webhook endpoint"
+        });
+        return (StatusCode::UNAUTHORIZED, Json(err));
     }
 
     let Json(webhook_body) = match body {
@@ -3278,24 +3303,38 @@ async fn handle_whatsapp_message(
         );
     };
 
-    if let Some(ref app_secret) = state.whatsapp_app_secret {
-        let signature = headers
-            .get("X-Hub-Signature-256")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+    match state.whatsapp_app_secret.as_ref() {
+        Some(app_secret) => {
+            let signature = headers
+                .get("X-Hub-Signature-256")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
 
-        if !verify_whatsapp_signature(app_secret, &body, signature) {
+            if !verify_whatsapp_signature(app_secret, &body, signature) {
+                tracing::warn!(
+                    "WhatsApp webhook signature verification failed (signature: {})",
+                    if signature.is_empty() {
+                        "missing"
+                    } else {
+                        "invalid"
+                    }
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "Invalid signature"})),
+                );
+            }
+        }
+        None => {
+            // Fail closed: an unauthenticated webhook can inject arbitrary agent
+            // input, so refuse rather than process when no secret is configured.
             tracing::warn!(
-                "WhatsApp webhook signature verification failed (signature: {})",
-                if signature.is_empty() {
-                    "missing"
-                } else {
-                    "invalid"
-                }
+                "WhatsApp webhook rejected: no app secret configured (set the WhatsApp \
+                 app secret to enable signature verification)"
             );
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Invalid signature"})),
+                Json(serde_json::json!({"error": "Webhook secret not configured"})),
             );
         }
     }
@@ -3380,34 +3419,45 @@ async fn handle_linq_webhook(
 
     let body_str = String::from_utf8_lossy(&body);
 
-    if let Some(ref signing_secret) = state.linq_signing_secret {
-        let timestamp = headers
-            .get("X-Webhook-Timestamp")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+    match state.linq_signing_secret.as_ref() {
+        Some(signing_secret) => {
+            let timestamp = headers
+                .get("X-Webhook-Timestamp")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
 
-        let signature = headers
-            .get("X-Webhook-Signature")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+            let signature = headers
+                .get("X-Webhook-Signature")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
 
-        if !crate::channels::linq::verify_linq_signature(
-            signing_secret,
-            &body_str,
-            timestamp,
-            signature,
-        ) {
+            if !crate::channels::linq::verify_linq_signature(
+                signing_secret,
+                &body_str,
+                timestamp,
+                signature,
+            ) {
+                tracing::warn!(
+                    "Linq webhook signature verification failed (signature: {})",
+                    if signature.is_empty() {
+                        "missing"
+                    } else {
+                        "invalid"
+                    }
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "Invalid signature"})),
+                );
+            }
+        }
+        None => {
             tracing::warn!(
-                "Linq webhook signature verification failed (signature: {})",
-                if signature.is_empty() {
-                    "missing"
-                } else {
-                    "invalid"
-                }
+                "Linq webhook rejected: no signing secret configured (set SEN_LINQ_SIGNING_SECRET)"
             );
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Invalid signature"})),
+                Json(serde_json::json!({"error": "Webhook secret not configured"})),
             );
         }
     }
@@ -3598,34 +3648,46 @@ async fn handle_nextcloud_talk_webhook(
 
     let body_str = String::from_utf8_lossy(&body);
 
-    if let Some(ref webhook_secret) = state.nextcloud_talk_webhook_secret {
-        let random = headers
-            .get("X-Nextcloud-Talk-Random")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+    match state.nextcloud_talk_webhook_secret.as_ref() {
+        Some(webhook_secret) => {
+            let random = headers
+                .get("X-Nextcloud-Talk-Random")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
 
-        let signature = headers
-            .get("X-Nextcloud-Talk-Signature")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
+            let signature = headers
+                .get("X-Nextcloud-Talk-Signature")
+                .and_then(|v| v.to_str().ok())
+                .unwrap_or("");
 
-        if !crate::channels::nextcloud_talk::verify_nextcloud_talk_signature(
-            webhook_secret,
-            random,
-            &body_str,
-            signature,
-        ) {
+            if !crate::channels::nextcloud_talk::verify_nextcloud_talk_signature(
+                webhook_secret,
+                random,
+                &body_str,
+                signature,
+            ) {
+                tracing::warn!(
+                    "Nextcloud Talk webhook signature verification failed (signature: {})",
+                    if signature.is_empty() {
+                        "missing"
+                    } else {
+                        "invalid"
+                    }
+                );
+                return (
+                    StatusCode::UNAUTHORIZED,
+                    Json(serde_json::json!({"error": "Invalid signature"})),
+                );
+            }
+        }
+        None => {
             tracing::warn!(
-                "Nextcloud Talk webhook signature verification failed (signature: {})",
-                if signature.is_empty() {
-                    "missing"
-                } else {
-                    "invalid"
-                }
+                "Nextcloud Talk webhook rejected: no webhook secret configured \
+                 (set SEN_NEXTCLOUD_TALK_WEBHOOK_SECRET)"
             );
             return (
                 StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Invalid signature"})),
+                Json(serde_json::json!({"error": "Webhook secret not configured"})),
             );
         }
     }
@@ -3716,20 +3778,27 @@ async fn handle_gmail_push_webhook(
     }
 
     let secret = gmail_push.resolve_webhook_secret();
-    if !secret.is_empty() {
-        let provided = headers
-            .get(axum::http::header::AUTHORIZATION)
-            .and_then(|v| v.to_str().ok())
-            .and_then(|auth| auth.strip_prefix("Bearer "))
-            .unwrap_or("");
+    if secret.is_empty() {
+        tracing::warn!("Gmail push webhook: rejected  -  webhook secret is not configured");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({
+                "error": "Unauthorized  -  configure gmail push webhook secret before enabling this endpoint"
+            })),
+        );
+    }
+    let provided = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|auth| auth.strip_prefix("Bearer "))
+        .unwrap_or("");
 
-        if provided != secret {
-            tracing::warn!("Gmail push webhook: unauthorized request");
-            return (
-                StatusCode::UNAUTHORIZED,
-                Json(serde_json::json!({"error": "Unauthorized"})),
-            );
-        }
+    if provided != secret {
+        tracing::warn!("Gmail push webhook: unauthorized request");
+        return (
+            StatusCode::UNAUTHORIZED,
+            Json(serde_json::json!({"error": "Unauthorized"})),
+        );
     }
 
     let body_str = String::from_utf8_lossy(&body);

@@ -21,6 +21,8 @@ struct HygieneReport {
     purged_memory_archives: u64,
     purged_session_archives: u64,
     pruned_conversation_rows: u64,
+    #[serde(default)]
+    superseded_duplicate_rows: u64,
 }
 
 impl HygieneReport {
@@ -30,6 +32,7 @@ impl HygieneReport {
             + self.purged_memory_archives
             + self.purged_session_archives
             + self.pruned_conversation_rows
+            + self.superseded_duplicate_rows
     }
 }
 
@@ -63,6 +66,7 @@ pub fn run_if_due(config: &MemoryConfig, workspace_dir: &Path) -> Result<()> {
         purged_memory_archives: purge_memory_archives(workspace_dir, config.purge_after_days)?,
         purged_session_archives: purge_session_archives(workspace_dir, config.purge_after_days)?,
         pruned_conversation_rows: prune_conversation_rows(workspace_dir, conversation_retention)?,
+        superseded_duplicate_rows: consolidate_duplicate_rows(workspace_dir)?,
     };
 
     if config.audit_enabled {
@@ -75,12 +79,13 @@ pub fn run_if_due(config: &MemoryConfig, workspace_dir: &Path) -> Result<()> {
 
     if report.total_actions() > 0 {
         tracing::info!(
-            "memory hygiene complete: archived_memory={} archived_sessions={} purged_memory={} purged_sessions={} pruned_conversation_rows={}",
+            "memory hygiene complete: archived_memory={} archived_sessions={} purged_memory={} purged_sessions={} pruned_conversation_rows={} superseded_duplicates={}",
             report.archived_memory_files,
             report.archived_session_files,
             report.purged_memory_archives,
             report.purged_session_archives,
             report.pruned_conversation_rows,
+            report.superseded_duplicate_rows,
         );
     }
 
@@ -323,6 +328,62 @@ fn prune_conversation_rows(workspace_dir: &Path, retention_days: u32) -> Result<
     let affected = conn.execute(
         "DELETE FROM memories WHERE category = 'conversation' AND updated_at < ?1",
         params![cutoff],
+    )?;
+
+    Ok(u64::try_from(affected).unwrap_or(0))
+}
+
+fn consolidate_duplicate_rows(workspace_dir: &Path) -> Result<u64> {
+    let db_path = workspace_dir.join("memory").join("brain.db");
+    if !db_path.exists() {
+        return Ok(0);
+    }
+
+    let conn = Connection::open(db_path)?;
+    conn.execute_batch("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;")?;
+
+    let has_column: bool = conn
+        .prepare("SELECT 1 FROM pragma_table_info('memories') WHERE name = 'superseded_by'")?
+        .exists([])?;
+    if !has_column {
+        return Ok(0);
+    }
+
+    conn.execute_batch(
+        "CREATE INDEX IF NOT EXISTS idx_memories_dedupe \
+         ON memories(category, substr(content, 1, 64));",
+    )?;
+
+    let affected = conn.execute(
+        "UPDATE memories
+         SET superseded_by = (
+             SELECT m2.id FROM memories m2
+             WHERE m2.category = memories.category
+               AND substr(m2.content, 1, 64) = substr(memories.content, 1, 64)
+               AND m2.content = memories.content
+               AND COALESCE(m2.namespace, 'default') = COALESCE(memories.namespace, 'default')
+               AND COALESCE(m2.session_id, '') = COALESCE(memories.session_id, '')
+               AND m2.id != memories.id
+               AND m2.superseded_by IS NULL
+               AND (m2.updated_at > memories.updated_at
+                    OR (m2.updated_at = memories.updated_at AND m2.rowid > memories.rowid))
+             ORDER BY m2.updated_at DESC, m2.rowid DESC
+             LIMIT 1
+         )
+         WHERE superseded_by IS NULL
+           AND EXISTS (
+             SELECT 1 FROM memories m2
+             WHERE m2.category = memories.category
+               AND substr(m2.content, 1, 64) = substr(memories.content, 1, 64)
+               AND m2.content = memories.content
+               AND COALESCE(m2.namespace, 'default') = COALESCE(memories.namespace, 'default')
+               AND COALESCE(m2.session_id, '') = COALESCE(memories.session_id, '')
+               AND m2.id != memories.id
+               AND m2.superseded_by IS NULL
+               AND (m2.updated_at > memories.updated_at
+                    OR (m2.updated_at = memories.updated_at AND m2.rowid > memories.rowid))
+           )",
+        [],
     )?;
 
     Ok(u64::try_from(affected).unwrap_or(0))

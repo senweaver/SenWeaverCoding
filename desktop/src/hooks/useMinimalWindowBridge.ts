@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 import { useEffect } from 'react'
-import { useSettingsStore } from '../stores/settingsStore'
+import { useSettingsStore, syncLocaleToShell } from '../stores/settingsStore'
 import { useSessionRunStateStore } from '../stores/sessionRunStateStore'
 import { useTabStore } from '../stores/tabStore'
 import { useProviderStore } from '../stores/providerStore'
@@ -53,6 +53,7 @@ export function useMinimalWindowBridge() {
         useSessionRunStateStore.getState().start()
         void useProviderStore.getState().fetchProviders().catch(() => {})
         void useComputerUseStore.getState().loadModels().catch(() => {})
+        void syncLocaleToShell(useSettingsStore.getState().locale).catch(() => {})
       } catch (err) {
         console.warn('[minimal] bootstrap failed', err)
       }
@@ -73,6 +74,37 @@ export function useMinimalWindowBridge() {
       else unlisten = off
     })()
 
+    return () => {
+      disposed = true
+      if (unlisten) unlisten()
+    }
+  }, [])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let disposed = false
+    let unlisten: (() => void) | null = null
+    void (async () => {
+      const [{ listen }, i18n] = await Promise.all([
+        import('@tauri-apps/api/event'),
+        import('../i18n'),
+      ])
+      const off = await listen<string>(i18n.LOCALE_CHANGED_EVENT, (event) => {
+        const next = event.payload === 'en' || event.payload === 'zh' ? event.payload : null
+        if (!next) return
+        if (useSettingsStore.getState().locale === next) return
+        void i18n
+          .ensureLocaleLoaded(next)
+          .then(() => {
+            useSettingsStore.setState({ locale: next })
+          })
+          .catch((err) => {
+            console.warn('[minimal] locale sync failed to load dictionary', err)
+          })
+      })
+      if (disposed) off()
+      else unlisten = off
+    })()
     return () => {
       disposed = true
       if (unlisten) unlisten()

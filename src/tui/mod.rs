@@ -338,7 +338,7 @@ pub enum RevertHunkOutcome {
     },
     FileDone {
         entry_id: u64,
-        summary: String,
+        outcome: diff_review::RevertFileOutcome,
     },
     Failed {
         entry_id: Option<u64>,
@@ -351,6 +351,7 @@ pub struct ApprovalPrompt {
     pub tool_id: String,
     pub tool_name: String,
     pub args_summary: String,
+    pub arguments: serde_json::Value,
 }
 
 #[derive(Debug, Clone)]
@@ -943,7 +944,7 @@ impl App {
             KeyAction::VoiceToggle => {
                 self.chat_messages.push(ChatMessage::with_role_now(
                     "system",
-                    "Voice input is not available in this build unless compiled with voice-wake and configured under channels_config.voice_wake. Use /voice for status.",
+                    "Voice input is not available in this build unless compiled with voice-wake and configured under channels_config.voice_wake. Use /voice for status.".to_string(),
                 ));
                 self.dirty = true;
                 true
@@ -985,7 +986,9 @@ impl App {
         let Ok(entries) = std::fs::read_dir(&dir) else {
             return;
         };
+        const MAX_SCANNED_ENTRIES: usize = 2048;
         let mut matches: Vec<String> = entries
+            .take(MAX_SCANNED_ENTRIES)
             .filter_map(|e| e.ok())
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .filter(|name| name.starts_with(&prefix))
@@ -1159,10 +1162,20 @@ impl App {
         let Some(prompt) = self.pending_approvals.pop_front() else {
             return;
         };
-        let _ = self.bridge.send(agent_bridge::UserInput::ApprovalResponse {
+        let sent = self.bridge.send(agent_bridge::UserInput::ApprovalResponse {
             tool_id: prompt.tool_id.clone(),
             approved,
         });
+        if !sent {
+            // Channel full: the verdict never reached the agent. Re-queue the
+            // prompt instead of logging a decision that never took effect.
+            self.chat_messages.push(ChatMessage::with_role_now(
+                "system",
+                "input channel busy; press again to respond to the approval".into(),
+            ));
+            self.pending_approvals.push_front(prompt);
+            return;
+        }
         let verdict = if approved { "approved" } else { "denied" };
         self.chat_messages.push(ChatMessage::with_role_now(
             "system",
@@ -1405,7 +1418,7 @@ impl App {
                     let tx = self.revert_hunk_outcome_tx.clone();
                     tokio::task::spawn_blocking(move || {
                         let msg = match diff_review::revert_file_entry(&entry, &workspace) {
-                            Ok(summary) => RevertHunkOutcome::FileDone { entry_id, summary },
+                            Ok(outcome) => RevertHunkOutcome::FileDone { entry_id, outcome },
                             Err(e) => RevertHunkOutcome::Failed {
                                 entry_id: Some(entry_id),
                                 message: format!("revert failed: {e}"),
@@ -1430,8 +1443,7 @@ impl App {
                     .get_mut_by_id(entry_id)
                     .map(|e| e.clone());
                 if let Some(entry) = entry {
-                    let workspace = std::env::current_dir()
-                        .unwrap_or_else(|_| std::path::PathBuf::from("."));
+                    let workspace = self.config.workspace_dir.clone();
 
                     self.diff_review_state.reverting_entries.insert(entry_id);
                     let entry_clone = entry.clone();
@@ -2153,14 +2165,26 @@ impl App {
                         Some(format!("hunk reverted via new batch {new_batch_id}"));
                     self.mark_dirty();
                 }
-                Ok(RevertHunkOutcome::FileDone { entry_id, summary }) => {
+                Ok(RevertHunkOutcome::FileDone { entry_id, outcome }) => {
                     self.diff_review_state.reverting_entries.remove(&entry_id);
-                    diff_review::mark_reverted(
+                    diff_review::apply_file_revert_outcome(
                         &mut self.edit_batch_registry,
                         entry_id,
-                        None,
+                        &outcome,
                     );
-                    self.diff_review_state.toast = Some(summary);
+                    if !outcome.skipped.is_empty() {
+                        let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+                        self.chat_messages.push(ChatMessage::from_parts(
+                            "system",
+                            format!(
+                                "revert skipped {} file(s) changed after the batch: {}",
+                                outcome.skipped.len(),
+                                outcome.skipped.join(", ")
+                            ),
+                            ts,
+                        ));
+                    }
+                    self.diff_review_state.toast = Some(outcome.summary);
                     self.mark_dirty();
                 }
                 Ok(RevertHunkOutcome::Failed { entry_id, message }) => {
@@ -2386,6 +2410,17 @@ impl App {
                     }
                     self.reasoning_buffer.clear();
                     self.stream_finalized = true;
+                    // The turn is over: any prompt still queued was resolved by
+                    // timeout/denial on the agent side. Keeping it up blocked
+                    // chat keys and accepted answers nobody consumes (the chat
+                    // log then asserted a verdict that never took effect).
+                    if !self.pending_approvals.is_empty() {
+                        self.event_entries.push(format!(
+                            "[{ts}] dismissed {} stale approval prompt(s) at turn end",
+                            self.pending_approvals.len()
+                        ));
+                        self.pending_approvals.clear();
+                    }
                 }
                 agent_bridge::AgentEvent::Error(e) => {
                     self.event_entries.push(format!("[{ts}] error: {e}"));
@@ -2533,6 +2568,7 @@ impl App {
                     tool_name,
                     tool_id,
                     args_summary,
+                    arguments,
                 } => {
                     self.chat_messages.push(ChatMessage::from_parts(
                         "system",
@@ -2543,6 +2579,7 @@ impl App {
                         tool_id,
                         tool_name,
                         args_summary,
+                        arguments,
                     });
                 }
                 agent_bridge::AgentEvent::QuestionAsked {
@@ -2980,7 +3017,10 @@ fn draw_approval_overlay(f: &mut Frame, app: &App) {
         return;
     };
     let area = f.area();
-    let popup = centered_overlay_rect(area, 64, 9);
+    let detail = serde_json::to_string_pretty(&prompt.arguments).unwrap_or_default();
+    let detail_lines: Vec<&str> = detail.lines().take(12).collect();
+    let popup_height = (9 + detail_lines.len() as u16).min(area.height.saturating_sub(2));
+    let popup = centered_overlay_rect(area, 72, popup_height);
 
     let mut lines: Vec<Line> = vec![
         Line::from(Span::styled(
@@ -2996,12 +3036,18 @@ fn draw_approval_overlay(f: &mut Frame, app: &App) {
             Span::styled("  args: ", theme::dim()),
             Span::styled(prompt.args_summary.clone(), theme::normal()),
         ]),
-        Line::from(""),
-        Line::from(Span::styled(
-            "  y: approve    n / Esc: deny",
-            theme::dim(),
-        )),
     ];
+    for detail_line in &detail_lines {
+        lines.push(Line::from(Span::styled(
+            format!("    {detail_line}"),
+            theme::dim(),
+        )));
+    }
+    lines.push(Line::from(""));
+    lines.push(Line::from(Span::styled(
+        "  y: approve    n / Esc: deny",
+        theme::dim(),
+    )));
     if app.pending_approvals.len() > 1 {
         lines.push(Line::from(Span::styled(
             format!("  ({} more pending)", app.pending_approvals.len() - 1),

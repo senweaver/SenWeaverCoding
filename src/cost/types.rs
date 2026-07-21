@@ -12,6 +12,12 @@ pub struct TokenUsage {
 
     pub output_tokens: u64,
 
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cached_input_tokens: u64,
+
+    #[serde(default, skip_serializing_if = "is_zero_u64")]
+    pub cache_creation_input_tokens: u64,
+
     pub total_tokens: u64,
 
     pub cost_usd: f64,
@@ -19,7 +25,17 @@ pub struct TokenUsage {
     pub timestamp: chrono::DateTime<chrono::Utc>,
 }
 
+fn is_zero_u64(v: &u64) -> bool {
+    *v == 0
+}
+
 impl TokenUsage {
+    // Cache-read tokens bill far below fresh input (OpenAI/Anthropic ~0.1-0.25x);
+    // cache-write bills above it (Anthropic ~1.25x). Use conservative
+    // industry-standard multipliers since ModelPricing has no cache-specific rate.
+    const CACHE_READ_RATE: f64 = 0.25;
+    const CACHE_WRITE_RATE: f64 = 1.25;
+
     fn sanitize_price(value: f64) -> f64 {
         if value.is_finite() && value > 0.0 {
             value
@@ -35,19 +51,61 @@ impl TokenUsage {
         input_price_per_million: f64,
         output_price_per_million: f64,
     ) -> Self {
+        Self::new_with_cache(
+            model,
+            input_tokens,
+            output_tokens,
+            0,
+            0,
+            input_price_per_million,
+            output_price_per_million,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_cache(
+        model: impl Into<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+        input_price_per_million: f64,
+        output_price_per_million: f64,
+    ) -> Self {
         let model = model.into();
         let input_price_per_million = Self::sanitize_price(input_price_per_million);
         let output_price_per_million = Self::sanitize_price(output_price_per_million);
-        let total_tokens = input_tokens.saturating_add(output_tokens);
 
-        let input_cost = (input_tokens as f64 / 1_000_000.0) * input_price_per_million;
-        let output_cost = (output_tokens as f64 / 1_000_000.0) * output_price_per_million;
+        // `input_tokens` here is the FRESH (full-rate) input count only; the
+        // caller has already split out any cached-read subset per its provider's
+        // convention (OpenAI-style prompt_tokens include the cache read, so the
+        // caller subtracts it; Anthropic reports cache-read separately). Cache
+        // reads bill at a discount, cache writes at a premium. total_tokens is
+        // the real prompt+completion sum so reporting stays accurate.
+        let total_tokens = input_tokens
+            .saturating_add(cached_input_tokens)
+            .saturating_add(cache_creation_input_tokens)
+            .saturating_add(output_tokens);
+        let per_million = |tokens: u64, rate: f64| (tokens as f64 / 1_000_000.0) * rate;
+
+        let input_cost = per_million(input_tokens, input_price_per_million)
+            + per_million(
+                cached_input_tokens,
+                input_price_per_million * Self::CACHE_READ_RATE,
+            )
+            + per_million(
+                cache_creation_input_tokens,
+                input_price_per_million * Self::CACHE_WRITE_RATE,
+            );
+        let output_cost = per_million(output_tokens, output_price_per_million);
         let cost_usd = input_cost + output_cost;
 
         Self {
             model,
             input_tokens,
             output_tokens,
+            cached_input_tokens,
+            cache_creation_input_tokens,
             total_tokens,
             cost_usd,
             timestamp: chrono::Utc::now(),

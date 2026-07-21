@@ -23,6 +23,32 @@ pub fn global_registry() -> &'static CommandRegistry {
 }
 
 pub async fn dispatch_slash_input(raw: &str) -> SlashOutcome {
+    let (session_id, cwd, is_interactive, is_remote) = match crate::bootstrap::try_get_state() {
+        Some(bs) => bs.read(|state| {
+            (
+                state.session_id.0.clone(),
+                state.cwd.clone(),
+                state.is_interactive,
+                state.is_remote_mode,
+            )
+        }),
+        None => (
+            uuid::Uuid::new_v4().to_string(),
+            std::env::current_dir().unwrap_or_default(),
+            true,
+            false,
+        ),
+    };
+    dispatch_slash_input_scoped(raw, session_id, cwd, is_interactive, is_remote).await
+}
+
+pub async fn dispatch_slash_input_scoped(
+    raw: &str,
+    session_id: String,
+    cwd: std::path::PathBuf,
+    is_interactive: bool,
+    is_remote: bool,
+) -> SlashOutcome {
     let trimmed = raw.trim();
     if !trimmed.starts_with('/') {
         return SlashOutcome::NotCommand;
@@ -33,23 +59,6 @@ pub async fn dispatch_slash_input(raw: &str) -> SlashOutcome {
         crate::agent::repl_command::ReplCommand::Quit => SlashOutcome::Quit,
         crate::agent::repl_command::ReplCommand::Clear => SlashOutcome::Clear,
         crate::agent::repl_command::ReplCommand::Slash { name, args } => {
-            let (session_id, cwd, is_interactive, is_remote) =
-                match crate::bootstrap::try_get_state() {
-                    Some(bs) => bs.read(|state| {
-                        (
-                            state.session_id.0.clone(),
-                            state.cwd.clone(),
-                            state.is_interactive,
-                            state.is_remote_mode,
-                        )
-                    }),
-                    None => (
-                        uuid::Uuid::new_v4().to_string(),
-                        std::env::current_dir().unwrap_or_default(),
-                        true,
-                        false,
-                    ),
-                };
             let ctx = CommandContext {
                 session_id,
                 cwd,
@@ -78,7 +87,7 @@ pub async fn dispatch_slash_input(raw: &str) -> SlashOutcome {
                 .to_string();
             SlashOutcome::Handled {
                 success: false,
-                message: format!("未知命令：{cmd_token}。输入 /help 查看可用命令。"),
+                message: format!("Unknown command: {cmd_token}. Type /help to list available commands."),
             }
         }
     }

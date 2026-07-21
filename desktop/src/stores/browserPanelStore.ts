@@ -630,7 +630,7 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       })
       useUIStore.getState().addToast({
         type: 'info',
-        message: 'Another agent session wants to open the browser. Switch to it to view.',
+        message: t('browser.backgroundSessionWantsOpen'),
         duration: 5000,
         sessionId,
       })

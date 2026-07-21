@@ -9,11 +9,45 @@ use super::EvolutionEngine;
 
 const APPROX_CHARS_PER_TOKEN: usize = 4;
 
+const LESSON_BLOCK_TTL: std::time::Duration = std::time::Duration::from_secs(120);
+
+fn lesson_block_cache()
+-> &'static parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, Option<String>)>>
+{
+    static CACHE: std::sync::OnceLock<
+        parking_lot::Mutex<
+            std::collections::HashMap<String, (std::time::Instant, Option<String>)>,
+        >,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
 pub fn build_lesson_block(engine: &Arc<EvolutionEngine>, coding_mode: Option<&str>) -> Option<String> {
     let snapshot = engine.config_snapshot();
     if !snapshot.enabled {
         return None;
     }
+    let cache_key = coding_mode.unwrap_or("__any__").to_string();
+    {
+        let cache = lesson_block_cache().lock();
+        if let Some((cached_at, block)) = cache.get(&cache_key) {
+            if cached_at.elapsed() < LESSON_BLOCK_TTL {
+                return block.clone();
+            }
+        }
+    }
+    let block = build_lesson_block_uncached(engine, coding_mode, &snapshot);
+    lesson_block_cache()
+        .lock()
+        .insert(cache_key, (std::time::Instant::now(), block.clone()));
+    block
+}
+
+fn build_lesson_block_uncached(
+    engine: &Arc<EvolutionEngine>,
+    coding_mode: Option<&str>,
+    snapshot: &super::EvolutionConfig,
+) -> Option<String> {
     let max_lessons = snapshot.max_lessons_in_prompt.max(1);
     let token_budget = snapshot.lesson_token_budget.max(64);
     let char_budget = token_budget.saturating_mul(APPROX_CHARS_PER_TOKEN);

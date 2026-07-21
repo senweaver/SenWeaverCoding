@@ -45,8 +45,8 @@ import { WorkersStrip } from './WorkersStrip'
 import { TokenUsageRing } from './TokenUsageRing'
 import { WorkspaceQueuePanel } from './WorkspaceQueuePanel'
 import {
-  FALLBACK_SLASH_COMMANDS,
   findSlashTrigger,
+  localizedFallbackSlashCommands,
   mergeSlashCommands,
   replaceSlashToken,
   resolveSlashUiAction,
@@ -488,7 +488,19 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
   }, [isHeroComposer, isWorkspaceMissing, resolvedWorkDir])
 
   useEffect(() => {
-    composerRef.current?.focus()
+    // Only claim focus when nothing else holds it. This effect fires on every
+    // idle<->active flip (turn start/end, permission arrival); force-focusing
+    // unconditionally yanked the caret out of Monaco or a PTY terminal while
+    // the user was typing.
+    const activeEl = document.activeElement
+    const composerHasFocus =
+      activeEl instanceof HTMLElement &&
+      composerRootRef.current instanceof HTMLElement &&
+      composerRootRef.current.contains(activeEl)
+    const focusIsFree = !activeEl || activeEl === document.body || composerHasFocus
+    if (focusIsFree) {
+      composerRef.current?.focus()
+    }
   }, [isActive])
 
   const prevDraftSessionRef = useRef<string | null>(null)
@@ -551,6 +563,11 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
     setAtCursorPos(-1)
     setAtStartPos(-1)
     setSlashSelectedIndex(0)
+    // Design references are anchored to a session's artifact; carrying them
+    // across a switch made the next send in another session generate against
+    // the previous session's artifact/element.
+    setDesignRef(null)
+    setDesignRefElement(null)
     prevDraftSessionRef.current = next
   }, [activeTabId, setComposerDraft])
 
@@ -824,14 +841,14 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
   }, [fileSearchOpen])
 
   const filteredCommands = useMemo(() => {
-    const source = mergeSlashCommands(slashCommands, FALLBACK_SLASH_COMMANDS)
+    const source = mergeSlashCommands(slashCommands, localizedFallbackSlashCommands(t))
     if (!slashFilter) return source
     const lower = slashFilter.toLowerCase()
     return source.filter((command) => (
       command.name.toLowerCase().includes(lower) ||
       command.description.toLowerCase().includes(lower)
     ))
-  }, [slashCommands, slashFilter])
+  }, [slashCommands, slashFilter, t])
 
   const exactSlashCommand = useMemo(() => {
     const normalized = slashFilter.trim().toLowerCase()

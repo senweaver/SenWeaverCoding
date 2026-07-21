@@ -6,6 +6,82 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::LazyLock;
+
+use dashmap::DashMap;
+
+/// Per-model-family online calibration factors (x1000, so 1000 == 1.0) that
+/// scale the character heuristic toward what each provider actually reports.
+/// Bucketing by family is important for this product: several models run in
+/// PARALLEL, and CJK-heavy vs ASCII-heavy families have materially different
+/// chars/token ratios — a single shared EMA had them fighting each other and
+/// drifting the factor. Each family self-corrects independently.
+static CALIBRATION: LazyLock<DashMap<String, u64>> = LazyLock::new(DashMap::new);
+
+/// The family most recently calibrated, used by the param-less estimate path
+/// (which has no model in scope). Best-effort: in mixed-model bursts it tracks
+/// the latest family, while the stored per-family factors stay isolated/correct.
+static ACTIVE_FAMILY: LazyLock<arc_swap::ArcSwap<String>> =
+    LazyLock::new(|| arc_swap::ArcSwap::from_pointee("default".to_string()));
+
+/// Coarse model-family key so related models share a calibration bucket.
+pub fn family_from_model(model: &str) -> String {
+    let id = model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase();
+    const FAMILIES: &[&str] = &[
+        "claude", "gpt", "o1", "o3", "o4", "gemini", "qwen", "kimi", "moonshot",
+        "deepseek", "glm", "doubao", "llama", "mistral", "grok", "command", "yi",
+    ];
+    for fam in FAMILIES {
+        if id.contains(fam) {
+            return (*fam).to_string();
+        }
+    }
+    "default".to_string()
+}
+
+/// Feed a real (estimated_tokens, provider_reported_tokens) observation to nudge
+/// the calibration factor for the given model's family. Uses an EMA so it
+/// converges smoothly.
+///
+/// Contract: `estimated_tokens` must be the RAW (uncalibrated) char-heuristic
+/// estimate — i.e. `providers::traits::estimate_total_tokens` output, which does
+/// not apply this factor. The target is then simply reported/base, whose EMA
+/// fixed point is the true ratio.
+pub fn record_usage_calibration(model: &str, estimated_tokens: usize, reported_tokens: u64) {
+    if estimated_tokens == 0 || reported_tokens == 0 {
+        return;
+    }
+    let family = family_from_model(model);
+    let prev = CALIBRATION.get(&family).map(|v| *v as f64).unwrap_or(1000.0);
+    let base_estimate = (estimated_tokens as f64).max(1.0);
+    let target_millis = ((reported_tokens as f64) / base_estimate * 1000.0).clamp(500.0, 2000.0);
+    // EMA with alpha=0.2 for stability.
+    let next = (prev * 0.8 + target_millis * 0.2).clamp(500.0, 2000.0);
+    CALIBRATION.insert(family.clone(), next as u64);
+    ACTIVE_FAMILY.store(Arc::new(family));
+}
+
+fn calibration_factor() -> f64 {
+    let family = ACTIVE_FAMILY.load();
+    CALIBRATION
+        .get(family.as_str())
+        .map(|v| *v as f64 / 1000.0)
+        .unwrap_or(1.0)
+}
+
+/// Character-class calibrated token estimate. Uses the SAME base formula the
+/// calibration observations are recorded against
+/// (`providers::traits::estimate_content_tokens`, ~3.4 ASCII chars/token and
+/// ~1 token per non-ASCII codepoint), then scales by the online factor learned
+/// from provider-reported usage. Sharing one base is what makes the learned
+/// factor land on the right scale here; a second, different heuristic would
+/// re-introduce a systematic content-mix-dependent skew.
+#[must_use]
+pub fn estimate_tokens_calibrated(text: &str) -> usize {
+    let base = crate::providers::traits::estimate_content_tokens(text).saturating_add(4);
+    let scaled = (base as f64 * calibration_factor()).round() as usize;
+    scaled.max(1)
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct TokenBudgetConfig {
@@ -160,7 +236,7 @@ impl TokenBudgetManager {
     }
 
     pub fn estimate_tokens(text: &str) -> usize {
-        text.len().div_ceil(4).saturating_add(4)
+        estimate_tokens_calibrated(text)
     }
 
     pub fn estimate_messages_tokens(messages: &[impl AsRef<str>]) -> usize {

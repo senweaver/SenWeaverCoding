@@ -46,7 +46,7 @@ impl Tool for TeamDeleteTool {
             .ok_or_else(|| anyhow::anyhow!("Missing 'team_id'"))?;
 
         let removed = self.registry.write().remove(team_id);
-        crate::services::team_runtime::delete_team(team_id);
+        crate::services::team::runtime::delete_team(team_id);
 
         match removed {
             Some(team) => Ok(ToolResult {

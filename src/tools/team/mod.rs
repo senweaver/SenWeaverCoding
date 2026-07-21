@@ -5,4 +5,4 @@
 pub mod create;
 pub mod delete;
 
-pub use crate::services::team_store::global_team_registry;
+pub use crate::services::team::store::global_team_registry;

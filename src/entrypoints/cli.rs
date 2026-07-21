@@ -155,6 +155,15 @@ impl CliEntrypoint {
             crate::workers::init_global_supervisor(cwd.clone());
             crate::workers::scan_and_recover_at(&cwd);
         }
+
+        // The headless/interactive CLI paths must install the workspace resource
+        // manager too (the gateway installs its own). Without it the cross-session
+        // write lock and stale-file detection are inert on the no-gateway path, so
+        // concurrent agent sessions sharing this workspace would not serialize.
+        crate::session::install_global_workspace_resources(
+            crate::session::WorkspaceResourceManager::new(),
+        );
+
         let multi_agent_rt = crate::agent::multi_agent_runtime::init_global_runtime();
         crate::agent::multi_agent_runtime::register_configured_agents(&multi_agent_rt, &config);
 
@@ -302,8 +311,9 @@ impl CliEntrypoint {
             url.push_str(&format!("&token={token}"));
         } else if config.gateway.require_pairing {
             anyhow::bail!(
-                "remote 模式需要 gateway 配对 token：gateway.require_pairing 已开启，但 config.toml 的 [gateway] paired_tokens 为空。\
-                 请先在 gateway 端完成配对（或在 [gateway] 中加入有效 token / 关闭 require_pairing）后重试。"
+                "Remote mode requires a gateway pairing token: gateway.require_pairing is enabled \
+                 but [gateway] paired_tokens in config.toml is empty. Pair with the gateway first \
+                 (or add a valid token to [gateway] / disable require_pairing), then retry."
             );
         }
 
@@ -314,7 +324,7 @@ impl CliEntrypoint {
             let mut request = url
                 .as_str()
                 .into_client_request()
-                .map_err(|e| anyhow::anyhow!("remote 模式构造请求失败：{e}"))?;
+                .map_err(|e| anyhow::anyhow!("Remote mode: failed to build the connection request: {e}"))?;
             if let Some(secret) = config
                 .gateway
                 .signing_secret
@@ -340,9 +350,10 @@ impl CliEntrypoint {
         };
         let (ws_stream, _) = connect_future.await.map_err(|e| {
             anyhow::anyhow!(
-                "remote 模式连接 gateway 失败（ws://{host}:{port}/ws/chat）：{e}\n\
-                 请确认：1) gateway 已启动（运行 `sen gateway`）；2) config.toml 的 [gateway] host/port 配置正确；\
-                 3) 若启用 require_pairing，paired_tokens 中需有有效 token。"
+                "Remote mode: failed to connect to the gateway (ws://{host}:{port}/ws/chat): {e}\n\
+                 Check that: 1) the gateway is running (`sen gateway`); 2) [gateway] host/port in \
+                 config.toml are correct; 3) if require_pairing is enabled, paired_tokens contains \
+                 a valid token."
             )
         })?;
 
@@ -400,7 +411,7 @@ impl CliEntrypoint {
                             }
                             "error" => {
                                 eprintln!(
-                                    "\x1b[31m远程错误：{}\x1b[0m",
+                                    "\x1b[31mRemote error: {}\x1b[0m",
                                     parsed["content"]
                                         .as_str()
                                         .or_else(|| parsed["message"].as_str())
@@ -415,12 +426,12 @@ impl CliEntrypoint {
                         }
                     }
                     tokio_tungstenite::tungstenite::Message::Close(_) => {
-                        anyhow::bail!("远程会话已被 gateway 关闭");
+                        anyhow::bail!("Remote session was closed by the gateway");
                     }
                     _ => {}
                 }
             }
-            anyhow::bail!("远程连接中断：gateway 在回合完成前断开")
+            anyhow::bail!("Remote connection lost: the gateway disconnected before the turn finished")
         }
 
         if let Some(prompt) = options.prompt {
@@ -428,17 +439,12 @@ impl CliEntrypoint {
             return Ok(());
         }
 
-        println!("已连接到远程 gateway（session: {session_id}）。输入 /exit 退出。");
+        println!("Connected to remote gateway (session: {session_id}). Type /exit to quit.");
         loop {
             print!("\x1b[1;32mremote>\x1b[0m ");
             let _ = std::io::stdout().flush();
             let line = tokio::task::spawn_blocking(|| {
-                let mut buf = String::new();
-                match std::io::stdin().read_line(&mut buf) {
-                    Ok(0) => None,
-                    Ok(_) => Some(buf),
-                    Err(_) => None,
-                }
+                crate::cli::input::read_stdin_line_lossy().ok().flatten()
             })
             .await
             .ok()

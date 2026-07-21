@@ -97,10 +97,33 @@ impl TodoWriteTool {
 
 #[derive(Deserialize)]
 struct TodoArg {
+    #[serde(deserialize_with = "deserialize_todo_id")]
     id: String,
-    content: String,
+    #[serde(default)]
+    content: Option<String>,
     status: String,
     #[serde(default)]
+    priority: Option<String>,
+}
+
+fn deserialize_todo_id<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = serde_json::Value::deserialize(deserializer)?;
+    match value {
+        serde_json::Value::String(s) => Ok(s),
+        serde_json::Value::Number(n) => Ok(n.to_string()),
+        other => Err(serde::de::Error::custom(format!(
+            "todo id must be a string or number, got: {other}"
+        ))),
+    }
+}
+
+struct TodoPatch {
+    id: String,
+    content: Option<String>,
+    status: TodoStatus,
     priority: Option<String>,
 }
 
@@ -116,12 +139,12 @@ fn parse_status(s: &str) -> anyhow::Result<TodoStatus> {
     }
 }
 
-fn args_to_items(todos: &[serde_json::Value]) -> anyhow::Result<Vec<TodoItem>> {
+fn args_to_patches(todos: &[serde_json::Value]) -> anyhow::Result<Vec<TodoPatch>> {
     let mut out = Vec::with_capacity(todos.len());
     for raw in todos {
         let arg: TodoArg = serde_json::from_value(raw.clone())?;
         let status = parse_status(arg.status.trim())?;
-        out.push(TodoItem {
+        out.push(TodoPatch {
             id: arg.id,
             content: arg.content,
             status,
@@ -202,11 +225,11 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
                         "properties": {
                             "id": {
                                 "type": "string",
-                                "description": "Unique ID for this todo"
+                                "description": "Unique ID for this todo (string or number accepted)"
                             },
                             "content": {
                                 "type": "string",
-                                "description": "Description of the task"
+                                "description": "Description of the task. Required when creating a todo; optional on merge:true status-only updates of existing todos"
                             },
                             "status": {
                                 "type": "string",
@@ -218,7 +241,7 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
                                 "description": "Optional priority level"
                             }
                         },
-                        "required": ["id", "content", "status"]
+                        "required": ["id", "status"]
                     }
                 },
                 "merge": {
@@ -237,7 +260,7 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
             .and_then(|v| v.as_array())
             .ok_or_else(|| anyhow::anyhow!("Missing or invalid 'todos' array"))?;
 
-        let incoming = args_to_items(todos_val)?;
+        let incoming = args_to_patches(todos_val)?;
 
         let merge = args.get("merge").and_then(|v| v.as_bool()).unwrap_or(false);
 
@@ -261,16 +284,58 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
 
         let next = if effective_merge {
             let mut base = existing;
-            for item in incoming {
-                if let Some(pos) = base.iter().position(|t| t.id == item.id) {
-                    base[pos] = item;
+            for patch in incoming {
+                if let Some(pos) = base.iter().position(|t| t.id == patch.id) {
+                    base[pos].status = patch.status;
+                    if let Some(content) = patch.content {
+                        base[pos].content = content;
+                    }
+                    if patch.priority.is_some() {
+                        base[pos].priority = patch.priority;
+                    }
                 } else {
-                    base.push(item);
+                    let Some(content) = patch.content else {
+                        drop(guard);
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "todo '{}' does not exist in the current list, so 'content' is required to create it",
+                                patch.id
+                            )),
+                        });
+                    };
+                    base.push(TodoItem {
+                        id: patch.id,
+                        content,
+                        status: patch.status,
+                        priority: patch.priority,
+                    });
                 }
             }
             base
         } else {
-            incoming
+            let mut items = Vec::with_capacity(incoming.len());
+            for patch in incoming {
+                let Some(content) = patch.content else {
+                    drop(guard);
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "'content' is required for every todo when creating a new list (missing for id '{}')",
+                            patch.id
+                        )),
+                    });
+                };
+                items.push(TodoItem {
+                    id: patch.id,
+                    content,
+                    status: patch.status,
+                    priority: patch.priority,
+                });
+            }
+            items
         };
 
         let new_count = next.len();

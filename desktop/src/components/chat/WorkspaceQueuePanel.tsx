@@ -5,11 +5,15 @@
 import { useMemo } from 'react'
 import { useTranslation } from '../../i18n'
 import { useSessionStore } from '../../stores/sessionStore'
+import { useSessionRunStateStore } from '../../stores/sessionRunStateStore'
+import { useChatStore } from '../../stores/chatStore'
 import {
   useWorkspaceQueueStore,
   workspaceKeyFor,
+  tryDrainWorkspace,
   type QueuedItem,
 } from '../../stores/workspaceQueueStore'
+import type { AttachmentRef, UIAttachment } from '../../types/chat'
 import { resolveSessionTitle } from '../../utils/sessionTitle'
 import { Spinner } from '../shared/Spinner'
 import { refsToPlainText } from './composerRefs'
@@ -20,6 +24,17 @@ function previewText(text: string): string {
   const trimmed = refsToPlainText(text).replace(/\s+/g, ' ').trim()
   if (trimmed.length <= PREVIEW_LIMIT) return trimmed
   return `${trimmed.slice(0, PREVIEW_LIMIT)}\u2026`
+}
+
+function toUiAttachments(refs?: AttachmentRef[]): UIAttachment[] | undefined {
+  if (!refs || refs.length === 0) return undefined
+  return refs.map((a) => ({
+    type: a.type,
+    name: a.name || a.path || a.mimeType || a.type,
+    ...(a.path ? { path: a.path } : {}),
+    data: a.data,
+    mimeType: a.mimeType,
+  }))
 }
 
 type Props = {
@@ -34,6 +49,29 @@ export function WorkspaceQueuePanel({ sessionId }: Props) {
   const cancel = useWorkspaceQueueStore((s) => s.cancel)
   const cancelAllForSession = useWorkspaceQueueStore((s) => s.cancelAllForSession)
   const toggleExpanded = useWorkspaceQueueStore((s) => s.toggleExpanded)
+  const moveToFront = useWorkspaceQueueStore((s) => s.moveToFront)
+
+  // Cursor-style per-item actions. Edit pulls the message back into the
+  // composer; send-now promotes it to the queue head and either stops the
+  // running turn (the idle transition auto-drains the head) or drains
+  // immediately when nothing is running.
+  const handleEdit = (item: QueuedItem) => {
+    cancel(item.id)
+    useChatStore.getState().queueComposerPrefill(item.sessionId, {
+      text: item.content,
+      attachments: toUiAttachments(item.attachments),
+    })
+  }
+
+  const handleSendNow = (item: QueuedItem) => {
+    moveToFront(item.id)
+    const running = useSessionRunStateStore.getState().running
+    if (running.has(item.sessionId)) {
+      useChatStore.getState().stopGeneration(item.sessionId)
+    } else {
+      void tryDrainWorkspace(item.workspaceKey)
+    }
+  }
 
   const session = useMemo(
     () => (sessionId ? sessions.find((s) => s.id === sessionId) ?? null : null),
@@ -132,7 +170,12 @@ export function WorkspaceQueuePanel({ sessionId }: Props) {
                   key={item.id}
                   item={item}
                   rank={idx + 1}
+                  onEdit={() => handleEdit(item)}
+                  onSendNow={() => handleSendNow(item)}
                   onCancel={() => cancel(item.id)}
+                  editLabel={t('composer.queue.edit')}
+                  sendNowLabel={t('composer.queue.sendNow')}
+                  deleteLabel={t('composer.queue.delete')}
                   attachmentsLabel={
                     item.attachments && item.attachments.length > 0
                       ? t('composer.queue.itemAttachments', { count: item.attachments.length })
@@ -154,12 +197,22 @@ export function WorkspaceQueuePanel({ sessionId }: Props) {
 function QueueRow({
   item,
   rank,
+  onEdit,
+  onSendNow,
   onCancel,
+  editLabel,
+  sendNowLabel,
+  deleteLabel,
   attachmentsLabel,
 }: {
   item: QueuedItem
   rank: number
+  onEdit: () => void
+  onSendNow: () => void
   onCancel: () => void
+  editLabel: string
+  sendNowLabel: string
+  deleteLabel: string
   attachmentsLabel: string
 }) {
   return (
@@ -175,14 +228,35 @@ function QueueRow({
           </span>
         )}
       </span>
-      <button
-        type="button"
-        onClick={onCancel}
-        aria-label="cancel"
-        className="opacity-0 transition-opacity group-hover:opacity-100 flex-shrink-0 rounded p-0.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-error)]"
-      >
-        <span className="material-symbols-outlined text-[14px] leading-none">close</span>
-      </button>
+      <span className="flex flex-shrink-0 items-center gap-0.5 opacity-0 transition-opacity group-hover:opacity-100">
+        <button
+          type="button"
+          onClick={onEdit}
+          aria-label={editLabel}
+          title={editLabel}
+          className="rounded p-0.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+        >
+          <span className="material-symbols-outlined text-[14px] leading-none">edit</span>
+        </button>
+        <button
+          type="button"
+          onClick={onSendNow}
+          aria-label={sendNowLabel}
+          title={sendNowLabel}
+          className="rounded p-0.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-brand)]"
+        >
+          <span className="material-symbols-outlined text-[14px] leading-none">arrow_upward</span>
+        </button>
+        <button
+          type="button"
+          onClick={onCancel}
+          aria-label={deleteLabel}
+          title={deleteLabel}
+          className="rounded p-0.5 text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-error)]"
+        >
+          <span className="material-symbols-outlined text-[14px] leading-none">delete</span>
+        </button>
+      </span>
     </li>
   )
 }

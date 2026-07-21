@@ -42,7 +42,9 @@ pub mod rbac;
 pub mod sandbox;
 pub mod taint;
 
-pub use audit::{AuditEvent, AuditEventType, AuditLogger};
+pub use audit::{
+    AuditEvent, AuditEventType, AuditLogger, global_audit_logger, record_command_execution,
+};
 pub use detect::create_sandbox;
 pub use domain_matcher::DomainMatcher;
 pub use estop::{EstopLevel, EstopManager, EstopState, ResumeSelector};

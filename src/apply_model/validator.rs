@@ -43,10 +43,124 @@ impl ValidationReport {
     pub fn first_kind(&self) -> Option<&ValidationKind> {
         self.issues.first().map(|i| &i.kind)
     }
+
+    pub fn is_confident_failure(&self) -> bool {
+        self.issues.iter().any(|i| {
+            matches!(
+                i.kind,
+                ValidationKind::TreeSitterError { .. } | ValidationKind::Empty
+            )
+        })
+    }
+
+    pub fn advisory_summary(&self) -> String {
+        self.issues
+            .iter()
+            .map(|i| i.message.clone())
+            .collect::<Vec<_>>()
+            .join("; ")
+    }
 }
 
 pub fn validate_bytes(s: &str) -> ValidationReport {
     validate_bytes_with_lang(s, None)
+}
+
+pub fn grammar_id_for_path(path: &std::path::Path) -> Option<&'static str> {
+    match path.extension().and_then(|e| e.to_str()) {
+        Some("rs") => Some("rust"),
+        Some("py") => Some("python"),
+        Some("ts") | Some("tsx") => Some("typescript"),
+        Some("js") | Some("jsx") | Some("mjs") | Some("cjs") => Some("javascript"),
+        Some("json") | Some("jsonc") => Some("json"),
+        Some("toml") => Some("toml"),
+        Some("md") | Some("markdown") => Some("markdown"),
+        Some("go") => Some("go"),
+        Some("java") => Some("java"),
+        Some("c") | Some("h") => Some("c"),
+        Some("cpp") | Some("cxx") | Some("cc") | Some("hpp") | Some("hh") | Some("hxx") => {
+            Some("cpp")
+        }
+        _ => None,
+    }
+}
+
+pub fn bracket_checkable_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some(
+            "rs" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "py" | "go" | "java" | "c"
+                | "h" | "cpp" | "cc" | "cxx" | "hpp" | "hh" | "hxx" | "cs" | "json" | "jsonc"
+                | "css" | "scss" | "less" | "php" | "rb" | "swift" | "kt" | "kts" | "scala"
+                | "zig" | "vue" | "svelte"
+        )
+    )
+}
+
+pub fn validate_edit(
+    before: Option<&str>,
+    after: &str,
+    path: Option<&std::path::Path>,
+) -> ValidationReport {
+    if after.is_empty() {
+        return ValidationReport::default();
+    }
+    let bracket_ok = path.map(bracket_checkable_path).unwrap_or(true);
+    #[cfg(feature = "code-intel")]
+    let lang = path.and_then(grammar_id_for_path);
+
+    let run = |text: &str| -> ValidationReport {
+        #[cfg(feature = "code-intel")]
+        {
+            if let Some(name) = lang {
+                if let Some(report) = tree_sitter_validate(text, name) {
+                    return report;
+                }
+            }
+        }
+        if bracket_ok {
+            bracket_balance_validate(text)
+        } else {
+            ValidationReport::default()
+        }
+    };
+
+    let after_report = run(after);
+    if after_report.is_ok() {
+        return after_report;
+    }
+    let Some(before_text) = before else {
+        return after_report;
+    };
+    let before_report = run(before_text);
+    if before_report.is_ok() {
+        return after_report;
+    }
+    let kept: Vec<ValidationIssue> = after_report
+        .issues
+        .into_iter()
+        .filter(|issue| match &issue.kind {
+            ValidationKind::BracketUnbalanced { bracket, net, .. } => {
+                !before_report.issues.iter().any(|b| {
+                    matches!(
+                        &b.kind,
+                        ValidationKind::BracketUnbalanced {
+                            bracket: prior_bracket,
+                            net: prior_net,
+                            ..
+                        } if prior_bracket == bracket && prior_net == net
+                    )
+                })
+            }
+            ValidationKind::TreeSitterError { .. } => !before_report
+                .issues
+                .iter()
+                .any(|b| matches!(&b.kind, ValidationKind::TreeSitterError { .. })),
+            ValidationKind::Empty => false,
+            ValidationKind::ValidatorCustom(_) => true,
+        })
+        .collect();
+    ValidationReport { issues: kept }
 }
 
 pub fn validate_bytes_with_lang(s: &str, lang: Option<&str>) -> ValidationReport {

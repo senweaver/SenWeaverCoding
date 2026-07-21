@@ -506,6 +506,25 @@ impl AuthProfilesStore {
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // A crashed holder used to brick auth for the full timeout on
+                    // every call. Steal the lock when it is clearly stale (older
+                    // than STALE_LOCK_MS by mtime) so recovery is automatic.
+                    const STALE_LOCK_MS: u64 = 30_000;
+                    let stale = fs::metadata(&self.lock_path)
+                        .await
+                        .ok()
+                        .and_then(|m| m.modified().ok())
+                        .and_then(|t| t.elapsed().ok())
+                        .map(|age| age.as_millis() as u64 >= STALE_LOCK_MS)
+                        .unwrap_or(false);
+                    if stale {
+                        tracing::warn!(
+                            "stealing stale auth profile lock at {} (holder appears dead)",
+                            self.lock_path.display()
+                        );
+                        let _ = fs::remove_file(&self.lock_path).await;
+                        continue;
+                    }
                     if waited >= LOCK_TIMEOUT_MS {
                         anyhow::bail!(
                             "Timed out waiting for auth profile lock at {}",

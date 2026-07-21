@@ -96,7 +96,10 @@ impl EvalSuite for MbppSuite {
             verdict,
             output: output.to_string(),
             latency_ms: 0,
-            notes: None,
+            notes: Some(
+                "heuristic string-containment judge; NOT an execution-based MBPP verdict"
+                    .to_string(),
+            ),
         }
     }
 }

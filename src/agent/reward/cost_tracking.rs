@@ -56,6 +56,13 @@ where
     TOOL_LOOP_COST_TRACKING_CONTEXT.scope(ctx, f).await
 }
 
+pub fn current_tool_loop_cost_tracking_context() -> Option<ToolLoopCostTrackingContext> {
+    TOOL_LOOP_COST_TRACKING_CONTEXT
+        .try_with(|c| c.clone())
+        .ok()
+        .flatten()
+}
+
 pub(crate) fn lookup_model_pricing<'a>(
     prices: &'a std::collections::HashMap<String, ModelPricing>,
     provider_name: &str,
@@ -99,11 +106,29 @@ pub(crate) fn record_tool_loop_cost_usage(
         }
     };
 
+    let cached_input = usage.cached_input_tokens.unwrap_or(0);
+    let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
+    // Provider convention split: OpenAI-style usage reports prompt_tokens that
+    // ALREADY include the cached-read subset, so the fresh (full-rate) portion is
+    // input - cached. Anthropic/Bedrock report cache-read as a SEPARATE field, so
+    // input is already the fresh portion and must not be reduced.
+    let cache_is_separate = matches!(
+        provider_name.to_ascii_lowercase().as_str(),
+        "anthropic" | "bedrock" | "claude" | "claude_code"
+    );
+    let fresh_input = if cache_is_separate {
+        input_tokens
+    } else {
+        input_tokens.saturating_sub(cached_input)
+    };
+
     let pricing = lookup_model_pricing(&prices, provider_name, model);
-    let cost_usage = CostTokenUsage::new(
+    let cost_usage = CostTokenUsage::new_with_cache(
         model,
-        input_tokens,
+        fresh_input,
         output_tokens,
+        cached_input,
+        cache_creation,
         pricing.map_or(0.0, |entry| entry.input),
         pricing.map_or(0.0, |entry| entry.output),
     );

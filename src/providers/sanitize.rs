@@ -258,12 +258,13 @@ pub fn sanitize_messages_before_send_for_trait(
     reserve_output_tokens: usize,
     context_window: Option<usize>,
 ) -> Vec<ChatMessage> {
-    sanitize_messages_before_send_for_provider(
+    sanitize_messages_before_send_for_provider_ext(
         messages,
         model,
         reserve_output_tokens,
         context_window,
         provider.message_format_kind(),
+        provider.consumes_reasoning_envelope(),
     )
 }
 
@@ -274,13 +275,31 @@ pub fn sanitize_messages_before_send_for_provider(
     context_window: Option<usize>,
     kind: ProviderKind,
 ) -> Vec<ChatMessage> {
+    sanitize_messages_before_send_for_provider_ext(
+        messages,
+        model,
+        reserve_output_tokens,
+        context_window,
+        kind,
+        false,
+    )
+}
+
+pub fn sanitize_messages_before_send_for_provider_ext(
+    messages: Vec<ChatMessage>,
+    model: &str,
+    reserve_output_tokens: usize,
+    context_window: Option<usize>,
+    kind: ProviderKind,
+    consumes_reasoning_envelope: bool,
+) -> Vec<ChatMessage> {
     let trimmed = enforce_context_budget_native_with_window(
         messages,
         model,
         reserve_output_tokens,
         context_window,
     );
-    normalize_chat_messages_for_provider(trimmed, kind)
+    normalize_chat_messages_for_provider_ext(trimmed, kind, consumes_reasoning_envelope)
 }
 
 pub fn normalize_chat_messages_for_wire(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -291,18 +310,104 @@ pub fn normalize_chat_messages_for_provider(
     messages: Vec<ChatMessage>,
     kind: ProviderKind,
 ) -> Vec<ChatMessage> {
+    normalize_chat_messages_for_provider_ext(messages, kind, true)
+}
+
+pub fn normalize_chat_messages_for_provider_ext(
+    messages: Vec<ChatMessage>,
+    kind: ProviderKind,
+    consumes_reasoning_envelope: bool,
+) -> Vec<ChatMessage> {
     let mirrored = mirror_tool_ids_in_chat_messages(messages);
     let cleaned = clean_empty_assistant_tool_calls_in_chat_messages(mirrored);
     let non_empty = drop_payloadless_assistant_messages(cleaned);
     let reasoning_normalized = match kind {
         ProviderKind::Anthropic => non_empty,
-        _ => promote_reasoning_only_assistants_for_openai(non_empty),
+        _ => {
+            if consumes_reasoning_envelope {
+                promote_reasoning_only_assistants_for_openai(non_empty)
+            } else {
+                flatten_reasoning_envelopes_for_wire(non_empty)
+            }
+        }
     };
     let no_orphans = match kind {
         ProviderKind::Anthropic => coerce_orphan_tool_messages_for_anthropic(reasoning_normalized),
         _ => coerce_orphan_tool_messages_in_chat_messages(reasoning_normalized),
     };
     repair_dangling_tool_pairs_for_provider(no_orphans, kind)
+}
+
+pub fn flatten_reasoning_envelopes_for_wire(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    let mut flattened: usize = 0;
+    let mut dropped: usize = 0;
+
+    for mut msg in messages {
+        if msg.role != "assistant" {
+            out.push(msg);
+            continue;
+        }
+        let trimmed = msg.content.trim_start();
+        if !trimmed.starts_with('{') {
+            out.push(msg);
+            continue;
+        }
+        let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) else {
+            out.push(msg);
+            continue;
+        };
+        let is_envelope = !obj.is_empty()
+            && obj.keys().all(|key| {
+                matches!(key.as_str(), "content" | "tool_calls" | "reasoning_content")
+            });
+        if !is_envelope {
+            out.push(msg);
+            continue;
+        }
+        // Envelopes carrying tool_calls are already destructured by every wire
+        // (tool_calls parsed, plain content extracted, reasoning dropped), so they
+        // never leak. Only the reasoning-only envelope needs flattening here.
+        let has_tool_calls = obj
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false);
+        if has_tool_calls {
+            out.push(msg);
+            continue;
+        }
+        let content = obj
+            .get("content")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let reasoning = obj
+            .get("reasoning_content")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        match content.or(reasoning) {
+            Some(text) => {
+                msg.content = text.to_string();
+                flattened += 1;
+                out.push(msg);
+            }
+            None => {
+                dropped += 1;
+            }
+        }
+    }
+
+    if flattened > 0 || dropped > 0 {
+        tracing::warn!(
+            target: "providers.sanitize",
+            flattened,
+            dropped,
+            "flattened reasoning envelopes to plain content for a wire that does not consume them (prevents raw JSON leak)"
+        );
+    }
+    out
 }
 
 pub fn promote_reasoning_only_assistants_for_openai(

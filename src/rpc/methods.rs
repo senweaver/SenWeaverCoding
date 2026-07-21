@@ -162,6 +162,11 @@ impl RpcCtx {
     pub async fn handle_request(&self, method: &str, params: Value, id: Option<Value>) {
         let id = id.unwrap_or(Value::Null);
 
+        // SDK clients send dotted method names (session.prompt); the server
+        // dispatch uses slashes (session/prompt). Normalize so both forms work.
+        let method = &method.replace('.', "/");
+        let method = method.as_str();
+
         let result = match method {
             "initialize" => self.handle_initialize(&params).await,
             "session/new" => self.handle_session_new(&params).await,
@@ -202,10 +207,13 @@ impl RpcCtx {
     }
 
     pub async fn handle_http_request(&self, method: &str, params: Value) -> RpcResult {
+        let method = &method.replace('.', "/");
+        let method = method.as_str();
         match method {
             "initialize" => self.handle_initialize(&params).await,
             "session/new" => self.handle_session_new(&params).await,
             "session/prompt" => self.handle_session_prompt(&params).await,
+            "session/prompt_stream" => self.handle_session_prompt(&params).await,
             "session/stop" => self.handle_session_stop(&params).await,
             "session/list" => self.handle_session_list().await,
             "session/kill" => self.handle_session_kill(&params).await,
@@ -358,6 +366,7 @@ impl RpcCtx {
                     return Ok(serde_json::json!({
                         "sessionId": session_id,
                         "content": "",
+                        "response": "",
                         "stopped": true,
                     }));
                 }
@@ -386,6 +395,7 @@ impl RpcCtx {
         Ok(serde_json::json!({
             "sessionId": session_id,
             "content": result,
+            "response": result,
         }))
     }
 
@@ -1148,17 +1158,15 @@ impl RpcCtx {
             .map_err(|e| RpcError::memory(format!("Failed to create memory: {e}")))?,
         );
 
-        mem.store(
-            &Uuid::new_v4().to_string(),
-            content,
-            category,
-            Some(namespace),
-        )
-        .await
-        .map_err(|e| RpcError::memory(format!("Store failed: {e}")))?;
+        let key = Uuid::new_v4().to_string();
+        let importance = params.get("importance").and_then(|v| v.as_f64());
+        mem.store_with_metadata(&key, content, category, None, Some(namespace), importance)
+            .await
+            .map_err(|e| RpcError::memory(format!("Store failed: {e}")))?;
 
         Ok(serde_json::json!({
             "stored": true,
+            "id": key,
             "namespace": namespace,
         }))
     }
@@ -1189,7 +1197,7 @@ impl RpcCtx {
         );
 
         let results = mem
-            .recall(query, limit, Some(namespace), None, None)
+            .recall_namespaced(namespace, query, limit, None, None, None)
             .await
             .map_err(|e| RpcError::memory(format!("Recall failed: {e}")))?;
 
@@ -1286,8 +1294,9 @@ impl RpcCtx {
     fn extract_prompt(&self, params: &Value) -> RpcResult<String> {
         params
             .get("prompt")
+            .or_else(|| params.get("message"))
             .and_then(|v| v.as_str())
             .map(String::from)
-            .ok_or_else(|| RpcError::invalid_params("Missing required: prompt"))
+            .ok_or_else(|| RpcError::invalid_params("Missing required: prompt (or message)"))
     }
 }

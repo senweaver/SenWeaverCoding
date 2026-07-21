@@ -24,87 +24,12 @@ impl Default for PermissionMode {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ComposerPermissionMode {
-
-    Default,
-
-    AcceptEdits,
-
-    Plan,
-
-    Bypass,
-
-    AskEveryTime,
-}
-
-impl ComposerPermissionMode {
-
-    pub fn from_wire(s: &str) -> Self {
-        match s {
-            "acceptEdits" => Self::AcceptEdits,
-            "plan" => Self::Plan,
-
-            "bypassPermissions" | "dontAsk" => Self::Bypass,
-            "askEveryTime" => Self::AskEveryTime,
-            _ => Self::Default,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GateDecision {
-
-    Auto,
-
-    Ask,
-
-    Deny,
-}
-
-const EDIT_TOOLS: &[&str] = &[
-    "file_write",
-    "file_edit",
-    "multi_edit",
-    "glob_edit",
-    "notebook_edit",
-    "patch_apply",
-    "diff_apply",
-    "lsp_rename",
-    "restore_file",
-    "copy_path",
-    "move_path",
-    "delete_path",
-    "create_directory",
-    "code_xfile_refactor",
-    "lsp_format",
-];
-
-const SYSTEM_TOOLS: &[&str] = &[
-    "shell",
-    "powershell",
-    "cron_add",
-    "cron_list",
-    "cron_remove",
-    "cron_update",
-    "cron_run",
-
-];
-
 const BROWSER_FAMILY_TOOLS: &[&str] = &[
     "browser",
     "browser_open",
     "browser_delegate",
     "text_browser",
 ];
-
-fn is_edit_tool(name: &str) -> bool {
-    EDIT_TOOLS.contains(&name)
-}
-
-fn is_system_tool(name: &str) -> bool {
-    SYSTEM_TOOLS.contains(&name)
-}
 
 pub fn is_browser_tool(name: &str) -> bool {
     BROWSER_FAMILY_TOOLS.contains(&name)
@@ -122,71 +47,6 @@ pub fn is_mcp_tool_name(name: &str) -> bool {
         return !head.is_empty();
     }
     false
-}
-
-pub fn gate_decision<S: ::std::hash::BuildHasher>(
-    mode: ComposerPermissionMode,
-    tool_name: &str,
-    auto_approve: &std::collections::HashSet<String, S>,
-    protect_browser: bool,
-    protect_mcp: bool,
-) -> GateDecision {
-
-    if is_interactive_question_tool(tool_name) {
-        return GateDecision::Ask;
-    }
-
-    let read_only = is_read_only_tool(tool_name);
-    let is_edit = is_edit_tool(tool_name);
-    let is_system = is_system_tool(tool_name);
-    let browser_protected = protect_browser && is_browser_tool(tool_name);
-    let mcp_protected = protect_mcp && is_mcp_tool_name(tool_name);
-
-    if matches!(mode, ComposerPermissionMode::Bypass) {
-        return GateDecision::Auto;
-    }
-
-    if matches!(mode, ComposerPermissionMode::AskEveryTime) {
-        if read_only {
-            return GateDecision::Auto;
-        }
-        return GateDecision::Ask;
-    }
-
-    if matches!(mode, ComposerPermissionMode::Plan) {
-        if read_only || is_plan_mode_allowed_tool(tool_name) {
-            return GateDecision::Auto;
-        }
-        return GateDecision::Deny;
-    }
-
-    if (browser_protected || mcp_protected) && !read_only {
-        return GateDecision::Ask;
-    }
-
-    if auto_approve.contains("*") || auto_approve.contains(tool_name) {
-        return GateDecision::Auto;
-    }
-
-    if read_only {
-        return GateDecision::Auto;
-    }
-
-    match mode {
-        ComposerPermissionMode::AcceptEdits => {
-            if is_edit {
-                GateDecision::Auto
-            } else if is_system {
-                GateDecision::Ask
-            } else {
-                GateDecision::Auto
-            }
-        }
-        ComposerPermissionMode::Default => GateDecision::Ask,
-        ComposerPermissionMode::Bypass
-        | ComposerPermissionMode::AskEveryTime
-        | ComposerPermissionMode::Plan => GateDecision::Ask,
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -419,10 +279,6 @@ pub fn read_only_tool_names() -> Vec<&'static str> {
     READ_ONLY_TOOLS.to_vec()
 }
 
-pub fn is_interactive_question_tool(name: &str) -> bool {
-    matches!(name, "ask_question" | "ask_user" | "AskQuestion")
-}
-
 pub fn is_dangerous_command(command: &str) -> bool {
     let lower = command.to_lowercase();
     DANGEROUS_PATTERNS
@@ -506,18 +362,17 @@ impl ToolActivationGate for CliStdinGate {
             }
         }
         let decision = tokio::task::spawn_blocking(move || {
-            use std::io::{self, BufRead, Write};
+            use std::io::{self, Write};
             eprintln!();
             eprintln!("⚠️  Agent requested a high-risk tool: {tool_name}");
             eprint!(
-                "    是否允许助手使用工具 {tool_name}？(y)es / (a)lways / (n)o: "
+                "    Allow the assistant to use tool {tool_name}? (y)es / (a)lways / (n)o: "
             );
             let _ = io::stderr().flush();
-            let stdin = io::stdin();
-            let mut line = String::new();
-            if stdin.lock().read_line(&mut line).is_err() {
-                return ToolActivationDecision::No;
-            }
+            let line = match crate::cli::input::read_line_lossy(&mut io::stdin().lock()) {
+                Ok(Some(line)) => line,
+                Ok(None) | Err(_) => return ToolActivationDecision::No,
+            };
             match line.trim().to_ascii_lowercase().as_str() {
                 "y" | "yes" => ToolActivationDecision::Yes,
                 "a" | "always" => ToolActivationDecision::Always,
@@ -570,39 +425,45 @@ impl ToolActivationGate for SessionActivationGate {
             "tool_name": tool_name,
             "workspace_key": workspace_key,
         });
+        // Order matters: subscribe and register BEFORE emitting, otherwise an
+        // instant reply can land in the gap and be lost; the mailbox-aware wait
+        // below then also survives a lagged broadcast.
+        let mut rx = self.bus.subscribe();
+        crate::approval::register_pending_gateway_approval_with_replay(
+            request_id.clone(),
+            serde_json::json!({
+                "type": "permission_request",
+                "requestId": request_id,
+                "toolName": format!("tool_search/activate:{tool_name}"),
+                "input": arguments,
+            }),
+        );
         self.sink.emit_kind(SessionEventKind::ApprovalRequested {
             id: request_id.clone(),
             tool_name: format!("tool_search/activate:{tool_name}"),
             arguments,
             issued_at: chrono::Utc::now(),
         });
-        crate::approval::register_pending_gateway_approval(request_id.clone());
 
-        let mut rx = self.bus.subscribe();
-        let deadline =
-            std::time::Instant::now() + std::time::Duration::from_millis(self.timeout_ms);
-        loop {
-            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
-            if remaining.is_zero() {
-                return Ok(ToolActivationDecision::No);
-            }
-            match tokio::time::timeout(remaining, rx.recv()).await {
-                Ok(Ok(evt)) => {
-                    if let SessionEventKind::ApprovalResponded { id, decision, .. } = &evt.kind {
-                        if id == &request_id {
-                            return Ok(match decision.to_ascii_lowercase().as_str() {
-                                "yes" | "y" => ToolActivationDecision::Yes,
-                                "always" | "a" => ToolActivationDecision::Always,
-                                _ => ToolActivationDecision::No,
-                            });
-                        }
-                    }
-                }
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => continue,
-                Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) | Err(_) => {
-                    return Ok(ToolActivationDecision::No);
-                }
-            }
-        }
+        let wait = crate::approval::wait_for_session_decision(&request_id, &mut rx, None);
+        let verdict = match tokio::time::timeout(
+            std::time::Duration::from_millis(self.timeout_ms),
+            wait,
+        )
+        .await
+        {
+            Ok(verdict) => verdict,
+            Err(_) => crate::approval::SessionApprovalVerdict::TimedOut,
+        };
+        let _ = crate::approval::drop_pending_gateway_approval(&request_id);
+        Ok(match verdict {
+            crate::approval::SessionApprovalVerdict::Decision(response) => match response {
+                crate::approval::ApprovalResponse::Yes => ToolActivationDecision::Yes,
+                crate::approval::ApprovalResponse::Always => ToolActivationDecision::Always,
+                crate::approval::ApprovalResponse::No => ToolActivationDecision::No,
+            },
+            crate::approval::SessionApprovalVerdict::Cancelled
+            | crate::approval::SessionApprovalVerdict::TimedOut => ToolActivationDecision::No,
+        })
     }
 }

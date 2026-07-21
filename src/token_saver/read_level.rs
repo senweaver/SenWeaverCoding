@@ -23,6 +23,14 @@ impl ReadLevel {
             _ => Self::Default,
         }
     }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::Smart => "smart",
+            Self::Signatures => "signatures",
+        }
+    }
 }
 
 pub fn compact(path: &str, content: &str, level: ReadLevel) -> String {

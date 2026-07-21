@@ -167,6 +167,22 @@ impl Tool for CopyPathTool {
             });
         }
 
+        // Guard against copying a directory into itself/a descendant, which would
+        // recurse into the growing destination and blow up disk usage.
+        if src_path.is_dir() {
+            let src_norm = crate::util::normalize_path_for_containment(&src_path);
+            let dst_norm = crate::util::normalize_path_for_containment(&dst_path);
+            if dst_norm == src_norm || crate::util::path_is_within(&dst_norm, &src_norm) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Refusing to copy directory {src} into itself or a subdirectory ({dst})"
+                    )),
+                });
+            }
+        }
+
         if src_path.is_dir() {
             copy_dir_recursive(&src_path, &dst_path).await?;
         } else {
@@ -176,12 +192,48 @@ impl Tool for CopyPathTool {
             tokio::fs::copy(&src_path, &dst_path).await?;
         }
 
+        notify_indexes_paths_changed(std::slice::from_ref(&dst_path));
+
         Ok(ToolResult {
             success: true,
             output: format!("Copied {src} → {dst}"),
             error: None,
         })
     }
+}
+
+/// Collect regular files under `root` (or `root` itself if it is a file), up to
+/// `limit`, using an iterative walk. Used to snapshot files before a recursive
+/// delete without pulling in a walker dependency or unbounded recursion.
+fn collect_files_bounded(root: &std::path::Path, limit: usize) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    if root.is_file() {
+        out.push(root.to_path_buf());
+        return out;
+    }
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        if out.len() >= limit {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            match entry.file_type() {
+                Ok(ft) if ft.is_dir() => stack.push(path),
+                Ok(ft) if ft.is_file() => {
+                    out.push(path);
+                    if out.len() >= limit {
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    out
 }
 
 async fn copy_dir_recursive(src: &std::path::Path, dst: &std::path::Path) -> anyhow::Result<()> {
@@ -289,12 +341,25 @@ impl Tool for MovePathTool {
 
         tokio::fs::rename(&src_path, &dst_path).await?;
 
+        notify_indexes_paths_removed(std::slice::from_ref(&src_path));
+        notify_indexes_paths_changed(std::slice::from_ref(&dst_path));
+
         Ok(ToolResult {
             success: true,
             output: format!("Moved {src} → {dst}"),
             error: None,
         })
     }
+}
+
+fn notify_indexes_paths_changed(paths: &[std::path::PathBuf]) {
+    crate::agent::loop_::services::note_code_files_changed(paths);
+    crate::code_intel::symbol_graph::incremental::note_files_changed_global(paths);
+}
+
+fn notify_indexes_paths_removed(paths: &[std::path::PathBuf]) {
+    crate::agent::loop_::services::note_code_files_changed(paths);
+    crate::code_intel::symbol_graph::incremental::note_files_removed_global(paths);
 }
 
 pub struct DeletePathTool {
@@ -366,11 +431,28 @@ impl Tool for DeletePathTool {
             });
         }
 
+        // Snapshot content into edit-history before an irreversible recursive
+        // delete so it can be recovered (restore_file only covers git-tracked
+        // files). Bounded so deleting a huge tree doesn't stall.
+        const MAX_DELETE_SNAPSHOTS: usize = 200;
+        let workspace = self.security.workspace_dir();
+        let history = crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
+        let to_snapshot: Vec<std::path::PathBuf> = if full.is_dir() {
+            collect_files_bounded(&full, MAX_DELETE_SNAPSHOTS)
+        } else {
+            vec![full.clone()]
+        };
+        for file in &to_snapshot {
+            let _ = history.snapshot_before_write(file, "delete_path", "pre-delete snapshot");
+        }
+
         if full.is_dir() {
             tokio::fs::remove_dir_all(&full).await?;
         } else {
             tokio::fs::remove_file(&full).await?;
         }
+
+        notify_indexes_paths_removed(std::slice::from_ref(&full));
 
         Ok(ToolResult {
             success: true,

@@ -27,11 +27,16 @@ impl Channel for CliChannel {
 
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
         let stdin = io::stdin();
-        let reader = BufReader::new(stdin);
-        let mut lines = reader.lines();
+        let mut reader = BufReader::new(stdin);
 
-        while let Ok(Some(line)) = lines.next_line().await {
-            let line = line.trim().to_string();
+        loop {
+            let mut raw = Vec::new();
+            let n = reader.read_until(b'\n', &mut raw).await;
+            match n {
+                Ok(0) | Err(_) => break,
+                Ok(_) => {}
+            }
+            let line = String::from_utf8_lossy(&raw).trim().to_string();
             if line.is_empty() {
                 continue;
             }

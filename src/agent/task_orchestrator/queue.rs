@@ -220,6 +220,7 @@ impl TaskQueue {
 
     pub fn submit(&self, task: Task) -> TaskId {
         let task_id = task.id.clone();
+        let required_capability = task.required_capability.clone();
         let prioritized = PrioritizedTask {
             task_id: task_id.clone(),
             priority: task.priority,
@@ -228,18 +229,19 @@ impl TaskQueue {
 
         info!(
             task_id = %task_id,
-            capability = %task.required_capability,
+            capability = %required_capability,
             priority = ?task.priority,
             "Task submitted"
         );
 
+        self.tasks.write().insert(task_id.clone(), task);
+
         self.capability_index
             .write()
-            .entry(task.required_capability.clone())
+            .entry(required_capability)
             .or_default()
             .push(prioritized);
 
-        self.tasks.write().insert(task_id.clone(), task);
         task_id
     }
 
@@ -257,6 +259,7 @@ impl TaskQueue {
                 }
                 if task.is_expired() {
                     task.status = TaskStatus::Expired;
+                    task.finished_at = Some(Utc::now());
                     continue;
                 }
 

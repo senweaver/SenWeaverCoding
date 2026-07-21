@@ -30,6 +30,10 @@ impl EmbeddingProvider for LocalBgeEmbedding {
         self.dims
     }
 
+    fn fingerprint(&self) -> String {
+        format!("local_bge:{}:{}", self.model, self.dims)
+    }
+
     async fn embed(&self, texts: &[&str]) -> anyhow::Result<Vec<Vec<f32>>> {
         if texts.is_empty() {
             return Ok(Vec::new());

@@ -16,12 +16,83 @@ pub struct ChatMessage {
     pub metadata: std::collections::HashMap<String, serde_json::Value>,
 }
 
+pub const EPHEMERAL_CONTEXT_KEY: &str = "ephemeral_context";
+pub const TURN_COMPANION_KEY: &str = "turn_companion";
+
 impl ChatMessage {
     pub fn system(content: impl Into<String>) -> Self {
         Self {
             role: "system".into(),
             content: content.into(),
             metadata: Default::default(),
+        }
+    }
+
+    #[must_use]
+    pub fn with_ephemeral_context(mut self, wire_content: impl Into<String>) -> Self {
+        let wire = wire_content.into();
+        if !wire.is_empty() && wire != self.content {
+            self.metadata.insert(
+                EPHEMERAL_CONTEXT_KEY.to_string(),
+                serde_json::Value::String(wire),
+            );
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn with_turn_companion(mut self, companion: impl Into<String>) -> Self {
+        let text = companion.into();
+        if !text.trim().is_empty() {
+            self.metadata.insert(
+                TURN_COMPANION_KEY.to_string(),
+                serde_json::Value::String(text),
+            );
+        }
+        self
+    }
+
+    #[must_use]
+    pub fn turn_companion(&self) -> Option<&str> {
+        self.metadata
+            .get(TURN_COMPANION_KEY)
+            .and_then(|v| v.as_str())
+    }
+
+    #[must_use]
+    pub fn has_current_request_marker(&self) -> bool {
+        self.wire_content().contains("[CURRENT REQUEST")
+            || self
+                .turn_companion()
+                .is_some_and(|c| c.contains("[CURRENT REQUEST"))
+    }
+
+    #[must_use]
+    pub fn ephemeral_wire_content(&self) -> Option<&str> {
+        self.metadata
+            .get(EPHEMERAL_CONTEXT_KEY)
+            .and_then(|v| v.as_str())
+    }
+
+    pub fn strip_ephemeral_context(&mut self) {
+        self.metadata.remove(EPHEMERAL_CONTEXT_KEY);
+    }
+
+    #[must_use]
+    pub fn wire_content(&self) -> &str {
+        self.ephemeral_wire_content().unwrap_or(&self.content)
+    }
+
+    #[must_use]
+    pub fn composed_for_send(&self) -> ChatMessage {
+        match self.ephemeral_wire_content() {
+            Some(wire) => {
+                let mut composed = self.clone();
+                composed.content = wire.to_string();
+                composed.metadata.remove(EPHEMERAL_CONTEXT_KEY);
+                composed
+            }
+            None => self.clone(),
         }
     }
 
@@ -67,7 +138,7 @@ pub struct TokenUsage {
     pub cache_creation_input_tokens: Option<u64>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct ChatResponse {
 
     pub text: Option<String>,
@@ -77,6 +148,44 @@ pub struct ChatResponse {
     pub usage: Option<TokenUsage>,
 
     pub reasoning_content: Option<String>,
+
+    pub thinking_signature: Option<String>,
+
+    pub stop_reason: Option<StopReason>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    Stop,
+    Length,
+    ToolCalls,
+    ContentFilter,
+}
+
+impl StopReason {
+    pub fn from_wire(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "stop" | "end_turn" | "stop_sequence" | "eos" | "done" | "complete" => {
+                Some(Self::Stop)
+            }
+            "length" | "max_tokens" | "max_output_tokens" | "model_length" => Some(Self::Length),
+            "tool_calls" | "tool_use" | "function_call" => Some(Self::ToolCalls),
+            "content_filter" | "content_filtered" | "guardrail_intervened" | "safety"
+            | "recitation" | "blocklist" | "prohibited_content" | "spii" => {
+                Some(Self::ContentFilter)
+            }
+            _ => None,
+        }
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Stop => "stop",
+            Self::Length => "length",
+            Self::ToolCalls => "tool_calls",
+            Self::ContentFilter => "content_filter",
+        }
+    }
 }
 
 impl ChatResponse {
@@ -89,12 +198,18 @@ impl ChatResponse {
         self.text.as_deref().unwrap_or("")
     }
 
+    pub fn truncated_by_length(&self) -> bool {
+        matches!(self.stop_reason, Some(StopReason::Length))
+    }
+
     pub fn text_only(text: impl Into<Option<String>>, usage: Option<TokenUsage>) -> Self {
         Self {
             text: text.into(),
             tool_calls: Vec::new(),
             usage,
             reasoning_content: None,
+            thinking_signature: None,
+            stop_reason: None,
         }
     }
 }
@@ -235,6 +350,10 @@ pub enum StreamEvent {
 
     Usage(TokenUsage),
 
+    ReasoningSignature(String),
+
+    StopReason(StopReason),
+
     Retry(RetryNotice),
 
     Final,
@@ -371,6 +490,14 @@ pub trait Provider: Send + Sync {
 
     fn message_format_kind(&self) -> crate::providers::sanitize::ProviderKind {
         crate::providers::sanitize::ProviderKind::OpenAi
+    }
+
+    /// Whether this provider's wire serializer natively destructures the
+    /// `{content, reasoning_content}` assistant envelope into structured fields.
+    /// Providers that don't (the default) get the envelope flattened to plain
+    /// content before send so the raw JSON never leaks into the transcript.
+    fn consumes_reasoning_envelope(&self) -> bool {
+        false
     }
 
     fn convert_tools(&self, tools: &[ToolSpec]) -> ToolsPayload {
@@ -601,11 +728,21 @@ pub fn build_tool_instructions_text(tools: &[ToolSpec]) -> String {
 
 pub fn estimate_message_tokens(message: &ChatMessage) -> usize {
     let role_overhead = 4_usize;
-    let content_tokens = estimate_content_tokens(&message.content);
+    let mut content_tokens = estimate_content_tokens(message.wire_content());
+    if let Some(companion) = message.turn_companion() {
+        content_tokens = content_tokens
+            .saturating_add(role_overhead)
+            .saturating_add(estimate_content_tokens(companion));
+    }
     role_overhead.saturating_add(content_tokens)
 }
 
-fn estimate_content_tokens(content: &str) -> usize {
+/// Raw (uncalibrated) char-class token estimate. This is the single base
+/// formula shared by the wire-level estimators here and the budget layer's
+/// calibrated estimator (`agent::token::budget`); the online calibration factor
+/// is learned against THIS base, so any consumer that applies the factor must
+/// use this same base or the correction lands on the wrong scale.
+pub fn estimate_content_tokens(content: &str) -> usize {
     let mut ascii_chars = 0_usize;
     let mut wide_chars = 0_usize;
     for ch in content.chars() {
@@ -615,7 +752,48 @@ fn estimate_content_tokens(content: &str) -> usize {
             wide_chars += 1;
         }
     }
-    ascii_chars.div_ceil(4).saturating_add(wide_chars)
+    ascii_chars
+        .saturating_mul(10)
+        .div_ceil(34)
+        .saturating_add(wide_chars)
+}
+
+pub fn estimate_tool_specs_tokens(tools: &[crate::tools::ToolSpec]) -> usize {
+    use std::hash::{Hash, Hasher};
+    const MAX_CACHED_TOOLSETS: usize = 32;
+    static CACHE: std::sync::LazyLock<
+        parking_lot::Mutex<std::collections::HashMap<u64, usize>>,
+    > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+    if tools.is_empty() {
+        return 0;
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    tools.len().hash(&mut hasher);
+    for tool in tools {
+        tool.name.hash(&mut hasher);
+        tool.description.len().hash(&mut hasher);
+    }
+    let key = hasher.finish();
+    if let Some(cached_value) = CACHE.lock().get(&key) {
+        return *cached_value;
+    }
+    let estimate = tools
+        .iter()
+        .map(|tool| {
+            16_usize
+                .saturating_add(estimate_content_tokens(&tool.name))
+                .saturating_add(estimate_content_tokens(&tool.description))
+                .saturating_add(estimate_content_tokens(
+                    &serde_json::to_string(&tool.parameters).unwrap_or_default(),
+                ))
+        })
+        .sum();
+    let mut cache = CACHE.lock();
+    if cache.len() >= MAX_CACHED_TOOLSETS {
+        cache.clear();
+    }
+    cache.insert(key, estimate);
+    estimate
 }
 
 fn format_conversation_history(messages: &[ChatMessage]) -> String {
@@ -713,6 +891,7 @@ pub fn enforce_context_budget_native_with_window(
         .saturating_sub(system_tokens)
         .saturating_sub(last_group_tokens);
 
+    let total_groups = groups.len();
     let mut kept_groups: Vec<Vec<ChatMessage>> = Vec::new();
     let mut used: usize = 0;
     for group in groups.into_iter().rev() {
@@ -724,6 +903,7 @@ pub fn enforce_context_budget_native_with_window(
         kept_groups.push(group);
     }
     kept_groups.reverse();
+    let dropped_groups = total_groups.saturating_sub(kept_groups.len());
 
     if system_tokens.saturating_add(last_group_tokens) > max_input {
         let target_for_system = max_input
@@ -744,6 +924,16 @@ pub fn enforce_context_budget_native_with_window(
     }
 
     let mut out: Vec<ChatMessage> = leading_system;
+    if dropped_groups > 0 {
+        // Emit an explicit marker so the model knows older turns were elided to fit
+        // the context window, rather than silently presenting a truncated history as
+        // if it were complete.
+        out.push(ChatMessage::system(format!(
+            "[Context trimmed: {dropped_groups} older conversation turn(s) were dropped to fit \
+             the model context window. Earlier history is incomplete; ask the user to restate \
+             anything you need rather than assuming it was never said.]"
+        )));
+    }
     for group in kept_groups {
         out.extend(group);
     }

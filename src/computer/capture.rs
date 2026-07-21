@@ -38,6 +38,48 @@ pub struct RecorderFrame {
     pub monitor: MonitorRect,
 }
 
+#[derive(Debug, Clone)]
+pub struct RawFrame {
+    pub image: Arc<image::RgbaImage>,
+    pub monitor: MonitorRect,
+}
+
+pub async fn capture_raw(monitor_id: Option<u32>) -> Result<RawFrame> {
+    tokio::task::spawn_blocking(move || {
+        super::dpi::ensure_dpi_awareness();
+        let selector = match monitor_id {
+            Some(id) => MonitorSelector::Id(id),
+            None => MonitorSelector::Primary,
+        };
+        let (transport, _, _, monitor) = grab_frame(selector)?;
+        Ok(RawFrame {
+            image: Arc::new(transport),
+            monitor,
+        })
+    })
+    .await
+    .map_err(|e| anyhow!("screen capture task failed to join: {e}"))?
+}
+
+pub async fn encode_frame_for_vision(frame: &RawFrame) -> Result<(String, String)> {
+    let image = Arc::clone(&frame.image);
+    tokio::task::spawn_blocking(move || {
+        let png_bytes = encode_png(&image)?;
+        let png_base64 = base64::engine::general_purpose::STANDARD.encode(&png_bytes);
+        let display_jpeg = encode_display_jpeg_base64(&image)?;
+        Ok((format!("data:image/png;base64,{png_base64}"), display_jpeg))
+    })
+    .await
+    .map_err(|e| anyhow!("frame encode task failed to join: {e}"))?
+}
+
+pub async fn encode_frame_display_jpeg(frame: &RawFrame) -> Result<String> {
+    let image = Arc::clone(&frame.image);
+    tokio::task::spawn_blocking(move || encode_display_jpeg_base64(&image))
+        .await
+        .map_err(|e| anyhow!("frame encode task failed to join: {e}"))?
+}
+
 fn monitor_rect(monitor: &xcap::Monitor) -> MonitorRect {
     MonitorRect {
         id: monitor.id().unwrap_or(0),

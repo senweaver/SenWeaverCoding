@@ -59,6 +59,11 @@ struct OutgoingFunction {
 #[derive(Debug, Serialize)]
 struct Options {
     temperature: f64,
+    // Without num_ctx Ollama silently truncates the prompt at the server's tiny
+    // default context (2k/4k) while the client budgets for the model's real
+    // window, so long prompts lose their tail. Send an explicit window.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    num_ctx: Option<u32>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +73,8 @@ struct ApiChatResponse {
     prompt_eval_count: Option<u64>,
     #[serde(default)]
     eval_count: Option<u64>,
+    #[serde(default)]
+    done_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -307,14 +314,41 @@ impl OllamaProvider {
         tools: Option<&[serde_json::Value]>,
         think: Option<bool>,
     ) -> ChatRequest {
+        // Clamp to a range that is useful (well above the 2k/4k server default)
+        // yet not so large it forces a huge KV-cache allocation that OOMs a
+        // local model.
+        let num_ctx = crate::constants::api_limits::context_window_for_model(model)
+            .clamp(8_192, 32_768);
         ChatRequest {
             model: model.to_string(),
             messages,
             stream: false,
-            options: Options { temperature },
+            options: Options {
+                temperature,
+                num_ctx: Some(num_ctx),
+            },
             think,
             tools: tools.map(|t| t.to_vec()),
         }
+    }
+
+    fn stream_http_client(&self) -> Client {
+        // Streaming needs a read-idle timeout, not a total-request timeout, so a
+        // long streamed response is not truncated mid-flight (the previous total
+        // timeout cut long local generations and looked like a dropped stream).
+        let read_timeout_secs = self.timeout_secs.max(300);
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (key, value) in &self.extra_headers {
+            if let (Ok(name), Ok(val)) = (
+                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                headers.insert(name, val);
+            }
+        }
+        crate::services::require_services()
+            .proxy_runtime()
+            .build_stream_client("provider.ollama.stream", read_timeout_secs, 10, &headers)
     }
 
     fn convert_user_message_content(&self, content: &str) -> (Option<String>, Option<Vec<String>>) {
@@ -773,6 +807,11 @@ impl Provider for OllamaProvider {
             None
         };
 
+        let stop_reason = response
+            .done_reason
+            .as_deref()
+            .and_then(crate::providers::traits::StopReason::from_wire);
+
         if !response.message.tool_calls.is_empty() {
             let tool_calls: Vec<ToolCall> = response
                 .message
@@ -797,6 +836,8 @@ impl Provider for OllamaProvider {
                 tool_calls,
                 usage,
                 reasoning_content: None,
+                thinking_signature: None,
+                stop_reason,
             });
         }
 
@@ -810,7 +851,9 @@ impl Provider for OllamaProvider {
                 response.message.thinking.as_deref(),
             ));
         };
-        Ok(ChatResponse::text_only(Some(text), usage))
+        let mut resp = ChatResponse::text_only(Some(text), usage);
+        resp.stop_reason = stop_reason;
+        Ok(resp)
     }
 
     fn supports_native_tools(&self) -> bool {
@@ -850,6 +893,228 @@ impl Provider for OllamaProvider {
             .chat_with_history(request.messages, model, temperature)
             .await?;
         Ok(ChatResponse::text_only(Some(text), None))
+    }
+
+    fn supports_streaming(&self) -> bool {
+        true
+    }
+
+    fn stream_chat(
+        &self,
+        request: crate::providers::traits::ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        options: crate::providers::traits::StreamOptions,
+    ) -> futures_util::stream::BoxStream<
+        'static,
+        crate::providers::traits::StreamResult<crate::providers::traits::StreamEvent>,
+    > {
+        use crate::providers::traits::{StreamChunk, StreamError, StreamEvent};
+        use futures_util::StreamExt;
+        use futures_util::stream;
+
+        if !options.enabled {
+            return stream::once(async { Ok(StreamEvent::Final) }).boxed();
+        }
+
+        let (normalized_model, should_auth) = match self.resolve_request_details(model) {
+            Ok(v) => v,
+            Err(e) => {
+                let msg = e.to_string();
+                return stream::once(async move { Err(StreamError::Provider(msg)) }).boxed();
+            }
+        };
+
+        let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            request.messages.to_vec(),
+            model,
+            0,
+            None,
+        );
+        let api_messages = self.convert_messages(&sanitized);
+        let tools_json: Option<Vec<serde_json::Value>> = request.tools.and_then(|specs| {
+            if specs.is_empty() {
+                return None;
+            }
+            Some(
+                specs
+                    .iter()
+                    .map(|s| {
+                        serde_json::json!({
+                            "type": "function",
+                            "function": {
+                                "name": s.name,
+                                "description": s.description,
+                                "parameters": s.parameters
+                            }
+                        })
+                    })
+                    .collect(),
+            )
+        });
+
+        let mut body = self.build_chat_request_with_think(
+            api_messages,
+            &normalized_model,
+            temperature,
+            tools_json.as_deref(),
+            self.reasoning_enabled,
+        );
+        body.stream = true;
+
+        let url = format!("{}/api/chat", self.base_url);
+        let client = self.stream_http_client();
+        let api_key = self.api_key.clone();
+        let extra_headers = self.extra_headers.clone();
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<
+            crate::providers::traits::StreamResult<StreamEvent>,
+        >(64);
+
+        crate::runtime::spawn_supervised("providers.ollama.stream", async move {
+            let mut req = client.post(&url).json(&body);
+            for (name, value) in &extra_headers {
+                req = req.header(name, value);
+            }
+            if should_auth {
+                if let Some(key) = api_key.as_ref() {
+                    req = req.header("Authorization", format!("Bearer {key}"));
+                }
+            }
+            let response = match req.send().await {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(StreamError::Provider(format!(
+                            "Ollama stream request failed: {e}"
+                        ))))
+                        .await;
+                    return;
+                }
+            };
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                let _ = tx
+                    .send(Err(StreamError::Provider(format!(
+                        "Ollama API error ({status}): {}",
+                        crate::providers::sanitize_api_error(&text)
+                    ))))
+                    .await;
+                return;
+            }
+
+            let mut byte_stream = response.bytes_stream();
+            let mut pending: Vec<u8> = Vec::new();
+            while let Some(chunk) = byte_stream.next().await {
+                let chunk = match chunk {
+                    Ok(c) => c,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(StreamError::Provider(format!(
+                                "Ollama stream transport error: {e}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                };
+                pending.extend_from_slice(&chunk);
+                while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
+                    let line: Vec<u8> = pending.drain(..=pos).collect();
+                    let line = String::from_utf8_lossy(&line);
+                    let line = line.trim();
+                    if line.is_empty() {
+                        continue;
+                    }
+                    let Ok(value) = serde_json::from_str::<serde_json::Value>(line) else {
+                        continue;
+                    };
+                    if let Some(delta) = value
+                        .get("message")
+                        .and_then(|m| m.get("content"))
+                        .and_then(|c| c.as_str())
+                        .filter(|s| !s.is_empty())
+                    {
+                        if tx
+                            .send(Ok(StreamEvent::TextDelta(StreamChunk::delta(delta))))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    if let Some(calls) = value
+                        .get("message")
+                        .and_then(|m| m.get("tool_calls"))
+                        .and_then(|t| t.as_array())
+                    {
+                        for call in calls {
+                            let name = call
+                                .get("function")
+                                .and_then(|f| f.get("name"))
+                                .and_then(|n| n.as_str())
+                                .unwrap_or_default()
+                                .to_string();
+                            if name.is_empty() {
+                                continue;
+                            }
+                            let arguments = call
+                                .get("function")
+                                .and_then(|f| f.get("arguments"))
+                                .cloned()
+                                .unwrap_or_else(|| serde_json::json!({}));
+                            if tx
+                                .send(Ok(StreamEvent::ToolCall(ToolCall {
+                                    id: uuid::Uuid::new_v4().to_string(),
+                                    name,
+                                    arguments: arguments.to_string(),
+                                })))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                    if value.get("done").and_then(|d| d.as_bool()) == Some(true) {
+                        let prompt_tokens =
+                            value.get("prompt_eval_count").and_then(|v| v.as_u64());
+                        let output_tokens = value.get("eval_count").and_then(|v| v.as_u64());
+                        if prompt_tokens.is_some() || output_tokens.is_some() {
+                            let _ = tx
+                                .send(Ok(StreamEvent::Usage(TokenUsage {
+                                    input_tokens: prompt_tokens,
+                                    output_tokens,
+                                    cached_input_tokens: None,
+                                    cache_creation_input_tokens: None,
+                                })))
+                                .await;
+                        }
+                        if let Some(reason) = value
+                            .get("done_reason")
+                            .and_then(|r| r.as_str())
+                            .and_then(crate::providers::traits::StopReason::from_wire)
+                        {
+                            let _ = tx.send(Ok(StreamEvent::StopReason(reason))).await;
+                        }
+                        let _ = tx.send(Ok(StreamEvent::Final)).await;
+                        return;
+                    }
+                }
+            }
+            let _ = tx
+                .send(Err(StreamError::Provider(
+                    "Ollama stream ended before done=true; connection closed mid-response"
+                        .to_string(),
+                )))
+                .await;
+        });
+
+        stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed()
     }
 }
 

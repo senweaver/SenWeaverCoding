@@ -409,16 +409,8 @@ fn estimate_tokens_saved(raw_bytes: usize, compacted_bytes: usize) -> u64 {
 }
 
 fn cap_raw(text: &str, cap: usize) -> String {
-    if text.len() <= cap {
-        return text.to_string();
+    match crate::util::truncate_head_tail(text, cap, 25) {
+        Some(clipped) => clipped,
+        None => text.to_string(),
     }
-    let mut b = cap.min(text.len());
-    while b > 0 && !text.is_char_boundary(b) {
-        b -= 1;
-    }
-    let mb = (text.len() as f64 / 1_048_576.0).ceil() as u64;
-    let mut out = String::with_capacity(b + 64);
-    out.push_str(&text[..b]);
-    out.push_str(&format!("\n... [raw output truncated at {mb} MB]"));
-    out
 }

@@ -400,6 +400,10 @@ impl ServiceContainer {
         self.policy_limits.check_spending(current_cents).allowed
     }
 
+    pub fn check_write_path_policy(&self, path: &str) -> bool {
+        self.policy_limits.check_write_path(path).allowed
+    }
+
     pub fn config(&self) -> Arc<crate::config::schema::Config> {
         self.shared_config.load()
     }

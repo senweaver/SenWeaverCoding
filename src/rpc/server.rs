@@ -180,6 +180,20 @@ pub struct RpcServer {
     ctx: Arc<RpcCtx>,
 }
 
+/// True when the bind host resolves to loopback only. Treats the common textual
+/// forms as loopback and parses literal IPs; a hostname that isn't obviously
+/// loopback is treated as non-loopback (fail-closed).
+fn host_is_loopback(host: &str) -> bool {
+    let h = host.trim();
+    if h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1" || h == "::1" {
+        return true;
+    }
+    match h.parse::<std::net::IpAddr>() {
+        Ok(ip) => ip.is_loopback(),
+        Err(_) => false,
+    }
+}
+
 impl RpcServer {
 
     pub async fn new(config: &Config) -> Result<Self> {
@@ -512,13 +526,80 @@ impl RpcServer {
         use std::net::SocketAddr;
 
         info!("RPC: running in HTTP mode on {}:{}", host, port);
+        let token_present = crate::util::get_runtime_var("SEN_RPC_TOKEN")
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+        // Fail closed: binding a non-loopback host without a token would expose
+        // read methods (session/list leaks every workspace path, memory/recall,
+        // blackboard/get, system/info) to the network. Require a token to bind
+        // publicly.
+        if !host_is_loopback(host) && !token_present {
+            anyhow::bail!(
+                "RPC HTTP transport refused: host '{host}' is not loopback and SEN_RPC_TOKEN is \
+                 not set. Bind to 127.0.0.1, or set SEN_RPC_TOKEN to expose it with Bearer auth."
+            );
+        }
+        if !token_present {
+            tracing::warn!(
+                "SECURITY: RPC HTTP transport is running WITHOUT authentication \
+                 (SEN_RPC_TOKEN not set) on loopback; mutating methods (session/*, tool/exec, \
+                 memory/store, blackboard writes) are REFUSED until a token is configured. \
+                 Set SEN_RPC_TOKEN to enable them behind Bearer auth."
+            );
+        }
 
         let shared_ctx = Arc::clone(&self.ctx);
 
         async fn handle_rpc(
             State(ctx): State<Arc<RpcCtx>>,
+            headers: axum::http::HeaderMap,
             Json(body): Json<serde_json::Value>,
         ) -> impl IntoResponse {
+            // Bearer auth: when SEN_RPC_TOKEN is configured, every request must
+            // present it. The RPC HTTP transport exposes mutating methods
+            // (tool/exec, session/prompt), so it must not be open by default when
+            // a token is set.
+            if let Some(expected) = crate::util::get_runtime_var("SEN_RPC_TOKEN")
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+            {
+                let presented = headers
+                    .get(axum::http::header::AUTHORIZATION)
+                    .and_then(|v| v.to_str().ok())
+                    .and_then(|v| v.strip_prefix("Bearer "))
+                    .map(str::trim)
+                    .unwrap_or("");
+                if !crate::security::pairing::constant_time_eq(presented, &expected) {
+                    return (
+                        StatusCode::UNAUTHORIZED,
+                        [("content-type", "application/json")],
+                        Body::from(
+                            serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "error": { "code": -32007, "message": "Unauthorized" },
+                                "id": serde_json::Value::Null,
+                            })
+                            .to_string(),
+                        ),
+                    );
+                }
+            }
+            let token_configured = crate::util::get_runtime_var("SEN_RPC_TOKEN")
+                .map(|s| !s.trim().is_empty())
+                .unwrap_or(false);
+            const MUTATING_METHODS: &[&str] = &[
+                "session/new",
+                "session/prompt",
+                "session/prompt_stream",
+                "session/stop",
+                "session/kill",
+                "tool/exec",
+                "memory/store",
+                "blackboard/put",
+                "blackboard/watch",
+                "blackboard/unwatch",
+            ];
+
             let requests: Vec<serde_json::Value> = match body.as_array() {
                 Some(arr) => arr.clone(),
                 None => vec![body],
@@ -529,6 +610,24 @@ impl RpcServer {
                 match serde_json::from_value::<JsonRpcRequest>(req_value) {
                     Ok(req) => {
                         let id = req.id.clone().unwrap_or(serde_json::Value::Null);
+                        let normalized_method = req.method.replace('.', "/");
+                        if !token_configured
+                            && MUTATING_METHODS.contains(&normalized_method.as_str())
+                        {
+                            responses.push(serde_json::json!({
+                                "jsonrpc": "2.0",
+                                "error": {
+                                    "code": -32007,
+                                    "message": format!(
+                                        "Method '{}' is disabled on the unauthenticated RPC HTTP transport. \
+                                         Set SEN_RPC_TOKEN and send it as a Bearer token to enable mutating methods.",
+                                        req.method
+                                    ),
+                                },
+                                "id": id,
+                            }));
+                            continue;
+                        }
                         let result = ctx.handle_http_request(&req.method, req.params).await;
                         let resp = match result {
                             Ok(value) => serde_json::json!({

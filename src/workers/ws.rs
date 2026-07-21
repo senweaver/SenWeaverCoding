@@ -54,28 +54,29 @@ async fn run_worker_socket(socket: WebSocket, worker_id: String) {
         .or_else(|| crate::bootstrap::try_get_state().map(|st| st.read(|s| s.cwd.clone())))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    if let Ok(log) = WorkerEventLog::open(&workspace_root, &worker_id) {
-        if let Ok(events) = log.replay() {
-            for event in events {
-                let frames = session_event_to_wire(&worker_id, &event);
-                for frame in frames {
-                    if sink
-                        .send(Message::Text(frame.to_string().into()))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
-                }
-            }
-        }
-    }
-
-    let mut wire_tracker = WorkerWireTracker::default();
-
+    // Subscribe to the live stream BEFORE replaying history so events emitted
+    // during replay land in the broadcast buffer and are delivered afterwards
+    // instead of being lost in the replay→subscribe gap. The wire_tracker dedups
+    // any overlap between replayed and live frames.
     let handle = match supervisor.as_ref().and_then(|s| s.get(&worker_id)) {
         Some(h) => h,
         None => {
+            // No live worker: replay-only, then done.
+            if let Ok(log) = WorkerEventLog::open(&workspace_root, &worker_id) {
+                if let Ok(events) = log.replay() {
+                    for event in events {
+                        for frame in session_event_to_wire(&worker_id, &event) {
+                            if sink
+                                .send(Message::Text(frame.to_string().into()))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                    }
+                }
+            }
             let _ = sink
                 .send(Message::Text(
                     json!({
@@ -96,6 +97,23 @@ async fn run_worker_socket(socket: WebSocket, worker_id: String) {
 
     let mut rx = handle.subscribe();
     let handle_for_cancel = handle.clone();
+
+    let mut wire_tracker = WorkerWireTracker::default();
+    if let Ok(log) = WorkerEventLog::open(&workspace_root, &worker_id) {
+        if let Ok(events) = log.replay() {
+            for event in events {
+                for frame in session_event_to_wire(&worker_id, &event) {
+                    if sink
+                        .send(Message::Text(frame.to_string().into()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                }
+            }
+        }
+    }
 
     loop {
         tokio::select! {

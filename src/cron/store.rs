@@ -1194,6 +1194,16 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     let conn = Connection::open(&db_path)
         .with_context(|| format!("Failed to open cron DB: {}", db_path.display()))?;
 
+    // WAL + busy_timeout so the desktop app and a CLI daemon can both poll/claim
+    // jobs without SQLITE_BUSY silently dropping a tick (which lost scheduled
+    // runs). Matches brain.db's connection setup.
+    conn.execute_batch(
+        "PRAGMA journal_mode = WAL;
+         PRAGMA synchronous = NORMAL;
+         PRAGMA busy_timeout = 5000;",
+    )
+    .context("Failed to set cron DB pragmas")?;
+
     conn.execute_batch(
         "PRAGMA foreign_keys = ON;
          CREATE TABLE IF NOT EXISTS cron_jobs (

@@ -149,7 +149,13 @@ pub fn normalize_locale_public(raw: &str) -> String {
 }
 
 pub fn default_search_dirs(workspace_dir: &Path) -> Vec<PathBuf> {
-    let mut dirs = vec![workspace_dir.to_path_buf()];
+    // Trusted sources first: the installed binary's directory and the build
+    // manifest dir (covers in-repo development). The workspace is NOT trusted by
+    // default — an untrusted repo could otherwise ship a tool_descriptions/*.toml
+    // that overrides every tool's description (e.g. relabel delete_path as
+    // "always safe"), a prompt-injection surface. Opt in explicitly with
+    // SEN_TRUST_WORKSPACE_TOOL_DESCRIPTIONS=1.
+    let mut dirs: Vec<PathBuf> = Vec::new();
 
     if let Ok(exe) = std::env::current_exe() {
         if let Some(parent) = exe.parent() {
@@ -160,6 +166,16 @@ pub fn default_search_dirs(workspace_dir: &Path) -> Vec<PathBuf> {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     if !dirs.contains(&manifest_dir) {
         dirs.push(manifest_dir);
+    }
+
+    let trust_workspace = std::env::var("SEN_TRUST_WORKSPACE_TOOL_DESCRIPTIONS")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
+    if trust_workspace {
+        let ws = workspace_dir.to_path_buf();
+        if !dirs.contains(&ws) {
+            dirs.insert(0, ws);
+        }
     }
 
     dirs

@@ -56,22 +56,43 @@ impl Tool for McpToolWrapper {
             }
             other => other,
         };
+        const MAX_MCP_OUTPUT_BYTES: usize = 131_072;
         match self.registry.call_tool(&self.prefixed_name, args).await {
-            Ok(output) => {
-                let output = if crate::token_saver::is_enabled() {
+            Ok(outcome) => {
+                let mut output = if crate::token_saver::is_enabled() {
                     crate::token_saver::compact_tool_output(
                         &format!("mcp_{}", self.prefixed_name),
-                        &output,
+                        &outcome.text,
                         &crate::token_saver::global(),
                     )
                 } else {
-                    output
+                    outcome.text
                 };
-                Ok(ToolResult {
-                    success: true,
-                    output,
-                    error: None,
-                })
+                if let Some(clipped) =
+                    crate::util::truncate_head_tail(&output, MAX_MCP_OUTPUT_BYTES, 40)
+                {
+                    output = clipped;
+                }
+                if outcome.is_error {
+                    Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(if output.trim().is_empty() {
+                            format!(
+                                "MCP tool `{}` reported an error without details",
+                                self.prefixed_name
+                            )
+                        } else {
+                            output
+                        }),
+                    })
+                } else {
+                    Ok(ToolResult {
+                        success: true,
+                        output,
+                        error: None,
+                    })
+                }
             }
             Err(e) => Ok(ToolResult {
                 success: false,

@@ -268,9 +268,11 @@ impl SessionMemoryService {
         if entries.is_empty() {
             return String::new();
         }
+        let mut sorted_entries: Vec<_> = entries.values().collect();
+        sorted_entries.sort_by(|a, b| a.key.cmp(&b.key));
         let mut parts = Vec::new();
         let mut total_len = 0;
-        for entry in entries.values() {
+        for entry in sorted_entries {
             let line = format!(
                 "- [{}] {}: {}",
                 entry.category_label(),

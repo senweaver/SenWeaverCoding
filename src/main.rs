@@ -1324,8 +1324,8 @@ async fn async_main() -> Result<()> {
                     .context("Failed to flush stdout")?;
 
                 let answer = tokio::task::spawn_blocking(|| {
-                    let mut answer = String::new();
-                    std::io::stdin().read_line(&mut answer).map(|_| answer)
+                    senweavercoding::cli::input::read_stdin_line_lossy()
+                        .map(Option::unwrap_or_default)
                 })
                 .await
                 .context("stdin read task failed")??;
@@ -1536,11 +1536,9 @@ async fn async_main() -> Result<()> {
                     if std::io::stdin().is_terminal() {
                         eprintln!("Reading from stdin (press Ctrl+D to finish)...");
                     }
-                    let buf = tokio::task::spawn_blocking(|| {
-                        let mut buf = String::new();
-                        std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf)
-                            .map(|_| buf)
-                    })
+                    let buf = tokio::task::spawn_blocking(
+                        senweavercoding::cli::input::read_stdin_to_string_best_effort,
+                    )
                     .await
                     .context("stdin read task failed")??;
                     if buf.trim().is_empty() {
@@ -2507,10 +2505,9 @@ async fn async_main() -> Result<()> {
         } => {
 
             let instruction = if instruction == "-" {
-                tokio::task::spawn_blocking(|| {
-                    let mut buf = String::new();
-                    std::io::Read::read_to_string(&mut std::io::stdin(), &mut buf).map(|_| buf)
-                })
+                tokio::task::spawn_blocking(
+                    senweavercoding::cli::input::read_stdin_to_string_best_effort,
+                )
                 .await
                 .context("stdin read task failed")??
             } else {
@@ -2827,11 +2824,9 @@ async fn handle_tokens_command(config: &Config, command: TokensCommands) -> Resu
                 };
             }
 
-            let raw = tokio::task::spawn_blocking(|| {
-                use std::io::Read;
-                let mut raw = String::new();
-                std::io::stdin().read_to_string(&mut raw).map(|_| raw)
-            })
+            let raw = tokio::task::spawn_blocking(
+                senweavercoding::cli::input::read_stdin_to_string_best_effort,
+            )
             .await
             .context("stdin read task failed")??;
             let result =
@@ -4144,15 +4139,12 @@ async fn run_inline_complete_command(
     stop_sequences: Vec<String>,
     stream: bool,
 ) -> Result<()> {
-    use std::io::Read;
-
     let prefix = match prefix {
         Some(p) => p,
         None => {
-            tokio::task::spawn_blocking(|| {
-                let mut buf = String::new();
-                std::io::stdin().read_to_string(&mut buf).map(|_| buf)
-            })
+            tokio::task::spawn_blocking(
+                senweavercoding::cli::input::read_stdin_to_string_best_effort,
+            )
             .await
             .context("stdin read task failed")??
         }
@@ -4298,21 +4290,32 @@ async fn run_inline_edit_command(
         {
             tokio::fs::create_dir_all(parent).await.ok();
         }
-        if let Ok(current) = tokio::fs::read_to_string(&file).await {
-            if current != source {
-                return Err(anyhow::anyhow!(
-                    "file {} changed on disk during inline edit; aborting to avoid overwriting concurrent changes",
-                    file.display()
-                ));
-            }
-        }
-        let write_path = file.clone();
-        let write_bytes = outcome.applied.clone().into_bytes();
-        tokio::task::spawn_blocking(move || crate::util::atomic_write(&write_path, &write_bytes))
+        // Route through OpsApplier as a whole-file Replace with old_text = source:
+        // the old_text check + region lock replace the previous check-then-write
+        // race and give journal/edit-history bookkeeping.
+        let workspace_root = file
+            .parent()
+            .filter(|p| !p.as_os_str().is_empty())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
+        let batch = crate::apply_model::edit_op::EditBatch::new(
+            crate::apply_model::edit_op::EditOrigin::InlineEdit,
+        )
+        .with_op(crate::apply_model::edit_op::EditOp::Replace {
+            path: file.clone(),
+            byte_range: 0..len,
+            old_text: source.clone(),
+            new_text: outcome.applied.clone(),
+            anchor: None,
+        });
+        crate::apply_model::ops_applier::OpsApplier::locked_for_workspace(workspace_root)
+            .apply_batch(batch)
             .await
-            .map_err(|e| anyhow::anyhow!("inline-edit write task join failed: {e}"))?
             .map_err(|e| {
-                anyhow::anyhow!("failed to write {}: {e}", file.display())
+                anyhow::anyhow!(
+                    "inline-edit apply failed for {} (file may have changed on disk): {e}",
+                    file.display()
+                )
             })?;
     }
 
@@ -4392,8 +4395,13 @@ async fn run_predict_next_command(
         };
         let refiner_ref: Option<&crate::apply_model::FastApplyRefiner> =
             refiner.as_deref();
-        let _ = inline_completion::nep::apply_suggestion(suggestion, refiner_ref, &opts)
-            .await?;
+        let _ = inline_completion::nep::apply_suggestion(
+            suggestion,
+            refiner_ref,
+            &opts,
+            &config.workspace_dir,
+        )
+        .await?;
     }
 
     println!("{}", serde_json::to_string_pretty(&payload)?);

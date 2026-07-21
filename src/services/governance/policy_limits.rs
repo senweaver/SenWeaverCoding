@@ -126,6 +126,23 @@ impl PolicyLimitsService {
     }
 }
 
+fn glob_matches(pattern: &str, path: &str) -> bool {
+    if pattern == "**" {
+        return true;
+    }
+    if pattern.contains("**") {
+        let prefix = pattern.split("**").next().unwrap_or("");
+        return path.starts_with(prefix);
+    }
+    if pattern.contains('*') {
+        let parts: Vec<&str> = pattern.split('*').collect();
+        if parts.len() == 2 {
+            return path.starts_with(parts[0]) && path.ends_with(parts[1]);
+        }
+    }
+    path == pattern
+}
+
 #[derive(Debug, Clone)]
 pub struct PolicyCheckResult {
     pub allowed: bool,
@@ -148,19 +165,3 @@ pub struct PolicyViolation {
     pub enforcement: PolicyEnforcement,
 }
 
-fn glob_matches(pattern: &str, path: &str) -> bool {
-    if pattern == "**" {
-        return true;
-    }
-    if pattern.contains("**") {
-        let prefix = pattern.split("**").next().unwrap_or("");
-        return path.starts_with(prefix);
-    }
-    if pattern.contains('*') {
-        let parts: Vec<&str> = pattern.split('*').collect();
-        if parts.len() == 2 {
-            return path.starts_with(parts[0]) && path.ends_with(parts[1]);
-        }
-    }
-    path == pattern
-}

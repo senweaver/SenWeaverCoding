@@ -7,7 +7,7 @@ use std::hint::black_box;
 use std::sync::Arc;
 use std::thread;
 
-use senweavercoding::memory::sharded_map::ShardedMap;
+use senweavercoding::memory::sharded::map::ShardedMap;
 
 const THREADS: usize = 8;
 const KEYS_PER_THREAD: usize = 2000;

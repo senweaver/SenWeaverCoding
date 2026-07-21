@@ -19,18 +19,18 @@ type Props = {
   sessionId?: string | null
 }
 
-const TOOL_META: Record<string, { icon: string; label: string; color: string }> = {
-  Bash: { icon: 'terminal', label: 'Bash', color: 'var(--color-warning)' },
-  Edit: { icon: 'edit_note', label: 'Edit File', color: 'var(--color-brand)' },
-  Write: { icon: 'edit_document', label: 'Write File', color: 'var(--color-success)' },
-  Read: { icon: 'description', label: 'Read File', color: 'var(--color-secondary)' },
-  Glob: { icon: 'search', label: 'Glob Search', color: 'var(--color-secondary)' },
-  Grep: { icon: 'find_in_page', label: 'Grep Search', color: 'var(--color-secondary)' },
-  Agent: { icon: 'smart_toy', label: 'Agent', color: 'var(--color-tertiary)' },
-  WebSearch: { icon: 'travel_explore', label: 'Web Search', color: 'var(--color-secondary)' },
-  WebFetch: { icon: 'cloud_download', label: 'Web Fetch', color: 'var(--color-secondary)' },
-  NotebookEdit: { icon: 'note', label: 'Notebook Edit', color: 'var(--color-brand)' },
-  Skill: { icon: 'auto_awesome', label: 'Skill', color: 'var(--color-tertiary)' },
+const TOOL_META: Record<string, { icon: string; color: string }> = {
+  Bash: { icon: 'terminal', color: 'var(--color-warning)' },
+  Edit: { icon: 'edit_note', color: 'var(--color-brand)' },
+  Write: { icon: 'edit_document', color: 'var(--color-success)' },
+  Read: { icon: 'description', color: 'var(--color-secondary)' },
+  Glob: { icon: 'search', color: 'var(--color-secondary)' },
+  Grep: { icon: 'find_in_page', color: 'var(--color-secondary)' },
+  Agent: { icon: 'smart_toy', color: 'var(--color-tertiary)' },
+  WebSearch: { icon: 'travel_explore', color: 'var(--color-secondary)' },
+  WebFetch: { icon: 'cloud_download', color: 'var(--color-secondary)' },
+  NotebookEdit: { icon: 'note', color: 'var(--color-brand)' },
+  Skill: { icon: 'auto_awesome', color: 'var(--color-tertiary)' },
 }
 
 function extractToolDetails(toolName: string, input: unknown, t: (key: TranslationKey, params?: Record<string, string | number>) => string): { primary: string; secondary?: string } {
@@ -128,7 +128,7 @@ export function PermissionDialog({
   const isPending = pendingPermission?.requestId === requestId
   const [showRaw, setShowRaw] = useState(false)
 
-  const meta = TOOL_META[toolName] || { icon: 'shield', label: toolName, color: 'var(--color-text-tertiary)' }
+  const meta = TOOL_META[toolName] || { icon: 'shield', color: 'var(--color-text-tertiary)' }
   const details = extractToolDetails(toolName, input, t)
   const rawInput = typeof input === 'string' ? input : JSON.stringify(input, null, 2)
   const preview = renderPermissionPreview(toolName, input)

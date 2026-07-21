@@ -61,15 +61,20 @@ fn resolve_workspace(arg: Option<&str>) -> PathBuf {
     }
 }
 
-fn load_or_build_graph(root: &std::path::Path) -> std::io::Result<SymbolGraph> {
+fn with_graph<R>(
+    root: &std::path::Path,
+    f: impl FnOnce(&SymbolGraph) -> R,
+) -> std::io::Result<R> {
     if let Some(writer) =
         crate::code_intel::symbol_graph::incremental::get_or_build_writer(root)
     {
-        return Ok(writer.graph().read().clone());
+        let graph_arc = writer.graph();
+        let guard = graph_arc.read();
+        return Ok(f(&guard));
     }
     let g = SymbolGraph::build(root)?;
     let _ = g.persist(root);
-    Ok(g)
+    Ok(f(&g))
 }
 
 fn parse_changed_files(args: &serde_json::Value) -> Option<Vec<PathBuf>> {
@@ -157,49 +162,8 @@ fn run_review(args: serde_json::Value) -> anyhow::Result<ToolResult> {
             .to_string();
         let changed = parse_changed_files(&args);
 
-        let graph = match load_or_build_graph(&workspace) {
-            Ok(g) => g,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("failed to load/build symbol graph: {e}")),
-                });
-            }
-        };
-
-        let graph_empty = graph.symbols.iter().all(|s| s.id.is_file_anchor());
-
-        let mut report = match action {
-            "impact_radius" => {
-                context::impact_radius_report(&graph, &workspace, changed, &base)
-            }
-            "detect_changes" => {
-                context::detect_changes_report(&graph, &workspace, changed, &base)
-            }
-            "review_context" => {
-                let include_source = args
-                    .get("include_source")
-                    .and_then(|v| v.as_bool())
-                    .unwrap_or(true);
-                let max_lines = args
-                    .get("max_lines_per_file")
-                    .and_then(|v| v.as_u64())
-                    .map(|v| v.clamp(20, 2000) as usize)
-                    .unwrap_or(200);
-                context::review_context_report(
-                    &graph,
-                    &workspace,
-                    changed,
-                    &base,
-                    include_source,
-                    max_lines,
-                )
-            }
-            "minimal_context" => {
-                let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
-                context::minimal_context_report(&graph, &workspace, task, &base)
-            }
+        match action {
+            "impact_radius" | "detect_changes" | "review_context" | "minimal_context" => {}
             "" => {
                 return Ok(ToolResult {
                     success: false,
@@ -214,11 +178,56 @@ fn run_review(args: serde_json::Value) -> anyhow::Result<ToolResult> {
                     error: Some(format!("unknown action: {other}")),
                 });
             }
-        };
-
-        if graph_empty {
-            report.push_str(EMPTY_GRAPH_HINT);
         }
+
+        let report_result = with_graph(&workspace, |graph| {
+            let graph_empty = graph.symbols.iter().all(|s| s.id.is_file_anchor());
+            let mut report = match action {
+                "impact_radius" => {
+                    context::impact_radius_report(graph, &workspace, changed, &base)
+                }
+                "detect_changes" => {
+                    context::detect_changes_report(graph, &workspace, changed, &base)
+                }
+                "review_context" => {
+                    let include_source = args
+                        .get("include_source")
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(true);
+                    let max_lines = args
+                        .get("max_lines_per_file")
+                        .and_then(|v| v.as_u64())
+                        .map(|v| v.clamp(20, 2000) as usize)
+                        .unwrap_or(200);
+                    context::review_context_report(
+                        graph,
+                        &workspace,
+                        changed,
+                        &base,
+                        include_source,
+                        max_lines,
+                    )
+                }
+                _ => {
+                    let task = args.get("task").and_then(|v| v.as_str()).unwrap_or("");
+                    context::minimal_context_report(graph, &workspace, task, &base)
+                }
+            };
+            if graph_empty {
+                report.push_str(EMPTY_GRAPH_HINT);
+            }
+            report
+        });
+        let report = match report_result {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("failed to load/build symbol graph: {e}")),
+                });
+            }
+        };
 
         Ok(ToolResult {
             success: true,

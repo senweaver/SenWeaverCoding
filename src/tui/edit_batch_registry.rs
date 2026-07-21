@@ -112,6 +112,10 @@ impl EditBatchRegistry {
         &self.entries
     }
 
+    pub fn entries_mut(&mut self) -> impl Iterator<Item = &mut PendingEdit> {
+        self.entries.iter_mut()
+    }
+
     pub fn get_mut_by_id(&mut self, id: u64) -> Option<&mut PendingEdit> {
         self.entries.iter_mut().find(|e| e.id == id)
     }

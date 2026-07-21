@@ -20,11 +20,11 @@ command.
 | --- | --- |
 | **Desktop-first** | Tauri 2 shell with native menus, multi-tab sessions, in-app PTY terminal, file browser, and an embedded browser dock for live web/UI work. |
 | **Embedded Rust runtime** | The same crate that runs headless is loaded in-process via `crate-type = ["cdylib", "staticlib", "rlib"]`. The UI talks to it over a loopback WebSocket/HTTP gateway — no serialization-heavy IPC, no external daemon. |
-| **Intent-routed coding modes** | `Auto` routes each turn to the best fit; or pin a mode explicitly: **Agent** (default, full autonomy + full tool surface), **Plan** (read-only plan authoring), **Ask** (read-only Q&A with citations), **Debug** (4-stage root-cause + in-app browser QA), **Curator** (research → DOCX / implementation blueprint), **Designer** (ten UI/design surfaces). Each mode rewires the system prompt, tool allowlist, approval policy, and auto-verify behavior. |
-| **130+ tools** | File ops, PTY-mirrored shell, Git, ripgrep/content search, glob/multi-edit/patch-apply, **code intelligence** (tree-sitter outline + symbol graph for callers/implementors/uses + optional Tantivy full-text index), multi-engine web search/fetch, headless & embedded browser, SQLite + vector memory, todo/plan tracking, image generation, office docs (xlsx/pdf/docx), MCP tools, Skills, and Subagent delegation. |
+| **Intent-routed coding modes** | `Auto` routes each turn to the best fit; or pin any of the 14 modes explicitly — **Agent** (default, full autonomy), **Vibe**, **Spec**, **Plan** (read-only plan authoring), **Ask** (read-only Q&A with citations), **TDD**, **Debug** (4-stage root-cause + in-app browser QA), **Architect**, **Pair**, **Context**, **MVAI**, **Harness**, **Curator** (research → DOCX / implementation blueprint), **Designer** (ten UI/design surfaces). Each mode rewires the system prompt, tool allowlist, approval policy, and auto-verify behavior. |
+| **130+ tools** | File ops, PTY-mirrored shell, Git, ripgrep/content search, glob/multi-edit/patch-apply, **code intelligence** (tree-sitter outline + symbol graph for callers/implementors/uses + heuristic lexical code index), multi-engine web search/fetch, headless & embedded browser, SQLite + vector memory, todo/plan tracking, image generation, office docs (xlsx/pdf/docx), MCP tools, Skills, and Subagent delegation. |
 | **Multi-provider** | OpenAI-compatible (incl. DeepSeek / Gemini-compatible endpoints), Anthropic, OpenRouter, GitHub Copilot, Claude Code, Ollama, Azure OpenAI, AWS Bedrock, Telnyx, and local CLI bridges. Provider keys and per-session model routing are configured in-app. |
 | **Persistent memory & checkpoints** | SQLite + Markdown backends with vector embeddings, per-session work-dir isolation, and rewind/restore checkpoints. Interrupted turns are repaired and resumed against the *most recent* task on "continue". |
-| **Automations & extensibility** | Cron-driven automations, Hooks, user Rules, Skills, MCP servers, multi-channel adapters (Slack / Telegram / Discord / Matrix / Lark / …), and first-party TypeScript & Python SDKs over a `/v1/agents` REST surface. |
+| **Automations & extensibility** | Cron-driven automations, Hooks, user Rules, Skills, MCP servers, multi-channel adapters (Slack / Telegram / Discord / Lark / … plus feature-gated Matrix), and first-party TypeScript & Python SDKs over the JSON-RPC 2.0 server. |
 | **Performance-tuned** | Virtualized message list, rAF-coalesced streaming flushes, prioritized WebSocket heartbeats, content-aware context compaction, and `spawn_blocking` on IO hot paths. Hard constraints live in `AGENTS.md`. |
 
 ---
@@ -56,15 +56,25 @@ you can verify the CLI with `sen --help`.
 Modes are switchable mid-session from the composer. **Auto** is an
 intent router that picks a fit per turn; the rest can be pinned:
 
+**Auto** is not a mode itself — it is an intent router that picks one of the
+14 pinnable modes below per turn (debug / plan / Q&A / general fit).
+
 | Mode | Writes? | Purpose |
 | --- | --- | --- |
-| **Auto** | depends | Routes each message to the best-fit mode based on intent (debug / plan / Q&A / general). |
 | **Agent** *(default)* | yes | Fully autonomous orchestrator. Full tool surface, auto-approved tool calls, decomposes the task, executes end-to-end, then self-verifies. |
+| **Vibe** | yes | Full tool access with minimal prompting — fast prototyping and free-form coding when you trust the agent to move quickly. |
+| **Spec** | yes | Specification-driven — generates `SPEC.md`, follows a tracked plan step-by-step, and verifies each step with build/test commands. |
 | **Plan** | no | Drafts/updates a `.plan.md` under `.senweavercoding/plans/` for later execution. No source edits, no shell. |
 | **Ask** | no | Read-only Q&A with citations. No edits, no shell, no plan writes. |
+| **TDD** | yes | Strict Red → Green → Refactor: failing test first, minimum implementation, then refactor; auto-verifies after every edit. |
 | **Debug** | yes | Reproduce → Hypothesize → Isolate → Fix, with in-app browser QA, PII redaction at the LLM boundary, and report/tech-doc output. |
+| **Architect** | yes | Architecture-focused — broad reads for high-level design review, then targeted cross-module edits backed by spec analysis. |
+| **Pair** | yes | Collaborative pair-programming — one step at a time, pausing at every checkpoint for your confirmation. |
+| **Context** | yes | Context engineering for large codebases — Explore → Map → Plan → Strike, with impact analysis after each batch of edits. |
+| **MVAI** | yes | Model-View-Agent-Interface architecture — enforces interface-first contracts that are observable, testable, and clearly layered. |
+| **Harness** | yes | Engineering-grade harness — spec generation, skill orchestration, session checkpoints, and multi-agent delegation with auto-verify. |
 | **Curator** | docs only | Mines the web + local workspace, authors a professional paper / solution / report with DOCX export, then stops so Agent mode can implement the blueprint. |
-| **Designer** | yes | Design studio across ten surfaces (prototype, dashboard, slide deck, diagram, image, video, etc.) with a discovery → plan → generate → critique pipeline and a live preview panel. |
+| **Designer** | yes | Design studio across ten surfaces (prototype, dashboard, slide deck, diagram, image, video, HyperFrames, audio, from Figma, from template) with a discovery → plan → generate → critique pipeline and a live preview panel. |
 
 Agent mode includes the tools and capabilities of every other mode, so
 you never lose functionality by staying in the default.
@@ -142,7 +152,6 @@ what they need.
 | --- | --- | --- |
 | **default** | `observability-prometheus`, `skill-creation`, `fs-watch`, `sandbox`, `lsp-push-diagnostics`, `tool-image`, `tool-utility-misc`, `tool-search-broad`, `tool-workspace-deep`, `tool-curator`, `lan-comms`, `office-docs` | What a normal build ships. |
 | **code-intel** | tree-sitter grammars (rust/js/ts/python/go/java/c/cpp/…) | Enables AST outline + symbol graph; falls back to heuristics when off. |
-| **code-search** | `tantivy` | Adds an incremental full-text code index. |
 | **extras** | `tool-cron`, `tool-sop`, `tool-team`, `tool-reports`, `tool-cloud-ops`, `computer-use`, … | Optional tool families (also what desktop enables). |
 | **channels** | `channel-slack`, `channel-telegram`, `channel-matrix`, `channel-lark`, … | Multi-channel adapters. |
 
@@ -173,7 +182,7 @@ SenWeaverCoding/
 │   ├── agent/               # Turn loop, tool dispatch, modes, context compaction
 │   ├── providers/           # OpenAI-compat / Anthropic / OpenRouter / Copilot / …
 │   ├── tools/               # 130+ tools (file/shell/git/web/code-intel/…)
-│   ├── code_intel/          # tree-sitter outline, symbol graph, Tantivy search
+│   ├── code_intel/          # tree-sitter outline, symbol graph, heuristic code search
 │   ├── context/ · rag/      # Context assembly, retrieval, RAG
 │   ├── gateway/             # axum HTTP + WebSocket router (loopback)
 │   ├── memory/              # SQLite + Markdown + vector index backends
@@ -181,6 +190,7 @@ SenWeaverCoding/
 │   ├── skills/ · workflows/ # Skills, subagents, multi-step workflows
 │   ├── cron/ · hooks/       # Automations, lifecycle hooks, user rules
 │   ├── apply_model/         # Patch / multi-edit application
+│   ├── tool_descriptions/   # Localized tool manifests (en / zh-CN)
 │   ├── security/ · guardrails/  # Sandbox, permissions, PII redaction
 │   └── observability/ · evolution/ · lsp/ · …
 │
@@ -191,7 +201,6 @@ SenWeaverCoding/
 │   └── package.json
 │
 ├── sdk/                     # First-party TypeScript & Python SDKs
-├── tool_descriptions/       # Localized tool manifests (en / zh-CN)
 ├── benches/                 # Criterion benchmarks
 └── .github/workflows/       # CI / release pipeline
 ```
@@ -200,9 +209,9 @@ The desktop app boots the gateway router in-process and connects the
 React front-end to it via a `127.0.0.1` WebSocket / HTTP loopback.
 Because the back-end is loaded as a library
 (`sen_desktop_lib.{cdylib,staticlib}`) there is no IPC serialization
-overhead between the UI and the agent runtime. The same gateway exposes
-a `/v1/agents` REST surface consumed by the TypeScript and Python SDKs
-under `sdk/`.
+overhead between the UI and the agent runtime. Programmatic access goes
+through the JSON-RPC 2.0 server (`sen rpc`, HTTP `/rpc` or stdio/UDS)
+consumed by the TypeScript and Python SDKs under `sdk/`.
 
 ---
 

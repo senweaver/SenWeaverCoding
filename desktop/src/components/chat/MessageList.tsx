@@ -134,7 +134,10 @@ function appendChildToolCall(
   else childToolCallsByParent.set(parentToolUseId, [toolCall])
 }
 
-export function buildRenderModel(messages: UIMessage[]): RenderModel {
+export function buildRenderModel(
+  messages: UIMessage[],
+  pendingAskToolUseId?: string | null,
+): RenderModel {
   const items: RenderItem[] = []
   const toolResultMap = new Map<string, ToolResult>()
   const childToolCallsByParent = new Map<string, ToolCall[]>()
@@ -163,10 +166,6 @@ export function buildRenderModel(messages: UIMessage[]): RenderModel {
       }
     } else {
       const summary = buildExploredSummary(buffer)
-      // Key the group solely by its first message id (stable and unique), NOT by
-      // ordinal position: a positional counter would change every retained
-      // group's key when older messages are trimmed from the front, forcing
-      // Virtuoso to remount the whole list.
       items.push({
         kind: 'explored',
         id: `explored-${buffer[0]?.id ?? 'empty'}`,
@@ -204,7 +203,16 @@ export function buildRenderModel(messages: UIMessage[]): RenderModel {
       if (isAskQuestionToolName(msg.toolName)) {
 
         flush()
-        if (toolResultMap.has(msg.toolUseId)) {
+        // Answered questions render from their result; the LIVE pending one must
+        // also render — it is the only interactive surface for answering (the
+        // permission_request handler intentionally adds no separate bubble for
+        // question tools). Hiding it left the user stuck in permission_pending
+        // with no visible question. Stale unanswered questions from history
+        // (no result, not pending) stay hidden.
+        if (
+          toolResultMap.has(msg.toolUseId) ||
+          (pendingAskToolUseId != null && msg.toolUseId === pendingAskToolUseId)
+        ) {
           items.push({ kind: 'message', message: msg })
         }
         emittedToolUseIds.add(msg.toolUseId)
@@ -371,15 +379,7 @@ type MessageListProps = {
 const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 160
 const USER_SCROLL_UP_CANCEL_PX = 24
 
-// At idle, suppress follow-on-growth briefly after the user clicks inside the
-// list (e.g. expanding a tool card): the resulting height change is their own
-// interaction, and snapping to the bottom would yank the content they are
-// trying to read. Streaming growth is unaffected.
 const IDLE_INTERACTION_GRACE_MS = 1200
-// Follow-mode re-arms once the user manually returns close to the bottom.
-// Cancellation is gesture-driven (wheel/drag/keys), so a slightly generous
-// band here cannot fight the user; 48px is reachable by hand while staying
-// well inside atBottomThreshold (160px).
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 48
 const FIRST_ITEM_INDEX_BASE = 1_000_000
 
@@ -515,10 +515,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const atTopRef = useRef(false)
   const lastScrollTopRef = useRef(0)
   const programmaticScrollRef = useRef(false)
-  // True while the user is physically holding a pointer/touch on the scroller
-  // (scrollbar drag, touch pan). Only then may upward scroll deltas cancel
-  // follow; every other scrollTop shift (Virtuoso re-measurement, streaming
-  // footer commits, programmatic pins) must never break stick-to-bottom.
   const userInteractingRef = useRef(false)
   const scrollRafRef = useRef<number | null>(null)
   const followRafRef = useRef<number | null>(null)
@@ -603,13 +599,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       setShowScrollToBottom(true)
     }
 
-    // The scroll listener never cancels follow on its own: Virtuoso item
-    // re-measurement, firstItemIndex compensation and streaming-footer commits
-    // all shift scrollTop without any user intent, and treating those as
-    // "the user scrolled up" was what kept killing stick-to-bottom. An upward
-    // delta only cancels while a pointer/touch gesture is physically active
-    // (scrollbar drag / touch pan); wheel and keyboard cancel via their own
-    // dedicated listeners below.
     const onScroll = () => {
       const st = next.scrollTop
       const distanceFromBottom = next.scrollHeight - st - next.clientHeight
@@ -621,9 +610,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       if (draggedUp && followRef.current) {
         cancelFollow()
       } else if (!movedUp && distanceFromBottom <= AUTO_SCROLL_REARM_THRESHOLD_PX) {
-        // Re-arm only on non-upward motion into the bottom band, so a fresh
-        // wheel-up cancel right at the bottom is not immediately overridden
-        // by its own scroll event still being within the band.
         followRef.current = true
         setShowScrollToBottom((prev) => (prev ? false : prev))
       } else if (distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX && followRef.current) {
@@ -633,8 +619,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     }
 
     const onWheel = (e: WheelEvent) => {
-      // Ignore wheel-up when there is nothing to scroll back through; a pill
-      // with no scrollback would be a dead control.
       if (e.deltaY < 0 && next.scrollHeight - next.clientHeight > 1) {
         cancelFollow()
       }
@@ -657,8 +641,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     next.addEventListener('pointerdown', onPointerDown, { passive: true })
     next.addEventListener('touchstart', onPointerDown, { passive: true })
     next.addEventListener('keydown', onKeyDown)
-    // Pointer/touch releases can land outside the scroller (drag ends off the
-    // scrollbar), so the end-of-gesture listeners live on the window.
     window.addEventListener('pointerup', endPointerInteraction, { passive: true })
     window.addEventListener('pointercancel', endPointerInteraction, { passive: true })
     window.addEventListener('touchend', endPointerInteraction, { passive: true })
@@ -677,8 +659,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     }
   }, [])
 
-  // Virtuoso calls scrollerRef(null) on unmount, but keep an unmount sweep as
-  // insurance so the window-level gesture listeners can never outlive the list.
   useEffect(() => {
     return () => {
       if (scrollerCleanupRef.current) {
@@ -692,8 +672,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     followRef.current = true
     atBottomRef.current = true
     setShowScrollToBottom(false)
-    // Clear any in-list interaction grace: an explicit "scroll to latest"
-    // click overrides it, and follow now persists until a real upward gesture.
     lastScrollerPointerDownAtRef.current = 0
     scrollFollowToBottom(true)
   }, [scrollFollowToBottom])
@@ -731,14 +709,14 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     maybeLoadOlder()
   }, [historyLoadingOlder, historyHasMore, maybeLoadOlder])
 
-  // Window the in-memory message list once a turn settles: only when the user is
-  // pinned to the tail (not reading older messages) and not mid-pagination, so a
-  // trim never yanks the viewport. The symmetric firstItemIndex handling above
-  // keeps retained rows anchored; loadOlderHistory refetches trimmed messages.
   useEffect(() => {
     if (!resolvedSessionId) return
-    if (chatState !== 'idle') return
     if (messages.length <= MAX_IN_MEMORY_MESSAGES) return
+    // Cap the in-memory window even while a turn is running (the core scenario:
+    // a multi-hour agent loop never returns to idle). Only requires the user to
+    // be pinned to the bottom (following), so trimming off-screen-top messages
+    // never disrupts what they are reading; when scrolled up to read history we
+    // skip capping. This bounds both memory and the O(n) buildRenderModel cost.
     if (!atBottomRef.current || !followRef.current) return
     if (historyLoadingOlder) return
     useChatStore.getState().capMessageWindow(resolvedSessionId)
@@ -834,9 +812,16 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     )
   }, [messages, activeThinkingId])
 
+  const pendingAskToolUseId = useMemo(() => {
+    if (!pendingPermission) return null
+    return isAskQuestionToolName(pendingPermission.toolName)
+      ? (pendingPermission.toolUseId ?? null)
+      : null
+  }, [pendingPermission])
+
   const { toolResultMap, renderItems, childToolCallsByParent } = useMemo(
-    () => buildRenderModel(baseMessages),
-    [baseMessages],
+    () => buildRenderModel(baseMessages, pendingAskToolUseId),
+    [baseMessages, pendingAskToolUseId],
   )
 
   const childResultsByParent = useMemo(() => {
@@ -889,12 +874,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   }, [renderItems, chatState, streamingText])
 
   useLayoutEffect(() => {
-    // Keep Virtuoso's firstItemIndex consistent with front-of-list mutations so
-    // retained rows keep a stable virtual index (no remount / scroll jump):
-    //  - prepend K rows (loadOlderHistory)  -> firstItemIndex -= K
-    //  - trim   K rows from the front (cap)  -> firstItemIndex += K
-    // Render-item keys are stable (message id / first-message id for groups), so
-    // we detect which case happened by locating the anchor key across renders.
     const keys = listRenderItems.map(renderItemKey)
     const prevKeys = prevRenderKeysRef.current
     const firstKey = keys[0]
@@ -904,21 +883,33 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       firstKey !== undefined &&
       firstKey !== prevFirstKey
     ) {
-      const prependCount = keys.indexOf(prevFirstKey)
-      if (prependCount > 0) {
-        setFirstItemIndex((v) => v - prependCount)
-      } else {
-        const trimCount = prevKeys.indexOf(firstKey)
-        if (trimCount > 0) {
-          setFirstItemIndex((v) => v + trimCount)
+      // Anchor on the FIRST key common to both lists, not just the two head
+      // keys: when a prepended page merges with the window's leading
+      // "explored" group, the group id changes on both sides and head-only
+      // comparison found no match, skipping compensation — the viewport then
+      // visibly jumped by the prepended amount.
+      const prevIndexByKey = new Map<string, number>()
+      for (let i = 0; i < prevKeys.length; i++) {
+        const k = prevKeys[i]
+        if (k !== undefined && !prevIndexByKey.has(k)) prevIndexByKey.set(k, i)
+      }
+      let delta: number | null = null
+      for (let i = 0; i < keys.length; i++) {
+        const k = keys[i]
+        if (k === undefined) continue
+        const prevIdx = prevIndexByKey.get(k)
+        if (prevIdx !== undefined) {
+          delta = i - prevIdx
+          break
         }
+      }
+      if (delta !== null && delta !== 0) {
+        setFirstItemIndex((v) => v - delta)
       }
     }
     prevRenderKeysRef.current = keys
   }, [listRenderItems])
 
-  // Jump-to-latest via Virtuoso, flagged as programmatic so the drag-up
-  // detector can never mistake the resulting scroll events for a user gesture.
   const pinToLatestProgrammatically = useCallback(() => {
     programmaticScrollRef.current = true
     virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' })
@@ -944,13 +935,19 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
 
   const rewindIndexByMsgId = useMemo(() => {
     const map = new Map<string, number>()
+    // Backend userMessageIndex is absolute over all live user messages. History
+    // entries carry it; optimistic live messages don't. Live messages must
+    // CONTINUE from the last numbered history index — a counter that ignored
+    // numbered entries mapped the first live message of the run to index 0 and
+    // a rewind/edit on it truncated the whole conversation.
     let counter = -1
     for (const item of listRenderItems) {
       if (item.kind !== 'message') continue
       const msg = item.message
       if (msg.type === 'user_text' && !msg.pending && !msg.superseded) {
         const idx =
-          typeof msg.userMessageIndex === 'number' ? msg.userMessageIndex : ++counter
+          typeof msg.userMessageIndex === 'number' ? msg.userMessageIndex : counter + 1
+        counter = idx
         map.set(msg.id, idx)
       }
     }
@@ -1036,9 +1033,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
           try {
             await sessionsApi.commitRewind(resolvedSessionId, result.rewindId)
           } catch {
-            // Commit failed: the rewind checkpoint stays open on the backend.
-            // Warn the user rather than silently proceeding to resend, since the
-            // session and backend rewind state may now disagree.
             addToast({
               type: 'error',
               message: t('chat.rewindCommitFailed'),
@@ -1261,9 +1255,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
                   return r ? { content: r.content, isError: r.isError } : null
                 })()
               : null
-          // Narrow chatState to per-block booleans that stay constant for completed blocks:
-          // only the in-flight tool (no result yet) and the last assistant segment can change,
-          // so streaming<->tool transitions no longer invalidate the whole history.
           const toolStreaming =
             msg.type === 'tool_use' &&
             chatState === 'tool_executing' &&
@@ -1333,10 +1324,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
             pinToLatestProgrammatically()
             return
           }
-          // At idle, height growth right after the user clicked inside the
-          // list (expanding a tool card, opening a diff) is their own doing:
-          // snapping to the bottom would yank away what they opened. During a
-          // live turn we always follow.
           if (
             chatState === 'idle' &&
             Date.now() - lastScrollerPointerDownAtRef.current < IDLE_INTERACTION_GRACE_MS
@@ -1612,10 +1599,6 @@ type MessageBlockProps = {
   message: UIMessage
   activeThinkingId: string | null
   toolResult?: { content: unknown; isError: boolean } | null
-  // Narrowed, history-stable flags derived from chatState in the parent. Passing the raw
-  // chatState into every block made all memoized history blocks invalidate on every
-  // streaming<->tool_executing transition (flicker / layout jump during active editing).
-  // These booleans are constant for completed blocks, so only the active block re-renders.
   toolStreaming: boolean
   tailMenuEnabled: boolean
   assistantTurnCopy: AssistantTurnCopyInfo | null

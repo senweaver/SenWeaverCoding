@@ -139,11 +139,11 @@ fn try_start_isolated_gateway(
     let mut cmd = senweavercoding::util::hidden_sync_command(sen_path.as_os_str());
     cmd.args(["gateway", "start", "-p", &port.to_string(), "--host", host])
         .env(
-            senweavercoding::gateway::desktop_bridge::BRIDGE_MODE_ENV,
+            senweavercoding::gateway::desktop::bridge::BRIDGE_MODE_ENV,
             "1",
         )
         .env(
-            senweavercoding::gateway::desktop_bridge::BRIDGE_TOKEN_ENV,
+            senweavercoding::gateway::desktop::bridge::BRIDGE_TOKEN_ENV,
             &token,
         );
     if let Some(ref path) = log_path {
@@ -1056,10 +1056,12 @@ struct TrayMenuItems {
 
 #[tauri::command]
 fn set_tray_labels(
+    app: AppHandle,
     state: tauri::State<'_, TrayMenuItems>,
     show: String,
     stop_computer: String,
     quit: String,
+    tooltip: Option<String>,
 ) -> Result<(), String> {
     if !show.trim().is_empty() {
         state.show.set_text(show).map_err(|e| e.to_string())?;
@@ -1073,20 +1075,77 @@ fn set_tray_labels(
     if !quit.trim().is_empty() {
         state.quit.set_text(quit).map_err(|e| e.to_string())?;
     }
+    if let Some(tooltip) = tooltip.filter(|t| !t.trim().is_empty()) {
+        if let Some(tray) = app.tray_by_id("sen-main-tray") {
+            tray.set_tooltip(Some(tooltip)).map_err(|e| e.to_string())?;
+        }
+    }
     Ok(())
+}
+
+fn ui_locale_snapshot_path(app: &AppHandle) -> Option<std::path::PathBuf> {
+    app.path()
+        .app_config_dir()
+        .ok()
+        .map(|dir| dir.join("ui-locale.json"))
+}
+
+fn read_ui_locale_snapshot(app: &AppHandle) -> Option<String> {
+    let path = ui_locale_snapshot_path(app)?;
+    let raw = std::fs::read_to_string(path).ok()?;
+    let json = serde_json::from_str::<serde_json::Value>(&raw).ok()?;
+    let locale = json.get("locale").and_then(|v| v.as_str())?;
+    if locale == "en" || locale == "zh" {
+        Some(locale.to_string())
+    } else {
+        None
+    }
+}
+
+#[tauri::command]
+fn persist_ui_locale(app: AppHandle, locale: String) -> Result<(), String> {
+    if locale != "en" && locale != "zh" {
+        return Err(format!("unsupported locale: {locale}"));
+    }
+    let path = ui_locale_snapshot_path(&app)
+        .ok_or_else(|| "app config dir unavailable".to_string())?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    }
+    let body = serde_json::json!({ "locale": locale }).to_string();
+    std::fs::write(&path, body).map_err(|e| e.to_string())
+}
+
+struct TrayInitialLabels {
+    show: &'static str,
+    stop_computer: &'static str,
+    quit: &'static str,
+}
+
+fn tray_initial_labels(app: &AppHandle) -> TrayInitialLabels {
+    match read_ui_locale_snapshot(app).as_deref() {
+        Some("en") => TrayInitialLabels {
+            show: "Show main window",
+            stop_computer: "Stop computer control",
+            quit: "Quit",
+        },
+        _ => TrayInitialLabels {
+            show: "显示主窗口",
+            stop_computer: "停止电脑操作",
+            quit: "退出",
+        },
+    }
 }
 
 fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
     use tauri::menu::{Menu, MenuItem};
     use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 
-    // Initial labels are English (the app's primary locale); the front-end pushes
-    // localized labels via `set_tray_labels` on boot and whenever the UI locale
-    // changes, so the tray stays in sync with the in-app language.
-    let show_item = MenuItem::with_id(app, "tray_show", "Show main window", true, None::<&str>)?;
+    let labels = tray_initial_labels(app);
+    let show_item = MenuItem::with_id(app, "tray_show", labels.show, true, None::<&str>)?;
     let stop_computer_item =
-        MenuItem::with_id(app, "tray_stop_computer", "Stop computer control", true, None::<&str>)?;
-    let quit_item = MenuItem::with_id(app, "tray_quit", "Quit", true, None::<&str>)?;
+        MenuItem::with_id(app, "tray_stop_computer", labels.stop_computer, true, None::<&str>)?;
+    let quit_item = MenuItem::with_id(app, "tray_quit", labels.quit, true, None::<&str>)?;
     let menu = Menu::with_items(app, &[&show_item, &stop_computer_item, &quit_item])?;
     app.manage(TrayMenuItems {
         show: show_item.clone(),
@@ -1858,6 +1917,7 @@ pub fn run() {
             signal_frontend_ready,
             quit_app,
             set_tray_labels,
+            persist_ui_locale,
             reveal_in_explorer,
             read_local_image_data_url,
             minimal_resize_anchored,

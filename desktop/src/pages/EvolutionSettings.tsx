@@ -418,7 +418,7 @@ function PersistenceCard({
         footer={
           <>
             <Button variant="secondary" size="sm" onClick={() => { setPurgeOpen(null); setConfirmText('') }}>
-              Cancel
+              {t('common.cancel')}
             </Button>
             <Button
               size="sm"
@@ -426,7 +426,7 @@ function PersistenceCard({
               disabled={confirmText !== 'I_UNDERSTAND' || busy}
               loading={busy}
             >
-              Confirm
+              {t('common.confirm')}
             </Button>
           </>
         }
@@ -1052,10 +1052,14 @@ function CloudTargetsCard({
             setPendingDelete(null)
           }
         }}
-        title="Delete target"
-        body={pendingDelete ? `Delete cloud target "${pendingDelete.name}"?` : ''}
-        confirmLabel="Delete"
-        cancelLabel="Cancel"
+        title={t('settings.evolution.cloud.deleteTargetTitle')}
+        body={
+          pendingDelete
+            ? t('settings.evolution.cloud.deleteTargetBody', { name: pendingDelete.name })
+            : ''
+        }
+        confirmLabel={t('common.delete')}
+        cancelLabel={t('common.cancel')}
         confirmVariant="danger"
       />
 
@@ -1067,7 +1071,7 @@ function CloudTargetsCard({
         footer={
           <>
             <Button variant="secondary" size="sm" onClick={() => setPushPickerForTarget(null)}>
-              Cancel
+              {t('common.cancel')}
             </Button>
             <Button
               size="sm"
@@ -1084,7 +1088,9 @@ function CloudTargetsCard({
           </>
         }
       >
-        <div className="text-xs text-[var(--color-text-secondary)] mb-2">Select an export to push.</div>
+        <div className="text-xs text-[var(--color-text-secondary)] mb-2">
+          {t('settings.evolution.cloud.selectExport')}
+        </div>
         <select
           value={pushExportId}
           onChange={(e) => setPushExportId(e.target.value)}
@@ -1115,6 +1121,7 @@ function CloudTargetEditor({
     enabled: boolean
   }) => Promise<void>
 }) {
+  const t = useTranslation()
   const [name, setName] = useState(initial?.name ?? '')
   const [kind, setKind] = useState<CloudTarget['kind']>(initial?.kind ?? 'webhook')
   const [endpoint, setEndpoint] = useState(initial?.endpoint ?? '')
@@ -1144,23 +1151,33 @@ function CloudTargetEditor({
     <Modal
       open={true}
       onClose={onClose}
-      title={initial ? 'Edit cloud target' : 'Add cloud target'}
+      title={
+        initial
+          ? t('settings.evolution.cloud.editTarget')
+          : t('settings.evolution.cloud.addTarget')
+      }
       width={520}
       footer={
         <>
           <Button variant="secondary" size="sm" onClick={onClose}>
-            Cancel
+            {t('common.cancel')}
           </Button>
           <Button size="sm" onClick={() => void handleSubmit()} disabled={!name || submitting} loading={submitting}>
-            Save
+            {t('common.save')}
           </Button>
         </>
       }
     >
       <div className="flex flex-col gap-3 text-xs">
-        <Input label="Name" value={name} onChange={(e) => setName(e.target.value)} />
+        <Input
+          label={t('settings.evolution.cloud.fieldName')}
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+        />
         <div>
-          <label className="text-xs font-medium text-[var(--color-text-primary)] mb-1 block">Kind</label>
+          <label className="text-xs font-medium text-[var(--color-text-primary)] mb-1 block">
+            {t('settings.evolution.cloud.fieldKind')}
+          </label>
           <select
             value={kind}
             onChange={(e) => setKind(e.target.value as CloudTarget['kind'])}
@@ -1171,18 +1188,30 @@ function CloudTargetEditor({
             <option value="rl_dataset_server">RL Dataset Server</option>
             <option value="tinker">Tinker</option>
             <option value="fireworks">Fireworks</option>
-            <option value="webhook">Custom Webhook</option>
+            <option value="webhook">{t('settings.evolution.cloud.kindWebhook')}</option>
           </select>
         </div>
-        <Input label="Endpoint" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} />
         <Input
-          label="Secret ref (env var name)"
+          label={t('settings.evolution.cloud.fieldEndpoint')}
+          value={endpoint}
+          onChange={(e) => setEndpoint(e.target.value)}
+        />
+        <Input
+          label={t('settings.evolution.cloud.fieldSecretRef')}
           value={secretRef}
           onChange={(e) => setSecretRef(e.target.value)}
           placeholder="e.g. OPENAI_API_KEY"
         />
-        <ToggleRow label="Enabled" value={enabled} onChange={setEnabled} />
-        <ToggleRow label="Auto push" value={autoPush} onChange={setAutoPush} />
+        <ToggleRow
+          label={t('settings.evolution.cloud.fieldEnabled')}
+          value={enabled}
+          onChange={setEnabled}
+        />
+        <ToggleRow
+          label={t('settings.evolution.cloud.fieldAutoPush')}
+          value={autoPush}
+          onChange={setAutoPush}
+        />
       </div>
     </Modal>
   )

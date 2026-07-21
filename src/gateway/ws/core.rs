@@ -80,7 +80,14 @@ pub async fn handle_approval_respond(
             .into_response();
     }
 
-    if !crate::approval::claim_pending_gateway_approval(&approval_id) {
+    if !crate::approval::claim_pending_gateway_approval_for_session(
+        &approval_id,
+        headers
+            .get("X-Session-Id")
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty()),
+    ) {
         return (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({
@@ -186,6 +193,69 @@ pub struct WsQuery {
     pub name: Option<String>,
 }
 
+pub(crate) fn is_valid_session_id(session_id: &str) -> bool {
+    if session_id.is_empty() || session_id.len() > 128 {
+        return false;
+    }
+    if session_id.contains("..") {
+        return false;
+    }
+    session_id
+        .bytes()
+        .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.'))
+}
+
+pub(crate) fn authorize_ws_request(
+    state: &AppState,
+    headers: &HeaderMap,
+    peer: Option<std::net::SocketAddr>,
+    query_token: Option<&str>,
+    endpoint: &str,
+) -> Result<(), axum::response::Response> {
+    if let Some(reject) = crate::gateway::cors::reject_ws_disallowed_origin(headers, endpoint) {
+        return Err(reject);
+    }
+
+    if state.exposed {
+        let token = extract_ws_token(headers, query_token).unwrap_or("");
+        if state.pairing.is_authenticated_strict(token) {
+            return Ok(());
+        }
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized  - this gateway is exposed (public bind/tunnel); a valid Bearer token is required",
+        )
+            .into_response());
+    }
+
+    if state.pairing.require_pairing() {
+        let token = extract_ws_token(headers, query_token).unwrap_or("");
+        if state.pairing.is_authenticated(token) {
+            return Ok(());
+        }
+        return Err((
+            StatusCode::UNAUTHORIZED,
+            "Unauthorized  - provide Authorization header, Sec-WebSocket-Protocol bearer, or ?token= query param",
+        )
+            .into_response());
+    }
+
+    if peer.map(|addr| addr.ip().is_loopback()).unwrap_or(false) {
+        return Ok(());
+    }
+
+    tracing::warn!(
+        target: "gateway.security",
+        endpoint,
+        "rejecting WebSocket upgrade from non-loopback client on a loopback-bound gateway"
+    );
+    Err((
+        StatusCode::FORBIDDEN,
+        "Forbidden  - local WebSocket endpoints only accept loopback clients",
+    )
+        .into_response())
+}
+
 pub fn extract_ws_token<'a>(headers: &'a HeaderMap, query_token: Option<&'a str>) -> Option<&'a str> {
 
     if let Some(t) = headers
@@ -225,6 +295,7 @@ pub fn extract_ws_token<'a>(headers: &'a HeaderMap, query_token: Option<&'a str>
 pub async fn handle_ws_chat(
     State(state): State<AppState>,
     Query(params): Query<WsQuery>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
@@ -234,21 +305,21 @@ pub async fn handle_ws_chat(
         "WebSocket chat upgrade requested"
     );
 
-    if let Some(reject) = crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/chat") {
+    if let Err(reject) = authorize_ws_request(
+        &state,
+        &headers,
+        Some(peer),
+        params.token.as_deref(),
+        "/ws/chat",
+    ) {
         return reject;
     }
 
-    if state.exposed || state.pairing.require_pairing() {
-        let token = extract_ws_token(&headers, params.token.as_deref()).unwrap_or("");
-        let authed = if state.exposed {
-            state.pairing.is_authenticated_strict(token)
-        } else {
-            state.pairing.is_authenticated(token)
-        };
-        if !authed {
+    if let Some(ref sid) = params.session_id {
+        if !is_valid_session_id(sid) {
             return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                "Unauthorized  - provide Authorization header, Sec-WebSocket-Protocol bearer, or ?token= query param",
+                axum::http::StatusCode::BAD_REQUEST,
+                "Bad Request  - malformed session_id",
             )
                 .into_response();
         }
@@ -688,14 +759,15 @@ async fn process_chat_message(
             .map(|svc| svc.resolve_coding_mode_for(Some(session_key)))
             .unwrap_or_default()
     });
+    let workspace_dir = agent.current_workspace_dir();
     let session_ctx = crate::session::SessionContext {
         session_id: session_key.to_string(),
-        workspace_key: session_key.to_string(),
+        // Key by the real workspace directory (not the session id) so this WS
+        // chat path shares the same-workDir serial queue / file-write locks
+        // with desktop sessions targeting the same directory.
+        workspace_key: crate::session::workspace_key_from_path(&workspace_dir, session_key),
         title: session_key.to_string(),
-        workspace_dir: agent
-            .current_workspace_dir()
-            .to_string_lossy()
-            .into_owned(),
+        workspace_dir: workspace_dir.to_string_lossy().into_owned(),
         connection_id: None,
     };
     let turn_permission_mode = crate::gateway::ws::desktop::desktop_runtime_state()

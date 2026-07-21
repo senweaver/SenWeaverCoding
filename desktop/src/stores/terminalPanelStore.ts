@@ -35,6 +35,10 @@ export type TerminalTab = {
   status: TerminalTabStatus
   cwd?: string
   sessionId?: number
+  // True once the user has typed into this terminal. Auto-cwd sync only writes
+  // `cd` into pristine (never-typed) terminals so it can never inject keystrokes
+  // into a running vim/REPL/dev-server.
+  interacted?: boolean
 }
 
 export type AgentMirrorEvent =
@@ -117,10 +121,12 @@ type State = {
   setTabStatus: (id: string, status: TerminalTabStatus) => void
   setTabTitle: (id: string, title: string) => void
   setTabCwd: (id: string, cwd: string) => void
+  markTabInteracted: (id: string) => void
   ensureAgentMirrorTab: (sessionId?: string | null) => string
   appendAgentMirrorEvent: (event: AgentMirrorEvent) => void
   clearAgentMirror: (sessionId?: string | null) => void
   syncAgentMirrorForChatSession: (sessionId: string | null | undefined) => void
+  removeAgentMirrorForSession: (sessionId: string) => void
 }
 
 export const useTerminalPanelStore = create<State>((set, get) => ({
@@ -203,6 +209,16 @@ export const useTerminalPanelStore = create<State>((set, get) => ({
     }))
   },
 
+  markTabInteracted: (id) => {
+    set((s) => {
+      const tab = s.tabs.find((t) => t.id === id)
+      if (!tab || tab.interacted) return s
+      return {
+        tabs: s.tabs.map((t) => (t.id === id ? { ...t, interacted: true } : t)),
+      }
+    })
+  },
+
   ensureAgentMirrorTab: (sessionId) => {
     const tabId = mirrorTabIdForSession(sessionId)
     const existing = get().tabs.find((t) => t.id === tabId)
@@ -249,6 +265,26 @@ export const useTerminalPanelStore = create<State>((set, get) => ({
     }
     if (current === targetTabId) return
     set({ activeTabId: targetTabId })
+  },
+
+  removeAgentMirrorForSession: (sessionId) => {
+    // Mirror tabs were permanent (no close button, one per session ever
+    // activated) — each an xterm instance with a 4k-line scrollback that
+    // outlived its chat tab. Drop the tab and its buffers when the chat
+    // session closes.
+    const tabId = mirrorTabIdForSession(sessionId)
+    const key = bucketKey(sessionId)
+    mirrorBuffersBySession.delete(key)
+    mirrorWritersBySession.delete(key)
+    set((s) => {
+      if (!s.tabs.some((t) => t.id === tabId)) return s
+      const tabs = s.tabs.filter((t) => t.id !== tabId)
+      let activeTabId = s.activeTabId
+      if (activeTabId === tabId) {
+        activeTabId = tabs[tabs.length - 1]?.id ?? null
+      }
+      return { tabs, activeTabId }
+    })
   },
 }))
 

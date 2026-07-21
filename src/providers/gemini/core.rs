@@ -242,6 +242,29 @@ struct GenerationConfig {
 
     #[serde(rename = "responseSchema", skip_serializing_if = "Option::is_none")]
     response_schema: Option<serde_json::Value>,
+
+    #[serde(rename = "thinkingConfig", skip_serializing_if = "Option::is_none")]
+    thinking_config: Option<ThinkingConfig>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "includeThoughts")]
+    include_thoughts: bool,
+}
+
+/// Only Gemini 2.5 "thinking" models accept `thinkingConfig`; sending it to other
+/// models is rejected, so gate conservatively and default to omitting it.
+fn thinking_config_for_model(model: &str) -> Option<ThinkingConfig> {
+    let m = model.to_ascii_lowercase();
+    let supported = m.contains("2.5") || m.contains("flash-thinking") || m.contains("-thinking");
+    if supported {
+        Some(ThinkingConfig {
+            include_thoughts: true,
+        })
+    } else {
+        None
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -266,6 +289,8 @@ struct GeminiUsageMetadata {
 struct Candidate {
     #[serde(default)]
     content: Option<CandidateContent>,
+    #[serde(default, rename = "finishReason")]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -907,6 +932,24 @@ impl GeminiProvider {
             )
     }
 
+    fn stream_http_client(&self) -> Client {
+        // Streaming needs a read-idle timeout, not a total-request timeout, so a
+        // long streamed response is not truncated while data is still arriving.
+        let read_timeout_secs = self.timeout_secs.max(300);
+        let mut headers = reqwest::header::HeaderMap::new();
+        for (key, value) in &self.extra_headers {
+            if let (Ok(name), Ok(val)) = (
+                reqwest::header::HeaderName::from_bytes(key.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                headers.insert(name, val);
+            }
+        }
+        crate::services::require_services()
+            .proxy_runtime()
+            .build_stream_client("provider.gemini.stream", read_timeout_secs, 10, &headers)
+    }
+
     async fn resolve_oauth_project(&self, token: &str) -> anyhow::Result<String> {
         let project_seed = Self::load_non_empty_env("GOOGLE_CLOUD_PROJECT")
             .or_else(|| Self::load_non_empty_env("GOOGLE_CLOUD_PROJECT_ID"));
@@ -1054,6 +1097,7 @@ impl GeminiProvider {
                 max_output_tokens: self.max_output_tokens,
                 response_mime_type: None,
                 response_schema: None,
+                thinking_config: thinking_config_for_model(model),
             },
         )
         .await
@@ -1311,9 +1355,12 @@ impl GeminiProvider {
             cache_creation_input_tokens: None,
         });
 
-        let candidate = result
-            .candidates
-            .and_then(|c| c.into_iter().next())
+        let first = result.candidates.and_then(|c| c.into_iter().next());
+        let stop_reason = first
+            .as_ref()
+            .and_then(|c| c.finish_reason.as_deref())
+            .and_then(crate::providers::traits::StopReason::from_wire);
+        let candidate = first
             .and_then(|c| c.content)
             .map(|c| c.into_candidate())
             .unwrap_or_default();
@@ -1323,6 +1370,8 @@ impl GeminiProvider {
             tool_calls: candidate.tool_calls,
             usage,
             reasoning_content: candidate.reasoning,
+            thinking_signature: None,
+            stop_reason,
         })
     }
 
@@ -1619,6 +1668,7 @@ impl Provider for GeminiProvider {
             max_output_tokens: self.max_output_tokens,
             response_mime_type: Some("application/json".to_string()),
             response_schema: Some(schema.clone()),
+            thinking_config: None,
         };
 
         let (text, usage) = self
@@ -1717,6 +1767,7 @@ impl Provider for GeminiProvider {
                 max_output_tokens: self.max_output_tokens,
                 response_mime_type: None,
                 response_schema: None,
+                thinking_config: thinking_config_for_model(model),
             },
             tools,
             tool_config,
@@ -1732,6 +1783,8 @@ impl Provider for GeminiProvider {
             tool_calls: response.tool_calls,
             usage: response.usage,
             reasoning_content: response.reasoning_content,
+            thinking_signature: None,
+            stop_reason: response.stop_reason,
         })
     }
 
@@ -1774,6 +1827,7 @@ impl Provider for GeminiProvider {
                 max_output_tokens: self.max_output_tokens,
                 response_mime_type: None,
                 response_schema: None,
+                thinking_config: thinking_config_for_model(model),
             },
             tools: tools_decl,
             tool_config,
@@ -1789,7 +1843,233 @@ impl Provider for GeminiProvider {
             tool_calls: response.tool_calls,
             usage: response.usage,
             reasoning_content: response.reasoning_content,
+            thinking_signature: None,
+            stop_reason: response.stop_reason,
         })
+    }
+
+    fn supports_streaming(&self) -> bool {
+        self.auth.as_ref().is_some_and(GeminiAuth::is_api_key)
+    }
+
+    fn stream_chat(
+        &self,
+        request: crate::providers::traits::ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        options: crate::providers::traits::StreamOptions,
+    ) -> futures_util::stream::BoxStream<
+        'static,
+        crate::providers::traits::StreamResult<crate::providers::traits::StreamEvent>,
+    > {
+        use crate::providers::traits::{StreamChunk, StreamError, StreamEvent};
+        use futures_util::StreamExt;
+        use futures_util::stream;
+
+        if !options.enabled {
+            return stream::once(async { Ok(StreamEvent::Final) }).boxed();
+        }
+        let Some(auth) = self.auth.as_ref() else {
+            return stream::once(async {
+                Err(StreamError::Provider("Gemini API key not found".to_string()))
+            })
+            .boxed();
+        };
+        if !auth.is_api_key() {
+            return stream::once(async {
+                Err(StreamError::Provider(
+                    "Gemini streaming requires API-key auth; OAuth sessions use buffered responses"
+                        .to_string(),
+                ))
+            })
+            .boxed();
+        }
+        let api_key = auth.api_key_credential().to_string();
+
+        let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            request.messages.to_vec(),
+            model,
+            0,
+            None,
+        );
+        let (system_parts, contents) = Self::convert_messages_native(&sanitized);
+        let system_instruction = if system_parts.is_empty() {
+            None
+        } else {
+            Some(Content {
+                role: None,
+                parts: vec![Part::text(system_parts.join("\n\n"))],
+            })
+        };
+        let tools_decl = request.tools.and_then(Self::build_tools);
+        let tool_config = tools_decl.as_ref().map(|_| GeminiToolConfig {
+            function_calling_config: FunctionCallingConfig {
+                mode: "AUTO".to_string(),
+            },
+        });
+        let gen_req = GenerateContentRequest {
+            contents,
+            system_instruction,
+            generation_config: GenerationConfig {
+                temperature,
+                max_output_tokens: self.max_output_tokens,
+                response_mime_type: None,
+                response_schema: None,
+                thinking_config: thinking_config_for_model(model),
+            },
+            tools: tools_decl,
+            tool_config,
+        };
+
+        let model_name = Self::format_model_name(model);
+        let url = format!("{PUBLIC_API_ENDPOINT}/{model_name}:streamGenerateContent?alt=sse");
+        let client = self.stream_http_client();
+
+        let (tx, rx) = tokio::sync::mpsc::channel::<
+            crate::providers::traits::StreamResult<StreamEvent>,
+        >(64);
+
+        crate::runtime::spawn_supervised("providers.gemini.stream", async move {
+            let response = match client
+                .post(&url)
+                .header("x-goog-api-key", &api_key)
+                .json(&gen_req)
+                .send()
+                .await
+            {
+                Ok(r) => r,
+                Err(e) => {
+                    let _ = tx
+                        .send(Err(StreamError::Provider(format!(
+                            "Gemini stream request failed: {e}"
+                        ))))
+                        .await;
+                    return;
+                }
+            };
+            if !response.status().is_success() {
+                let status = response.status();
+                let text = response.text().await.unwrap_or_default();
+                let _ = tx
+                    .send(Err(StreamError::Provider(format!(
+                        "Gemini API error ({status}): {}",
+                        crate::providers::sanitize_api_error(&text)
+                    ))))
+                    .await;
+                return;
+            }
+
+            let mut byte_stream = response.bytes_stream();
+            let mut parser = crate::providers::core::sse::SseParser::new();
+            let mut last_usage: Option<TokenUsage> = None;
+            let mut made_progress = false;
+            loop {
+                let chunk = match byte_stream.next().await {
+                    Some(Ok(c)) => c,
+                    Some(Err(e)) => {
+                        let _ = tx
+                            .send(Err(StreamError::Provider(format!(
+                                "Gemini stream transport error: {e}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                    None => break,
+                };
+                parser.push(&chunk);
+                while let Some(event) = parser.next_event() {
+                    if event.data.trim().is_empty() || event.is_done() {
+                        continue;
+                    }
+                    let Ok(parsed) =
+                        serde_json::from_str::<GenerateContentResponse>(&event.data)
+                    else {
+                        continue;
+                    };
+                    let parsed = parsed.into_effective_response();
+                    if let Some(err) = parsed.error {
+                        let _ = tx
+                            .send(Err(StreamError::Provider(format!(
+                                "Gemini API error: {}",
+                                crate::providers::sanitize_api_error(&err.message)
+                            ))))
+                            .await;
+                        return;
+                    }
+                    if let Some(usage) = parsed.usage_metadata.as_ref() {
+                        last_usage = Some(TokenUsage {
+                            input_tokens: usage.prompt_token_count,
+                            output_tokens: usage.candidates_token_count,
+                            cached_input_tokens: None,
+                            cache_creation_input_tokens: None,
+                        });
+                    }
+                    let Some(candidate) = parsed.candidates.and_then(|c| c.into_iter().next())
+                    else {
+                        continue;
+                    };
+                    if let Some(reason) = candidate
+                        .finish_reason
+                        .as_deref()
+                        .and_then(crate::providers::traits::StopReason::from_wire)
+                    {
+                        let _ = tx.send(Ok(StreamEvent::StopReason(reason))).await;
+                    }
+                    let Some(content) = candidate.content else {
+                        continue;
+                    };
+                    let piece = content.into_candidate();
+                    // Forward thinking/reasoning during streaming instead of
+                    // silently dropping it, so the UI shows Gemini's reasoning
+                    // stream like the other providers.
+                    if let Some(reasoning) = piece.reasoning.filter(|t| !t.is_empty()) {
+                        made_progress = true;
+                        if tx
+                            .send(Ok(StreamEvent::TextDelta(StreamChunk::reasoning(reasoning))))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    if let Some(text) = piece.text.filter(|t| !t.is_empty()) {
+                        made_progress = true;
+                        if tx
+                            .send(Ok(StreamEvent::TextDelta(StreamChunk::delta(text))))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    for call in piece.tool_calls {
+                        made_progress = true;
+                        if tx.send(Ok(StreamEvent::ToolCall(call))).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
+            if !made_progress {
+                let _ = tx
+                    .send(Err(StreamError::Provider(
+                        "Gemini stream ended without any content; connection closed mid-response"
+                            .to_string(),
+                    )))
+                    .await;
+                return;
+            }
+            if let Some(usage) = last_usage {
+                let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+            }
+            let _ = tx.send(Ok(StreamEvent::Final)).await;
+        });
+
+        stream::unfold(rx, |mut rx| async move {
+            rx.recv().await.map(|event| (event, rx))
+        })
+        .boxed()
     }
 
     async fn warmup(&self) -> anyhow::Result<()> {

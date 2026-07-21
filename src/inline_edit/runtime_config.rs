@@ -225,8 +225,7 @@ pub fn build_pipeline_from_config(
             "lsp_diag" => {
                 if let Some(svc) = lsp.clone() {
                     let fetcher = LspPoolDiagnosticFetcher::new(svc, root.to_path_buf());
-                    let verifier = LspDiagVerifier::new(Arc::new(fetcher))
-                        .with_timeout_status_summary(true);
+                    let verifier = LspDiagVerifier::new(Arc::new(fetcher));
                     stages.push(Box::new(verifier));
                 }
             }

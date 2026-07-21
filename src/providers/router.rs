@@ -137,6 +137,10 @@ impl RouterProvider {
     }
 
     fn resolve(&self, model: &str) -> anyhow::Result<(usize, String)> {
+        let model = model.trim();
+        if model.is_empty() {
+            return Ok((self.default_index, self.default_model.clone()));
+        }
         let prefixed = model.strip_prefix("route:").or_else(|| {
             model.strip_prefix("hint:").inspect(|_| {
                 tracing::warn!(
@@ -152,27 +156,11 @@ impl RouterProvider {
             }
             tracing::warn!(
                 hint = hint,
-                "Unknown route hint, falling back to default provider"
+                "Unknown route hint"
             );
-            if !self.default_model.trim().is_empty() {
-                return Ok((self.default_index, self.default_model.clone()));
-            }
-            if let Some((fallback_hint, (idx, route_model))) = self
-                .routes
-                .iter()
-                .min_by(|a, b| a.0.cmp(b.0))
-            {
-                tracing::warn!(
-                    hint = hint,
-                    fallback_route = fallback_hint.as_str(),
-                    fallback_model = route_model.as_str(),
-                    "default_model is empty, falling back to first configured route"
-                );
-                return Ok((*idx, route_model.clone()));
-            }
             anyhow::bail!(
-                "Router cannot resolve route hint '{hint}': no matching route, \
-                 empty default_model, and no configured routes are available"
+                "Router cannot resolve route hint '{hint}': no matching route configured \
+                 (refusing silent fallback to default model)"
             );
         }
 

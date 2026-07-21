@@ -15,6 +15,30 @@ use tracing::{debug, warn};
 use super::sharded::map::ShardedMap;
 use crate::observability::coordination_metrics;
 
+fn ensure_session_scoped_key(key: String) -> String {
+    if key.contains("::") || key.starts_with("tool_cache:") {
+        return key;
+    }
+    match crate::session::current_session_context() {
+        Some(ctx) if !ctx.session_id.is_empty() => format!("{}::{key}", ctx.session_id),
+        _ => format!("__global__::{key}"),
+    }
+}
+
+fn ensure_session_scoped_namespace(namespace: String) -> String {
+    match crate::session::current_session_context() {
+        Some(ctx) if !ctx.session_id.is_empty() => {
+            let suffix = format!(":{}", ctx.session_id);
+            if namespace.ends_with(&suffix) {
+                namespace
+            } else {
+                format!("{namespace}{suffix}")
+            }
+        }
+        _ => namespace,
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BlackboardEntry {
 
@@ -342,9 +366,9 @@ impl Blackboard {
         namespace: impl Into<String>,
         ttl: Option<Duration>,
     ) -> u64 {
-        let key = key.into();
+        let key = ensure_session_scoped_key(key.into());
         let agent = agent.into();
-        let namespace = namespace.into();
+        let namespace = ensure_session_scoped_namespace(namespace.into());
         let now = Utc::now();
         let value_for_journal = value.clone();
 
@@ -427,9 +451,9 @@ impl Blackboard {
         namespace: impl Into<String>,
         expected_version: u64,
     ) -> Result<u64, BlackboardError> {
-        let key = key.into();
+        let key = ensure_session_scoped_key(key.into());
         let agent = agent.into();
-        let namespace = namespace.into();
+        let namespace = ensure_session_scoped_namespace(namespace.into());
         let now = Utc::now();
         let value_for_journal = value.clone();
 
@@ -487,8 +511,9 @@ impl Blackboard {
     }
 
     pub fn read(&self, key: &str) -> Option<BlackboardEntry> {
-        self.entries.with_shard(key, |shard| {
-            shard.get(key).and_then(|e| {
+        let key = ensure_session_scoped_key(key.to_string());
+        self.entries.with_shard(&key, |shard| {
+            shard.get(&key).and_then(|e| {
                 if e.is_expired() {
                     None
                 } else {
@@ -503,10 +528,11 @@ impl Blackboard {
     }
 
     pub fn delete(&self, key: &str, agent: &str) -> bool {
-        let removed_opt = self.entries.remove(key);
+        let key = ensure_session_scoped_key(key.to_string());
+        let removed_opt = self.entries.remove(&key);
         if let Some(removed) = removed_opt {
             let change = BlackboardChange {
-                key: key.to_string(),
+                key: key.clone(),
                 namespace: removed.namespace,
                 kind: ChangeKind::Deleted,
                 agent: agent.to_string(),

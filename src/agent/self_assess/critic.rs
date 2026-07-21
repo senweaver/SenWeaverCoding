@@ -158,13 +158,17 @@ impl IndependentCritic {
         let mut parsed_any = false;
 
         const CRITIC_VOTE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(60);
-        for _ in 0..votes {
-            let raw = match tokio::time::timeout(
-                CRITIC_VOTE_TIMEOUT,
-                provider.chat_with_history(messages, &model, ctx.config.judge_temperature),
-            )
-            .await
-            {
+        let vote_futures: Vec<_> = (0..votes)
+            .map(|_| {
+                tokio::time::timeout(
+                    CRITIC_VOTE_TIMEOUT,
+                    provider.chat_with_history(messages, &model, ctx.config.judge_temperature),
+                )
+            })
+            .collect();
+        let vote_results = futures_util::future::join_all(vote_futures).await;
+        for raw in vote_results {
+            let raw = match raw {
                 Ok(r) => r,
                 Err(_) => {
                     tracing::warn!(

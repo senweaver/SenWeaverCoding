@@ -47,6 +47,7 @@ impl Default for RunnerOptions {
                 max_fuzz: 3,
                 dry_run: false,
                 validate: true,
+                path: None,
             },
             checkpoint: true,
             max_refine_attempts: 1,
@@ -137,13 +138,77 @@ impl InlineEditRunner {
             (outcome.hunks_exact + outcome.hunks_fuzzy) as u64,
         );
 
+        let (mut issues, verification_failed) = self.verify_applied(&req, &outcome.applied).await;
+
+        let (final_diff, outcome) = if let Some((summary, kind)) = verification_failed {
+            let synthetic = ApplyError::Validation {
+                reasons: vec![summary],
+            };
+            match self
+                .refine_and_retry_with_failure(
+                    source,
+                    &req,
+                    final_diff.clone(),
+                    synthetic,
+                    kind,
+                )
+                .await
+            {
+                Ok((d, o)) => {
+                    let (refined_issues, refined_failed) =
+                        self.verify_applied(&req, &o.applied).await;
+                    match refined_failed {
+                        None => {
+                            issues = refined_issues;
+                            (d, o)
+                        }
+                        Some((refined_summary, _)) => {
+                            crate::observability::subsystem_metrics::incr_inline_edit_validator_failure();
+                            return Err(InlineEditError::Apply(ApplyError::Validation {
+                                reasons: vec![format!(
+                                    "refined result still fails verification: {refined_summary}"
+                                )],
+                            }));
+                        }
+                    }
+                }
+                Err(_) => {
+
+                    (final_diff, outcome)
+                }
+            }
+        } else {
+            (final_diff, outcome)
+        };
+
+        let checkpoint_id = if self.opts.checkpoint {
+            push_checkpoint(&req, source)
+        } else {
+            None
+        };
+
+        Ok(InlineEditOutcome {
+            diff: final_diff,
+            applied: outcome.applied,
+            hunks_exact: outcome.hunks_exact,
+            hunks_fuzzy: outcome.hunks_fuzzy,
+            validator_issues: issues,
+            checkpoint_id,
+        })
+    }
+
+    async fn verify_applied(
+        &self,
+        req: &InlineEditRequest,
+        applied: &str,
+    ) -> (Vec<String>, Option<(String, Option<FailureKind>)>) {
         let mut issues = Vec::new();
         let mut verification_failed: Option<(String, Option<FailureKind>)> = None;
         if let Some(pipeline) = self.pipeline.clone() {
             let art = VerifyArtifact {
                 kind: ArtifactKind::Patch,
                 path: req.file_path.clone(),
-                contents: outcome.applied.clone(),
+                contents: applied.to_string(),
                 language: Language::from_path(&req.file_path),
             };
             match pipeline.run(&art).await {
@@ -172,7 +237,7 @@ impl InlineEditRunner {
             }
         } else if self.opts.apply.validate {
             let lang_id = Language::from_path(&req.file_path).grammar_id();
-            let report = crate::apply_model::validate_bytes_with_lang(&outcome.applied, lang_id);
+            let report = crate::apply_model::validate_bytes_with_lang(applied, lang_id);
             if !report.is_ok() {
                 crate::observability::subsystem_metrics::incr_inline_edit_validator_failure();
                 let summary = report
@@ -186,48 +251,7 @@ impl InlineEditRunner {
             }
             issues.extend(report.issues.iter().map(|i| i.message.clone()));
         }
-
-        let (final_diff, outcome) = if let Some((summary, kind)) = verification_failed {
-            let synthetic = ApplyError::Validation {
-                reasons: vec![summary],
-            };
-            match self
-                .refine_and_retry_with_failure(
-                    source,
-                    &req,
-                    final_diff.clone(),
-                    synthetic,
-                    kind,
-                )
-                .await
-            {
-                Ok((d, o)) => {
-                    issues.clear();
-                    (d, o)
-                }
-                Err(_) => {
-
-                    (final_diff, outcome)
-                }
-            }
-        } else {
-            (final_diff, outcome)
-        };
-
-        let checkpoint_id = if self.opts.checkpoint {
-            push_checkpoint(&req, source)
-        } else {
-            None
-        };
-
-        Ok(InlineEditOutcome {
-            diff: final_diff,
-            applied: outcome.applied,
-            hunks_exact: outcome.hunks_exact,
-            hunks_fuzzy: outcome.hunks_fuzzy,
-            validator_issues: issues,
-            checkpoint_id,
-        })
+        (issues, verification_failed)
     }
 
     async fn refine_and_retry(

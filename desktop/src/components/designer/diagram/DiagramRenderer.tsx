@@ -4,7 +4,6 @@
 
 import { useCallback, useEffect, useRef, useState } from 'react'
 import DOMPurify from 'dompurify'
-import mermaid from 'mermaid'
 import { useTranslation } from '../../../i18n'
 import { workspaceFilesApi } from '../../../api/workspaceFiles'
 import { useUIStore } from '../../../stores/uiStore'
@@ -32,9 +31,19 @@ export function diagramEngineForPath(path: string): DiagramEngine | null {
 
 type MermaidTheme = 'default' | 'dark'
 
+// mermaid is ~1.5MB; load it lazily only when a mermaid diagram is opened.
+type MermaidApi = typeof import('mermaid')['default']
+let diagramMermaidModulePromise: Promise<MermaidApi> | null = null
+function loadDiagramMermaid(): Promise<MermaidApi> {
+  if (!diagramMermaidModulePromise) {
+    diagramMermaidModulePromise = import('mermaid').then((m) => m.default)
+  }
+  return diagramMermaidModulePromise
+}
+
 let diagramMermaidTheme: MermaidTheme | null = null
 
-function initDiagramMermaid(theme: MermaidTheme) {
+function initDiagramMermaid(mermaid: MermaidApi, theme: MermaidTheme) {
   if (diagramMermaidTheme === theme) return
   mermaid.initialize({
     startOnLoad: false,
@@ -255,13 +264,17 @@ export function DiagramRenderer({
     if (source === null || engine !== 'mermaid') return
     let cancelled = false
     setError(null)
-    initDiagramMermaid(themeMode === 'dark' ? 'dark' : 'default')
     const id = `designer-diagram-${++diagramIdCounter}`
-    mermaid
-      .parse(source)
-      .then(() => mermaid.render(id, source))
-      .then(({ svg }) => {
-        if (!cancelled) setMermaidSvg(svg)
+    loadDiagramMermaid()
+      .then((mermaid) => {
+        if (cancelled) return
+        initDiagramMermaid(mermaid, themeMode === 'dark' ? 'dark' : 'default')
+        return mermaid
+          .parse(source)
+          .then(() => mermaid.render(id, source))
+          .then(({ svg }) => {
+            if (!cancelled) setMermaidSvg(svg)
+          })
       })
       .catch((e: unknown) => {
         if (!cancelled) {

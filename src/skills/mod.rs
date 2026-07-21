@@ -310,6 +310,7 @@ pub fn load_skills_from_directory(skills_dir: &Path, allow_scripts: bool) -> Vec
         }
     }
 
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
 }
 
@@ -378,6 +379,7 @@ fn load_open_skills_from_directory(skills_dir: &Path, allow_scripts: bool) -> Ve
         }
     }
 
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
 }
 
@@ -440,6 +442,7 @@ fn load_open_skills(repo_dir: &Path, allow_scripts: bool) -> Vec<Skill> {
         }
     }
 
+    skills.sort_by(|a, b| a.name.cmp(&b.name));
     skills
 }
 

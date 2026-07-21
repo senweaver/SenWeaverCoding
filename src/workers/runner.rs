@@ -25,6 +25,9 @@ pub struct WorkerRunContext {
     pub parent_workspace_dir: Option<String>,
 
     pub parent_permission_mode: Option<String>,
+
+    pub parent_cost_ctx:
+        Option<crate::agent::reward::cost_tracking::ToolLoopCostTrackingContext>,
 }
 
 struct WorkerFinalizeGuard {
@@ -34,6 +37,7 @@ struct WorkerFinalizeGuard {
 
 impl Drop for WorkerFinalizeGuard {
     fn drop(&mut self) {
+        crate::security::sandbox::unregister_session_workspace_root(&self.handle.worker_id);
         if self.handle.result_snapshot().is_some() {
             self.supervisor.unregister(&self.handle.worker_id);
             return;
@@ -215,9 +219,13 @@ pub async fn run_worker(
             crate::agent::coding_mode::scope_coding_mode(worker_coding_mode, turn);
         let session_scoped =
             crate::session::scope_session_context(worker_session_ctx, mode_scoped);
-        crate::gateway::ws::desktop::scope_permission_mode(
+        let perm_scoped = crate::gateway::ws::desktop::scope_permission_mode(
             worker_permission_mode,
             session_scoped,
+        );
+        crate::agent::reward::cost_tracking::scope_tool_loop_cost_tracking(
+            ctx.parent_cost_ctx.clone(),
+            perm_scoped,
         )
     };
 

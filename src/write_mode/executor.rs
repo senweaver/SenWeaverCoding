@@ -120,7 +120,7 @@ impl WriteExecutor {
         if let Some(o) = self.ops_applier.clone() {
             return o;
         }
-        Arc::new(OpsApplier::default_for_workspace(root.to_path_buf()))
+        Arc::new(OpsApplier::locked_for_workspace(root.to_path_buf()))
     }
 
     async fn verify_apply_artifact(
@@ -207,9 +207,10 @@ impl Default for WriteExecutor {
 
 fn default_apply_fn() -> ApplyFn {
     Arc::new(
-        |source: &str, _path: &Path, _instruction: Option<&str>, diff: Option<&str>| {
+        |source: &str, path: &Path, _instruction: Option<&str>, diff: Option<&str>| {
             let source = source.to_string();
             let diff = diff.map(str::to_owned);
+            let path = path.to_path_buf();
             Box::pin(async move {
                 let Some(diff) = diff else {
                     return Err(
@@ -222,6 +223,7 @@ fn default_apply_fn() -> ApplyFn {
                     max_fuzz: 3,
                     dry_run: false,
                     validate: true,
+                    path: Some(path),
                 };
 
                 HeuristicApplier
@@ -412,10 +414,18 @@ impl WriteExecutor {
                     }
 
                     session_write_mode_metrics::incr_write_mode_apply_verify_pass();
+                    crate::session::record_write_for_current_session(&abs);
+                    crate::agent::file_edit_emitter::emit_file_edit(
+                        &abs,
+                        Some(source.as_bytes()),
+                        Some(new_contents.as_bytes()),
+                        Some(batch_id.clone()),
+                    )
+                    .await;
                     outcomes.push(StepOutcome {
                         label: "apply_diff",
                         summary: format!(
-                            "{} ({} bytes ??{} bytes, verified)",
+                            "{} ({} bytes -> {} bytes, verified)",
                             path.display(),
                             source.len(),
                             new_contents.len()

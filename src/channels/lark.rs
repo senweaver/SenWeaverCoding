@@ -1812,6 +1812,13 @@ impl LarkChannel {
             tx: tokio::sync::mpsc::Sender<ChannelMessage>,
         }
 
+        fn extract_lark_token(payload: &serde_json::Value) -> Option<&str> {
+            payload
+                .get("token")
+                .and_then(|t| t.as_str())
+                .or_else(|| payload.pointer("/header/token").and_then(|t| t.as_str()))
+        }
+
         async fn handle_event(
             State(state): State<AppState>,
             Json(payload): Json<serde_json::Value>,
@@ -1819,17 +1826,22 @@ impl LarkChannel {
             use axum::http::StatusCode;
             use axum::response::IntoResponse;
 
+            // Every inbound callback (challenge and real events alike) must carry the
+            // configured verification token; otherwise anyone on the network could
+            // inject synthetic events that drive the agent.
+            let provided_token = extract_lark_token(&payload).unwrap_or("");
+            if !crate::security::pairing::constant_time_eq(
+                provided_token,
+                &state.verification_token,
+            ) {
+                tracing::warn!(
+                    target: "channels.lark",
+                    "Lark webhook: rejected callback with missing or invalid verification token"
+                );
+                return (StatusCode::UNAUTHORIZED, "invalid token").into_response();
+            }
+
             if let Some(challenge) = payload.get("challenge").and_then(|c| c.as_str()) {
-
-                let token_ok = payload
-                    .get("token")
-                    .and_then(|t| t.as_str())
-                    .map_or(true, |t| t == state.verification_token);
-
-                if !token_ok {
-                    return (StatusCode::FORBIDDEN, "invalid token").into_response();
-                }
-
                 let resp = serde_json::json!({ "challenge": challenge });
                 return (StatusCode::OK, Json(resp)).into_response();
             }
@@ -1869,6 +1881,17 @@ impl LarkChannel {
         let port = self.port.ok_or_else(|| {
             anyhow::anyhow!("Lark webhook mode requires `port` to be set in [channels_config.lark]")
         })?;
+
+        // The webhook binds to a public interface, so a verification token is
+        // mandatory: without it every callback is unauthenticated and anyone could
+        // inject events. Refuse to start rather than expose an open injection point.
+        if self.verification_token.trim().is_empty() {
+            anyhow::bail!(
+                "Lark webhook mode requires a non-empty `verification_token` in \
+                 [channels_config.lark]; refusing to start an unauthenticated public callback \
+                 server that would accept forged events"
+            );
+        }
 
         let state = AppState {
             verification_token: self.verification_token.clone(),

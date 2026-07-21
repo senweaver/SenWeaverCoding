@@ -9,6 +9,7 @@ use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
 
 const MAX_RESULTS: usize = 1000;
+const DEFAULT_MAX_RESULTS: usize = 50;
 const MAX_OUTPUT_BYTES: usize = 1_048_576;
 const TIMEOUT_SECS: u64 = 30;
 
@@ -104,8 +105,8 @@ impl Tool for ContentSearchTool {
                 },
                 "max_results": {
                     "type": "integer",
-                    "description": "Maximum number of results to return per page. Defaults to 20",
-                    "default": 20
+                    "description": "Maximum number of matches to return per page (content mode counts matching lines, not context lines). Defaults to 50, capped at 1000",
+                    "default": 50
                 },
                 "offset": {
                     "type": "integer",
@@ -178,7 +179,7 @@ impl Tool for ContentSearchTool {
             .get("max_results")
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
-            .unwrap_or(MAX_RESULTS)
+            .unwrap_or(DEFAULT_MAX_RESULTS)
             .min(MAX_RESULTS);
 
         #[allow(clippy::cast_possible_truncation)]
@@ -812,23 +813,26 @@ fn format_line_output(
 
                 if relativized == "--" {
                     lines.push(relativized);
-                    if lines.len() >= max_results {
-                        truncated = true;
-                        break;
-                    }
                     continue;
                 }
                 if let Some((path, is_match)) = parse_content_line(&relativized) {
                     file_set.insert(path.to_string());
                     if is_match {
+                        if total_matches >= max_results {
+                            truncated = true;
+                            break;
+                        }
                         total_matches += 1;
                     }
                 } else {
-
+                    if total_matches >= max_results {
+                        truncated = true;
+                        break;
+                    }
                     total_matches += 1;
                 }
                 lines.push(relativized);
-                if lines.len() >= max_results {
+                if lines.len() >= max_results.saturating_mul(12) {
                     truncated = true;
                     break;
                 }
@@ -846,7 +850,8 @@ fn format_line_output(
     if truncated {
         let _ = write!(
             buf,
-            "\n\n[Results truncated: showing first {max_results} results]"
+            "\n\n[Results truncated: showing first {} matches (max_results={max_results}); raise max_results or use offset to page]",
+            if output_mode == "content" { total_matches } else { lines.len() }
         );
     }
 

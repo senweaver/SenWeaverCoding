@@ -10,7 +10,6 @@ use crate::security::AutonomyLevel;
 use crate::skills::Skill;
 use crate::tools::Tool;
 use anyhow::Result;
-use chrono::{Datelike, Local, Timelike};
 use std::fmt::Write;
 use std::path::Path;
 
@@ -49,11 +48,8 @@ impl SystemPromptBuilder {
     pub fn with_defaults() -> Self {
         Self {
             sections: vec![
-                Box::new(DateTimeSection),
                 Box::new(IdentitySection),
                 Box::new(GlobalDirectivesSection),
-                Box::new(EvolutionLessonsSection),
-                Box::new(ExperienceRecyclingSection),
                 Box::new(ToolHonestySection),
                 Box::new(ToolsSection),
                 Box::new(ContextReferenceSection),
@@ -63,7 +59,10 @@ impl SystemPromptBuilder {
                 Box::new(UserRulesSection),
                 Box::new(WorkspaceSection),
                 Box::new(RuntimeSection),
+                Box::new(DateTimeSection),
                 Box::new(ChannelMediaSection),
+                Box::new(EvolutionLessonsSection),
+                Box::new(ExperienceRecyclingSection),
             ],
         }
     }
@@ -594,6 +593,29 @@ const REPO_MAP_SKIP: &[&str] = &[
 ];
 
 fn render_repo_map(root: &std::path::Path) -> String {
+    const REPO_MAP_TTL: std::time::Duration = std::time::Duration::from_secs(30);
+    static CACHE: std::sync::OnceLock<
+        parking_lot::Mutex<
+            std::collections::HashMap<std::path::PathBuf, (std::time::Instant, String)>,
+        >,
+    > = std::sync::OnceLock::new();
+    let cache = CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+    {
+        let guard = cache.lock();
+        if let Some((cached_at, map)) = guard.get(root) {
+            if cached_at.elapsed() < REPO_MAP_TTL {
+                return map.clone();
+            }
+        }
+    }
+    let rendered = render_repo_map_uncached(root);
+    cache
+        .lock()
+        .insert(root.to_path_buf(), (std::time::Instant::now(), rendered.clone()));
+    rendered
+}
+
+fn render_repo_map_uncached(root: &std::path::Path) -> String {
     const MAX_TOP_ENTRIES: usize = 40;
     const MAX_CHILD_NAMES: usize = 16;
     const MAX_CHARS: usize = 2_000;
@@ -709,24 +731,14 @@ impl PromptSection for DateTimeSection {
     }
 
     fn build(&self, _ctx: &PromptContext<'_>) -> Result<String> {
-        let now = Local::now();
-
-        let (year, month, day) = (now.year(), now.month(), now.day());
-        let (hour, minute) = (now.hour(), now.minute());
-        let tz = now.format("%Z");
-
-        // Minute precision (no seconds) so an otherwise-identical system prompt
-        // stays byte-stable for up to a minute, letting provider prompt caches
-        // hit across rapid turns without meaningfully hurting time accuracy.
-        Ok(format!(
-            "## CRITICAL CONTEXT: CURRENT DATE & TIME\n\n\
-             The following is the ABSOLUTE TRUTH regarding the current date and time. \
-             Use this for all relative time calculations (e.g. \"last 7 days\").\n\n\
-             Date: {year:04}-{month:02}-{day:02}\n\
-             Time: {hour:02}:{minute:02} ({tz})\n\
-             ISO 8601: {year:04}-{month:02}-{day:02}T{hour:02}:{minute:02}{}",
-            now.format("%:z")
-        ))
+        Ok(
+            "## CURRENT DATE & TIME\n\n\
+             The authoritative current date and time is the `[MESSAGE DATE & TIME: ...]` \
+             marker attached to the LATEST user message (earlier messages carry their own, \
+             older timestamps). Use that marker for all relative time calculations \
+             (e.g. \"last 7 days\"); never guess the date."
+                .to_string(),
+        )
     }
 }
 

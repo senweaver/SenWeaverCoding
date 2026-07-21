@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-use super::super::background_registry::{self, BackgroundShellSignal, BgStream};
+use super::super::background::registry::{self, BackgroundShellSignal, BgStream};
+use parking_lot::Mutex;
+use std::sync::Arc;
 use std::time::Duration;
 
 const FOREGROUND_STREAM_CAP: usize = 1_048_576;
@@ -50,19 +52,28 @@ pub(crate) fn build_cancelled_output(stdout: &str, stderr: &str) -> String {
     }
 }
 
+struct StreamReaderHandle {
+    rx: tokio::sync::oneshot::Receiver<String>,
+    buf: Arc<Mutex<Vec<u8>>>,
+}
+
 fn spawn_stream_reader<R>(
     pipe: Option<R>,
     mirror_id: String,
     stream: BgStream,
     session_id: Option<String>,
     label: &'static str,
-) -> tokio::sync::oneshot::Receiver<String>
+) -> StreamReaderHandle
 where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     let (tx, rx) = tokio::sync::oneshot::channel();
+    // Shared with the drain step so that, when a lingering grandchild keeps the
+    // pipe open past EOF, the drain timeout can still snapshot everything read so
+    // far instead of handing the model an empty string.
+    let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
+    let reader_buf = buf.clone();
     crate::runtime::spawn_supervised(label, async move {
-        let mut raw_all: Vec<u8> = Vec::new();
         let mut capped = false;
         if let Some(pipe) = pipe {
             use tokio::io::AsyncBufReadExt;
@@ -74,6 +85,7 @@ where
                     Ok(0) => break,
                     Ok(_) => {
                         if !capped {
+                            let mut raw_all = reader_buf.lock();
                             raw_all.extend_from_slice(&line);
                             if raw_all.len() > FOREGROUND_STREAM_CAP {
                                 let boundary = utf8_floor_boundary(&raw_all, FOREGROUND_STREAM_CAP);
@@ -94,9 +106,28 @@ where
                 }
             }
         }
-        let _ = tx.send(crate::util::decode_subprocess_bytes(&raw_all));
+        let decoded = {
+            let raw_all = reader_buf.lock();
+            crate::util::decode_subprocess_bytes(&raw_all)
+        };
+        let _ = tx.send(decoded);
     });
-    rx
+    StreamReaderHandle { rx, buf }
+}
+
+fn drain_stream(handle: StreamReaderHandle) -> impl std::future::Future<Output = String> {
+    async move {
+        match tokio::time::timeout(Duration::from_millis(500), handle.rx).await {
+            Ok(Ok(text)) => text,
+            // The reader task never signalled EOF within the grace window (a
+            // grandchild is still holding the pipe). Return whatever it has
+            // buffered so far rather than an empty string.
+            _ => {
+                let raw_all = handle.buf.lock();
+                crate::util::decode_subprocess_bytes(&raw_all)
+            }
+        }
+    }
 }
 
 pub(crate) async fn run_foreground_streamed(
@@ -106,14 +137,14 @@ pub(crate) async fn run_foreground_streamed(
     mirror_started: std::time::Instant,
     timeout_duration: Duration,
 ) -> ForegroundOutcome {
-    let stdout_rx = spawn_stream_reader(
+    let stdout_handle = spawn_stream_reader(
         child.stdout.take(),
         mirror_id.to_string(),
         BgStream::Stdout,
         mirror_session_id.map(str::to_string),
         "tools.shell.stdout",
     );
-    let stderr_rx = spawn_stream_reader(
+    let stderr_handle = spawn_stream_reader(
         child.stderr.take(),
         mirror_id.to_string(),
         BgStream::Stderr,
@@ -125,7 +156,7 @@ pub(crate) async fn run_foreground_streamed(
     let (foreground_token, _kill_tx_keepalive) = if let Some(sid) = mirror_session_id {
         let connection_id = crate::session::current_connection_id();
         (
-            Some(background_registry::register_foreground(
+            Some(registry::register_foreground(
                 sid.to_string(),
                 connection_id,
                 kill_tx,
@@ -175,7 +206,7 @@ pub(crate) async fn run_foreground_streamed(
                 break WaitOutcome::Cancelled;
             }
             _ = heartbeat.tick() => {
-                background_registry::publish(BackgroundShellSignal::Heartbeat {
+                registry::publish(BackgroundShellSignal::Heartbeat {
                     id: mirror_id.to_string(),
                     elapsed_secs: mirror_started.elapsed().as_secs(),
                     session_id: mirror_session_id.map(str::to_string),
@@ -185,19 +216,11 @@ pub(crate) async fn run_foreground_streamed(
     };
 
     if let (Some(sid), Some(token)) = (mirror_session_id, foreground_token) {
-        background_registry::unregister_foreground(sid, token);
+        registry::unregister_foreground(sid, token);
     }
 
-    let drained_stdout = tokio::time::timeout(Duration::from_millis(500), stdout_rx)
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
-    let drained_stderr = tokio::time::timeout(Duration::from_millis(500), stderr_rx)
-        .await
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_default();
+    let drained_stdout = drain_stream(stdout_handle).await;
+    let drained_stderr = drain_stream(stderr_handle).await;
 
     match wait_outcome {
         WaitOutcome::Exited(status) => {

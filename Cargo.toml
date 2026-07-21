@@ -6,7 +6,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_Globalization"] }
 
 [lints.rust]
 unsafe_code = "allow"
@@ -210,8 +210,6 @@ probe-rs = { version = "0.31", optional = true }
 pdf-extract = { version = "0.10", optional = true }
 
 extism = { version = "1.20", optional = true }
-wasmi = { version = "0.42", optional = true }
-
 ratatui = { version = "0.29", optional = true, default-features = false, features = ["crossterm", "unstable-rendered-line-info"] }
 crossterm = { version = "0.28", optional = true }
 
@@ -276,6 +274,7 @@ default = [
     "tool-curator",
     "lan-comms",
     "office-docs",
+    "code-intel",
 ]
 lan-comms = ["dep:mdns-sd", "dep:mac_address", "dep:local-ip-address", "dep:x25519-dalek"]
 tui = ["dep:ratatui", "dep:crossterm", "dep:syntect"]
@@ -327,14 +326,15 @@ probe = ["dep:probe-rs"]
 rag-pdf = ["dep:pdf-extract"]
 skill-creation = []
 fs-watch = ["dep:notify"]
-rusqlite-load-extension = ["rusqlite/load_extension"]
-vector-index-sqlite = ["rusqlite-load-extension"]
 vector-index-hnsw = []
 whatsapp-web = ["dep:wa-rs", "dep:wa-rs-core", "dep:wa-rs-binary", "dep:wa-rs-proto", "dep:wa-rs-ureq-http", "dep:wa-rs-tokio-transport", "dep:serde-big-array", "dep:prost", "dep:qrcode"]
 voice-wake = ["dep:cpal"]
 plugins-wasm = ["dep:extism"]
-runtime-wasm = ["dep:wasmi"]
+runtime-wasm = []
 webauthn = []
+# Experimental, opt-in only (intentionally NOT in `default`). Provides best-effort
+# last-writer-wins convergence plus a re-read-and-retry conflict guard, NOT full
+# operational-transform conflict resolution; see the runtime warning it emits.
 crdt-coordination = []
 computer-use = ["dep:enigo", "dep:xcap", "dep:windows"]
 lsp-push-diagnostics = []
@@ -448,14 +448,6 @@ harness = false
 
 [[bench]]
 name = "blackboard_ops"
-harness = false
-
-[[bench]]
-name = "parallel_tools"
-harness = false
-
-[[bench]]
-name = "compression_pipeline"
 harness = false
 
 [[bench]]

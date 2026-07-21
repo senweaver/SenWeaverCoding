@@ -52,6 +52,29 @@ impl FastApplyRefiner {
             _ => &self.full,
         }
     }
+
+    /// Last-resort full-file merge: prefer the fast tier (Morph/Relace-style), fall
+    /// back to the full tier, whichever advertises support.
+    async fn merge_full_file(
+        &self,
+        source: &str,
+        edit_snippet: &str,
+        instruction: Option<&str>,
+    ) -> Result<String, ApplyError> {
+        if let Some(fast) = self.fast.as_ref() {
+            if fast.supports_full_file_merge() {
+                if let Ok(out) = fast.merge_full_file(source, edit_snippet, instruction).await {
+                    return Ok(out);
+                }
+            }
+        }
+        if self.full.supports_full_file_merge() {
+            return self.full.merge_full_file(source, edit_snippet, instruction).await;
+        }
+        Err(ApplyError::LlmError(
+            "no refiner tier supports full-file merge".to_string(),
+        ))
+    }
 }
 
 #[async_trait]
@@ -172,7 +195,45 @@ async fn apply_via_full_tier(
     options: &ApplyOptions,
     hint: Option<&str>,
 ) -> Result<(ApplyOutcome, String, FastPathTier), ApplyError> {
-    let refined = refiner.full.refine(source, seed_diff, hint).await?;
-    let outcome = apply_unified_diff(source, &refined, options)?;
-    Ok((outcome, refined, FastPathTier::Full))
+    match refiner.full.refine(source, seed_diff, hint).await {
+        Ok(refined) => match apply_unified_diff(source, &refined, options) {
+            Ok(outcome) => Ok((outcome, refined, FastPathTier::Full)),
+            Err(diff_err) => merge_full_file_fallback(refiner, source, seed_diff, hint, diff_err)
+                .await
+                .map(|(outcome, merged)| (outcome, merged, FastPathTier::Full)),
+        },
+        Err(refine_err) => {
+            merge_full_file_fallback(refiner, source, seed_diff, hint, refine_err)
+                .await
+                .map(|(outcome, merged)| (outcome, merged, FastPathTier::Full))
+        }
+    }
+}
+
+/// When diff-based application has exhausted its retries, ask the refiner to
+/// produce the COMPLETE merged file and use it directly as the outcome. This is
+/// the Morph/Relace fast-apply escape hatch that avoids the double failure mode of
+/// "model produces a diff + the diff fails to locate".
+async fn merge_full_file_fallback(
+    refiner: &FastApplyRefiner,
+    source: &str,
+    edit_snippet: &str,
+    hint: Option<&str>,
+    prior_err: ApplyError,
+) -> Result<(ApplyOutcome, String), ApplyError> {
+    match refiner.merge_full_file(source, edit_snippet, hint).await {
+        Ok(merged) => {
+            crate::observability::code_intel_metrics::incr_apply_model_refine_success();
+            let outcome = ApplyOutcome {
+                applied: merged.clone(),
+                hunks_exact: 0,
+                hunks_fuzzy: 1,
+                hunks_failed: 0,
+            };
+            Ok((outcome, merged))
+        }
+        // Preserve the original diff-application error if full-file merge is
+        // unavailable or also fails, so the caller sees the meaningful failure.
+        Err(_) => Err(prior_err),
+    }
 }

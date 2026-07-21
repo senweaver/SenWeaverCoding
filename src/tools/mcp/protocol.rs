@@ -5,7 +5,10 @@
 use serde::{Deserialize, Serialize};
 
 pub const JSONRPC_VERSION: &str = "2.0";
-pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
+// Offer the latest spec version on initialize. Servers that only support an older
+// revision reply with their own version (the client accepts it and continues), so
+// this is a safe, backward-negotiable bump rather than a hard requirement.
+pub const MCP_PROTOCOL_VERSION: &str = "2025-06-18";
 
 pub const PARSE_ERROR: i32 = -32700;
 pub const INVALID_REQUEST: i32 = -32600;

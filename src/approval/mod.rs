@@ -8,7 +8,7 @@ use chrono::Utc;
 use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::path::PathBuf;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
@@ -22,8 +22,14 @@ const PENDING_APPROVAL_SWEEP_INTERVAL_SECS: u64 = 5 * 60;
 
 const PENDING_APPROVAL_MAX_ENTRIES: usize = 1_000;
 
+struct PendingGatewayEntry {
+    created: Instant,
+    session_id: Option<String>,
+    replay: Option<serde_json::Value>,
+}
+
 struct PendingGatewayApprovals {
-    entries: HashMap<String, Instant>,
+    entries: HashMap<String, PendingGatewayEntry>,
     last_sweep: Instant,
 }
 
@@ -38,7 +44,7 @@ impl PendingGatewayApprovals {
     fn sweep_locked(&mut self, now: Instant) {
         let ttl = Duration::from_secs(PENDING_APPROVAL_TTL_SECS);
         self.entries
-            .retain(|_, ts| now.duration_since(*ts) < ttl);
+            .retain(|_, entry| now.duration_since(entry.created) < ttl);
         self.last_sweep = now;
     }
 
@@ -50,7 +56,7 @@ impl PendingGatewayApprovals {
         }
     }
 
-    fn insert(&mut self, id: String) {
+    fn insert(&mut self, id: String, session_id: Option<String>, replay: Option<serde_json::Value>) {
         let now = Instant::now();
         self.maybe_sweep(now);
 
@@ -60,7 +66,7 @@ impl PendingGatewayApprovals {
                 if let Some(lru) = self
                     .entries
                     .iter()
-                    .min_by_key(|(_, ts)| **ts)
+                    .min_by_key(|(_, entry)| entry.created)
                     .map(|(k, _)| k.clone())
                 {
                     self.entries.remove(&lru);
@@ -71,16 +77,41 @@ impl PendingGatewayApprovals {
             }
         }
 
-        self.entries.insert(id, now);
+        self.entries.insert(
+            id,
+            PendingGatewayEntry {
+                created: now,
+                session_id,
+                replay,
+            },
+        );
     }
 
-    fn claim(&mut self, id: &str) -> bool {
+    fn claim(&mut self, id: &str, session_id: Option<&str>) -> bool {
         let now = Instant::now();
         self.maybe_sweep(now);
         match self.entries.remove(id) {
-            Some(ts) => now.duration_since(ts).as_secs() < PENDING_APPROVAL_TTL_SECS,
+            Some(entry) if now.duration_since(entry.created).as_secs() < PENDING_APPROVAL_TTL_SECS => {
+                match (entry.session_id.as_deref(), session_id) {
+                    (Some(expected), Some(actual)) => expected == actual,
+                    (Some(_), None) => false,
+                    // Registered without a session (e.g. CLI single-turn): only a
+                    // responder that also carries no session may claim it. A
+                    // responder presenting a concrete session id is a mismatch and
+                    // is rejected so it cannot claim another context's approval.
+                    (None, None) => true,
+                    (None, Some(_)) => false,
+                }
+            }
+            Some(_) => false,
             None => false,
         }
+    }
+
+    fn drop_entry(&mut self, id: &str) -> bool {
+        let now = Instant::now();
+        self.maybe_sweep(now);
+        self.entries.remove(id).is_some()
     }
 }
 
@@ -90,12 +121,70 @@ fn pending_gateway_approvals() -> &'static Mutex<PendingGatewayApprovals> {
     PENDING_GATEWAY_APPROVALS.get_or_init(|| Mutex::new(PendingGatewayApprovals::new()))
 }
 
+fn approval_session_id() -> Option<String> {
+    crate::session::current_session_context().map(|ctx| ctx.session_id.clone())
+}
+
 pub fn register_pending_gateway_approval(id: String) {
-    pending_gateway_approvals().lock().insert(id);
+    pending_gateway_approvals()
+        .lock()
+        .insert(id, approval_session_id(), None);
+}
+
+pub fn register_pending_gateway_approval_for_session(id: String, session_id: Option<String>) {
+    pending_gateway_approvals().lock().insert(id, session_id, None);
+}
+
+/// Register with a client-facing `permission_request` frame that can be
+/// replayed to a reconnecting client. Without this, a prompt emitted while the
+/// WebSocket was down is simply gone: the reconnected client shows a busy
+/// session with no dialog and the waiter blocks until timeout.
+pub fn register_pending_gateway_approval_with_replay(
+    id: String,
+    replay: serde_json::Value,
+) {
+    pending_gateway_approvals()
+        .lock()
+        .insert(id, approval_session_id(), Some(replay));
+}
+
+/// Replay frames for every approval still outstanding for `session_id`
+/// (oldest first). Non-consuming: entries stay pending until claimed/dropped.
+pub fn pending_replays_for_session(session_id: &str) -> Vec<serde_json::Value> {
+    let guard = pending_gateway_approvals().lock();
+    let mut hits: Vec<(&Instant, &serde_json::Value)> = guard
+        .entries
+        .values()
+        .filter(|e| e.session_id.as_deref() == Some(session_id))
+        .filter_map(|e| e.replay.as_ref().map(|r| (&e.created, r)))
+        .collect();
+    hits.sort_by_key(|(created, _)| **created);
+    hits.into_iter().map(|(_, r)| r.clone()).collect()
 }
 
 pub fn claim_pending_gateway_approval(id: &str) -> bool {
-    pending_gateway_approvals().lock().claim(id)
+    claim_pending_gateway_approval_for_session(id, approval_session_id().as_deref())
+}
+
+pub fn claim_pending_gateway_approval_for_session(id: &str, session_id: Option<&str>) -> bool {
+    pending_gateway_approvals()
+        .lock()
+        .claim(id, session_id)
+}
+
+pub fn drop_pending_gateway_approval(id: &str) -> bool {
+    pending_gateway_approvals().lock().drop_entry(id)
+}
+
+/// Peek the session a pending approval was registered under (outer `None` =
+/// unknown id, inner `None` = registered without a session). Lets per-session
+/// surfaces forward only their own bus prompts.
+pub fn pending_gateway_approval_session(id: &str) -> Option<Option<String>> {
+    pending_gateway_approvals()
+        .lock()
+        .entries
+        .get(id)
+        .map(|entry| entry.session_id.clone())
 }
 
 // Reliable decision mailbox: every emit site records the decision here before
@@ -309,9 +398,21 @@ impl ApprovalManager {
         }
     }
 
-    pub fn with_audit_log_path(self, path: impl Into<PathBuf>) -> Self {
-        *self.audit_log_path.lock() = Some(path.into());
-        self
+    // Single canonical constructor for every surface (interactive REPL,
+    // headless one-shot, channel daemons) so the three call sites cannot
+    // drift on interactivity semantics or audit-log wiring again.
+    pub fn for_surface(
+        config: &AutonomyConfig,
+        interactive: bool,
+        audit_log_path: Option<PathBuf>,
+    ) -> Self {
+        let mgr = if interactive {
+            Self::from_config(config)
+        } else {
+            Self::for_non_interactive(config)
+        };
+        mgr.set_audit_log_path(audit_log_path);
+        mgr
     }
 
     pub fn set_audit_log_path(&self, path: Option<PathBuf>) {
@@ -334,19 +435,47 @@ impl ApprovalManager {
     pub fn request_via_session(&self, request: &ApprovalRequest) -> Option<String> {
         let sink = self.session_sink.lock().clone()?;
         let id = format!("appr_{}", uuid::Uuid::new_v4().simple());
+        let replay = serde_json::json!({
+            "type": "permission_request",
+            "requestId": id,
+            "toolName": request.tool_name,
+            "input": request.arguments,
+        });
+        pending_gateway_approvals().lock().insert(
+            id.clone(),
+            approval_session_id(),
+            Some(replay),
+        );
         sink.emit_kind(crate::session::SessionEventKind::ApprovalRequested {
             id: id.clone(),
             tool_name: request.tool_name.clone(),
             arguments: request.arguments.clone(),
             issued_at: Utc::now(),
         });
-        register_pending_gateway_approval(id.clone());
         crate::observability::session_write_mode_metrics::incr_approval_routed_via_session();
         Some(id)
     }
 
     pub fn is_non_interactive(&self) -> bool {
         self.non_interactive
+    }
+
+    // Guardrail for coding modes whose policy is AutoApprove (Agent/Harness/
+    // Designer): the mode may skip routine confirmations, but it must never
+    // override an explicit user `always_ask` entry, and on non-interactive
+    // surfaces (channels/daemon/one-shot) it must not bypass the
+    // allow_shell_in_non_interactive opt-out for shell execution.
+    pub fn mode_auto_approve_allows(&self, tool_name: &str) -> bool {
+        if self.autonomy_level == AutonomyLevel::Full {
+            return true;
+        }
+        if self.always_ask.contains("*") || self.always_ask.contains(tool_name) {
+            return false;
+        }
+        if self.non_interactive && tool_name == "shell" && !self.allow_shell_in_non_interactive {
+            return false;
+        }
+        true
     }
 
     pub fn needs_approval(&self, tool_name: &str) -> bool {
@@ -519,11 +648,10 @@ fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
     eprint!("   [Y]es / [N]o / [A]lways for {}: ", request.tool_name);
     let _ = io::stderr().flush();
 
-    let stdin = io::stdin();
-    let mut line = String::new();
-    if stdin.lock().read_line(&mut line).is_err() {
-        return ApprovalResponse::No;
-    }
+    let line = match crate::cli::input::read_line_lossy(&mut io::stdin().lock()) {
+        Ok(Some(line)) => line,
+        Ok(None) | Err(_) => return ApprovalResponse::No,
+    };
 
     match line.trim().to_ascii_lowercase().as_str() {
         "y" | "yes" => ApprovalResponse::Yes,

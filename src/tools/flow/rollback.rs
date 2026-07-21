@@ -92,7 +92,7 @@ impl Tool for FlowRollbackTool {
                         .unwrap_or_else(|| std::path::PathBuf::from("."));
                     let batch_id_owned = batch_id.clone();
                     let revert = tokio::task::spawn_blocking(move || {
-                        crate::tools::edit_history::EditHistory::new(workspace)
+                        crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace)
                             .revert_batch(&batch_id_owned)
                     })
                     .await;

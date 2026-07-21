@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 use criterion::{Criterion, criterion_group, criterion_main};
-use senweavercoding::agent_session::{AgentSession, SessionConfig};
+use senweavercoding::session::{AgentSession, SessionConfig};
 
 fn session_submit_standalone(c: &mut Criterion) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -11,7 +11,7 @@ fn session_submit_standalone(c: &mut Criterion) {
     c.bench_function("session_submit_standalone_1x", |b| {
         b.to_async(&rt).iter(|| async {
             let (session, _rx) = AgentSession::new(SessionConfig::default());
-            session.submit("ping").await;
+            let _ = session.submit("ping").await;
         });
     });
 
@@ -19,7 +19,7 @@ fn session_submit_standalone(c: &mut Criterion) {
         b.to_async(&rt).iter(|| async {
             let (session, _rx) = AgentSession::new(SessionConfig::default());
             for _ in 0..100 {
-                session.submit("ping").await;
+                let _ = session.submit("ping").await;
             }
         });
     });

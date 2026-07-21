@@ -92,7 +92,7 @@ impl Drop for SessionRunGuard {
             return;
         }
         if let Some(manager) = crate::session::global_workspace_resources() {
-            manager.release_all_for_session(&self.session_id);
+            manager.cancel_waiters_for_session(&self.session_id);
         }
         let removed = {
             let mut guard = self.registry.inner.write();

@@ -3,6 +3,5 @@
 // Licensed under the MIT License.
 
 pub mod core;
-pub mod guard;
 
 pub use core::*;

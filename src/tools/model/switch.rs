@@ -182,7 +182,7 @@ impl ModelSwitchTool {
                         "registered_models": Vec::<String>::new(),
                     }))?,
                     error: Some(format!(
-                        "鏈坊鍔犳ā鍨?/ no_model_configured: provider '{provider}' has no models in Provider settings."
+                        "no_model_configured: provider '{provider}' has no models in Provider settings."
                     )),
                 });
             }
@@ -198,7 +198,7 @@ impl ModelSwitchTool {
                         "registered_models": registered,
                     }))?,
                     error: Some(format!(
-                        "鏈坊鍔犳ā鍨?/ model_not_registered: model '{model}' is not in Provider settings for '{provider}'. Add it first or pick from registered_models."
+                        "model_not_registered: model '{model}' is not in Provider settings for '{provider}'. Add it first or pick from registered_models."
                     )),
                 });
             }
@@ -207,6 +207,19 @@ impl ModelSwitchTool {
                 target = "model_switch",
                 "services container not initialized; skipping registered-model validation"
             );
+        }
+
+        if let Some(svc) = crate::services::try_get_services() {
+            if !svc.check_model_policy(model) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Model '{model}' is blocked by governance policy (AllowModels rule). \
+                         Pick a model from the allowed list or update the policy."
+                    )),
+                });
+            }
         }
 
         let switch_state = get_model_switch_state();
@@ -280,7 +293,7 @@ impl ModelSwitchTool {
                 output: serde_json::to_string_pretty(&json!({
                     "provider": provider,
                     "models": Vec::<String>::new(),
-                    "note": "鏈坊鍔犳ā鍨?/ no_model_configured: please add models in Provider settings"
+                    "note": "no_model_configured: please add models in Provider settings"
                 }))?,
                 error: None,
             });

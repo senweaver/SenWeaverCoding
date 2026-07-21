@@ -43,6 +43,7 @@ senweavercoding = { path = "../..", package = "SenWeaverCoding", default-feature
     "whatsapp-web",
     "lan-comms",
     "computer-use",
+    "crdt-coordination",
 ] }
 
 tauri = { version = "2.11", features = ["unstable", "image-png", "tray-icon", "macos-private-api"] }

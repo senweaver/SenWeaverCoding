@@ -4,14 +4,12 @@
 
 pub mod control;
 pub mod core;
-pub mod ctx;
 pub mod detector;
 pub mod policy;
 pub mod services;
 pub mod traits;
 pub mod unified;
 
-pub use self::ctx::LoopContext;
 
 use crate::approval::{ApprovalManager, ApprovalRequest, ApprovalResponse};
 use crate::config::Config;
@@ -49,6 +47,11 @@ pub(crate) use crate::agent::reward::cost_tracking::{
 };
 
 const STREAM_CHUNK_MIN_CHARS: usize = 80;
+
+// Prefix of a synthetic deduplicated-tool-call result. Used both to render the
+// message and to detect it when computing the progress signal so a duplicate
+// call is never counted as real progress.
+const DEDUP_RESULT_MARKER: &str = "[Deduplicated] Tool '";
 
 const STREAM_TOOL_MARKER_WINDOW_CHARS: usize = 512;
 
@@ -108,12 +111,13 @@ pub use crate::agent::model_switch::{
 pub(crate) use crate::agent::model_switch::{ModelSwitchRequested, is_model_switch_requested};
 
 use crate::agent::tool_handler::call_parser::{
-    ParsedToolCall, detect_tool_call_parse_issue, parse_structured_tool_calls, parse_tool_calls,
+    ParseGate, ParsedToolCall, detect_tool_call_parse_issue, parse_structured_tool_calls,
+    parse_tool_calls_gated,
 };
 use crate::agent::tool_handler::filter::{compute_excluded_mcp_tools, is_plan_mode_allowed};
 
 pub(crate) use crate::agent::profile::pii_sanitize::{
-    apply_outgoing_pii_sanitization, scrub_credentials,
+    apply_outgoing_pii_sanitization, scrub_credentials, scrub_tool_output,
 };
 
 pub use crate::agent::history::compaction::estimate_history_tokens;
@@ -281,8 +285,54 @@ fn truncate_tool_args_for_progress(name: &str, args: &serde_json::Value, max_len
     }
 }
 
-fn autosave_memory_key(prefix: &str) -> String {
-    format!("{prefix}_{}", Uuid::new_v4())
+pub(crate) fn autosave_content_key(prefix: &str, content: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    format!("{prefix}_{:016x}", hasher.finish())
+}
+
+pub(crate) fn build_cli_turn_companion(
+    raw_input: &str,
+    expanded_input: &str,
+    context: &str,
+) -> String {
+    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
+    let mut companion = format!("[MESSAGE DATE & TIME: {now}]");
+    let trimmed_context = context.trim();
+    if !trimmed_context.is_empty() {
+        companion.push_str("\n\n");
+        companion.push_str(trimmed_context);
+    }
+    if expanded_input != raw_input {
+        let appended_only = expanded_input
+            .strip_prefix(raw_input)
+            .map(str::trim)
+            .filter(|extra| !extra.is_empty());
+        if let Some(extra) = appended_only {
+            companion.push_str(
+                "\n\n[ATTACHED CONTEXT - resolved from the references in the user message \
+                 above]\n",
+            );
+            companion.push_str(extra);
+        } else if let Some(idx) = expanded_input.find("<context ") {
+            let attachments = expanded_input[idx..].trim();
+            if !attachments.is_empty() {
+                companion.push_str(
+                    "\n\n[ATTACHED CONTEXT - resolved from the @references in the user \
+                     message above]\n",
+                );
+                companion.push_str(attachments);
+            }
+        } else {
+            companion.push_str(
+                "\n\n[EXPANDED REQUEST - the user message above with its references \
+                 resolved]\n",
+            );
+            companion.push_str(expanded_input);
+        }
+    }
+    companion
 }
 
 fn memory_session_id_from_state_file(path: &Path) -> Option<String> {
@@ -302,9 +352,18 @@ async fn build_context(
 ) -> String {
     let mut context = String::new();
 
+    let recall_query = {
+        let kw = extract_code_search_query(user_msg);
+        if kw.trim().is_empty() {
+            user_msg.to_string()
+        } else {
+            kw
+        }
+    };
+
     let recall_result = match tokio::time::timeout(
         std::time::Duration::from_secs(20),
-        mem.recall(user_msg, 5, session_id, None, None),
+        mem.recall(&recall_query, 5, session_id, None, None),
     )
     .await
     {
@@ -341,7 +400,9 @@ async fn build_context(
                 if entry.content.contains("<tool_result") {
                     continue;
                 }
-                let _ = writeln!(context, "- {}: {}", entry.key, entry.content);
+                const MAX_MEMORY_ENTRY_CHARS: usize = 700;
+                let content = truncate_with_ellipsis(&entry.content, MAX_MEMORY_ENTRY_CHARS);
+                let _ = writeln!(context, "- {}: {}", entry.key, content);
             }
             if context == "[Memory context]\n" {
                 context.clear();
@@ -374,41 +435,124 @@ async fn code_intel_injection_block(user_msg: &str) -> Option<String> {
 
     let mut builder = crate::context::builder::ContextBuilder::new(cwd.clone());
     if !registry_focus.is_empty() {
-        builder = builder.with_focus_files(registry_focus);
+        builder = builder.with_focus_files(registry_focus.clone());
     }
     if let Some(lsp) = loop_services::lsp_context_source() {
         builder = builder.with_lsp(lsp);
     }
     let graph_cwd = cwd.clone();
-    if let Some(graph) =
-        tokio::task::spawn_blocking(move || loop_services::symbol_graph_source(&graph_cwd))
+    let graph_state =
+        tokio::task::spawn_blocking(move || loop_services::symbol_graph_source_state(&graph_cwd))
             .await
-            .ok()
-            .flatten()
-    {
-        builder = builder.with_symbol_graph(graph);
-        // Start the external-edit watcher from this async context (the graph
-        // was just loaded inside spawn_blocking, where it could not start).
-        crate::code_intel::symbol_graph::incremental::ensure_workspace_watcher(&cwd);
+            .ok();
+    match graph_state {
+        Some(loop_services::SymbolGraphSourceState::Ready(graph)) => {
+            builder = builder.with_symbol_graph(graph);
+            crate::code_intel::symbol_graph::incremental::ensure_workspace_watcher(&cwd);
+        }
+        Some(loop_services::SymbolGraphSourceState::Building) => {
+            builder = builder.with_symbol_graph_building(true);
+        }
+        _ => {}
     }
     if !query.is_empty() {
-        let rag_cwd = cwd.clone();
-        if let Some(rag) =
-            tokio::task::spawn_blocking(move || loop_services::rag_source(&rag_cwd))
-                .await
-                .ok()
-                .flatten()
-        {
-            builder = builder.with_rag(rag, query.to_string());
+        let rag_query = extract_code_search_query(query);
+        if !rag_query.is_empty() {
+            let rag_cwd = cwd.clone();
+            if let Some(rag) =
+                tokio::task::spawn_blocking(move || loop_services::rag_source(&rag_cwd))
+                    .await
+                    .ok()
+                    .flatten()
+            {
+                builder = builder.with_rag(rag, rag_query);
+            }
         }
     }
-    match builder.build().await {
-        Ok(qc) => {
+    const INJECTION_BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
+    match tokio::time::timeout(INJECTION_BUILD_TIMEOUT, builder.build()).await {
+        Ok(Ok(qc)) => {
             let qc: crate::context::builder::QueryContext = qc;
             Some(qc.render_injection_block())
         }
-        Err(_) => None,
+        Ok(Err(_)) => None,
+        Err(_) => {
+            tracing::warn!(
+                target: "agent.context",
+                "query-context assembly timed out after 8s; continuing without injection block"
+            );
+            None
+        }
     }
+}
+
+fn extract_code_search_query(user_msg: &str) -> String {
+    const STOP: &[&str] = &[
+        "the", "and", "for", "with", "this", "that", "from", "into", "please", "fix",
+    ];
+    const STOP_CJK: &[&str] = &[
+        "帮我", "一下", "如何", "怎么", "什么", "修改", "实现", "添加", "删除", "文件",
+        "代码", "这个", "那个", "可以", "需要", "问题", "为什么", "然后", "现在", "一个",
+        "不要", "使用", "请问", "麻烦", "所有", "进行", "或者", "以及", "但是", "如果",
+        "优化", "功能", "检查", "支持", "错误", "报错", "运行", "执行", "调用",
+    ];
+    fn is_cjk(c: char) -> bool {
+        matches!(c,
+            '\u{4E00}'..='\u{9FFF}'
+                | '\u{3400}'..='\u{4DBF}'
+                | '\u{F900}'..='\u{FAFF}'
+                | '\u{3040}'..='\u{30FF}'
+                | '\u{AC00}'..='\u{D7AF}'
+        )
+    }
+    let mut terms: Vec<String> = Vec::new();
+    let push_term = |t: &str, terms: &mut Vec<String>| {
+        if !terms.iter().any(|e| e.eq_ignore_ascii_case(t)) {
+            terms.push(t.to_string());
+        }
+    };
+    for raw in user_msg.split(|c: char| !(c.is_alphanumeric() || c == '_' || c == '-')) {
+        if terms.len() >= 12 {
+            break;
+        }
+        let t = raw.trim();
+        if t.len() < 2 {
+            continue;
+        }
+        if t.chars().any(is_cjk) {
+            let cjk_run: String = t.chars().filter(|c| is_cjk(*c)).collect();
+            let ascii_run: String = t.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '-').collect();
+            if ascii_run.len() >= 3 && !STOP.contains(&ascii_run.to_ascii_lowercase().as_str()) {
+                push_term(&ascii_run, &mut terms);
+            }
+            let chars: Vec<char> = cjk_run.chars().collect();
+            let mut i = 0usize;
+            while i < chars.len() && terms.len() < 12 {
+                let take = (chars.len() - i).min(2);
+                if take < 2 {
+                    break;
+                }
+                let gram: String = chars[i..i + 2].iter().collect();
+                if !STOP_CJK.contains(&gram.as_str()) {
+                    push_term(&gram, &mut terms);
+                }
+                i += 2;
+            }
+            continue;
+        }
+        let lower = t.to_ascii_lowercase();
+        if STOP.contains(&lower.as_str()) {
+            continue;
+        }
+        if t.chars().any(|c| c.is_ascii_uppercase())
+            || t.contains('_')
+            || t.contains('-')
+            || t.len() >= 4
+        {
+            push_term(t, &mut terms);
+        }
+    }
+    terms.join(" ")
 }
 
 fn build_hardware_context(
@@ -458,6 +602,9 @@ fn canonical_tool_alias(name: &str) -> Option<&'static str> {
         | "edit_file" | "editfile" => "file_edit",
         "bash" | "sh" | "exec" | "command" | "cmd" | "terminal" | "run_command"
         | "runcommand" | "shell_command" => "shell",
+        "web_search" | "websearch" | "web-search" | "search_web" | "websearch_tool" => {
+            "web_search_tool"
+        }
         "ls" | "list_files" | "listfiles" | "list_dir" | "listdir" | "dir" | "file_list"
         | "filelist" => "dir_list",
         "askquestion" => "ask_question",
@@ -465,7 +612,6 @@ fn canonical_tool_alias(name: &str) -> Option<&'static str> {
         "memory_search" | "memorysearch" | "memrecall" | "memory_query" => "memory_recall",
         "lsp_symbols" | "lspsymbols" | "symbols" | "lsp_hover" | "lsphover"
         | "lsp_definition" => "lsp",
-        "websearch" => "web_search",
         _ => return None,
     };
     Some(mapped)
@@ -857,8 +1003,12 @@ fn current_turn_preserved_indices(
 ) -> Vec<usize> {
     let current = h
         .iter()
-        .rposition(|m| m.role == "user" && m.content.contains("[CURRENT REQUEST"))
-        .or_else(|| h.iter().rposition(|m| m.role == "user"));
+        .rposition(|m| m.role == "user" && m.has_current_request_marker())
+        .or_else(|| {
+            h.iter().rposition(|m| {
+                m.role == "user" && !m.content.trim_start().starts_with("[Tool results]")
+            })
+        });
     let mut idxs: Vec<usize> = Vec::new();
     if let Some(cur) = current {
         idxs.push(cur);
@@ -1046,6 +1196,7 @@ fn build_native_assistant_history(
     text: &str,
     tool_calls: &[ToolCall],
     reasoning_content: Option<&str>,
+    thinking_signature: Option<&str>,
 ) -> String {
     let calls_json: Vec<serde_json::Value> = tool_calls
         .iter()
@@ -1077,6 +1228,14 @@ fn build_native_assistant_history(
             );
         }
     }
+    if let Some(sig) = thinking_signature.filter(|s| !s.is_empty()) {
+        if let Some(map) = obj.as_object_mut() {
+            map.insert(
+                "thinking_signature".to_string(),
+                serde_json::Value::String(sig.to_string()),
+            );
+        }
+    }
 
     obj.to_string()
 }
@@ -1085,6 +1244,7 @@ fn build_native_assistant_history_from_parsed_calls(
     text: &str,
     tool_calls: &[ParsedToolCall],
     reasoning_content: Option<&str>,
+    thinking_signature: Option<&str>,
 ) -> Option<String> {
     let calls_json = tool_calls
         .iter()
@@ -1116,6 +1276,14 @@ fn build_native_assistant_history_from_parsed_calls(
             );
         }
     }
+    if let Some(sig) = thinking_signature.filter(|s| !s.is_empty()) {
+        if let Some(map) = obj.as_object_mut() {
+            map.insert(
+                "thinking_signature".to_string(),
+                serde_json::Value::String(sig.to_string()),
+            );
+        }
+    }
 
     Some(obj.to_string())
 }
@@ -1131,8 +1299,14 @@ struct StreamedChatOutcome {
 
     reasoning_content: String,
 
+    thinking_signature: String,
+
+    thinking_signature_blocks: u32,
+
     usage: Option<crate::providers::traits::TokenUsage>,
     forwarded_live_deltas: bool,
+
+    stop_reason: Option<crate::providers::traits::StopReason>,
 
     pre_executed: Vec<PreExecutedToolRecord>,
 }
@@ -1144,10 +1318,6 @@ struct PreExecutedToolRecord {
     output: Option<String>,
 }
 
-fn looks_like_streamed_tool_payload(window: &str) -> bool {
-    crate::agent::streaming_markers::find_tool_marker(window).is_some()
-}
-
 fn retry_friendly_message(notice: &crate::providers::traits::RetryNotice) -> String {
     use crate::providers::traits::RetryClass;
     let provider = if notice.provider.is_empty() {
@@ -1157,13 +1327,13 @@ fn retry_friendly_message(notice: &crate::providers::traits::RetryNotice) -> Str
     };
     match notice.failure_class {
         RetryClass::EngineOverloaded => format!(
-            "{provider} 服务器临时繁忙（engine overloaded），正在自动重试…"
+            "{provider} is temporarily overloaded (engine overloaded); retrying automatically…"
         ),
         RetryClass::AccountRateLimited => format!(
-            "{provider} 账户配额限流（rate limit），等待恢复后重试…"
+            "{provider} account quota is rate limited; waiting for recovery before retrying…"
         ),
         RetryClass::Transient => format!(
-            "{provider} 网络瞬时错误，正在自动重试…"
+            "{provider} hit a transient network error; retrying automatically…"
         ),
     }
 }
@@ -1171,10 +1341,6 @@ fn retry_friendly_message(notice: &crate::providers::traits::RetryNotice) -> Str
 const LLM_RESILIENCE_MAX_RETRIES: u32 = 600;
 const LLM_RESILIENCE_BACKOFF_BASE_MS: u64 = 1_000;
 const LLM_RESILIENCE_BACKOFF_CAP_MS: u64 = 15_000;
-// Total wall-clock cap on a single turn's resilient retries, so an unattended
-// daemon/cron turn cannot silently hang for hours on a persistently failing
-// provider (600 * 15s would be ~2.5h). 10 minutes is generous for transient
-// outages while bounding the worst case.
 const LLM_RESILIENCE_MAX_TOTAL: std::time::Duration = std::time::Duration::from_secs(600);
 
 fn llm_resilience_backoff_ms(attempt: u32) -> u64 {
@@ -1260,6 +1426,7 @@ async fn consume_provider_streaming_response(
     let mut outcome = StreamedChatOutcome::default();
     let mut delta_sender = on_delta;
     let mut suppress_forwarding = false;
+    let mut tool_suppress_kind: Option<crate::agent::streaming_markers::ToolMarkerKind> = None;
     let mut marker_window = String::new();
     let mut think_splitter = crate::agent::think_extractor::ThinkTagSplitter::new();
 
@@ -1369,6 +1536,14 @@ async fn consume_provider_streaming_response(
 
                 outcome.usage = Some(usage);
             }
+            StreamEvent::ReasoningSignature(sig) => {
+                outcome.thinking_signature = sig;
+                outcome.thinking_signature_blocks =
+                    outcome.thinking_signature_blocks.saturating_add(1);
+            }
+            StreamEvent::StopReason(reason) => {
+                outcome.stop_reason = Some(reason);
+            }
             StreamEvent::Retry(notice) => {
                 let class_str = notice.failure_class.as_str();
                 let friendly = retry_friendly_message(&notice);
@@ -1410,10 +1585,14 @@ async fn consume_provider_streaming_response(
                 }
                 outcome.response_text.clear();
                 outcome.reasoning_content.clear();
+                outcome.thinking_signature.clear();
+                outcome.thinking_signature_blocks = 0;
                 outcome.tool_calls.clear();
                 outcome.pre_executed.clear();
+                outcome.stop_reason = None;
                 marker_window.clear();
                 suppress_forwarding = false;
+                tool_suppress_kind = None;
                 think_splitter = crate::agent::think_extractor::ThinkTagSplitter::new();
             }
             StreamEvent::TextDelta(chunk) => {
@@ -1483,18 +1662,33 @@ async fn consume_provider_streaming_response(
                     marker_window.drain(..boundary);
                 }
 
-                if !suppress_forwarding && looks_like_streamed_tool_payload(&marker_window) {
-                    suppress_forwarding = true;
-                    if outcome.forwarded_live_deltas {
-                        if let Some(tx) = delta_sender {
-                            let _ = tx.send(DraftEvent::Clear).await;
+                // Stateful suppression: once an opening tool marker is seen we suppress
+                // to the UI until the matching close (XML), or to the end of the turn
+                // (a bare `"tool_calls"` JSON envelope has no inline close). This replaces
+                // the old sliding-window heuristic that leaked the middle/tail of any tool
+                // payload longer than the window once the opening marker scrolled out.
+                if !suppress_forwarding {
+                    if let Some(kind) =
+                        crate::agent::streaming_markers::classify_tool_marker(&marker_window)
+                    {
+                        suppress_forwarding = true;
+                        tool_suppress_kind = Some(kind);
+                        if outcome.forwarded_live_deltas {
+                            if let Some(tx) = delta_sender {
+                                let _ = tx.send(DraftEvent::Clear).await;
+                            }
+                            outcome.forwarded_live_deltas = false;
                         }
-                        outcome.forwarded_live_deltas = false;
                     }
-                }
-
-                if suppress_forwarding && !looks_like_streamed_tool_payload(&marker_window) {
+                } else if matches!(
+                    tool_suppress_kind,
+                    Some(crate::agent::streaming_markers::ToolMarkerKind::Xml)
+                ) && crate::agent::streaming_markers::find_tool_close_marker(&marker_window)
+                    .is_some()
+                {
                     suppress_forwarding = false;
+                    tool_suppress_kind = None;
+                    marker_window.clear();
                 }
 
                 if suppress_forwarding {
@@ -1652,10 +1846,13 @@ async fn request_session_tool_approval(
             description: Some(description.to_string()),
         })
         .await;
-    Some(
+    let verdict =
         crate::approval::wait_for_session_decision(&request_id, &mut rx, cancellation_token)
-            .await,
-    )
+            .await;
+    // Resolved (or timed out/cancelled): retire the pending entry so a later
+    // reconnect doesn't replay a dead prompt.
+    let _ = crate::approval::drop_pending_gateway_approval(&request_id);
+    Some(verdict)
 }
 
 fn approval_timeout_denial(tool_name: &str) -> String {
@@ -1668,9 +1865,104 @@ fn approval_timeout_denial(tool_name: &str) -> String {
     )
 }
 
+// Deterministic build/type verification gate. After a turn modified code files,
+// run the workspace verification pipeline (cargo check / tsc --noEmit / go vet /
+// pytest --collect-only) and, if it fails, return the raw failure summary so the
+// loop can feed it back to the model instead of finalizing on an unverified
+// claim. Returns Some((feedback, retry_budget_left)) when verification FAILED;
+// None when it passed, was disabled, timed out, or had nothing to check.
+async fn run_auto_verify_gate(
+    verify_retries: u32,
+    cancellation_token: Option<&CancellationToken>,
+) -> Option<(String, bool)> {
+    let svc = crate::services::try_get_services()?;
+    let pacing = &svc.config().pacing;
+    if !pacing.auto_verify_after_edit {
+        return None;
+    }
+    let root = crate::session::current_session_context()
+        .map(|c| std::path::PathBuf::from(c.workspace_dir))
+        .filter(|p| p.is_dir())?;
+
+    let pipeline = crate::agent::verification::pipeline::VerificationPipeline::default_for_workspace(
+        &root,
+        Some(std::sync::Arc::new(svc.lsp.clone())),
+    );
+
+    let timeout = Duration::from_secs(pacing.auto_verify_timeout_secs.max(1));
+    let run_fut = pipeline.run_on_workspace(&root);
+    let report = {
+        let with_timeout = tokio::time::timeout(timeout, run_fut);
+        let outcome = match cancellation_token {
+            Some(token) => tokio::select! {
+                biased;
+                () = token.cancelled() => return None,
+                r = with_timeout => r,
+            },
+            None => with_timeout.await,
+        };
+        match outcome {
+            Ok(Ok(report)) => report,
+            Ok(Err(e)) => {
+                tracing::debug!(error = %e, "auto-verify pipeline error; skipping gate");
+                return None;
+            }
+            Err(_) => {
+                tracing::debug!("auto-verify pipeline timed out; skipping gate");
+                return None;
+            }
+        }
+    };
+
+    if report.passed {
+        return None;
+    }
+
+    let retry_budget_left = verify_retries < pacing.auto_verify_max_retries;
+    let mut body = String::new();
+    let summary = report.joined_summary();
+    if !summary.is_empty() {
+        body.push_str(&summary);
+        body.push('\n');
+    }
+    for issue in report
+        .all_issues()
+        .into_iter()
+        .filter(|i| matches!(i.severity, crate::agent::verification::IssueSeverity::Error))
+        .take(20)
+    {
+        body.push_str(&format!(
+            "  - {}:{} {}\n",
+            issue.line,
+            issue.column,
+            truncate_with_ellipsis(&issue.message, 300)
+        ));
+    }
+
+    let feedback = if retry_budget_left {
+        format!(
+            "[Auto-verify] The workspace does NOT build/type-check cleanly after your edits. \
+             These are real errors from the project's own tools ({}). Fix them before you \
+             finish — do not claim the task is done while these fail:\n{}",
+            report.failed_stages.join(", "),
+            body.trim_end()
+        )
+    } else {
+        format!(
+            "[Auto-verify] The workspace still fails verification ({}) after {} fix \
+             attempt(s). Remaining problems (stop and surface these to the user if you cannot \
+             resolve them):\n{}",
+            report.failed_stages.join(", "),
+            verify_retries,
+            body.trim_end()
+        )
+    };
+    Some((feedback, retry_budget_left))
+}
+
 async fn execute_one_tool(
     call_name: &str,
-    call_arguments: serde_json::Value,
+    mut call_arguments: serde_json::Value,
     tools_registry: &[Box<dyn Tool>],
     tool_registry: Option<&ToolRegistry>,
     activated_tools: Option<&std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
@@ -1819,7 +2111,7 @@ async fn execute_one_tool(
             crate::guardrails::GuardrailDecision::RequireApproval(reason) => {
                 let mode_auto_approved = crate::agent::mode::effects::mode_auto_approves(
                     crate::agent::coding_mode::active_coding_mode(),
-                );
+                ) && approval.is_none_or(|m| m.mode_auto_approve_allows(call_name));
                 let mut timeout_denial: Option<String> = None;
                 let approved = if mode_auto_approved {
                     true
@@ -1941,6 +2233,19 @@ async fn execute_one_tool(
                     duration,
                 });
             }
+        }
+    }
+
+    // Reaching execute_one_tool means the loop's approval gate already
+    // authorized this call — a denied call returns/continues before dispatch and
+    // never gets here. The per-tool `approved` risk flag must therefore reflect
+    // that trusted decision, not a value the model wrote into its own arguments
+    // (which would let it self-approve medium/high-risk commands on surfaces
+    // where the approval manager is bypassed). Catastrophic-command detection is
+    // enforced independently of this flag, so dangerous commands stay blocked.
+    if let Some(obj) = call_arguments.as_object_mut() {
+        if call_name == "shell" || obj.contains_key("approved") {
+            obj.insert("approved".to_string(), serde_json::Value::Bool(true));
         }
     }
 
@@ -2093,9 +2398,12 @@ async fn execute_one_tool(
                 success: normalized.success,
             });
             if normalized.success {
+                const COMPRESS_SPAWN_THRESHOLD_BYTES: usize = 8 * 1024;
                 let scrubbed: std::sync::Arc<str> =
-                    scrub_credentials(&normalized.output).into();
-                let compressed = {
+                    scrub_tool_output(call_name, &normalized.output).into();
+                let compressed = if scrubbed.len() < COMPRESS_SPAWN_THRESHOLD_BYTES {
+                    crate::agent::token::optimizer::compress_output(call_name, &scrubbed)
+                } else {
                     let call_name_owned = call_name.to_string();
                     let scrubbed_for_task = std::sync::Arc::clone(&scrubbed);
                     match tokio::task::spawn_blocking(move || {
@@ -2178,8 +2486,14 @@ struct ToolExecutionOutcome {
 
 fn resolve_parallel_tool_cap() -> usize {
     if let Some(svc) = crate::services::try_get_services() {
-        let cap = svc.config().agent_runtime.parallel_tool_max_concurrency;
-        return (cap as usize).max(1);
+        let rt = &svc.config().agent_runtime;
+        // Honor the parallel_tools_enabled switch: a cap of 1 forces serial
+        // dispatch (DispatchMode::select treats cap<=1 as "never parallel").
+        // Previously this flag was defined but never consulted anywhere.
+        if !rt.parallel_tools_enabled {
+            return 1;
+        }
+        return (rt.parallel_tool_max_concurrency as usize).max(1);
     }
     8
 }
@@ -2266,7 +2580,9 @@ async fn run_self_consistency_resampling(
     }
 
     let result = crate::agent::self_assess::consistency::aggregate(
-        &crate::agent::self_assess::consistency::Aggregator::MajorityVote,
+        &crate::agent::self_assess::consistency::Aggregator::EmbeddingCluster {
+            similarity_threshold: 0.8,
+        },
         samples,
     );
     let winner = result.chosen.clone();
@@ -2354,15 +2670,24 @@ async fn execute_tools_parallel(
 
     let results = futures_util::future::join_all(futures).await;
 
-    if cancellation_token.is_some_and(|t| t.is_cancelled()) {
-        return Err(tool_loop_cancelled());
-    }
-
+    let cancelled = cancellation_token.is_some_and(|t| t.is_cancelled());
     let mut outcomes = Vec::with_capacity(results.len());
     for (call, res) in tool_calls.iter().zip(results) {
         match res {
             Ok(outcome) => outcomes.push(outcome),
             Err(e) => {
+                if cancelled {
+                    outcomes.push(ToolExecutionOutcome {
+                        output: format!(
+                            "tool '{}' was interrupted by turn cancellation",
+                            call.name
+                        ),
+                        success: false,
+                        error_reason: Some("turn cancelled".to_string()),
+                        duration: Duration::ZERO,
+                    });
+                    continue;
+                }
                 tracing::warn!(
                     target: "agent.tool",
                     tool = %call.name,
@@ -2395,6 +2720,18 @@ async fn execute_tools_sequential(
     let mut outcomes = Vec::with_capacity(tool_calls.len());
 
     for (call_idx, call) in tool_calls.iter().enumerate() {
+        if cancellation_token.is_some_and(|t| t.is_cancelled()) {
+            outcomes.push(ToolExecutionOutcome {
+                output: format!(
+                    "tool '{}' was not executed: the turn was cancelled before it ran",
+                    call.name
+                ),
+                success: false,
+                error_reason: Some("turn cancelled".to_string()),
+                duration: Duration::ZERO,
+            });
+            continue;
+        }
         let pre_cleared = guardrails_pre_cleared.get(call_idx).copied().unwrap_or(false);
         let res = CURRENT_TOOL_CALL_ID
             .scope(call.tool_call_id.clone(), async {
@@ -2418,7 +2755,16 @@ async fn execute_tools_sequential(
             Ok(outcome) => outcomes.push(outcome),
             Err(e) => {
                 if cancellation_token.is_some_and(|t| t.is_cancelled()) {
-                    return Err(tool_loop_cancelled());
+                    outcomes.push(ToolExecutionOutcome {
+                        output: format!(
+                            "tool '{}' was interrupted by turn cancellation",
+                            call.name
+                        ),
+                        success: false,
+                        error_reason: Some("turn cancelled".to_string()),
+                        duration: Duration::ZERO,
+                    });
+                    continue;
                 }
                 tracing::warn!(
                     target: "agent.tool",
@@ -2554,20 +2900,52 @@ pub(crate) fn record_post_turn_learning(
     let temperature_used = crate::services::try_get_services()
         .map(|svc| svc.config().default_temperature)
         .unwrap_or(0.7);
+    let query_category = format!(
+        "{:?}",
+        crate::agent::eval::estimate_complexity(user_message)
+    );
     let record = crate::agent::reward::reinforcement::TurnRecord {
         turn_index: engine.total_turns(),
         timestamp: chrono::Utc::now(),
         reward,
         model_used: model.to_string(),
         temperature_used,
-        query_category: format!(
-            "{:?}",
-            crate::agent::eval::estimate_complexity(user_message)
-        ),
+        query_category: query_category.clone(),
         tools_used: tool_results.iter().map(|(name, _)| name.clone()).collect(),
         response_length: final_text.len(),
     };
     let _ = engine.record_turn(record);
+
+    let optimizer_enabled = crate::services::try_get_services()
+        .map(|svc| svc.config().prompt_optimizer.enabled)
+        .unwrap_or(false);
+    if optimizer_enabled {
+        let failure_reason = tool_results
+            .iter()
+            .find(|(_, ok)| !ok)
+            .map(|(name, _)| format!("tool '{name}' failed"));
+        let success_pattern = if reward > 0.5 && !tool_results.is_empty() {
+            let names: Vec<&str> = tool_results
+                .iter()
+                .filter(|(_, ok)| *ok)
+                .map(|(name, _)| name.as_str())
+                .take(3)
+                .collect();
+            if names.is_empty() {
+                None
+            } else {
+                Some(format!("tool sequence: {}", names.join(" -> ")))
+            }
+        } else {
+            None
+        };
+        crate::agent::prompt::optimizer::global_optimizer().record_turn(
+            &query_category,
+            reward,
+            failure_reason.as_deref(),
+            success_pattern.as_deref(),
+        );
+    }
 }
 
 fn spawn_post_turn_session_memory(user_message: &str, final_text: &str) {
@@ -2778,6 +3156,7 @@ pub(crate) async fn run_unified_loop_impl(
 
     let mut cached_tool_specs: Option<std::sync::Arc<Vec<crate::tools::ToolSpec>>> = None;
     let mut cached_mode_key: (u64, bool) = (0, false);
+    let mut prepared_history_cache: Option<(u64, multimodal::PreparedMessages)> = None;
 
     let mut _turn_metrics = crate::agent::executor_core::TurnMetricsGuard::start();
 
@@ -2826,6 +3205,7 @@ pub(crate) async fn run_unified_loop_impl(
 
     if let Some(svc) = crate::services::try_get_services() {
         let mode = crate::agent::coding_mode::active_coding_mode();
+        crate::agent::mode::effects::remove_stale_mode_reminders(history, mode);
         if let Some(reminder) = crate::agent::mode::effects::pre_turn_reminder(mode) {
             crate::agent::mode::effects::replace_or_push_system_reminder(
                 history,
@@ -2875,8 +3255,18 @@ pub(crate) async fn run_unified_loop_impl(
     let mut parse_issue_nudges_used = 0usize;
     const MAX_PARSE_ISSUE_NUDGES: usize = 2;
 
+    let mut truncation_nudges_used = 0usize;
+    const MAX_TRUNCATION_NUDGES: usize = 2;
+    // Accumulates the segments emitted before each stop_reason=Length continuation
+    // so the FINAL return value carries the whole answer. GUI consumers see each
+    // segment stream live and each segment is pushed to history for the model to
+    // continue from, but non-streaming consumers (channels, delegate sub-agents,
+    // Agent::turn) only ever received the last fragment before this fix.
+    let mut truncation_prefix = String::new();
+
     let mut turn_modified_files = false;
     let mut evaluator_retries = 0u32;
+    let mut verify_retries = 0u32;
 
     let mut compression_retry_floor: Option<usize> = None;
 
@@ -3018,9 +3408,6 @@ pub(crate) async fn run_unified_loop_impl(
                     );
                 }
                 None => {
-                    // Occupancy fell back below the warning tier (e.g. after
-                    // compaction): retract the stale banner instead of leaving
-                    // a misleading high-usage reminder in the transcript.
                     crate::agent::mode::effects::remove_system_reminder(
                         history,
                         crate::agent::mode::effects::CONTEXT_BUDGET_MARKER,
@@ -3066,7 +3453,7 @@ pub(crate) async fn run_unified_loop_impl(
 
         if cached_tool_specs.is_none() || current_mode_key != cached_mode_key {
             cached_mode_key = current_mode_key;
-            let specs: Vec<_> = tools_registry
+            let mut specs: Vec<_> = tools_registry
                 .iter()
                 .filter(|tool| !excluded_tools.iter().any(|ex| ex == tool.name()))
                 .filter(|tool| {
@@ -3082,6 +3469,7 @@ pub(crate) async fn run_unified_loop_impl(
                 })
                 .map(|tool| tool.spec_with_descriptions(tool_descriptions))
                 .collect();
+            specs.sort_by(|a, b| a.name.cmp(&b.name));
             cached_tool_specs = Some(std::sync::Arc::new(specs));
         }
 
@@ -3091,7 +3479,7 @@ pub(crate) async fn run_unified_loop_impl(
                 "tool spec cache should have been populated above (internal invariant violation)"
             ))?
             .clone();
-        let mut tool_specs = (*tool_specs_arc).clone();
+        let mut activated_specs: Vec<crate::tools::ToolSpec> = Vec::new();
         if let Some(at) = activated_tools {
             for spec in at.lock().tool_specs() {
                 if !excluded_tools.iter().any(|ex| ex == &spec.name) {
@@ -3103,11 +3491,23 @@ pub(crate) async fn run_unified_loop_impl(
                         true
                     };
                     if allowed {
-                        tool_specs.push(spec);
+                        activated_specs.push(spec);
                     }
                 }
             }
         }
+        let tool_specs_extended: Option<Vec<crate::tools::ToolSpec>> =
+            if activated_specs.is_empty() {
+                None
+            } else {
+                activated_specs.sort_by(|a, b| a.name.cmp(&b.name));
+                let mut extended = (*tool_specs_arc).clone();
+                extended.extend(activated_specs);
+                Some(extended)
+            };
+        let tool_specs: &[crate::tools::ToolSpec] = tool_specs_extended
+            .as_deref()
+            .unwrap_or_else(|| tool_specs_arc.as_slice());
         let use_native_tools = provider.supports_native_tools() && !tool_specs.is_empty();
 
         let image_marker_count = multimodal::count_image_markers(history);
@@ -3234,7 +3634,7 @@ pub(crate) async fn run_unified_loop_impl(
                 if let Some(ref tx) = on_delta {
                     let _ = tx
                         .send(DraftEvent::Progress(
-                            "正在压缩对话上下文以适配模型窗口…".to_string(),
+                            "Compressing conversation context to fit the model window…".to_string(),
                         ))
                         .await;
                 }
@@ -3245,7 +3645,7 @@ pub(crate) async fn run_unified_loop_impl(
                     Box::new(
                         move |p: crate::agent::context::compressor::CompressionProgress| {
                             let _ = tx.try_send(DraftEvent::Progress(format!(
-                                "正在压缩对话上下文（第 {}/{} 轮，约 {} → 目标 {} tokens）…",
+                                "Compressing conversation context (pass {}/{}, ~{} → target {} tokens)…",
                                 p.pass, p.max_passes, p.tokens_current, p.tokens_target,
                             )));
                         },
@@ -3318,28 +3718,59 @@ pub(crate) async fn run_unified_loop_impl(
             }
         }
 
-        let mut prepared_messages =
-            multimodal::prepare_messages_for_provider(history, multimodal_config).await?;
-
         let active_mode = crate::agent::coding_mode::active_coding_mode();
-        let sanitization_report = apply_outgoing_pii_sanitization(
-            Some(active_mode),
-            &mut prepared_messages.messages,
-        );
-        if !sanitization_report.is_empty() {
-            tracing::debug!(
-                target: "agent.pii",
-                redactions = sanitization_report.total(),
-                "applied outbound PII sanitization in Debug mode"
-            );
-            if let Some(ref tx) = on_delta {
-                let _ = tx
-                    .send(DraftEvent::PiiSanitized {
-                        report: sanitization_report.clone(),
-                    })
-                    .await;
+        let history_fingerprint = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            history.len().hash(&mut h);
+            (active_mode as u8).hash(&mut h);
+            for msg in history.iter() {
+                msg.role.hash(&mut h);
+                msg.content.hash(&mut h);
+                if !msg.metadata.is_empty() {
+                    let mut keys: Vec<&String> = msg.metadata.keys().collect();
+                    keys.sort_unstable();
+                    for key in keys {
+                        key.hash(&mut h);
+                        if let Some(value) = msg.metadata.get(key) {
+                            value.to_string().hash(&mut h);
+                        }
+                    }
+                }
             }
-        }
+            h.finish()
+        };
+        let mut prepared_messages = match prepared_history_cache
+            .take()
+            .filter(|(fp, _)| *fp == history_fingerprint)
+        {
+            Some((_, cached)) => cached,
+            None => {
+                let mut prepared =
+                    multimodal::prepare_messages_for_provider(history, multimodal_config)
+                        .await?;
+                let sanitization_report = apply_outgoing_pii_sanitization(
+                    Some(active_mode),
+                    &mut prepared.messages,
+                );
+                if !sanitization_report.is_empty() {
+                    tracing::debug!(
+                        target: "agent.pii",
+                        redactions = sanitization_report.total(),
+                        "applied outbound PII sanitization in Debug mode"
+                    );
+                    if let Some(ref tx) = on_delta {
+                        let _ = tx
+                            .send(DraftEvent::PiiSanitized {
+                                report: sanitization_report.clone(),
+                            })
+                            .await;
+                    }
+                }
+                prepared
+            }
+        };
+        prepared_history_cache = Some((history_fingerprint, prepared_messages.clone()));
 
         if let Some(ref tx) = on_delta {
             let phase = if iteration == 0 {
@@ -3371,12 +3802,14 @@ pub(crate) async fn run_unified_loop_impl(
 
         let llm_started_at = Instant::now();
 
-        if let Some(svc) = crate::services::try_get_services() {
-            let est_tokens: u64 = history
-                .iter()
-                .map(|m| svc.token_estimator.estimate(&m.content))
-                .sum();
-            tracing::debug!(estimated_tokens = est_tokens, "Pre-call token estimate");
+        if tracing::enabled!(tracing::Level::DEBUG) {
+            if let Some(svc) = crate::services::try_get_services() {
+                let est_tokens: u64 = history
+                    .iter()
+                    .map(|m| svc.token_estimator.estimate(&m.content))
+                    .sum();
+                tracing::debug!(estimated_tokens = est_tokens, "Pre-call token estimate");
+            }
         }
 
         if let Some(hooks) = hooks {
@@ -3390,7 +3823,7 @@ pub(crate) async fn run_unified_loop_impl(
         }) = check_tool_loop_budget(None)
         {
             let budget_text = format!(
-                "\u{1f4b0} 已达成本预算上限（${:.4} / ${:.2} {:?}）。本轮在此安全停止，预算重置后可继续对话。",
+                "\u{1f4b0} Cost budget limit reached (${:.4} / ${:.2} {:?}). Stopping safely here; the conversation can continue once the budget resets.",
                 current_usd, limit_usd, period
             );
             _turn_metrics.mark_ok();
@@ -3399,6 +3832,28 @@ pub(crate) async fn run_unified_loop_impl(
                 let _ = tx.send(DraftEvent::Content(budget_text.clone())).await;
             }
             return Ok(budget_text);
+        }
+
+        if let Some(svc) = crate::services::try_get_services() {
+            let spent_cents = crate::bootstrap::try_get_state()
+                .map(|bs| {
+                    let mut cost = 0.0f64;
+                    bs.read(|s| cost = s.total_cost_usd);
+                    (cost * 100.0).max(0.0) as u64
+                })
+                .unwrap_or(0);
+            if spent_cents > 0 && !svc.check_spending_policy(spent_cents) {
+                let policy_text = format!(
+                    "\u{1f4b0} Spending has hit the governance SpendingCap policy limit (currently ~{:.2} USD). Stopping safely here; adjust the policy or wait for the budget cycle to reset.",
+                    spent_cents as f64 / 100.0
+                );
+                _turn_metrics.mark_ok();
+                history.push(ChatMessage::assistant(policy_text.clone()));
+                if let Some(ref tx) = on_delta {
+                    let _ = tx.send(DraftEvent::Content(policy_text.clone())).await;
+                }
+                return Ok(policy_text);
+            }
         }
 
         if let Some(svc) = crate::services::try_get_services() {
@@ -3431,7 +3886,7 @@ pub(crate) async fn run_unified_loop_impl(
         }
 
         let request_tools = if use_native_tools {
-            Some(tool_specs.as_slice())
+            Some(tool_specs)
         } else {
             None
         };
@@ -3450,6 +3905,7 @@ pub(crate) async fn run_unified_loop_impl(
         let mut llm_resilience_attempt: u32 = 0;
         let llm_resilience_started_at = std::time::Instant::now();
         let mut emergency_compress_attempts: u32 = 0;
+        let mut emergency_context_window: Option<usize> = None;
         const MAX_EMERGENCY_COMPRESS_ATTEMPTS: u32 = 4;
         let chat_result = 'llm_attempt: loop {
         let attempt_result = if should_consume_provider_stream {
@@ -3508,11 +3964,20 @@ pub(crate) async fn run_unified_loop_impl(
                     } else {
                         None
                     };
+                    let thinking_signature = if streamed.thinking_signature.is_empty()
+                        || streamed.thinking_signature_blocks > 1
+                    {
+                        None
+                    } else {
+                        Some(streamed.thinking_signature)
+                    };
                     Ok(crate::providers::ChatResponse {
                         text: Some(streamed.response_text),
                         tool_calls: streamed.tool_calls,
                         usage: streamed.usage,
                         reasoning_content,
+                        thinking_signature,
+                        stop_reason: streamed.stop_reason,
                     })
                 }
                 Err(stream_err) => {
@@ -3639,7 +4104,8 @@ pub(crate) async fn run_unified_loop_impl(
                                         crate::agent::token::optimizer::global_optimizer()
                                             .map(|opt| opt.budget().context_window())
                                             .unwrap_or(128_000);
-                                    let context_window = budget_window.max(32_000);
+                                    let context_window = emergency_context_window
+                                        .unwrap_or_else(|| budget_window.max(32_000));
                                     let mut emergency_compressor =
                                         crate::agent::context::compressor::ContextCompressor::new(
                                             compression_cfg,
@@ -3648,7 +4114,7 @@ pub(crate) async fn run_unified_loop_impl(
                                     if let Some(ref tx) = on_delta {
                                         let _ = tx
                                             .send(DraftEvent::Progress(
-                                                "模型反馈上下文超限，正在紧急压缩历史后重试…"
+                                                "The model reported a context overflow; emergency-compressing history and retrying…"
                                                     .to_string(),
                                             ))
                                             .await;
@@ -3666,6 +4132,8 @@ pub(crate) async fn run_unified_loop_impl(
                                         )
                                         .await
                                         .unwrap_or(false);
+                                    emergency_context_window =
+                                        Some(emergency_compressor.context_window());
                                     if compressed {
                                         emergency_compress_attempts += 1;
                                         prepared_messages =
@@ -3724,7 +4192,7 @@ pub(crate) async fn run_unified_loop_impl(
                                 provider: active_provider_name.to_string(),
                                 model: active_model.to_string(),
                                 message: format!(
-                                    "{active_provider_name} 连接异常，正在自动恢复并重试（第 {llm_resilience_attempt} 次）…"
+                                    "{active_provider_name} connection error; recovering and retrying automatically (attempt {llm_resilience_attempt})…"
                                 ),
                             })
                             .await;
@@ -3752,6 +4220,7 @@ pub(crate) async fn run_unified_loop_impl(
             native_tool_calls,
             _parse_issue_detected,
             response_streamed_live,
+            response_stop_reason,
         ) = match chat_result {
             Ok(resp) => {
                 let (resp_input_tokens, resp_output_tokens) = resp
@@ -3779,6 +4248,19 @@ pub(crate) async fn run_unified_loop_impl(
                     let input_tokens = usage.input_tokens.unwrap_or(0);
                     let output_tokens = usage.output_tokens.unwrap_or(0);
                     if input_tokens + output_tokens > 0 {
+                        // Calibrate the char-heuristic token estimator against the
+                        // provider's real prompt-token count so compaction/focus
+                        // thresholds track reality per model family.
+                        if input_tokens > 0 {
+                            let estimated_input = crate::providers::traits::estimate_total_tokens(
+                                &prepared_messages.messages,
+                            );
+                            crate::agent::token::budget::record_usage_calibration(
+                                model,
+                                estimated_input,
+                                input_tokens,
+                            );
+                        }
                         if let Some(opt) = crate::agent::token::optimizer::global_optimizer() {
                             opt.record_api_usage(input_tokens as usize, output_tokens as usize);
                         }
@@ -3848,7 +4330,14 @@ pub(crate) async fn run_unified_loop_impl(
                 let mut parsed_text = String::new();
 
                 if calls.is_empty() {
-                    let (fallback_text, fallback_calls) = parse_tool_calls(&response_text);
+                    let known_tools: std::collections::HashSet<String> =
+                        tool_specs.iter().map(|s| s.name.clone()).collect();
+                    let gate = ParseGate {
+                        native_tools_supported: use_native_tools,
+                        known_tools: &known_tools,
+                    };
+                    let (fallback_text, fallback_calls) =
+                        parse_tool_calls_gated(&response_text, Some(&gate));
                     if !fallback_text.is_empty() {
                         parsed_text = fallback_text;
                     }
@@ -3895,12 +4384,14 @@ pub(crate) async fn run_unified_loop_impl(
                 );
 
                 let reasoning_content = resp.reasoning_content.clone();
+                let thinking_signature = resp.thinking_signature.clone();
                 let assistant_history_content = if resp.tool_calls.is_empty() {
                     if use_native_tools {
                         build_native_assistant_history_from_parsed_calls(
                             &response_text,
                             &calls,
                             reasoning_content.as_deref(),
+                            thinking_signature.as_deref(),
                         )
                         .unwrap_or_else(|| response_text.clone())
                     } else {
@@ -3911,6 +4402,7 @@ pub(crate) async fn run_unified_loop_impl(
                         &response_text,
                         &resp.tool_calls,
                         reasoning_content.as_deref(),
+                        thinking_signature.as_deref(),
                     )
                 };
 
@@ -3923,6 +4415,7 @@ pub(crate) async fn run_unified_loop_impl(
                     native_calls,
                     parse_issue.is_some(),
                     streamed_live_deltas,
+                    resp.stop_reason,
                 )
             }
             Err(e) => {
@@ -3972,6 +4465,34 @@ pub(crate) async fn run_unified_loop_impl(
         }
 
         if tool_calls.is_empty() {
+
+            if matches!(
+                response_stop_reason,
+                Some(crate::providers::traits::StopReason::Length)
+            ) && truncation_nudges_used < MAX_TRUNCATION_NUDGES
+                && !awaiting_user_input
+            {
+                truncation_nudges_used += 1;
+                tracing::warn!(
+                    target: "agent.loop",
+                    turn_id = %turn_id,
+                    nudge = truncation_nudges_used,
+                    max = MAX_TRUNCATION_NUDGES,
+                    "provider reported stop_reason=length; response was truncated mid-output, injecting continuation nudge"
+                );
+                if !response_text.trim().is_empty() {
+                    history.push(ChatMessage::assistant(&response_text));
+                    truncation_prefix.push_str(&response_text);
+                }
+                history.push(ChatMessage::system(
+                    "[Output Truncated] Your previous message hit the maximum output token limit and was cut off mid-response. \
+                     Continue EXACTLY from where your output stopped. Do not repeat content you already produced, \
+                     do not apologise, and do not restart the answer. If you were writing a file, re-issue the remaining \
+                     part with a targeted edit tool call instead of rewriting the whole file."
+                        .to_string(),
+                ));
+                continue;
+            }
 
             if _parse_issue_detected
                 && parse_issue_nudges_used < MAX_PARSE_ISSUE_NUDGES
@@ -4093,20 +4614,59 @@ pub(crate) async fn run_unified_loop_impl(
             }
 
             if turn_modified_files && !awaiting_user_input {
+                if let Some((feedback, retry_budget_left)) = run_auto_verify_gate(
+                    verify_retries,
+                    cancellation_token.as_ref(),
+                )
+                .await
+                {
+                    if retry_budget_left {
+                        verify_retries += 1;
+                        turn_modified_files = false;
+                        runtime_trace::record_event(
+                            "auto_verify_gate_retry",
+                            Some(channel_name),
+                            Some(provider_name),
+                            Some(model),
+                            Some(&turn_id),
+                            Some(false),
+                            None,
+                            serde_json::json!({ "retry": verify_retries }),
+                        );
+                        if !response_text.trim().is_empty() {
+                            history.push(ChatMessage::assistant(&response_text));
+                        }
+                        history.push(ChatMessage::system(feedback));
+                        continue;
+                    }
+                }
+            }
+
+            if turn_modified_files && !awaiting_user_input {
                 if let Some(critic) = crate::agent::flows::global_critic_context() {
                     let max_retries = critic.config().max_evaluator_retries;
                     if critic.config().enabled
                         && evaluator_retries < max_retries
                         && _pacing_gov.remaining_iterations() > 1
                     {
-                        if let Some(verdict) =
-                            crate::agent::self_assess::critic::IndependentCritic::review_turn(
-                                &critic,
-                                &user_msg_for_hooks,
-                                &display_text,
-                            )
-                            .await
-                        {
+                        let critic_verdict = {
+                            let review_fut =
+                                crate::agent::self_assess::critic::IndependentCritic::review_turn(
+                                    &critic,
+                                    &user_msg_for_hooks,
+                                    &display_text,
+                                );
+                            if let Some(token) = cancellation_token.as_ref() {
+                                tokio::select! {
+                                    biased;
+                                    () = token.cancelled() => None,
+                                    verdict = review_fut => verdict,
+                                }
+                            } else {
+                                review_fut.await
+                            }
+                        };
+                        if let Some(verdict) = critic_verdict {
                             if verdict.should_retry {
                                 evaluator_retries += 1;
                                 turn_modified_files = false;
@@ -4172,6 +4732,16 @@ pub(crate) async fn run_unified_loop_impl(
             } else {
                 (response_text, display_text)
             };
+
+            // Prepend any earlier truncated segments so the returned answer and the
+            // post-turn hooks (memory/learning) carry the full text. History already
+            // holds the individual segments, so it keeps pushing only the final one.
+            let full_display_text = if truncation_prefix.is_empty() {
+                display_text.clone()
+            } else {
+                format!("{truncation_prefix}{display_text}")
+            };
+
             runtime_trace::record_event(
                 "turn_final_response",
                 Some(channel_name),
@@ -4227,14 +4797,14 @@ pub(crate) async fn run_unified_loop_impl(
                         response_cache_key.as_ref(),
                         &user_msg_for_hooks,
                         model,
-                        &display_text,
+                        &full_display_text,
                         _pacing_gov.total_generated_tokens() as u32,
                         &turn_tools_used,
                         &turn_tool_results,
                         true,
                     )
                     .await;
-                    return Ok(display_text);
+                    return Ok(full_display_text);
                 }
 
                 let _ = tx.send(DraftEvent::Clear).await;
@@ -4242,7 +4812,7 @@ pub(crate) async fn run_unified_loop_impl(
                 let mut chunk = String::new();
                 let mut delivered_chars = 0usize;
                 let mut delivery_interrupted = false;
-                for word in display_text.split_inclusive(char::is_whitespace) {
+                for word in full_display_text.split_inclusive(char::is_whitespace) {
                     if cancellation_token
                         .as_ref()
                         .is_some_and(CancellationToken::is_cancelled)
@@ -4272,7 +4842,7 @@ pub(crate) async fn run_unified_loop_impl(
                     }
                 }
                 if delivery_interrupted {
-                    let total_chars = display_text.len();
+                    let total_chars = full_display_text.len();
                     history.push(ChatMessage::assistant(response_text.clone()));
                     tracing::error!(
                         target: "agent.loop",
@@ -4326,14 +4896,14 @@ pub(crate) async fn run_unified_loop_impl(
                 response_cache_key.as_ref(),
                 &user_msg_for_hooks,
                 model,
-                &display_text,
+                &full_display_text,
                 _pacing_gov.total_generated_tokens() as u32,
                 &turn_tools_used,
                 &turn_tool_results,
                 true,
             )
             .await;
-            return Ok(display_text);
+            return Ok(full_display_text);
         }
 
         if !display_text.is_empty() {
@@ -4362,6 +4932,7 @@ pub(crate) async fn run_unified_loop_impl(
         let mut executable_pre_cleared: Vec<bool> = Vec::new();
 
         let mut deferred_system_after_tool_batch: Vec<String> = Vec::new();
+        let mut batch_edit_diagnostics_dirty = false;
 
         let tool_burst_cap =
             crate::constants::tool_limits::MAX_TOOL_CALLS_PER_TURN as usize;
@@ -4449,6 +5020,7 @@ pub(crate) async fn run_unified_loop_impl(
                 continue;
             }
 
+            let mut pre_hook_user_approved = false;
             let pre_hook_guardrail_cleared = {
                 let coding_label = Some(
                     crate::agent::coding_mode::active_coding_mode()
@@ -4475,7 +5047,8 @@ pub(crate) async fn run_unified_loop_impl(
                         let mode_auto_approved =
                             crate::agent::mode::effects::mode_auto_approves(
                                 crate::agent::coding_mode::active_coding_mode(),
-                            );
+                            ) && approval
+                                .is_none_or(|m| m.mode_auto_approve_allows(&call.name));
                         if mode_auto_approved {
                             None
                         } else if let Some(mgr) = approval {
@@ -4507,6 +5080,7 @@ pub(crate) async fn run_unified_loop_impl(
                                              granted ({reason})"
                                         ))
                                     } else {
+                                        pre_hook_user_approved = true;
                                         None
                                     }
                                 }
@@ -4548,6 +5122,7 @@ pub(crate) async fn run_unified_loop_impl(
                                                  not granted ({reason})"
                                             ))
                                         } else {
+                                            pre_hook_user_approved = true;
                                             None
                                         }
                                     }
@@ -4784,10 +5359,18 @@ pub(crate) async fn run_unified_loop_impl(
 
             let mode_auto_approved = crate::agent::mode::effects::mode_auto_approves(
                 crate::agent::coding_mode::active_coding_mode(),
-            );
+            ) && approval.is_none_or(|m| m.mode_auto_approve_allows(&tool_name));
+
+            // The user already said yes to THIS exact call at the guardrail
+            // pre-hook prompt; asking again through the approval manager (with a
+            // different request id) double-prompts for a single action. Only
+            // valid while hooks did not rewrite the call.
+            let already_user_approved = pre_hook_user_approved
+                && tool_name == call.name
+                && tool_args == call.arguments;
 
             if let Some(mgr) = approval {
-                if !mode_auto_approved && mgr.needs_approval(&tool_name) {
+                if !mode_auto_approved && !already_user_approved && mgr.needs_approval(&tool_name) {
                     let request = ApprovalRequest {
                         tool_name: tool_name.clone(),
                         arguments: tool_args.clone(),
@@ -4953,7 +5536,7 @@ pub(crate) async fn run_unified_loop_impl(
             if !dedup_exempt && !seen_tool_signatures.insert(signature) {
 
                 let deduplicated = format!(
-                    "[Deduplicated] Tool '{tool_name}' with identical arguments was already \
+                    "{DEDUP_RESULT_MARKER}{tool_name}' with identical arguments was already \
                     executed in this turn and its result was returned above. \
                     No further action needed for this duplicate call."
                 );
@@ -5199,11 +5782,13 @@ pub(crate) async fn run_unified_loop_impl(
                     crate::agent::verification::post_edit::post_edit_check(
                         &call.name,
                         &call.arguments,
+                        &outcome.output,
                     ),
                 )
                 .await
                 {
                     Ok(Some(report)) => {
+                        batch_edit_diagnostics_dirty = true;
                         outcome.output.push_str("\n\n");
                         outcome.output.push_str(&report);
                     }
@@ -5229,11 +5814,6 @@ pub(crate) async fn run_unified_loop_impl(
                         .tool_call_id
                         .clone()
                         .unwrap_or_else(|| Uuid::new_v4().to_string());
-                    // Register the pending request so the user's reply (sent back as a
-                    // `permission_response` with the same request_id) passes the gateway's
-                    // `claim_pending_gateway_approval` gate. Without this the reply is dropped
-                    // and the paused turn never resumes — the question tool pauses but the
-                    // agent can never continue after the user answers.
                     crate::approval::register_pending_gateway_approval(request_id.clone());
                     let description = match call.name.as_str() {
                         "ask_question" => Some(
@@ -5342,7 +5922,12 @@ pub(crate) async fn run_unified_loop_impl(
             }
 
             turn_tool_results.push((tool_name.clone(), outcome.success));
-            batch_had_success |= outcome.success;
+            // A deduplicated call is a synthetic "success" that did no real work;
+            // counting it as progress would reset the no-progress pacing budget
+            // and let a model spinning on repeated identical calls evade the loop
+            // guard. Exclude it from the progress signal.
+            let is_dedup = outcome.output.starts_with(DEDUP_RESULT_MARKER);
+            batch_had_success |= outcome.success && !is_dedup;
 
             crate::agent::profile::runtime_hooks::publish_tool_event(
                 &tool_name,
@@ -5390,7 +5975,7 @@ pub(crate) async fn run_unified_loop_impl(
             );
         }
 
-        if batch_had_success {
+        if batch_had_success && !batch_edit_diagnostics_dirty {
             _pacing_gov.note_progress();
         }
 
@@ -5402,19 +5987,6 @@ pub(crate) async fn run_unified_loop_impl(
             deferred_system_after_tool_batch.push(msg);
         }
 
-        // NOTE: plan-mode enforcement is applied only when the model ends a turn
-        // WITHOUT calling exit_plan_mode (see the `evaluate_plan_mode_exit` path
-        // above). We intentionally do NOT nudge after every tool batch here: plan
-        // mode explicitly permits read-only exploration, and per-batch nudging
-        // escalated to the CRITICAL warning within a few tool calls and forced the
-        // model to produce a plan before it had gathered enough context.
-
-        // NOTE: like plan-mode, Curator enforcement is applied only when the model
-        // ends a turn WITHOUT calling exit_curator_mode (see evaluate_curator_mode_exit
-        // above). We intentionally do NOT nudge after every tool batch: Curator's own
-        // quality gate requires 5+ web_search + 8+ web_fetch calls, so per-batch nudging
-        // would escalate to the CRITICAL "exit now" warning mid-research and force the
-        // model to finalize a shallow document.
 
         if plan_finalized_this_iter {
             tracing::info!(
@@ -5594,6 +6166,13 @@ pub(crate) async fn run_unified_loop_impl(
             history.push(ChatMessage::system(body));
         }
 
+        if cancellation_token
+            .as_ref()
+            .is_some_and(|t| t.is_cancelled())
+        {
+            return Err(tool_loop_cancelled());
+        }
+
         {
             let mode = crate::agent::coding_mode::active_coding_mode();
             if let Some(msg) = crate::agent::mode::effects::post_tool_batch_message(mode) {
@@ -5705,20 +6284,20 @@ pub(crate) async fn run_unified_loop_impl(
     .await;
     let overflow_text = match pacing_break_reason {
         Some(crate::agent::executor_core::PacingExceeded::TotalTimeout { limit }) => format!(
-            "本轮执行已超过总时长上限（{}秒），为避免长时间占用在此安全停止。已完成的工作已保留，可基于当前进展继续对话。",
+            "This turn exceeded the total time limit ({}s), so it was stopped safely to avoid running indefinitely. Completed work has been kept; continue the conversation to build on the current progress.",
             limit.as_secs()
         ),
         Some(crate::agent::executor_core::PacingExceeded::AbsoluteIterations { limit }) => format!(
-            "本轮迭代次数已达到单轮绝对上限（{limit} 次），在此安全停止。已完成的工作已保留，发送任意消息即可基于当前进展继续。"
+            "This turn reached the absolute per-turn iteration limit ({limit}), so it was stopped safely. Completed work has been kept; send any message to continue from the current progress."
         ),
         Some(crate::agent::executor_core::PacingExceeded::TokenBudget { used, limit }) => format!(
-            "自上次取得进展以来已消耗约 {used} tokens（无进展 token 硬上限 {limit}）仍未有任何工具成功，为控制成本在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
+            "About {used} tokens were spent since the last progress (no-progress hard limit {limit}) without any successful tool call, so this turn was stopped safely to control cost. Completed work has been kept; continue the conversation to build on the current progress."
         ),
         Some(crate::agent::executor_core::PacingExceeded::IterationBudget { limit }) => format!(
-            "连续 {limit} 轮迭代未取得任何进展，为避免空转在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
+            "No progress was made for {limit} consecutive iterations, so this turn was stopped safely to avoid spinning. Completed work has been kept; continue the conversation to build on the current progress."
         ),
         None => format!(
-            "连续多轮迭代未取得任何进展（无进展上限 {max_iterations}），为避免空转在此安全停止。已完成的工作已保留，可基于当前进展继续对话。"
+            "No progress was made across many consecutive iterations (no-progress limit {max_iterations}), so this turn was stopped safely to avoid spinning. Completed work has been kept; continue the conversation to build on the current progress."
         ),
     };
     _turn_metrics.mark_ok();
@@ -5783,8 +6362,9 @@ async fn finalize_loop_recovery(
     on_delta: Option<&tokio::sync::mpsc::Sender<DraftEvent>>,
 ) -> String {
     let text = format!(
-        "\u{26a0}\u{fe0f} 已自动停止重复的无效操作：{reason}。\n\n为避免空转，我没有继续强行重复同一动作。\
-         请调整需求、补充信息或换一个方向，我会继续。"
+        "\u{26a0}\u{fe0f} Stopped a repeated ineffective action automatically: {reason}.\n\n\
+         To avoid spinning, I did not keep forcing the same action. \
+         Adjust the request, add missing details, or pick another direction and I will continue."
     );
     history.push(ChatMessage::assistant(text.clone()));
     if let Some(tx) = on_delta {
@@ -6009,6 +6589,9 @@ pub async fn run(
         match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
             Ok(registry) => {
                 let registry = std::sync::Arc::new(registry);
+                crate::tools::mcp::client::register_global_registry(std::sync::Arc::clone(
+                    &registry,
+                ));
                 if config.mcp.deferred_loading {
 
                     let deferred_set = crate::tools::DeferredMcpToolSet::from_registry(
@@ -6519,11 +7102,11 @@ pub async fn run(
             .config_path
             .parent()
             .map(|p| p.join("approval_audit.jsonl"));
-        let mut mgr = ApprovalManager::from_config(&config.autonomy);
-        if let Some(p) = audit_path {
-            mgr = mgr.with_audit_log_path(p);
-        }
-        Some(mgr)
+        Some(ApprovalManager::for_surface(
+            &config.autonomy,
+            true,
+            audit_path,
+        ))
     } else {
         None
     };
@@ -6535,8 +7118,6 @@ pub async fn run(
     let start = Instant::now();
 
     let mut final_output = String::new();
-
-    let base_system_prompt = system_prompt.clone();
 
     if let Some(msg) = message {
 
@@ -6562,28 +7143,36 @@ pub async fn run(
             system_prompt = format!("{prefix}\n\n{system_prompt}");
         }
 
-        if config.memory.auto_save
-            && effective_msg.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS
-            && !memory::should_skip_autosave_content(&effective_msg)
-        {
-            let user_key = autosave_memory_key("user_msg");
-            let _ = mem
-                .store(
-                    &user_key,
-                    &effective_msg,
-                    MemoryCategory::Conversation,
-                    memory_session_id.as_deref(),
-                )
-                .await;
-        }
-
-        let mem_context = build_context(
+        let autosave_fut = async {
+            if config.memory.auto_save
+                && effective_msg.chars().count() >= AUTOSAVE_MIN_MESSAGE_CHARS
+                && !memory::should_skip_autosave_content(&effective_msg)
+            {
+                let user_key = autosave_content_key("user_msg", &effective_msg);
+                let _ = mem
+                    .store(
+                        &user_key,
+                        &effective_msg,
+                        MemoryCategory::Conversation,
+                        memory_session_id.as_deref(),
+                    )
+                    .await;
+            }
+        };
+        let recall_fut = build_context(
             mem.as_ref(),
             &effective_msg,
             config.memory.min_relevance_score,
             memory_session_id.as_deref(),
-        )
-        .await;
+        );
+        let expansion_fut = crate::agent::context::expansion::expand_input(
+            &effective_msg,
+            &config.workspace_dir,
+            crate::context::builder::FocusPathRegistry::current(),
+            String::new(),
+        );
+        let ((), mem_context, expanded_msg) =
+            tokio::join!(autosave_fut, recall_fut, expansion_fut);
         let hw_context = if !board_names.is_empty() {
             let rag_limit = if config.agent.compact_context { 2 } else { 5 };
             hardware_rag
@@ -6594,27 +7183,11 @@ pub async fn run(
             String::new()
         };
         let context = format!("{mem_context}{hw_context}");
-        // Resolve @file/@folder/@codebase tags into inline <context> blocks so
-        // CLI users get Cursor-style attachment semantics. Recent focus files
-        // back the @recent tag. Raw text is still used for memory recall and
-        // intent, so only the envelope carries the expanded payload.
-        let expanded_msg = crate::agent::context::expansion::expand_input(
-            &effective_msg,
-            &config.workspace_dir,
-            crate::context::builder::FocusPathRegistry::current(),
-            String::new(),
-        )
-        .await;
-        let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-        let enriched = if context.is_empty() {
-            format!("[{now}] {expanded_msg}")
-        } else {
-            format!("{context}[{now}] {expanded_msg}")
-        };
+        let companion = build_cli_turn_companion(&effective_msg, &expanded_msg, &context);
 
         let mut history = vec![
             ChatMessage::system(&system_prompt),
-            ChatMessage::user(&enriched),
+            ChatMessage::user(&effective_msg).with_turn_companion(companion),
         ];
 
         if config.agent.history_pruning.enabled {
@@ -6769,8 +7342,6 @@ pub async fn run(
             vec![ChatMessage::system(&system_prompt)]
         };
 
-        let mut interactive_turn_count: u32 = 0;
-
         loop {
 
             let prompt_prefix = {
@@ -6886,28 +7457,26 @@ pub async fn run(
                 }
             }
 
-            interactive_turn_count += 1;
-            if interactive_turn_count > 1 {
-                system_prompt = base_system_prompt.clone();
-            }
-
             let thinking_level =
                 crate::agent::thinking::resolve_thinking_level(None, None, &config.agent.thinking);
             let thinking_params = crate::agent::thinking::apply_thinking_level(thinking_level);
             let effective_temperature = crate::agent::thinking::clamp_temperature(
                 temperature + thinking_params.temperature_adjustment,
             );
-            if let Some(ref prefix) = thinking_params.system_prompt_prefix {
-                system_prompt = format!("{prefix}\n\n{system_prompt}");
-            }
 
-            let mem_context = build_context(
+            let recall_fut = build_context(
                 mem.as_ref(),
                 &effective_input,
                 config.memory.min_relevance_score,
                 memory_session_id.as_deref(),
-            )
-            .await;
+            );
+            let expansion_fut = crate::agent::context::expansion::expand_input(
+                &effective_input,
+                &config.workspace_dir,
+                crate::context::builder::FocusPathRegistry::current(),
+                String::new(),
+            );
+            let (mem_context, expanded_input) = tokio::join!(recall_fut, expansion_fut);
             let hw_context = if !board_names.is_empty() {
                 let rag_limit = if config.agent.compact_context { 2 } else { 5 };
                 hardware_rag
@@ -6917,24 +7486,27 @@ pub async fn run(
             } else {
                 String::new()
             };
-            let extra_dir_context = String::new();
-            let context = format!("{mem_context}{hw_context}{extra_dir_context}");
-            let expanded_input = crate::agent::context::expansion::expand_input(
-                &effective_input,
-                &config.workspace_dir,
-                crate::context::builder::FocusPathRegistry::current(),
-                String::new(),
-            )
-            .await;
-            let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-            let enriched = if context.is_empty() {
-                format!("[{now}] {expanded_input}")
-            } else {
-                format!("{context}[{now}] {expanded_input}")
-            };
+            let context = format!("{mem_context}{hw_context}");
+            let companion =
+                build_cli_turn_companion(&effective_input, &expanded_input, &context);
+
+            if config.agent.history_pruning.enabled {
+                let stats = crate::agent::history::pruner::prune_history(
+                    &mut history,
+                    &config.agent.history_pruning,
+                );
+                if stats.dropped_messages > 0 || stats.collapsed_pairs > 0 {
+                    tracing::debug!(
+                        target: "cli.history",
+                        dropped = stats.dropped_messages,
+                        collapsed = stats.collapsed_pairs,
+                        "pruned interactive session history before turn"
+                    );
+                }
+            }
 
             let history_len_before_turn = history.len();
-            history.push(ChatMessage::user(&enriched));
+            history.push(ChatMessage::user(&effective_input).with_turn_companion(companion));
 
             let excluded_tools = compute_excluded_mcp_tools(
                 &tools_registry,
@@ -7029,6 +7601,7 @@ pub async fn run(
                     }
                 });
 
+            let response = scope_model_switch(async {
             let model_switch_callback = get_model_switch_state();
             if let Some(bs) = crate::bootstrap::try_get_state() {
                 if let Some(requested) = bs.read(|s| s.main_loop_model_override.clone()) {
@@ -7043,14 +7616,14 @@ pub async fn run(
                         }
                         None => {
                             eprintln!(
-                                "\x1b[31m未找到可用的 fast 模型配置：请在 model_routes 中配置 hint=\"fast\" 的路由，或设置 agent_runtime.fast_apply_model。\x1b[0m"
+                                "\x1b[31mNo usable fast model configuration found: add a model_routes entry with hint=\"fast\", or set agent_runtime.fast_apply_model.\x1b[0m"
                             );
                             bs.write(|s| s.main_loop_model_override = None);
                         }
                     }
                 }
             }
-            let response = loop {
+            let turn_response = loop {
                 let policy = crate::agent::loop_::policy::PolicyBundle::cli(
                     provider.as_ref(),
                     &tools_registry,
@@ -7111,7 +7684,7 @@ pub async fn run(
                             continue;
                         }
                         eprintln!(
-                            "\x1b[1;31m✖ 本轮请求失败：{e}\x1b[0m\n\x1b[2m  本轮输入未写入会话历史，可直接重新发送或调整后重试（网络/限流问题通常稍候重试即可）。\x1b[0m"
+                            "\x1b[1;31m✖ This turn's request failed: {e}\x1b[0m\n\x1b[2m  The input was not written to session history; resend it as-is or adjust and retry (network/rate-limit issues usually succeed after a short wait).\x1b[0m"
                         );
                         if history.len() > history_len_before_turn {
                             history.truncate(history_len_before_turn);
@@ -7120,11 +7693,10 @@ pub async fn run(
                     }
                 }
             };
+            Ok::<String, anyhow::Error>(turn_response)
+            })
+            .await?;
 
-            // Drop our retained sender so the consumer's `delta_rx.recv()` sees the
-            // channel close and drains any buffered tail events (final content /
-            // tool results) before exiting, instead of aborting mid-flush and
-            // truncating the terminal output.
             drop(delta_tx);
             match tokio::time::timeout(
                 std::time::Duration::from_secs(5),
@@ -7144,9 +7716,6 @@ pub async fn run(
                 if !content_was_streamed.load(std::sync::atomic::Ordering::Relaxed) {
                     println!("{response}");
                 }
-                // The unified loop already appended the final assistant message to
-                // `history`; only push here if it did not (avoid duplicating every
-                // reply in the interactive session history).
                 let already_in_history = history
                     .last()
                     .is_some_and(|m| m.role == "assistant" && m.content == response);
@@ -7155,8 +7724,22 @@ pub async fn run(
                 }
             }
 
+            for msg in history.iter_mut() {
+                msg.strip_ephemeral_context();
+            }
+
             if let Some(path) = session_state_file.as_deref() {
-                let _ = save_interactive_session_history_async(path, &history).await;
+                if let Err(e) = save_interactive_session_history_async(path, &history).await {
+                    tracing::error!(
+                        target: "cli.session",
+                        path = %path.display(),
+                        error = %e,
+                        "failed to save interactive session history for this turn"
+                    );
+                    eprintln!(
+                        "\x1b[33mwarning: failed to save session history ({e}); this turn may be lost on restart\x1b[0m"
+                    );
+                }
             }
         }
     }
@@ -7193,11 +7776,7 @@ pub async fn process_message(
             .config_path
             .parent()
             .map(|p| p.join("approval_audit.jsonl"));
-        let mut mgr = ApprovalManager::for_non_interactive(&config.autonomy);
-        if let Some(p) = audit_path {
-            mgr = mgr.with_audit_log_path(p);
-        }
-        mgr
+        ApprovalManager::for_surface(&config.autonomy, false, audit_path)
     };
     let mem: Arc<dyn Memory> = Arc::from(
         memory::create_memory_with_storage_and_routes_async(
@@ -7258,6 +7837,9 @@ pub async fn process_message(
         match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
             Ok(registry) => {
                 let registry = std::sync::Arc::new(registry);
+                crate::tools::mcp::client::register_global_registry(std::sync::Arc::clone(
+                    &registry,
+                ));
                 if config.mcp.deferred_loading {
                     let deferred_set = crate::tools::DeferredMcpToolSet::from_registry(
                         std::sync::Arc::clone(&registry),
@@ -7572,16 +8154,11 @@ pub async fn process_message(
         String::new(),
     )
     .await;
-    let now = chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z");
-    let enriched = if context.is_empty() {
-        format!("[{now}] {expanded_message}")
-    } else {
-        format!("{context}[{now}] {expanded_message}")
-    };
+    let companion = build_cli_turn_companion(&effective_message, &expanded_message, &context);
 
     let mut history = vec![
         ChatMessage::system(&system_prompt),
-        ChatMessage::user(&enriched),
+        ChatMessage::user(&effective_message).with_turn_companion(companion),
     ];
     let mut excluded_tools = compute_excluded_mcp_tools(
         &tools_registry,
@@ -7592,7 +8169,6 @@ pub async fn process_message(
         excluded_tools.extend(config.autonomy.non_cli_excluded_tools.iter().cloned());
     }
 
-    let pacing_default = crate::config::PacingConfig::default();
     let policy = crate::agent::loop_::policy::PolicyBundle::cli(
         provider.as_ref(),
         &tools_registry,
@@ -7600,7 +8176,7 @@ pub async fn process_message(
         provider_name,
         &model_name,
         &config.multimodal,
-        &pacing_default,
+        &config.pacing,
         &excluded_tools,
         &config.agent.tool_call_dedup_exempt,
     )

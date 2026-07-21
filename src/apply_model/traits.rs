@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 use serde::{Deserialize, Serialize};
+use std::path::PathBuf;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ApplyOptions {
@@ -12,15 +13,27 @@ pub struct ApplyOptions {
     pub dry_run: bool,
 
     pub validate: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<PathBuf>,
 }
 
 impl Default for ApplyOptions {
     fn default() -> Self {
         Self {
-            max_fuzz: 3,
+            max_fuzz: 2,
             dry_run: false,
-            validate: false,
+            validate: true,
+            path: None,
         }
+    }
+}
+
+impl ApplyOptions {
+    #[must_use]
+    pub fn with_path(mut self, path: impl Into<PathBuf>) -> Self {
+        self.path = Some(path.into());
+        self
     }
 }
 
@@ -39,8 +52,12 @@ pub struct ApplyOutcome {
 pub enum ApplyError {
     #[error("diff has no hunks")]
     EmptyDiff,
-    #[error("failed to apply {failed} of {total} hunks")]
-    HunkMismatch { failed: usize, total: usize },
+    #[error("failed to apply {failed} of {total} hunks. Details: {details:?}")]
+    HunkMismatch {
+        failed: usize,
+        total: usize,
+        details: Vec<String>,
+    },
     #[error("validator rejected the result: {reasons:?}")]
     Validation { reasons: Vec<String> },
     #[error("malformed unified diff: {0}")]

@@ -31,6 +31,8 @@ pub struct LoadedMessage {
     pub tombstoned_at: Option<String>,
 
     pub hidden_for_ui: bool,
+
+    pub created_at: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -122,6 +124,29 @@ pub trait SessionBackend: Send + Sync {
         self.load_with_tombstones(session_key).len()
     }
 
+    /// Atomically resolve one history page: total row count, the `[start, end)`
+    /// window before `before`, and the live-user-message count preceding the
+    /// window. Backends with real storage should override this to run all three
+    /// reads in ONE snapshot — composing the individual methods lets a
+    /// concurrent purge/delete between statements shift the OFFSET window and
+    /// mislabel every entry in the page.
+    fn load_page_with_counts(
+        &self,
+        session_key: &str,
+        before: Option<usize>,
+        limit: usize,
+    ) -> (Vec<LoadedMessage>, usize, usize, usize) {
+        let total = self.count_messages(session_key);
+        let end = before.unwrap_or(total).min(total);
+        let start = end.saturating_sub(limit.max(1));
+        let loaded = self.load_with_tombstones_range(session_key, start, end - start);
+        let base_user_index = loaded
+            .first()
+            .map(|m| self.count_live_user_messages_before_id(session_key, m.id))
+            .unwrap_or(0);
+        (loaded, start, total, base_user_index)
+    }
+
     fn load_tail(&self, session_key: &str, limit: usize) -> Vec<ChatMessage> {
         let mut all = self.load(session_key);
         if all.len() > limit {
@@ -196,6 +221,7 @@ pub trait SessionBackend: Send + Sync {
                 message,
                 tombstoned_at: None,
                 hidden_for_ui: false,
+                created_at: None,
             })
             .collect()
     }

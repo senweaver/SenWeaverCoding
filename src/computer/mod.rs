@@ -9,7 +9,6 @@ pub mod coordinates;
 pub mod dpi;
 pub mod grounding;
 pub mod input;
-pub mod input_lock;
 pub mod planner;
 pub mod recorder;
 pub mod run;

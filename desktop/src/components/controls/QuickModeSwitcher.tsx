@@ -12,6 +12,7 @@ import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
 import { useDockSuspend } from '../../hooks/useDockSuspend'
 import type { CodingModeId } from '../../types/codingMode'
+import { VISIBLE_CODING_MODES } from '../../types/codingMode'
 import type { TranslationKey } from '../../i18n'
 
 const QUICK_MODE_GLYPH: Record<CodingModeId, string> = {
@@ -32,27 +33,20 @@ const QUICK_MODE_GLYPH: Record<CodingModeId, string> = {
   designer: 'palette',
 }
 
-const QUICK_MODE_ORDER: CodingModeId[] = [
-  'agent',
-  'spec',
-  'plan',
-  'curator',
-  'designer',
-  'ask',
-  'debug',
-  'harness',
-]
+const QUICK_MODE_ORDER: CodingModeId[] = VISIBLE_CODING_MODES.filter(
+  (id) => id !== 'auto',
+)
 
 const QUICK_MODE_HOTKEY: Partial<Record<CodingModeId, string>> = {
   agent: '1',
-  spec: '2',
-  plan: '3',
-  ask: '4',
-  debug: '5',
-  harness: '6',
+  plan: '2',
+  curator: '3',
+  designer: '4',
+  ask: '5',
+  debug: '6',
 }
 
-const QUICK_MODE_AUTONOMOUS = new Set<CodingModeId>(['agent', 'harness'])
+const QUICK_MODE_AUTONOMOUS = new Set<CodingModeId>(['agent'])
 const QUICK_MODE_READONLY = new Set<CodingModeId>(['ask'])
 
 export function QuickModeSwitcher() {

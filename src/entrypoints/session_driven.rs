@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use std::io::{self, BufRead, Write};
+use std::io::{self, Write};
 use std::sync::Arc;
 
 use anyhow::Result;
@@ -210,12 +210,12 @@ pub async fn run_session_driven(
                         }
                         let _ = writeln!(
                             stdout,
-                            "\n\x1b[31m[force-abort] 正在强制中止当前回合\x1b[0m"
+                            "\n\x1b[31m[force-abort] Force-aborting the current turn\x1b[0m"
                         );
                     } else {
                         let _ = writeln!(
                             stdout,
-                            "\n\x1b[33m[cancelled] 已请求取消当前回合（再按一次 Ctrl+C 强制中止，提示符下按 Ctrl+C 退出）\x1b[0m"
+                            "\n\x1b[33m[cancelled] Cancellation requested for the current turn (press Ctrl+C again to force-abort; press Ctrl+C at the prompt to exit)\x1b[0m"
                         );
                     }
                     let _ = stdout.flush();
@@ -261,10 +261,9 @@ pub async fn run_session_driven(
                 let _ = stdout.flush();
             }
 
-            let mut buf = String::new();
-            match reader.read_line(&mut buf) {
-                Ok(0) => break,
-                Ok(_) => {
+            match crate::cli::input::read_line_lossy(&mut reader) {
+                Ok(None) | Err(_) => break,
+                Ok(Some(buf)) => {
                     let trimmed = buf.trim().to_string();
                     if trimmed.is_empty() {
                         continue;
@@ -276,7 +275,6 @@ pub async fn run_session_driven(
                         break;
                     }
                 }
-                Err(_) => break,
             }
         }
     });
@@ -327,7 +325,7 @@ pub async fn run_session_driven(
                     Some(Err(err)) => {
                         tracing::warn!(error = %err, "CLI: session turn failed");
                         let mut stdout = io::stdout().lock();
-                        let _ = writeln!(stdout, "\x1b[31m[error] 本轮对话失败: {err}\x1b[0m");
+                        let _ = writeln!(stdout, "\x1b[31m[error] Turn failed: {err}\x1b[0m");
                         let _ = stdout.flush();
                     }
                     None => {
@@ -335,7 +333,7 @@ pub async fn run_session_driven(
                         let mut stdout = io::stdout().lock();
                         let _ = writeln!(
                             stdout,
-                            "\x1b[31m[force-abort] 已强制中止当前回合\x1b[0m"
+                            "\x1b[31m[force-abort] Current turn force-aborted\x1b[0m"
                         );
                         let _ = stdout.flush();
                     }
@@ -371,7 +369,7 @@ pub async fn run_session_driven(
                 if let Err(err) = result {
                     tracing::warn!(error = %err, "CLI: session follow-up turn failed");
                     let mut stdout = io::stdout().lock();
-                    let _ = writeln!(stdout, "\x1b[31m[error] 续转对话失败: {err}\x1b[0m");
+                    let _ = writeln!(stdout, "\x1b[31m[error] Follow-up turn failed: {err}\x1b[0m");
                     let _ = stdout.flush();
                 }
             }

@@ -851,6 +851,13 @@ impl Channel for DiscordChannel {
     async fn listen(&self, tx: tokio::sync::mpsc::Sender<ChannelMessage>) -> anyhow::Result<()> {
         let bot_user_id = Self::bot_user_id_from_token(&self.bot_token).unwrap_or_default();
         let mut reconnect_attempt: u32 = 0;
+        let mut resume_state: Option<(String, String)> = None;
+        let mut sequence: i64 = -1;
+        let mut processed_ids: std::collections::VecDeque<String> =
+            std::collections::VecDeque::new();
+        let mut processed_set: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        const PROCESSED_ID_CAP: usize = 512;
 
         loop {
             if tx.is_closed() {
@@ -860,21 +867,26 @@ impl Channel for DiscordChannel {
 
             let session_started = std::time::Instant::now();
             let session: anyhow::Result<bool> = async {
-        let gw_resp: serde_json::Value = self
-            .http_client()
-            .get("https://discord.com/api/v10/gateway/bot")
-            .header("Authorization", format!("Bot {}", self.bot_token))
-            .send()
-            .await?
-            .json()
-            .await?;
+        let resume_attempt = resume_state.clone().filter(|_| sequence >= 0);
+        let ws_url = match &resume_attempt {
+            Some((_, resume_url)) => format!("{resume_url}/?v=10&encoding=json"),
+            None => {
+                let gw_resp: serde_json::Value = self
+                    .http_client()
+                    .get("https://discord.com/api/v10/gateway/bot")
+                    .header("Authorization", format!("Bot {}", self.bot_token))
+                    .send()
+                    .await?
+                    .json()
+                    .await?;
 
-        let gw_url = gw_resp
-            .get("url")
-            .and_then(|u| u.as_str())
-            .unwrap_or("wss://gateway.discord.gg");
-
-        let ws_url = format!("{gw_url}/?v=10&encoding=json");
+                let gw_url = gw_resp
+                    .get("url")
+                    .and_then(|u| u.as_str())
+                    .unwrap_or("wss://gateway.discord.gg");
+                format!("{gw_url}/?v=10&encoding=json")
+            }
+        };
         tracing::info!("Discord: connecting to gateway...");
 
         let (ws_stream, _) = crate::services::require_services()
@@ -891,25 +903,40 @@ impl Channel for DiscordChannel {
             .and_then(serde_json::Value::as_u64)
             .unwrap_or(41250);
 
-        let identify = json!({
-            "op": 2,
-            "d": {
-                "token": self.bot_token,
-                "intents": 37377,
-                "properties": {
-                    "os": "linux",
-                    "browser": "sen",
-                    "device": "sen"
-                }
+        match &resume_attempt {
+            Some((session_id, _)) => {
+                let resume = json!({
+                    "op": 6,
+                    "d": {
+                        "token": self.bot_token,
+                        "session_id": session_id,
+                        "seq": sequence,
+                    }
+                });
+                write
+                    .send(Message::Text(resume.to_string().into()))
+                    .await?;
+                tracing::info!("Discord: connected, attempting session RESUME (op 6)");
             }
-        });
-        write
-            .send(Message::Text(identify.to_string().into()))
-            .await?;
-
-        tracing::info!("Discord: connected and identified");
-
-        let mut sequence: i64 = -1;
+            None => {
+                let identify = json!({
+                    "op": 2,
+                    "d": {
+                        "token": self.bot_token,
+                        "intents": 37377,
+                        "properties": {
+                            "os": "linux",
+                            "browser": "sen",
+                            "device": "sen"
+                        }
+                    }
+                });
+                write
+                    .send(Message::Text(identify.to_string().into()))
+                    .await?;
+                tracing::info!("Discord: connected and identified");
+            }
+        }
 
         const MAX_MISSED_ACKS: u32 = 3;
         let mut missed_ack_count: u32 = 0;
@@ -998,12 +1025,23 @@ impl Channel for DiscordChannel {
                         }
 
                         7 => {
-                            tracing::warn!("Discord: received Reconnect (op 7), closing for restart");
+                            tracing::warn!("Discord: received Reconnect (op 7), closing for RESUME restart");
                             break;
                         }
 
                         9 => {
-                            tracing::warn!("Discord: received Invalid Session (op 9), closing for restart");
+                            let resumable = event
+                                .get("d")
+                                .and_then(serde_json::Value::as_bool)
+                                .unwrap_or(false);
+                            if !resumable {
+                                resume_state = None;
+                                sequence = -1;
+                            }
+                            tracing::warn!(
+                                resumable,
+                                "Discord: received Invalid Session (op 9), closing for restart"
+                            );
                             break;
                         }
 
@@ -1015,6 +1053,25 @@ impl Channel for DiscordChannel {
                     }
 
                     let event_type = event.get("t").and_then(|t| t.as_str()).unwrap_or("");
+                    if event_type == "READY" {
+                        let sid = event
+                            .pointer("/d/session_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let resume_url = event
+                            .pointer("/d/resume_gateway_url")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("wss://gateway.discord.gg");
+                        if !sid.is_empty() {
+                            resume_state = Some((sid.to_string(), resume_url.to_string()));
+                            tracing::info!("Discord: READY, session resume info captured");
+                        }
+                        continue;
+                    }
+                    if event_type == "RESUMED" {
+                        tracing::info!("Discord: session RESUMED; missed events replayed by gateway");
+                        continue;
+                    }
                     if event_type != "MESSAGE_CREATE" {
                         continue;
                     }
@@ -1092,6 +1149,22 @@ impl Channel for DiscordChannel {
                     };
 
                     let message_id = d.get("id").and_then(|i| i.as_str()).unwrap_or("");
+                    if !message_id.is_empty() {
+                        if processed_set.contains(message_id) {
+                            tracing::debug!(
+                                message_id,
+                                "Discord: skipping message already processed before RESUME"
+                            );
+                            continue;
+                        }
+                        processed_set.insert(message_id.to_string());
+                        processed_ids.push_back(message_id.to_string());
+                        if processed_ids.len() > PROCESSED_ID_CAP {
+                            if let Some(oldest) = processed_ids.pop_front() {
+                                processed_set.remove(&oldest);
+                            }
+                        }
+                    }
                     let channel_id = d
                         .get("channel_id")
                         .and_then(|c| c.as_str())
@@ -1167,6 +1240,13 @@ impl Channel for DiscordChannel {
                     tracing::warn!("Discord: gateway connection lost");
                 }
                 Err(e) => {
+                    if resume_state.is_some() && reconnect_attempt >= 2 {
+                        tracing::warn!(
+                            "Discord: repeated failures while trying to RESUME; falling back to a fresh IDENTIFY"
+                        );
+                        resume_state = None;
+                        sequence = -1;
+                    }
                     tracing::warn!("Discord: gateway session error: {e:#}");
                 }
             }

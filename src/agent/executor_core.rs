@@ -2,7 +2,6 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use crate::observability::agent_metrics::{self, inc_turns};
@@ -55,61 +54,6 @@ impl Drop for TurnMetricsGuard {
         if !self.finalized {
             self.emit();
         }
-    }
-}
-
-#[derive(Debug, Default)]
-pub struct ToolLoopDedup {
-
-    seen_signatures: HashMap<String, u32>,
-
-    consecutive_all_repeat: u32,
-}
-
-impl ToolLoopDedup {
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    pub fn record_batch<I, F>(&mut self, calls: I, signature_fn: F) -> bool
-    where
-        I: IntoIterator,
-        F: Fn(&I::Item) -> String,
-    {
-        let mut saw_new = false;
-        let mut count = 0usize;
-        for call in calls {
-            count += 1;
-            let sig = signature_fn(&call);
-            let entry = self.seen_signatures.entry(sig).or_insert(0);
-            if *entry == 0 {
-                saw_new = true;
-            }
-            *entry += 1;
-        }
-        if count == 0 {
-            return false;
-        }
-        if saw_new {
-            self.consecutive_all_repeat = 0;
-            false
-        } else {
-            self.consecutive_all_repeat += 1;
-            true
-        }
-    }
-
-    pub fn consecutive_all_repeat(&self) -> u32 {
-        self.consecutive_all_repeat
-    }
-
-    pub fn distinct_signatures(&self) -> usize {
-        self.seen_signatures.len()
-    }
-
-    pub fn reset(&mut self) {
-        self.seen_signatures.clear();
-        self.consecutive_all_repeat = 0;
     }
 }
 
@@ -324,23 +268,35 @@ impl DispatchMode {
         if tool_names.len() <= 1 {
             return DispatchMode::Sequential;
         }
+        // A cap of 1 means parallelism is disabled (parallel_tools_enabled=false
+        // resolves the cap to 1); run strictly sequentially.
+        if max_concurrency <= 1 {
+            return DispatchMode::Sequential;
+        }
         if tool_names.iter().any(|n| n.as_ref() == "tool_search") {
             return DispatchMode::Sequential;
         }
         if tool_names.iter().any(|n| needs_approval(n.as_ref())) {
             return DispatchMode::Sequential;
         }
-        // Two or more file-mutation tools in one batch must run sequentially:
-        // the per-session file write lock is reentrant within a session, so two
-        // concurrent edits to the same path are NOT serialized by the lock and
-        // could interleave read-modify-write and lose updates. A single mutating
-        // tool alongside reads is fine (reads don't mutate), so only collapse to
-        // sequential when multiple writers are present.
+        // Any file mutation in a multi-tool batch runs sequentially: a read
+        // racing a concurrent write can observe a half-applied file, and the
+        // per-session file write lock is reentrant within a session so it does
+        // not serialize same-session writers. Two shells also race on shared
+        // state (e.g. `cargo build` vs `cargo run` fighting over target/).
         let mutation_count = tool_names
             .iter()
             .filter(|n| crate::agent::mode::effects::is_file_mutation_tool(n.as_ref()))
             .count();
-        if mutation_count >= 2 {
+        // Use the shared command-execution predicate (covers run_terminal_cmd /
+        // execute_command too) instead of a narrower literal list.
+        let shell_count = tool_names
+            .iter()
+            .filter(|n| {
+                crate::agent::tool_handler::outcome::is_command_execution_tool(n.as_ref())
+            })
+            .count();
+        if mutation_count >= 1 || shell_count >= 2 {
             return DispatchMode::Sequential;
         }
         DispatchMode::Parallel {

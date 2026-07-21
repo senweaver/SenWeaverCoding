@@ -69,9 +69,87 @@ impl PersonalityProfile {
     }
 }
 
+const PERSONALITY_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(5);
+
+struct CachedPersonality {
+    checked_at: std::time::Instant,
+    fingerprint: u64,
+    profile: PersonalityProfile,
+}
+
+fn personality_cache()
+-> &'static parking_lot::Mutex<std::collections::HashMap<PathBuf, CachedPersonality>> {
+    static CACHE: std::sync::OnceLock<
+        parking_lot::Mutex<std::collections::HashMap<PathBuf, CachedPersonality>>,
+    > = std::sync::OnceLock::new();
+    CACHE.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn personality_fingerprint(workspace_dir: &Path) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for &filename in PERSONALITY_FILES {
+        let path = workspace_dir.join(filename);
+        filename.hash(&mut hasher);
+        match std::fs::metadata(&path) {
+            Ok(meta) => {
+                meta.len().hash(&mut hasher);
+                if let Ok(modified) = meta.modified() {
+                    modified.hash(&mut hasher);
+                }
+            }
+            Err(_) => 0u8.hash(&mut hasher),
+        }
+    }
+    let rules_dir = workspace_dir.join(".cursor").join("rules");
+    if rules_dir.is_dir() {
+        let mut paths: Vec<PathBuf> = Vec::new();
+        walk_cursor_rule_files(&rules_dir, 0, &mut paths);
+        paths.sort();
+        for path in paths {
+            path.hash(&mut hasher);
+            if let Ok(meta) = std::fs::metadata(&path) {
+                meta.len().hash(&mut hasher);
+                if let Ok(modified) = meta.modified() {
+                    modified.hash(&mut hasher);
+                }
+            }
+        }
+    }
+    hasher.finish()
+}
+
 pub fn load_personality(workspace_dir: &Path) -> PersonalityProfile {
+    {
+        let cache = personality_cache().lock();
+        if let Some(cached) = cache.get(workspace_dir) {
+            if cached.checked_at.elapsed() < PERSONALITY_CACHE_TTL {
+                return cached.profile.clone();
+            }
+        }
+    }
+
+    let fingerprint = personality_fingerprint(workspace_dir);
+    {
+        let mut cache = personality_cache().lock();
+        if let Some(cached) = cache.get_mut(workspace_dir) {
+            if cached.fingerprint == fingerprint {
+                cached.checked_at = std::time::Instant::now();
+                return cached.profile.clone();
+            }
+        }
+    }
+
     let mut profile = load_personality_files(workspace_dir, PERSONALITY_FILES);
     append_cursor_rules(&mut profile, workspace_dir);
+    personality_cache().lock().insert(
+        workspace_dir.to_path_buf(),
+        CachedPersonality {
+            checked_at: std::time::Instant::now(),
+            fingerprint,
+            profile: profile.clone(),
+        },
+    );
     profile
 }
 

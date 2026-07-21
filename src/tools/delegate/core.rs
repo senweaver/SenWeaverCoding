@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 use super::super::traits::{Tool, ToolResult};
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
+use crate::agent::subagent_limiter::{PermitResult, SubagentLimiter, SubagentPermit};
 use crate::config::{DelegateAgentConfig, DelegateToolConfig};
 use crate::observability::traits::{Observer, ObserverEvent, ObserverMetric};
 use crate::providers::{self, ChatMessage, Provider};
@@ -26,6 +27,13 @@ pub struct BackgroundDelegateResult {
     pub error: Option<String>,
     pub started_at: String,
     pub finished_at: Option<String>,
+}
+
+fn background_task_tokens()
+-> &'static parking_lot::Mutex<HashMap<String, CancellationToken>> {
+    static TOKENS: std::sync::OnceLock<parking_lot::Mutex<HashMap<String, CancellationToken>>> =
+        std::sync::OnceLock::new();
+    TOKENS.get_or_init(|| parking_lot::Mutex::new(HashMap::new()))
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize, PartialEq, Eq)]
@@ -174,6 +182,19 @@ impl DelegateTool {
         &self.cancellation_token
     }
 
+    /// The cancellation scope a delegated subagent should attach to. Prefers the
+    /// owning session/turn's live cancel token (so a parent turn cancel or a
+    /// `stop_generation` from any connection terminates the subagent too),
+    /// falling back to the tool's own token when no session turn is registered.
+    fn parent_scope_token(&self) -> CancellationToken {
+        if let Some(ctx) = crate::session::current_session_context() {
+            if let Some(feed) = crate::session::get_turn_feed(&ctx.session_id) {
+                return feed.current_cancel_token();
+            }
+        }
+        self.cancellation_token.clone()
+    }
+
     fn results_dir(&self) -> PathBuf {
         self.workspace_snapshot().join("delegate_results")
     }
@@ -183,6 +204,73 @@ impl DelegateTool {
             return Err(format!("Invalid task_id '{task_id}': must be a valid UUID"));
         }
         Ok(())
+    }
+}
+
+struct DelegateBatchCancelGuard {
+    token: CancellationToken,
+}
+
+impl Drop for DelegateBatchCancelGuard {
+    fn drop(&mut self) {
+        self.token.cancel();
+    }
+}
+
+fn resolve_subagent_limiter() -> Arc<SubagentLimiter> {
+    if let Some(rt) = crate::agent::multi_agent_runtime::global_runtime() {
+        return rt.subagent_limiter.clone();
+    }
+    match crate::services::try_get_services() {
+        Some(svc) => Arc::new(SubagentLimiter::new(
+            &svc.config().agent_runtime.subagent_limit,
+        )),
+        None => Arc::new(SubagentLimiter::new(
+            &crate::agent::subagent_limiter::SubagentLimitConfig::default(),
+        )),
+    }
+}
+
+async fn acquire_subagent_permit(
+    limiter: &SubagentLimiter,
+    label: &str,
+    cancel: &CancellationToken,
+) -> Result<SubagentPermit, String> {
+    match limiter.try_acquire() {
+        PermitResult::Granted(p) => return Ok(p),
+        PermitResult::Rejected { active, max } => {
+            return Err(format!(
+                "subagent '{label}' rejected: concurrency limit reached ({active}/{max})"
+            ));
+        }
+        PermitResult::Queued => {}
+    }
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    let mut wait = Duration::from_millis(25);
+    loop {
+        if cancel.is_cancelled() {
+            return Err(format!(
+                "subagent '{label}' cancelled while waiting for a concurrency permit"
+            ));
+        }
+        tokio::time::sleep(wait).await;
+        wait = (wait * 2).min(Duration::from_millis(500));
+        match limiter.try_acquire() {
+            PermitResult::Granted(p) => return Ok(p),
+            PermitResult::Rejected { active, max } => {
+                return Err(format!(
+                    "subagent '{label}' rejected: concurrency limit reached ({active}/{max})"
+                ));
+            }
+            PermitResult::Queued => {}
+        }
+        if std::time::Instant::now() > deadline {
+            return Err(format!(
+                "subagent '{label}' timed out waiting for a concurrency permit (active={}/{})",
+                limiter.active_count(),
+                limiter.max_concurrent()
+            ));
+        }
     }
 }
 
@@ -682,19 +770,29 @@ impl DelegateTool {
         let multimodal_config = self.multimodal_config.clone();
         let delegate_config = self.delegate_config.clone();
         let workspace_root = Arc::clone(&self.workspace_root);
-        let child_token = self.cancellation_token.child_token();
+        // Attach the background subagent to the owning turn/session cancel scope so
+        // cancelling the parent turn also terminates this detached task.
+        let child_token = self.parent_scope_token().child_token();
+        background_task_tokens()
+            .lock()
+            .insert(task_id.clone(), child_token.clone());
         let task_id_clone = task_id.clone();
+        let subagent_ctx = crate::session::subagent_session_context(
+            "delegate",
+            &task_id,
+            self.workspace_root.read().as_path(),
+        );
 
         let _bg_task = crate::runtime::spawn_supervised(
             format!("tools.delegate.bg_task.{}", task_id_clone),
-            async move {
+            crate::session::scope_session_context(subagent_ctx, async move {
 
                 let inner = DelegateTool {
                     agents,
                     security,
                     fallback_credential,
                     provider_runtime_options,
-                    depth,
+                    depth: depth.saturating_add(1),
                     parent_tools,
                     multimodal_config,
                     delegate_config,
@@ -707,22 +805,28 @@ impl DelegateTool {
                     "prompt": full_prompt,
                 });
 
-                let outcome = tokio::select! {
-                    () = child_token.cancelled() => {
-                        Err("Cancelled by parent session".to_string())
-                    }
-                    result = Box::pin(inner.execute_sync(&agent_name_owned, &full_prompt, &args_inner)) => {
-                        match result {
-                            Ok(tool_result) => {
-                                if tool_result.success {
-                                    Ok(tool_result.output)
-                                } else {
-                                    Err(tool_result.error.unwrap_or_else(|| "Unknown error".into()))
-                                }
-                            }
-                            Err(e) => Err(e.to_string()),
+                let limiter = resolve_subagent_limiter();
+                let permit =
+                    acquire_subagent_permit(&limiter, &agent_name_owned, &child_token).await;
+                let outcome = match permit {
+                    Err(msg) => Err(msg),
+                    Ok(_permit) => tokio::select! {
+                        () = child_token.cancelled() => {
+                            Err("Cancelled by parent session".to_string())
                         }
-                    }
+                        result = Box::pin(inner.execute_sync(&agent_name_owned, &full_prompt, &args_inner)) => {
+                            match result {
+                                Ok(tool_result) => {
+                                    if tool_result.success {
+                                        Ok(tool_result.output)
+                                    } else {
+                                        Err(tool_result.error.unwrap_or_else(|| "Unknown error".into()))
+                                    }
+                                }
+                                Err(e) => Err(e.to_string()),
+                            }
+                        }
+                    },
                 };
 
                 let finished_at = chrono::Utc::now().to_rfc3339();
@@ -737,7 +841,7 @@ impl DelegateTool {
                         finished_at: Some(finished_at),
                     },
                     Err(err) => {
-                        let status = if err.contains("Cancelled") {
+                        let status = if err.to_ascii_lowercase().contains("cancelled") {
                             BackgroundTaskStatus::Cancelled
                         } else {
                             BackgroundTaskStatus::Failed
@@ -754,7 +858,25 @@ impl DelegateTool {
                     }
                 };
 
+                background_task_tokens().lock().remove(&task_id_clone);
+
                 let result_path = results_dir.join(format!("{}.json", task_id_clone));
+                let already_cancelled = match tokio::fs::read(&result_path).await {
+                    Ok(bytes) => serde_json::from_slice::<BackgroundDelegateResult>(&bytes)
+                        .map(|r| r.status == BackgroundTaskStatus::Cancelled)
+                        .unwrap_or(false),
+                    Err(_) => false,
+                };
+                let final_result = if already_cancelled
+                    && final_result.status != BackgroundTaskStatus::Cancelled
+                {
+                    BackgroundDelegateResult {
+                        status: BackgroundTaskStatus::Cancelled,
+                        ..final_result
+                    }
+                } else {
+                    final_result
+                };
                 if let Ok(bytes) = serde_json::to_vec_pretty(&final_result) {
                     let _ = tokio::fs::write(&result_path, &bytes).await;
                 }
@@ -810,7 +932,7 @@ impl DelegateTool {
                         }),
                     );
                 }
-            },
+            }),
         );
 
         Ok(ToolResult {
@@ -877,6 +999,14 @@ impl DelegateTool {
             }
         }
 
+        let limiter = resolve_subagent_limiter();
+        // Parallel batch children attach to the owning turn/session cancel scope so
+        // a parent cancel tears down the whole in-flight batch (lineage subtree).
+        let batch_token = self.parent_scope_token().child_token();
+        let _batch_guard = DelegateBatchCancelGuard {
+            token: batch_token.clone(),
+        };
+
         let mut handles = Vec::with_capacity(agent_names.len());
         for agent_name in &agent_names {
             let agents = Arc::clone(&self.agents);
@@ -888,30 +1018,67 @@ impl DelegateTool {
             let multimodal_config = self.multimodal_config.clone();
             let delegate_config = self.delegate_config.clone();
             let workspace_root = Arc::clone(&self.workspace_root);
-            let cancellation_token = self.cancellation_token.child_token();
+            let cancellation_token = batch_token.child_token();
+            let limiter = Arc::clone(&limiter);
             let agent_name = agent_name.clone();
             let prompt = prompt.to_string();
             let args_clone = args.clone();
 
             let (tx, rx) = tokio::sync::oneshot::channel();
             let inner_agent_name = agent_name.clone();
-            crate::runtime::spawn_supervised("tools.delegate_subagent", async move {
+            let subagent_ctx = crate::session::subagent_session_context(
+                &format!("delegate-par-{agent_name}"),
+                &uuid::Uuid::new_v4().simple().to_string(),
+                self.workspace_root.read().as_path(),
+            );
+            crate::runtime::spawn_supervised(
+                "tools.delegate_subagent",
+                crate::session::scope_session_context(subagent_ctx, async move {
+                let _permit = match acquire_subagent_permit(
+                    &limiter,
+                    &inner_agent_name,
+                    &cancellation_token,
+                )
+                .await
+                {
+                    Ok(p) => p,
+                    Err(msg) => {
+                        let _ = tx.send((
+                            inner_agent_name,
+                            Ok(ToolResult {
+                                success: false,
+                                output: String::new(),
+                                error: Some(msg),
+                            }),
+                        ));
+                        return;
+                    }
+                };
                 let inner = DelegateTool {
                     agents,
                     security,
                     fallback_credential,
                     provider_runtime_options,
-                    depth,
+                    depth: depth.saturating_add(1),
                     parent_tools,
                     multimodal_config,
                     delegate_config,
                     workspace_root,
-                    cancellation_token,
+                    cancellation_token: cancellation_token.clone(),
                 };
-                let result =
-                    Box::pin(inner.execute_sync(&inner_agent_name, &prompt, &args_clone)).await;
+                let result = tokio::select! {
+                    () = cancellation_token.cancelled() => Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "subagent '{inner_agent_name}' cancelled with its parent batch"
+                        )),
+                    }),
+                    r = Box::pin(inner.execute_sync(&inner_agent_name, &prompt, &args_clone)) => r,
+                };
                 let _ = tx.send((inner_agent_name, result));
-            });
+                }),
+            );
             handles.push(rx);
         }
 
@@ -1085,6 +1252,17 @@ impl DelegateTool {
         let bytes = serde_json::to_vec_pretty(&result)?;
         tokio::fs::write(&result_path, &bytes).await?;
 
+        let signalled = {
+            let tokens = background_task_tokens().lock();
+            match tokens.get(task_id) {
+                Some(token) => {
+                    token.cancel();
+                    true
+                }
+                None => false,
+            }
+        };
+
         crate::event_bus::integration::publish_task_delegation_now(
             "delegate",
             task_id,
@@ -1094,7 +1272,13 @@ impl DelegateTool {
 
         Ok(ToolResult {
             success: true,
-            output: format!("Task '{task_id}' cancellation requested."),
+            output: if signalled {
+                format!("Task '{task_id}' cancelled; the running subagent was signalled to stop.")
+            } else {
+                format!(
+                    "Task '{task_id}' marked cancelled (no live subagent handle in this process; the record will stay cancelled)."
+                )
+            },
             error: None,
         })
     }
@@ -1150,8 +1334,7 @@ impl DelegateTool {
             .add_section(Box::new(crate::agent::prompt::ToolsSection))
             .add_section(Box::new(crate::agent::prompt::SafetySection))
             .add_section(Box::new(crate::agent::prompt::SkillsSection))
-            .add_section(Box::new(crate::agent::prompt::WorkspaceSection))
-            .add_section(Box::new(crate::agent::prompt::DateTimeSection));
+            .add_section(Box::new(crate::agent::prompt::WorkspaceSection));
 
         let mut enriched = builder.build(&ctx).unwrap_or_default();
 
@@ -1203,7 +1386,10 @@ impl DelegateTool {
             parent_tools
                 .iter()
                 .filter(|tool| allowed.contains(tool.name()))
-                .filter(|tool| tool.name() != "delegate")
+                .filter(|tool| {
+                    let n = tool.name();
+                    n != "delegate" && n != "delegate_parallel" && n != "spawn_workers"
+                })
                 .map(|tool| Box::new(ToolArcRef::new(tool.clone())) as Box<dyn Tool>)
                 .collect()
         };

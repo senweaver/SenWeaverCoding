@@ -5,7 +5,6 @@
 pub mod cli;
 pub mod mcp_server;
 pub mod sdk;
-pub mod sdk_types;
 pub mod session_driven;
 
 pub use cli::CliEntrypoint;
@@ -13,7 +12,7 @@ pub use mcp_server::McpServerEntrypoint;
 pub use sdk::SdkEntrypoint;
 pub use sdk::SdkSession;
 pub use sdk::SdkToolCallBuilder;
-pub use sdk_types::{
+pub use sdk::types::{
     HookEvent, PermissionMode, SdkConfig, SdkHookCallback, SdkMcpServer, SdkMessage, SdkModelUsage,
     SdkStatus, SdkToolCall, SdkTurnEvent, SdkTurnResult,
 };

@@ -34,6 +34,9 @@ pub struct CoordinationMetrics {
 
     pub crdt_local_ops: AtomicU64,
     pub crdt_remote_updates: AtomicU64,
+    pub crdt_conflicts: AtomicU64,
+
+    pub vector_dim_mismatch: AtomicU64,
 }
 
 impl CoordinationMetrics {
@@ -64,6 +67,8 @@ impl CoordinationMetrics {
             delegate_parallel_fallback: self.delegate_parallel_fallback.load(Ordering::Relaxed),
             crdt_local_ops: self.crdt_local_ops.load(Ordering::Relaxed),
             crdt_remote_updates: self.crdt_remote_updates.load(Ordering::Relaxed),
+            crdt_conflicts: self.crdt_conflicts.load(Ordering::Relaxed),
+            vector_dim_mismatch: self.vector_dim_mismatch.load(Ordering::Relaxed),
         }
     }
 }
@@ -85,6 +90,8 @@ pub struct CoordinationSnapshot {
     pub delegate_parallel_fallback: u64,
     pub crdt_local_ops: u64,
     pub crdt_remote_updates: u64,
+    pub crdt_conflicts: u64,
+    pub vector_dim_mismatch: u64,
 }
 
 impl CoordinationSnapshot {
@@ -161,6 +168,11 @@ impl CoordinationSnapshot {
         );
         counter!("sen_crdt_local_ops_total", self.crdt_local_ops);
         counter!("sen_crdt_remote_updates_total", self.crdt_remote_updates);
+        counter!("sen_crdt_conflicts_total", self.crdt_conflicts);
+        counter!(
+            "sen_vector_dim_mismatch_total",
+            self.vector_dim_mismatch
+        );
         out
     }
 }
@@ -232,4 +244,10 @@ pub fn incr_crdt_local_ops(n: u64) {
 }
 pub fn incr_crdt_remote_updates(n: u64) {
     global().crdt_remote_updates.fetch_add(n, Ordering::Relaxed);
+}
+pub fn incr_crdt_conflicts(n: u64) {
+    global().crdt_conflicts.fetch_add(n, Ordering::Relaxed);
+}
+pub fn incr_vector_dim_mismatch() {
+    global().vector_dim_mismatch.fetch_add(1, Ordering::Relaxed);
 }

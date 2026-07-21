@@ -23,6 +23,7 @@ const CODE_TO_KEY: Record<string, TranslationKey> = {
   replay_completed: 'computerUse.msg.replayCompleted',
   smart_replaying_steps: 'computerUse.msg.smartReplayingSteps',
   smart_replay_locating: 'computerUse.msg.smartReplayLocating',
+  smart_replay_local_match: 'computerUse.msg.smartReplayLocalMatch',
   smart_replay_step_failed: 'computerUse.msg.smartReplayStepFailed',
   smart_replay_budget_exhausted: 'computerUse.msg.smartReplayBudget',
   smart_replay_grounding_failed: 'computerUse.msg.smartReplayGrounding',

@@ -5,7 +5,7 @@ use super::super::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use serde_json::json;
 
-pub use crate::services::team_store::{TeamInfo, TeamRegistry};
+pub use crate::services::team::store::{TeamInfo, TeamRegistry};
 
 pub struct TeamCreateTool {
     registry: TeamRegistry,
@@ -105,7 +105,7 @@ impl Tool for TeamCreateTool {
             }
             None => crate::agent::team_protocol::TeamConfig::default(),
         };
-        crate::services::team_runtime::create_team(
+        crate::services::team::runtime::create_team(
             &id,
             name,
             &members,

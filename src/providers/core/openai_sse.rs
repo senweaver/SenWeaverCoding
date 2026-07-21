@@ -654,6 +654,19 @@ pub fn sse_bytes_to_events(
                                 if choice.finish_reason.is_some() {
                                     saw_terminator = true;
                                 }
+                                if let Some(reason) = choice
+                                    .finish_reason
+                                    .as_deref()
+                                    .and_then(crate::providers::traits::StopReason::from_wire)
+                                {
+                                    if tx
+                                        .send(Ok(StreamEvent::StopReason(reason)))
+                                        .await
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                }
                                 if choice.finish_reason.as_deref() == Some("tool_calls") {
                                     should_emit_tool_calls = true;
                                 }
@@ -743,16 +756,26 @@ pub fn sse_bytes_to_events(
 
 fn chunk_text_from_response(chunk: &StreamChunkResponse) -> Option<StreamChunk> {
     let choice = chunk.choices.first()?;
-    if let Some(content) = &choice.delta.content {
-        if !content.is_empty() {
-            return Some(StreamChunk::delta(content.clone()));
-        }
+    let content = choice
+        .delta
+        .content
+        .as_deref()
+        .filter(|c| !c.is_empty());
+    let reasoning = choice
+        .delta
+        .reasoning_content
+        .as_deref()
+        .filter(|r| !r.is_empty());
+    match (content, reasoning) {
+        (None, None) => None,
+        // Carry BOTH when a single chunk has content and reasoning together, so
+        // the reasoning stream is never silently dropped on this path.
+        (content, reasoning) => Some(StreamChunk {
+            delta: content.unwrap_or("").to_string(),
+            reasoning: reasoning.map(str::to_string),
+            is_final: false,
+            token_count: 0,
+        }),
     }
-    if let Some(reasoning) = &choice.delta.reasoning_content {
-        if !reasoning.is_empty() {
-            return Some(StreamChunk::reasoning(reasoning.clone()));
-        }
-    }
-    None
 }
 

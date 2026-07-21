@@ -24,21 +24,72 @@ type PendingCodingModeTransition = {
 
 const LOCALE_STORAGE_KEY = 'sen-locale'
 
+const TRAY_SYNC_RETRY_DELAYS_MS = [500, 2000]
+
+function isTauriEnv(): boolean {
+  return (
+    typeof window !== 'undefined' &&
+    ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
+  )
+}
+
 export async function syncTrayLabels(locale: Locale): Promise<void> {
-  if (typeof window === 'undefined') return
-  if (!('__TAURI_INTERNALS__' in window || '__TAURI__' in window)) return
+  if (!isTauriEnv()) return
   try {
-    const [{ invoke }, { translate }] = await Promise.all([
+    const [{ invoke }, i18n] = await Promise.all([
       import('@tauri-apps/api/core'),
       import('../i18n'),
     ])
-    await invoke('set_tray_labels', {
-      show: translate(locale, 'tray.show'),
-      stopComputer: translate(locale, 'tray.stopComputerControl'),
-      quit: translate(locale, 'tray.quit'),
-    })
-  } catch {
-    // Tray label sync is best-effort (e.g. tray not yet initialized); ignore.
+    await i18n.ensureLocaleLoaded(locale).catch(() => {})
+    const payload = {
+      show: i18n.translate(locale, 'tray.show'),
+      stopComputer: i18n.translate(locale, 'tray.stopComputerControl'),
+      quit: i18n.translate(locale, 'tray.quit'),
+      tooltip: i18n.translate(locale, 'tray.tooltip'),
+    }
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await invoke('set_tray_labels', payload)
+        return
+      } catch (err) {
+        if (attempt >= TRAY_SYNC_RETRY_DELAYS_MS.length) {
+          console.warn('[settings] tray label sync failed after retries:', err)
+          return
+        }
+        await new Promise((resolve) =>
+          setTimeout(resolve, TRAY_SYNC_RETRY_DELAYS_MS[attempt]),
+        )
+      }
+    }
+  } catch (err) {
+    console.warn('[settings] tray label sync unavailable:', err)
+  }
+}
+
+export async function persistUiLocaleSnapshot(locale: Locale): Promise<void> {
+  if (!isTauriEnv()) return
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('persist_ui_locale', { locale })
+  } catch (err) {
+    console.warn('[settings] persist ui locale snapshot failed:', err)
+  }
+}
+
+export async function syncLocaleToShell(locale: Locale): Promise<void> {
+  await Promise.all([syncTrayLabels(locale), persistUiLocaleSnapshot(locale)])
+}
+
+async function broadcastLocaleChanged(locale: Locale): Promise<void> {
+  if (!isTauriEnv()) return
+  try {
+    const [{ emit }, { LOCALE_CHANGED_EVENT }] = await Promise.all([
+      import('@tauri-apps/api/event'),
+      import('../i18n'),
+    ])
+    await emit(LOCALE_CHANGED_EVENT, locale)
+  } catch (err) {
+    console.warn('[settings] locale broadcast failed:', err)
   }
 }
 
@@ -473,14 +524,22 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
   },
 
   setLocale: (locale) => {
-    void import('../i18n')
-      .then(({ ensureLocaleLoaded }) => ensureLocaleLoaded(locale))
-      .catch(() => {})
-      .then(() => {
-        set({ locale })
-        try { localStorage.setItem(LOCALE_STORAGE_KEY, locale) } catch {  }
-        void syncTrayLabels(locale)
-      })
+    void (async () => {
+      try {
+        const { ensureLocaleLoaded } = await import('../i18n')
+        await ensureLocaleLoaded(locale)
+      } catch (err) {
+        console.warn(
+          `[settings] locale switch to '${locale}' aborted: dictionary failed to load`,
+          err,
+        )
+        return
+      }
+      set({ locale })
+      try { localStorage.setItem(LOCALE_STORAGE_KEY, locale) } catch {  }
+      void syncLocaleToShell(locale)
+      void broadcastLocaleChanged(locale)
+    })()
   },
 
   setTheme: async (theme) => {

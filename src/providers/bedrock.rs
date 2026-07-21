@@ -814,6 +814,10 @@ impl BedrockProvider {
     fn parse_converse_response(response: ConverseResponse) -> ProviderChatResponse {
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
+        let stop_reason = response
+            .stop_reason
+            .as_deref()
+            .and_then(crate::providers::traits::StopReason::from_wire);
 
         let usage = response.usage.map(|u| TokenUsage {
             input_tokens: u.input_tokens,
@@ -856,6 +860,8 @@ impl BedrockProvider {
             tool_calls,
             usage,
             reasoning_content: None,
+            thinking_signature: None,
+            stop_reason,
         }
     }
 

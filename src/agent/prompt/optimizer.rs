@@ -114,6 +114,22 @@ pub struct PromptOptimizer {
     adjustments: Arc<RwLock<Vec<PromptAdjustment>>>,
 }
 
+static GLOBAL_PROMPT_OPTIMIZER: std::sync::OnceLock<PromptOptimizer> =
+    std::sync::OnceLock::new();
+
+pub fn ensure_global_optimizer(config: &PromptOptimizerConfig) -> &'static PromptOptimizer {
+    GLOBAL_PROMPT_OPTIMIZER.get_or_init(|| PromptOptimizer::new(config))
+}
+
+pub fn global_optimizer() -> &'static PromptOptimizer {
+    GLOBAL_PROMPT_OPTIMIZER.get_or_init(|| {
+        let config = crate::services::try_get_services()
+            .map(|svc| svc.config().prompt_optimizer.clone())
+            .unwrap_or_default();
+        PromptOptimizer::new(&config)
+    })
+}
+
 impl PromptOptimizer {
     pub fn new(config: &PromptOptimizerConfig) -> Self {
         Self {

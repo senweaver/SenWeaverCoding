@@ -6,7 +6,7 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 use senweavercoding::memory::hnsw::{HnswMemIndex, HnswParams};
-use senweavercoding::memory::vector_index::VectorIndex;
+use senweavercoding::memory::vector::index::VectorIndex;
 
 fn rand_vec(seed: u64, dim: usize) -> Vec<f32> {
     let mut s = seed;

@@ -9,6 +9,7 @@ import {
   readMirrorBuffer,
   registerMirrorWriter,
   sessionIdFromMirrorTabId,
+  useTerminalPanelStore,
 } from '../../stores/terminalPanelStore'
 
 export type XtermViewHandle = {
@@ -80,6 +81,13 @@ export function XtermView(props: XtermViewProps) {
     onErrorRef.current = onError
   })
 
+  // Capture the cwd only for the FIRST spawn. Keeping `initialCwd` in the boot
+  // effect deps meant a later working-directory change (useTerminalCwdSync writes
+  // `cd` + updates tab.cwd) re-ran the effect, whose cleanup KILLS the PTY and
+  // respawns it — silently terminating a running dev server on tab switch. The
+  // cwd change is already applied via the `cd` command; the live PTY must survive.
+  const initialCwdRef = useRef(initialCwd)
+
   const fitRafRef = useRef<number | null>(null)
   const fit = useCallback(() => {
     if (fitRafRef.current !== null) return
@@ -141,8 +149,13 @@ export function XtermView(props: XtermViewProps) {
   useEffect(() => {
     if (!active) return
     fit()
-    terminalRef.current?.focus()
-  }, [active, fit])
+    // Agent-mirror views are read-only (disableStdin); grabbing DOM focus for
+    // them swallowed keystrokes after chat-session switches re-targeted the
+    // active terminal tab. Only interactive PTY tabs may claim focus.
+    if (mode === 'pty') {
+      terminalRef.current?.focus()
+    }
+  }, [active, fit, mode])
 
   useEffect(() => {
     let observer: ResizeObserver | null = null
@@ -233,6 +246,7 @@ export function XtermView(props: XtermViewProps) {
         terminal.onData((data) => {
           const sid = sessionIdRef.current
           if (sid != null) {
+            useTerminalPanelStore.getState().markTabInteracted(tabId)
             void terminalApi.write(sid, data).catch((err) => {
               const msg = err instanceof Error ? err.message : String(err)
               onErrorRef.current?.(msg)
@@ -244,7 +258,7 @@ export function XtermView(props: XtermViewProps) {
           const result = await terminalApi.spawn({
             cols: terminal.cols,
             rows: terminal.rows,
-            cwd: initialCwd,
+            cwd: initialCwdRef.current,
           })
           if (cancelled) {
             await terminalApi.kill(result.session_id).catch(() => {})
@@ -306,7 +320,7 @@ export function XtermView(props: XtermViewProps) {
       terminalRef.current = null
       fitRef.current = null
     }  
-  }, [tabId, mode, initialCwd])
+  }, [tabId, mode])
 
   return (
     <div

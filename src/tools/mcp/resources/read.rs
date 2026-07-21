@@ -136,7 +136,16 @@ impl Tool for McpResourcesReadTool {
             });
         };
 
-        if let Some(registry) = &self.registry {
+        // Prefer the registry injected at construction; otherwise fall back to the
+        // process-global registry published when MCP servers connected. The tool
+        // factory builds this with `None`, so without the fallback the tool could
+        // never actually read resource content.
+        let registry = self
+            .registry
+            .clone()
+            .or_else(crate::tools::mcp::client::global_registry);
+
+        if let Some(registry) = registry {
             match registry.read_resource(server, uri).await {
                 Ok(contents) => {
                     let output = serde_json::to_string_pretty(&json!({

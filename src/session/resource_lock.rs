@@ -6,7 +6,7 @@ use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use parking_lot::Mutex;
 use serde::Serialize;
@@ -16,6 +16,11 @@ const EVENT_CHANNEL_CAP: usize = 512;
 const WAIT_ANNOUNCE_DELAY: Duration = Duration::from_millis(50);
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_SNAPSHOTS_PER_SESSION: usize = 1024;
+// A promoted waiter must build its ResourceGuard (confirm) within this window.
+// If it does not — because it was cancelled/timed out at the exact instant it
+// was promoted, or its task was hard-aborted — the next acquirer reclaims the
+// lock instead of wedging on an orphaned holder for the process lifetime.
+const CLAIM_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
 pub enum ResourceKind {
@@ -62,6 +67,12 @@ struct Holder {
     session_id: String,
     title: String,
     ref_count: usize,
+    // A holder installed by promotion starts unconfirmed: the waiter must build
+    // its ResourceGuard (confirm) before `claim_deadline`, otherwise a later
+    // acquirer reclaims the lock. Immediate (uncontended) acquisitions are
+    // confirmed on creation and have no deadline.
+    confirmed: bool,
+    claim_deadline: Option<Instant>,
 }
 
 struct Pending {
@@ -141,6 +152,17 @@ impl WorkspaceResourceManager {
 
         let (acquired_immediately, rx_opt) = {
             let mut inner = self.inner.lock();
+            // Reclaim a promoted-but-never-confirmed holder whose acquirer was
+            // cancelled/aborted at the instant of promotion; without this the
+            // resource wedges for the process lifetime. Hand priority to the
+            // queue head, not the newcomer, to preserve FIFO fairness.
+            let stale = inner.holders.get(&key).is_some_and(|h| {
+                !h.confirmed && h.claim_deadline.is_some_and(|d| Instant::now() > d)
+            });
+            if stale {
+                inner.holders.remove(&key);
+                promote_next_waiter_locked(&mut inner, &key);
+            }
             let same_session_held = inner
                 .holders
                 .get(&key)
@@ -149,6 +171,8 @@ impl WorkspaceResourceManager {
             if same_session_held {
                 if let Some(holder) = inner.holders.get_mut(&key) {
                     holder.ref_count = holder.ref_count.saturating_add(1);
+                    holder.confirmed = true;
+                    holder.claim_deadline = None;
                 }
                 (true, None)
             } else if !inner.holders.contains_key(&key) {
@@ -158,6 +182,8 @@ impl WorkspaceResourceManager {
                         session_id: session_id.to_string(),
                         title: title.to_string(),
                         ref_count: 1,
+                        confirmed: true,
+                        claim_deadline: None,
                     },
                 );
                 (true, None)
@@ -217,12 +243,15 @@ impl WorkspaceResourceManager {
         }
 
         match wait_result {
-            Ok(Ok(())) => Ok(ResourceGuard {
-                manager: Arc::clone(self),
-                workspace_key: effective_workspace,
-                kind,
-                session_id: session_id.to_string(),
-            }),
+            Ok(Ok(())) => {
+                self.confirm_claim(&effective_workspace, &kind, session_id);
+                Ok(ResourceGuard {
+                    manager: Arc::clone(self),
+                    workspace_key: effective_workspace,
+                    kind,
+                    session_id: session_id.to_string(),
+                })
+            }
             Ok(Err(_)) => {
                 self.cancel_waiter(&effective_workspace, &kind, session_id);
                 Err(AcquireError::Shutdown)
@@ -266,7 +295,7 @@ impl WorkspaceResourceManager {
         let key = (
             workspace_key.to_string(),
             session_id.to_string(),
-            path.to_path_buf(),
+            snapshot_path_key(path),
         );
         let mut inner = self.inner.lock();
         inner.read_snapshots.insert(key, mtime);
@@ -278,7 +307,7 @@ impl WorkspaceResourceManager {
         let snap_key = (
             workspace_key.to_string(),
             session_id.to_string(),
-            path.to_path_buf(),
+            snapshot_path_key(path),
         );
         let mut inner = self.inner.lock();
         inner.read_snapshots.insert(snap_key, mtime);
@@ -328,7 +357,7 @@ impl WorkspaceResourceManager {
         let snap_key = (
             workspace_key.to_string(),
             session_id.to_string(),
-            path.to_path_buf(),
+            snapshot_path_key(path),
         );
         inner.read_snapshots.contains_key(&snap_key)
     }
@@ -338,7 +367,7 @@ impl WorkspaceResourceManager {
         let snap_key = (
             workspace_key.to_string(),
             session_id.to_string(),
-            path.to_path_buf(),
+            snapshot_path_key(path),
         );
         let last_seen = inner.read_snapshots.get(&snap_key).copied();
         drop(inner);
@@ -351,51 +380,8 @@ impl WorkspaceResourceManager {
         current > last_seen
     }
 
-    pub fn release_all_for_session(self: &Arc<Self>, session_id: &str) {
+    pub fn cancel_waiters_for_session(self: &Arc<Self>, session_id: &str) {
         let mut inner = self.inner.lock();
-        let mut released_keys: Vec<(String, ResourceKind)> = Vec::new();
-        for (key, holder) in inner.holders.iter() {
-            if holder.session_id == session_id {
-                released_keys.push(key.clone());
-            }
-        }
-        for key in released_keys {
-            inner.holders.remove(&key);
-            // Promote the next waiter, but only install a Holder once the waker
-            // signal is actually accepted by a still-waiting acquirer. Sending
-            // inside the lock (oneshot send is non-blocking) avoids leaving a
-            // phantom Holder for a waiter that timed out concurrently.
-            let mut promoted_holder: Option<(String, String)> = None;
-            let mut queue_empty = false;
-            if let Some(queue) = inner.waiters.get_mut(&key) {
-                while let Some(next) = queue.pop_front() {
-                    if next.waker.is_closed() {
-                        continue;
-                    }
-                    let session = next.session_id.clone();
-                    let title = next.title.clone();
-                    if next.waker.send(()).is_ok() {
-                        promoted_holder = Some((session, title));
-                        break;
-                    }
-                }
-                queue_empty = queue.is_empty();
-            }
-            if let Some((session, title)) = promoted_holder {
-                inner.holders.insert(
-                    key.clone(),
-                    Holder {
-                        session_id: session,
-                        title,
-                        ref_count: 1,
-                    },
-                );
-            }
-            if queue_empty {
-                inner.waiters.remove(&key);
-            }
-        }
-
         inner.waiters.retain(|_, q| {
             q.retain(|p| p.session_id != session_id);
             !q.is_empty()
@@ -409,6 +395,17 @@ impl WorkspaceResourceManager {
             queue.retain(|p| p.session_id != session_id);
             if queue.is_empty() {
                 inner.waiters.remove(&key);
+            }
+        }
+    }
+
+    fn confirm_claim(&self, workspace_key: &str, kind: &ResourceKind, session_id: &str) {
+        let key = (workspace_key.to_string(), kind.clone());
+        let mut inner = self.inner.lock();
+        if let Some(h) = inner.holders.get_mut(&key) {
+            if h.session_id == session_id {
+                h.confirmed = true;
+                h.claim_deadline = None;
             }
         }
     }
@@ -430,40 +427,7 @@ impl WorkspaceResourceManager {
             return;
         }
         inner.holders.remove(&key);
-
-        // Promote the next waiter, but only install a Holder for it once its waker
-        // signal is actually accepted by the still-waiting acquirer. Otherwise a
-        // waiter that timed out concurrently would leave behind a Holder with no
-        // matching ResourceGuard, wedging the resource until the session ends.
-        let mut promoted_holder: Option<(String, String)> = None;
-        let mut queue_empty = false;
-        if let Some(queue) = inner.waiters.get_mut(&key) {
-            while let Some(next) = queue.pop_front() {
-                if next.waker.is_closed() {
-                    continue;
-                }
-                let session = next.session_id.clone();
-                let title = next.title.clone();
-                if next.waker.send(()).is_ok() {
-                    promoted_holder = Some((session, title));
-                    break;
-                }
-            }
-            queue_empty = queue.is_empty();
-        }
-        if let Some((session, title)) = promoted_holder {
-            inner.holders.insert(
-                key.clone(),
-                Holder {
-                    session_id: session,
-                    title,
-                    ref_count: 1,
-                },
-            );
-        }
-        if queue_empty {
-            inner.waiters.remove(&key);
-        }
+        promote_next_waiter_locked(&mut inner, &key);
     }
 
     fn emit_wait_started(
@@ -533,23 +497,51 @@ impl Drop for ResourceGuard {
     }
 }
 
+// Promote the head of the wait queue: send its waker and install an
+// unconfirmed holder that must be confirmed (guard built) before CLAIM_GRACE.
+// If the promoted acquirer never confirms (cancelled at the promotion instant),
+// a later acquirer reclaims the stale holder instead of wedging forever.
+fn promote_next_waiter_locked(inner: &mut Inner, key: &(String, ResourceKind)) {
+    let mut promoted: Option<(String, String)> = None;
+    let mut queue_empty = false;
+    if let Some(queue) = inner.waiters.get_mut(key) {
+        while let Some(next) = queue.pop_front() {
+            if next.waker.is_closed() {
+                continue;
+            }
+            let session = next.session_id.clone();
+            let title = next.title.clone();
+            if next.waker.send(()).is_ok() {
+                promoted = Some((session, title));
+                break;
+            }
+        }
+        queue_empty = queue.is_empty();
+    }
+    if let Some((session, title)) = promoted {
+        inner.holders.insert(
+            key.clone(),
+            Holder {
+                session_id: session,
+                title,
+                ref_count: 1,
+                confirmed: false,
+                claim_deadline: Some(Instant::now() + CLAIM_GRACE),
+            },
+        );
+    }
+    if queue_empty {
+        inner.waiters.remove(key);
+    }
+}
+
 fn fs_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).ok().and_then(|m| m.modified().ok())
 }
 
 fn normalize_lock_path(path: &Path) -> String {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for comp in path.components() {
-        match comp {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                out.pop();
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    let s = out.to_string_lossy().replace('\\', "/");
+    let resolved = crate::util::normalize_path_for_containment(path);
+    let s = resolved.to_string_lossy().replace('\\', "/");
     if cfg!(windows) {
         s.to_ascii_lowercase()
     } else {
@@ -557,10 +549,14 @@ fn normalize_lock_path(path: &Path) -> String {
     }
 }
 
+fn snapshot_path_key(path: &Path) -> PathBuf {
+    PathBuf::from(normalize_lock_path(path))
+}
+
 fn scope_key_for(workspace_key: &str, kind: &ResourceKind, session_id: &str) -> String {
     match kind {
         ResourceKind::FileWrite { path } => {
-            format!("{}::file::{}", workspace_key, normalize_lock_path(path))
+            format!("file::{}", normalize_lock_path(path))
         }
         ResourceKind::Browser | ResourceKind::Shell => {
             format!("{}::session::{}", workspace_key, session_id)
@@ -577,10 +573,21 @@ fn enforce_snapshot_cap(inner: &mut Inner, workspace_key: &str, session_id: &str
         .keys()
         .filter(|(ws, sid, _)| ws == workspace_key && sid == session_id)
         .count();
-    if count > MAX_SNAPSHOTS_PER_SESSION {
+    if count <= MAX_SNAPSHOTS_PER_SESSION {
+        return;
+    }
+    let mut session_entries: Vec<(PathBuf, SystemTime)> = inner
+        .read_snapshots
+        .iter()
+        .filter(|((ws, sid, _), _)| ws == workspace_key && sid == session_id)
+        .map(|((_, _, path), mtime)| (path.clone(), *mtime))
+        .collect();
+    session_entries.sort_by_key(|(_, mtime)| *mtime);
+    let evict = count - MAX_SNAPSHOTS_PER_SESSION / 2;
+    for (path, _) in session_entries.into_iter().take(evict) {
         inner
             .read_snapshots
-            .retain(|(ws, sid, _), _| !(ws == workspace_key && sid == session_id));
+            .remove(&(workspace_key.to_string(), session_id.to_string(), path));
     }
 }
 
@@ -620,6 +627,24 @@ where
     F: std::future::Future<Output = R>,
 {
     SESSION_CONTEXT.scope(ctx, fut).await
+}
+
+pub fn subagent_session_context(kind: &str, task_id: &str, fallback_workspace_dir: &Path) -> SessionContext {
+    let session_id = format!("{kind}-{task_id}");
+    let workspace_dir = current_session_context()
+        .map(|c| c.workspace_dir)
+        .filter(|d| !d.trim().is_empty())
+        .unwrap_or_else(|| fallback_workspace_dir.to_string_lossy().into_owned());
+    SessionContext {
+        workspace_key: crate::session::workspace_run::workspace_key_from_path(
+            Path::new(&workspace_dir),
+            &session_id,
+        ),
+        title: session_id.clone(),
+        workspace_dir,
+        connection_id: None,
+        session_id,
+    }
 }
 
 pub async fn acquire_file_write_for_current_session(

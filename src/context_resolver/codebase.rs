@@ -106,11 +106,7 @@ fn rank_by_path(root: &Path, query_lc: &str) -> Vec<(PathBuf, usize)> {
 }
 
 fn rank_by_symbols(root: &Path, query_lc: &str) -> Vec<(PathBuf, usize)> {
-    let graph_path = root.join(".sen").join("symbol_graph.json");
-    let Ok(bytes) = fs::read(&graph_path) else {
-        return Vec::new();
-    };
-    let Ok(graph): Result<crate::code_intel::SymbolGraph, _> = serde_json::from_slice(&bytes)
+    let Some(graph) = crate::code_intel::symbol_graph::core::SymbolGraph::load_cached(root)
     else {
         return Vec::new();
     };

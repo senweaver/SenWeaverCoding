@@ -447,11 +447,15 @@ impl ToolSearchTool {
 }
 
 fn append_spec(output: &mut String, spec: &ToolSpec) {
-    let _ = writeln!(
-        output,
-        "<function>{{\"name\": \"{}\", \"description\": \"{}\", \"parameters\": {}}}</function>",
-        spec.name,
-        spec.description.replace('"', "\\\""),
-        spec.parameters
-    );
+    // Serialize the whole spec object with serde_json so a hostile MCP tool
+    // description (backslashes, newlines, or a literal `</function>`) cannot
+    // break out of the JSON string or inject a forged `<function>` entry. The
+    // hand-rolled string that only escaped `"` was a prompt-injection surface.
+    let obj = serde_json::json!({
+        "name": spec.name,
+        "description": spec.description,
+        "parameters": spec.parameters,
+    });
+    let serialized = serde_json::to_string(&obj).unwrap_or_else(|_| "{}".to_string());
+    let _ = writeln!(output, "<function>{serialized}</function>");
 }

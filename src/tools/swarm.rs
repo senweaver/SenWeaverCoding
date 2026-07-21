@@ -86,15 +86,22 @@ impl SwarmTool {
             .map_err(|r| r.error.unwrap_or_default())?;
 
         let temperature = agent_config.temperature.unwrap_or(0.7);
+        let timeout_secs = timeout_secs.max(1);
 
+        let subagent_ctx = crate::session::subagent_session_context(
+            "swarm",
+            agent_name,
+            self.security.workspace_root_handle().read().as_path(),
+        );
+        let call = provider.chat_with_system(
+            agent_config.system_prompt.as_deref(),
+            prompt,
+            &agent_config.model,
+            temperature,
+        );
         let result = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
-            provider.chat_with_system(
-                agent_config.system_prompt.as_deref(),
-                prompt,
-                &agent_config.model,
-                temperature,
-            ),
+            crate::session::scope_session_context(subagent_ctx, call),
         )
         .await;
 
@@ -125,7 +132,8 @@ impl SwarmTool {
             format!("[Context]\n{context}\n\n[Task]\n{prompt}")
         };
 
-        let per_agent_timeout = swarm_config.timeout_secs / swarm_config.agents.len().max(1) as u64;
+        let per_agent_timeout =
+            (swarm_config.timeout_secs / swarm_config.agents.len().max(1) as u64).max(1);
         let mut results = Vec::new();
 
         for (i, agent_name) in swarm_config.agents.iter().enumerate() {
@@ -208,68 +216,73 @@ impl SwarmTool {
                 .api_key
                 .clone()
                 .or_else(|| self.fallback_credential.clone());
-
-            let runtime_provider_name = match crate::services::try_get_services() {
-                Some(services) => {
-                    let cfg = services.config();
-                    providers::resolve_runtime_provider_name(&agent_config.provider, &cfg)
-                }
-                None => agent_config.provider.clone(),
-            };
-
-            let provider = match providers::create_provider_with_options_async(
-                runtime_provider_name,
-                credential,
-                self.provider_runtime_options.clone(),
-            )
-            .await
-            {
-                Ok(p) => p,
-                Err(e) => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!(
-                            "Failed to create provider for agent '{agent_name}': {e}"
-                        )),
-                    });
-                }
-            };
-
+            let runtime_options = self.provider_runtime_options.clone();
             let name = agent_name.clone();
             let prompt_clone = full_prompt.clone();
-            let timeout = swarm_config.timeout_secs;
+            let timeout = swarm_config.timeout_secs.max(1);
             let model = agent_config.model.clone();
             let temperature = agent_config.temperature.unwrap_or(0.7);
             let system_prompt = agent_config.system_prompt.clone();
             let provider_name = agent_config.provider.clone();
+            let subagent_ctx = crate::session::subagent_session_context(
+                "swarm",
+                &name,
+                self.security.workspace_root_handle().read().as_path(),
+            );
 
-            join_set.spawn(async move {
-                let result = tokio::time::timeout(
-                    Duration::from_secs(timeout),
-                    provider.chat_with_system(
-                        system_prompt.as_deref(),
-                        &prompt_clone,
-                        &model,
-                        temperature,
-                    ),
-                )
-                .await;
-
-                let output = match result {
-                    Ok(Ok(text)) => {
-                        if text.trim().is_empty() {
-                            "[Empty response]".to_string()
-                        } else {
-                            text
+            join_set.spawn(crate::session::scope_session_context(
+                subagent_ctx,
+                async move {
+                    let runtime_provider_name = match crate::services::try_get_services() {
+                        Some(services) => {
+                            let cfg = services.config();
+                            providers::resolve_runtime_provider_name(&provider_name, &cfg)
                         }
-                    }
-                    Ok(Err(e)) => format!("[Error] {e}"),
-                    Err(_) => format!("[Timed out after {timeout}s]"),
-                };
+                        None => provider_name.clone(),
+                    };
+                    let provider = match providers::create_provider_with_options_async(
+                        runtime_provider_name,
+                        credential,
+                        runtime_options,
+                    )
+                    .await
+                    {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return (
+                                name,
+                                provider_name,
+                                model,
+                                format!("[Error] failed to create provider: {e}"),
+                            );
+                        }
+                    };
+                    let result = tokio::time::timeout(
+                        Duration::from_secs(timeout),
+                        provider.chat_with_system(
+                            system_prompt.as_deref(),
+                            &prompt_clone,
+                            &model,
+                            temperature,
+                        ),
+                    )
+                    .await;
 
-                (name, provider_name, model, output)
-            });
+                    let output = match result {
+                        Ok(Ok(text)) => {
+                            if text.trim().is_empty() {
+                                "[Empty response]".to_string()
+                            } else {
+                                text
+                            }
+                        }
+                        Ok(Err(e)) => format!("[Error] {e}"),
+                        Err(_) => format!("[Timed out after {timeout}s]"),
+                    };
+
+                    (name, provider_name, model, output)
+                },
+            ));
         }
 
         let mut results = Vec::new();

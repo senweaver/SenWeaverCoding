@@ -606,7 +606,7 @@ impl Executor for CodeEditExecutor {
             fuzz: 3,
             scope_anchor,
         });
-        let applier = OpsApplier::default_for_workspace(workspace_root.clone());
+        let applier = OpsApplier::locked_for_workspace(workspace_root.clone());
         match applier.apply_batch(batch).await {
             Ok(_) => {
                 crate::observability::code_intel_metrics::incr_code_edit_diff_applied();
@@ -664,8 +664,9 @@ impl CodeEditExecutor {
             path: abs_path.to_path_buf(),
             contents: body.clone(),
             overwrite: false,
+            encoding: None,
         });
-        let applier = OpsApplier::default_for_workspace(workspace_root.to_path_buf());
+        let applier = OpsApplier::locked_for_workspace(workspace_root.to_path_buf());
         match applier.apply_batch(batch).await {
             Ok(_) => {
                 crate::observability::code_intel_metrics::incr_code_edit_diff_applied();
@@ -701,7 +702,7 @@ impl CodeEditExecutor {
             path: abs_path.to_path_buf(),
             missing_ok: false,
         });
-        let applier = OpsApplier::default_for_workspace(workspace_root.to_path_buf());
+        let applier = OpsApplier::locked_for_workspace(workspace_root.to_path_buf());
         match applier.apply_batch(batch).await {
             Ok(_) => {
                 let mut artifact = Artifact::new(step.id.clone(), String::new())
@@ -750,7 +751,7 @@ impl CodeEditExecutor {
             to: to_abs.clone(),
             overwrite: false,
         });
-        let applier = OpsApplier::default_for_workspace(workspace_root.to_path_buf());
+        let applier = OpsApplier::locked_for_workspace(workspace_root.to_path_buf());
         match applier.apply_batch(batch).await {
             Ok(_) => {
                 let mut artifact = Artifact::new(step.id.clone(), String::new())
@@ -795,7 +796,7 @@ impl CodeEditExecutor {
             new_text: new_body.clone(),
             anchor: None,
         });
-        let applier = OpsApplier::default_for_workspace(workspace_root.to_path_buf());
+        let applier = OpsApplier::locked_for_workspace(workspace_root.to_path_buf());
         match applier.apply_batch(batch).await {
             Ok(_) => {
                 let mut artifact = Artifact::new(step.id.clone(), new_body)

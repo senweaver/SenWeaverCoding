@@ -3,43 +3,52 @@
 // Licensed under the MIT License.
 
 import type { SettingsTab } from '../../stores/uiStore'
+import type { TranslationKey } from '../../i18n'
 
 export const PANEL_SLASH_COMMANDS = [
-  { name: 'mcp', description: 'Open available MCP tools for the current chat context' },
-  { name: 'skills', description: 'Browse user-invocable skills for the current chat context' },
-] as const
+  { name: 'mcp', descriptionKey: 'slash.mcp.desc' },
+  { name: 'skills', descriptionKey: 'slash.skills.desc' },
+] as const satisfies ReadonlyArray<{ name: string; descriptionKey: TranslationKey }>
 
 export const SETTINGS_SLASH_COMMANDS: ReadonlyArray<{
   name: string
-  description: string
+  descriptionKey: TranslationKey
   tab: SettingsTab
 }> = [
-  { name: 'plugins', description: 'Open the plugins manager', tab: 'plugins' },
+  { name: 'plugins', descriptionKey: 'slash.plugins.desc', tab: 'plugins' },
 ]
 
-export const FALLBACK_SLASH_COMMANDS = [
-  ...PANEL_SLASH_COMMANDS,
-  ...SETTINGS_SLASH_COMMANDS.map(({ name, description }) => ({ name, description })),
-  { name: 'compact', description: 'Compact conversation context' },
-  { name: 'clear', description: 'Clear conversation history' },
-  { name: 'help', description: 'Show available commands' },
-  { name: 'review', description: 'Review code changes' },
-  { name: 'commit', description: 'Create a git commit' },
-  { name: 'pr', description: 'Create a pull request' },
-  { name: 'init', description: 'Initialize project CLAUDE.md' },
-  { name: 'bug', description: 'Report a bug' },
-  { name: 'config', description: 'Open configuration' },
-  { name: 'cost', description: 'Show token usage and costs' },
-  { name: 'doctor', description: 'Diagnose installation issues' },
-  { name: 'login', description: 'Switch Anthropic accounts' },
-  { name: 'logout', description: 'Sign out of current account' },
-  { name: 'memory', description: 'Edit CLAUDE.md memory files' },
-  { name: 'model', description: 'Switch AI model' },
-  { name: 'permissions', description: 'View or manage tool permissions' },
-  { name: 'status', description: 'Show project and session status' },
-  { name: 'terminal-setup', description: 'Set up terminal integration' },
-  { name: 'vim', description: 'Toggle vim editing mode' },
+// Only commands that actually execute on this surface: local UI panels plus
+// backend registry commands runnable over the desktop WS (no TTY). The
+// authoritative list comes from the slash-commands API; this is the offline
+// fallback and must never advertise commands the backend cannot run.
+const FALLBACK_SLASH_COMMAND_KEYS: ReadonlyArray<{
+  name: string
+  descriptionKey: TranslationKey
+}> = [
+  ...PANEL_SLASH_COMMANDS.map(({ name, descriptionKey }) => ({ name, descriptionKey })),
+  ...SETTINGS_SLASH_COMMANDS.map(({ name, descriptionKey }) => ({ name, descriptionKey })),
+  { name: 'compact', descriptionKey: 'slash.compact.desc' },
+  { name: 'clear', descriptionKey: 'slash.clear.desc' },
+  { name: 'help', descriptionKey: 'slash.help.desc' },
+  { name: 'review', descriptionKey: 'slash.review.desc' },
+  { name: 'config', descriptionKey: 'slash.config.desc' },
+  { name: 'cost', descriptionKey: 'slash.cost.desc' },
+  { name: 'doctor', descriptionKey: 'slash.doctor.desc' },
+  { name: 'memory', descriptionKey: 'slash.memory.desc' },
+  { name: 'model', descriptionKey: 'slash.model.desc' },
+  { name: 'permissions', descriptionKey: 'slash.permissions.desc' },
+  { name: 'status', descriptionKey: 'slash.status.desc' },
 ]
+
+export function localizedFallbackSlashCommands(
+  t: (key: TranslationKey) => string,
+): SlashCommandOption[] {
+  return FALLBACK_SLASH_COMMAND_KEYS.map(({ name, descriptionKey }) => ({
+    name,
+    description: t(descriptionKey),
+  }))
+}
 
 export type SlashCommandOption = {
   name: string
@@ -72,7 +81,7 @@ export function resolveSlashUiAction(value: string): SlashUiAction | null {
 
 export function mergeSlashCommands(
   preferred: ReadonlyArray<SlashCommandOption>,
-  fallback: ReadonlyArray<SlashCommandOption> = FALLBACK_SLASH_COMMANDS,
+  fallback: ReadonlyArray<SlashCommandOption>,
 ): SlashCommandOption[] {
   const merged = new Map<string, SlashCommandOption>()
 

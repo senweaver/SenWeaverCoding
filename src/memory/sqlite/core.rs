@@ -43,6 +43,8 @@ pub(crate) struct VecIndexCache {
 
     indexed_max_rowid: i64,
 
+    indexed_max_updated: String,
+
     rebuilding: bool,
 }
 
@@ -52,6 +54,7 @@ impl VecIndexCache {
             index: None,
             indexed_rows: 0,
             indexed_max_rowid: 0,
+            indexed_max_updated: String::new(),
             rebuilding: false,
         }
     }
@@ -169,11 +172,19 @@ impl SqliteMemory {
                 |row| row.get(0),
             )
             .unwrap_or(0);
+        let current_max_updated: String = conn
+            .query_row(
+                "SELECT COALESCE(MAX(updated_at), '') FROM memories WHERE embedding IS NOT NULL",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap_or_default();
 
-        {
+        let (prev_max_rowid, prev_max_updated, prev_rows) = {
             let mut cache = vec_index.write();
             if cache.index.is_some()
                 && current_max_rowid == cache.indexed_max_rowid
+                && current_max_updated == cache.indexed_max_updated
                 && (current_rows - cache.indexed_rows).abs() < VEC_INDEX_REBUILD_THRESHOLD
             {
                 return Ok(());
@@ -182,6 +193,58 @@ impl SqliteMemory {
                 return Ok(());
             }
             cache.rebuilding = true;
+            (
+                cache.indexed_max_rowid,
+                cache.indexed_max_updated.clone(),
+                cache.indexed_rows,
+            )
+        };
+
+        // Prefer an incremental upsert (only rows added or updated since the last
+        // index pass) over rebuilding the whole index from every row each turn.
+        // Falls back to a full rebuild when the index does not yet exist or when a
+        // deletion is detected (a shrinking row count means an id must be evicted,
+        // which the incremental path cannot resolve without the full id set).
+        let has_index = vec_index.read().index.is_some();
+        let new_rows_since: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memories WHERE embedding IS NOT NULL AND rowid > ?1",
+                params![prev_max_rowid],
+                |row| row.get(0),
+            )
+            .unwrap_or(-1);
+        let no_deletions =
+            new_rows_since >= 0 && current_rows == prev_rows + new_rows_since;
+        let incremental_eligible = has_index && prev_max_rowid > 0 && no_deletions;
+
+        if incremental_eligible {
+            let changed = Self::load_changed_embeddings(conn, prev_max_rowid, &prev_max_updated);
+            match changed {
+                Ok(rows) => {
+                    let mut cache = vec_index.write();
+                    cache.rebuilding = false;
+                    if let Some(backend) = cache.index.as_mut() {
+                        let mut upserted = 0usize;
+                        for (id, emb) in &rows {
+                            backend.upsert(id, emb);
+                            upserted += 1;
+                        }
+                        tracing::debug!(
+                            rows = upserted,
+                            "Incrementally upserted SqliteMemory vector index"
+                        );
+                        cache.indexed_rows = current_rows;
+                        cache.indexed_max_rowid = current_max_rowid;
+                        cache.indexed_max_updated = current_max_updated;
+                        return Ok(());
+                    }
+                    // The index vanished between checks; fall through to full rebuild below.
+                }
+                Err(err) => {
+                    vec_index.write().rebuilding = false;
+                    return Err(err);
+                }
+            }
         }
 
         let rebuild = || -> anyhow::Result<(Box<dyn VectorIndex>, usize)> {
@@ -219,10 +282,36 @@ impl SqliteMemory {
                 cache.index = Some(backend);
                 cache.indexed_rows = current_rows;
                 cache.indexed_max_rowid = current_max_rowid;
+                cache.indexed_max_updated = current_max_updated;
                 Ok(())
             }
             Err(err) => Err(err),
         }
+    }
+
+    fn load_changed_embeddings(
+        conn: &Connection,
+        prev_max_rowid: i64,
+        prev_max_updated: &str,
+    ) -> anyhow::Result<Vec<(String, Vec<f32>)>> {
+        let mut stmt = conn.prepare(
+            "SELECT id, embedding FROM memories \
+             WHERE embedding IS NOT NULL AND (rowid > ?1 OR updated_at > ?2)",
+        )?;
+        let rows = stmt.query_map(params![prev_max_rowid, prev_max_updated], |row| {
+            let id: String = row.get(0)?;
+            let blob: Vec<u8> = row.get(1)?;
+            Ok((id, blob))
+        })?;
+        let mut out = Vec::new();
+        for row in rows {
+            let (id, blob) = row?;
+            let emb = vector::bytes_to_vec(&blob);
+            if !emb.is_empty() {
+                out.push((id, emb));
+            }
+        }
+        Ok(out)
     }
 
     fn open_connection(
@@ -285,6 +374,73 @@ impl SqliteMemory {
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             % self.read_pool.len();
         self.read_pool[idx].clone()
+    }
+
+    async fn enforce_store_policy(
+        &self,
+        namespace: &str,
+        category: &MemoryCategory,
+        key: &str,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let Some(svc) = crate::services::try_get_services() else {
+            return Ok(());
+        };
+        let policy_cfg = svc.config().memory.policy.clone();
+        if policy_cfg.read_only_namespaces.is_empty()
+            && policy_cfg.max_entries_per_namespace == 0
+            && policy_cfg.max_entries_per_category == 0
+        {
+            return Ok(());
+        }
+        let enforcer = crate::memory::policy::PolicyEnforcer::new(&policy_cfg);
+        enforcer
+            .validate_store(namespace, category)
+            .map_err(|v| anyhow::anyhow!("memory store rejected: {v}"))?;
+        if policy_cfg.max_entries_per_namespace == 0
+            && policy_cfg.max_entries_per_category == 0
+        {
+            return Ok(());
+        }
+
+        let ns = namespace.to_string();
+        let cat = Self::category_to_str(category);
+        let key = key.to_string();
+        let sid = session_id.unwrap_or("").to_string();
+        let conn = self.read_conn();
+        let (exists, ns_count, cat_count) =
+            tokio::task::spawn_blocking(move || -> anyhow::Result<(bool, usize, usize)> {
+                let conn = conn.lock();
+                let exists: bool = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM memories WHERE key = ?1 \
+                     AND COALESCE(namespace, 'default') = ?2 \
+                     AND COALESCE(session_id, '') = ?3)",
+                    params![key, ns, sid],
+                    |r| r.get(0),
+                )?;
+                let ns_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM memories WHERE COALESCE(namespace, 'default') = ?1",
+                    params![ns],
+                    |r| r.get(0),
+                )?;
+                let cat_count: i64 = conn.query_row(
+                    "SELECT COUNT(*) FROM memories WHERE category = ?1",
+                    params![cat],
+                    |r| r.get(0),
+                )?;
+                Ok((exists, ns_count.max(0) as usize, cat_count.max(0) as usize))
+            })
+            .await??;
+        if exists {
+            return Ok(());
+        }
+        enforcer
+            .check_namespace_limit(ns_count)
+            .map_err(|v| anyhow::anyhow!("memory store rejected: {v}"))?;
+        enforcer
+            .check_category_limit(cat_count)
+            .map_err(|v| anyhow::anyhow!("memory store rejected: {v}"))?;
+        Ok(())
     }
 
     fn init_schema(conn: &Connection) -> anyhow::Result<()> {
@@ -657,28 +813,12 @@ impl SqliteMemory {
         &self.conn
     }
 
-    pub fn attach_vec_index(
-        &self,
-        dim: usize,
-    ) -> anyhow::Result<crate::memory::vector::index::SqliteVecIndex> {
-        let idx = crate::memory::vector::index::SqliteVecIndex::attach(self.conn.clone(), dim)?;
-        let (migrated, skipped) = idx.migrate_from_legacy_memories()?;
-        if migrated > 0 {
-            tracing::info!(
-                migrated,
-                skipped,
-                "vec_memories: migrated legacy embeddings into vector index"
-            );
-        }
-        Ok(idx)
-    }
-
     pub async fn get_or_compute_embedding(&self, text: &str) -> anyhow::Result<Option<Vec<f32>>> {
         if self.embedder.dimensions() == 0 {
             return Ok(None);
         }
 
-        let hash = Self::content_hash(text);
+        let hash = Self::content_hash(&format!("{}|{}", self.embedder.fingerprint(), text));
         let now = chrono::Utc::now().to_rfc3339();
 
         let conn = self.conn.clone();
@@ -738,8 +878,13 @@ impl SqliteMemory {
         limit: usize,
     ) -> anyhow::Result<Vec<(String, f32)>> {
 
+        // Strip embedded double quotes from each term before wrapping it in
+        // quotes; otherwise a query containing `"` produced invalid FTS5 syntax
+        // and the whole search silently returned nothing (degrading hybrid recall).
         let fts_query: String = query
             .split_whitespace()
+            .map(|w| w.replace('"', ""))
+            .filter(|w| !w.is_empty())
             .map(|w| format!("\"{w}\""))
             .collect::<Vec<_>>()
             .join(" OR ");
@@ -1022,18 +1167,26 @@ impl Memory for SqliteMemory {
         category: MemoryCategory,
         session_id: Option<&str>,
     ) -> anyhow::Result<()> {
+        self.enforce_store_policy("default", &category, key, session_id)
+            .await?;
 
-        let embedding_bytes = match self.get_or_compute_embedding(content).await {
-            Ok(embedding) => embedding.map(|emb| vector::vec_to_bytes(&emb)),
-            Err(err) => {
-                tracing::warn!(
-                    key = %key,
-                    error = %err,
-                    "memory store: embedding failed; storing entry without vector"
-                );
-                None
-            }
-        };
+        let (embedding_bytes, embedding_norm) =
+            match self.get_or_compute_embedding(content).await {
+                Ok(embedding) => {
+                    let norm = embedding
+                        .as_ref()
+                        .map(|emb| f64::from(Self::embedding_norm(emb)));
+                    (embedding.map(|emb| vector::vec_to_bytes(&emb)), norm)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        key = %key,
+                        error = %err,
+                        "memory store: embedding failed; storing entry without vector"
+                    );
+                    (None, None)
+                }
+            };
 
         let key_owned = key.to_string();
         let content_owned = content.to_string();
@@ -1048,23 +1201,32 @@ impl Memory for SqliteMemory {
             let sid = sid_owned.clone();
             let category = category.clone();
             let embedding_bytes = embedding_bytes.clone();
+            let embedding_norm = embedding_norm;
             async move {
                 tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
                     let conn = conn.lock();
                     let now = chrono::Utc::now().to_rfc3339();
                     let cat = Self::category_to_str(&category);
                     let id = Uuid::new_v4().to_string();
+                    // Score importance from category + content keywords instead of a
+                    // constant 0.5, so the rerank importance weight is actually
+                    // meaningful for agent-stored memories (previously compute_importance
+                    // was dead code and every row got 0.5).
+                    let importance =
+                        crate::memory::importance::compute_importance(&content, &category);
 
                     conn.execute(
-                        "INSERT INTO memories (id, key, content, category, embedding, created_at, updated_at, session_id, namespace, importance)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'default', 0.5)
+                        "INSERT INTO memories (id, key, content, category, embedding, embedding_norm, created_at, updated_at, session_id, namespace, importance)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'default', ?10)
                          ON CONFLICT(key, COALESCE(namespace, 'default'), COALESCE(session_id, '')) DO UPDATE SET
                             content = excluded.content,
                             category = excluded.category,
                             embedding = excluded.embedding,
+                            embedding_norm = excluded.embedding_norm,
                             updated_at = excluded.updated_at,
-                            session_id = excluded.session_id",
-                        params![id, key, content, cat, embedding_bytes, now, now, sid],
+                            session_id = excluded.session_id,
+                            importance = excluded.importance",
+                        params![id, key, content, cat, embedding_bytes, embedding_norm, now, now, sid, importance],
                     )?;
                     Ok(())
                 })
@@ -1152,13 +1314,25 @@ impl Memory for SqliteMemory {
             };
 
             let merged = if vector_results.is_empty() {
+                // Normalize raw BM25 magnitudes to [0,1] (max-scaled per batch, matching
+                // hybrid_merge) so the downstream min_relevance_score / early-return /
+                // decay thresholds — all calibrated for [0,1] cosine — actually bite in
+                // BM25-only mode instead of every unbounded score sailing past them.
+                let max_kw = keyword_results
+                    .iter()
+                    .map(|(_, s)| *s)
+                    .fold(0.0_f32, f32::max);
+                let max_kw = if max_kw < f32::EPSILON { 1.0 } else { max_kw };
                 keyword_results
                     .iter()
-                    .map(|(id, score)| vector::ScoredResult {
-                        id: id.clone(),
-                        vector_score: None,
-                        keyword_score: Some(*score),
-                        final_score: *score,
+                    .map(|(id, score)| {
+                        let normalized = score / max_kw;
+                        vector::ScoredResult {
+                            id: id.clone(),
+                            vector_score: None,
+                            keyword_score: Some(normalized),
+                            final_score: normalized,
+                        }
                     })
                     .collect::<Vec<_>>()
             } else if keyword_results.is_empty() {
@@ -1189,7 +1363,9 @@ impl Memory for SqliteMemory {
                     .join(", ");
                 let sql = format!(
                     "SELECT id, key, content, category, created_at, session_id, namespace, importance, superseded_by \
-                     FROM memories WHERE superseded_by IS NULL AND id IN ({placeholders})"
+                     FROM memories WHERE superseded_by IS NULL AND id IN ({placeholders}) \
+                     AND key NOT LIKE 'user\\_msg\\_%' ESCAPE '\\' \
+                     AND key NOT LIKE 'assistant\\_msg\\_%' ESCAPE '\\'"
                 );
                 let mut stmt = conn.prepare(&sql)?;
                 let id_params: Vec<Box<dyn rusqlite::types::ToSql>> = merged
@@ -1283,6 +1459,8 @@ impl Memory for SqliteMemory {
                     let sql = format!(
                         "SELECT id, key, content, category, created_at, session_id, namespace, importance, superseded_by FROM memories
                          WHERE superseded_by IS NULL AND ({where_clause}){time_conditions}
+                         AND key NOT LIKE 'user\\_msg\\_%' ESCAPE '\\'
+                         AND key NOT LIKE 'assistant\\_msg\\_%' ESCAPE '\\'
                          ORDER BY updated_at DESC
                          LIMIT ?{param_idx}"
                     );
@@ -1691,17 +1869,30 @@ impl Memory for SqliteMemory {
         namespace: Option<&str>,
         importance: Option<f64>,
     ) -> anyhow::Result<()> {
-        let embedding_bytes = match self.get_or_compute_embedding(content).await {
-            Ok(embedding) => embedding.map(|emb| vector::vec_to_bytes(&emb)),
-            Err(err) => {
-                tracing::warn!(
-                    key = %key,
-                    error = %err,
-                    "memory store: embedding failed; storing entry without vector"
-                );
-                None
-            }
-        };
+        self.enforce_store_policy(
+            namespace.unwrap_or("default"),
+            &category,
+            key,
+            session_id,
+        )
+        .await?;
+        let (embedding_bytes, embedding_norm) =
+            match self.get_or_compute_embedding(content).await {
+                Ok(embedding) => {
+                    let norm = embedding
+                        .as_ref()
+                        .map(|emb| f64::from(Self::embedding_norm(emb)));
+                    (embedding.map(|emb| vector::vec_to_bytes(&emb)), norm)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        key = %key,
+                        error = %err,
+                        "memory store: embedding failed; storing entry without vector"
+                    );
+                    (None, None)
+                }
+            };
 
         let conn = self.conn.clone();
         let key = key.to_string();
@@ -1717,17 +1908,18 @@ impl Memory for SqliteMemory {
             let id = Uuid::new_v4().to_string();
 
             conn.execute(
-                "INSERT INTO memories (id, key, content, category, embedding, created_at, updated_at, session_id, namespace, importance)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)
+                "INSERT INTO memories (id, key, content, category, embedding, embedding_norm, created_at, updated_at, session_id, namespace, importance)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
                  ON CONFLICT(key, COALESCE(namespace, 'default'), COALESCE(session_id, '')) DO UPDATE SET
                     content = excluded.content,
                     category = excluded.category,
                     embedding = excluded.embedding,
+                    embedding_norm = excluded.embedding_norm,
                     updated_at = excluded.updated_at,
                     session_id = excluded.session_id,
                     namespace = excluded.namespace,
                     importance = excluded.importance",
-                params![id, key, content, cat, embedding_bytes, now, now, sid, ns, imp],
+                params![id, key, content, cat, embedding_bytes, embedding_norm, now, now, sid, ns, imp],
             )?;
             Ok(())
         })

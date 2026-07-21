@@ -23,7 +23,7 @@ pub mod traits;
 pub mod unconfigured;
 pub use traits::{
     ChatMessage, ChatRequest, ChatResponse, ConversationMessage, Provider, ProviderCapabilityError,
-    TokenUsage, ToolCall, ToolResultMessage,
+    StopReason, TokenUsage, ToolCall, ToolResultMessage,
 };
 
 use crate::auth::AuthService;
@@ -1422,7 +1422,11 @@ pub fn create_provider_with_url_and_options(
 
         "openrouter" => {
             let mut p = openrouter::OpenRouterProvider::new(key, options.provider_timeout_secs)
-                .with_max_tokens(options.provider_max_tokens);
+                .with_max_tokens(options.provider_max_tokens)
+                .with_reasoning(
+                    options.reasoning_enabled,
+                    options.reasoning_effort.clone(),
+                );
             if !options.model_context_windows.is_empty() {
                 p = p.with_model_context_windows(options.model_context_windows.clone());
             }
@@ -1432,7 +1436,10 @@ pub fn create_provider_with_url_and_options(
             Ok(Box::new(p))
         }
         "anthropic" => {
-            let mut p = anthropic::AnthropicProvider::new(key);
+            let mut p = anthropic::AnthropicProvider::new(key).with_reasoning(
+                options.reasoning_enabled,
+                options.reasoning_effort.clone(),
+            );
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_tokens(mt);
             }
@@ -1461,6 +1468,9 @@ pub fn create_provider_with_url_and_options(
             let mut p = openai::responses::OpenAiResponsesProvider::with_base_url(api_url, key);
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_output_tokens(Some(mt));
+            }
+            if options.reasoning_effort.is_some() {
+                p = p.with_reasoning_effort(options.reasoning_effort.clone());
             }
             if !options.extra_headers.is_empty() {
                 p = p.with_extra_headers(options.extra_headers.clone());
@@ -1620,7 +1630,7 @@ pub fn create_provider_with_url_and_options(
                 Ok(v) if !v.trim().is_empty() => v,
                 _ => {
                     anyhow::bail!(
-                        "no_model_configured: 未配置 AZURE_OPENAI_DEPLOYMENT 或 model_providers.*.azure_openai_deployment (please set AZURE_OPENAI_DEPLOYMENT env var or add azure_openai_deployment in Provider settings)"
+                        "no_model_configured: AZURE_OPENAI_DEPLOYMENT is not set and model_providers.*.azure_openai_deployment is missing (set the AZURE_OPENAI_DEPLOYMENT env var or add azure_openai_deployment in Provider settings)"
                     );
                 }
             };
@@ -2034,8 +2044,11 @@ pub fn create_provider_with_url_and_options(
                 "Anthropic-custom provider",
                 "anthropic-custom:https://your-api.com",
             )?;
-            let mut p =
-                anthropic::AnthropicProvider::with_base_url(key, Some(&base_url));
+            let mut p = anthropic::AnthropicProvider::with_base_url(key, Some(&base_url))
+                .with_reasoning(
+                    options.reasoning_enabled,
+                    options.reasoning_effort.clone(),
+                );
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_tokens(mt);
             }
@@ -2260,7 +2273,7 @@ pub fn resolve_default_model(config: &crate::config::Config) -> anyhow::Result<S
         return Ok(name);
     }
     Err(anyhow::anyhow!(
-        "no_model_configured: 未添加模型，请先在提供商设置页添加至少一个模型 (no model configured; please add at least one model in Provider settings)"
+        "no_model_configured: no model configured; please add at least one model in Provider settings"
     ))
 }
 

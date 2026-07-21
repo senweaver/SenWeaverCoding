@@ -317,6 +317,32 @@ impl AgentRegistry {
         }
     }
 
+    pub fn reconcile_loads_after_event_lag(&self) {
+        let mut agents = self.agents.write();
+        for agent in agents.values_mut() {
+            match agent.state {
+                AgentState::Idle
+                | AgentState::Terminated
+                | AgentState::Failed
+                | AgentState::Suspended
+                | AgentState::ShuttingDown
+                | AgentState::Restarting => {
+                    agent.current_load = 0;
+                    agent.current_task = None;
+                }
+                AgentState::Active => {
+                    if agent.current_task.is_none() {
+                        agent.current_load = 0;
+                        agent.state = AgentState::Idle;
+                    } else {
+                        agent.current_load = 1;
+                    }
+                }
+            }
+            agent.last_heartbeat = Utc::now();
+        }
+    }
+
     pub fn get(&self, agent_id: &str) -> Option<AgentInfo> {
         self.agents.read().get(agent_id).cloned()
     }
@@ -396,6 +422,7 @@ impl AgentRegistry {
             .iter()
             .filter(|(_, a)| {
                 a.state != AgentState::Terminated
+                    && a.state != AgentState::Idle
                     && (now - a.last_heartbeat).num_seconds() > timeout_secs
             })
             .map(|(id, _)| id.clone())
@@ -508,8 +535,46 @@ impl AgentRegistryHandle {
         self.inner.assign_task(agent_id, task_id)
     }
 
+    pub fn assign_task_guarded(
+        &self,
+        agent_id: &str,
+        task_id: &str,
+    ) -> Result<TaskAssignmentGuard, RegistryError> {
+        self.inner.assign_task(agent_id, task_id)?;
+        Ok(TaskAssignmentGuard {
+            registry: self.clone(),
+            agent_id: agent_id.to_string(),
+            done: false,
+        })
+    }
+
     pub fn complete_task(&self, agent_id: &str, success: bool) {
         self.inner.complete_task(agent_id, success)
+    }
+
+    pub fn reconcile_loads_after_event_lag(&self) {
+        self.inner.reconcile_loads_after_event_lag()
+    }
+}
+
+pub struct TaskAssignmentGuard {
+    registry: AgentRegistryHandle,
+    agent_id: String,
+    done: bool,
+}
+
+impl TaskAssignmentGuard {
+    pub fn complete(mut self, success: bool) {
+        self.registry.complete_task(&self.agent_id, success);
+        self.done = true;
+    }
+}
+
+impl Drop for TaskAssignmentGuard {
+    fn drop(&mut self) {
+        if !self.done {
+            self.registry.complete_task(&self.agent_id, false);
+        }
     }
 }
 

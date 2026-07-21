@@ -88,52 +88,47 @@ pub async fn apply_suggestion(
     suggestion: &NepSuggestion,
     refiner: Option<&crate::apply_model::FastApplyRefiner>,
     options: &crate::apply_model::ApplyOptions,
-) -> Result<(crate::apply_model::ApplyOutcome, crate::apply_model::FastPathTier), anyhow::Error>
-{
-    let source = tokio::fs::read_to_string(&suggestion.file_path)
-        .await
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to read {}: {e}",
-                suggestion.file_path.display()
-            )
-        })?;
-    let (outcome, _final_diff, tier) =
-        crate::apply_model::apply_unified_diff_with_fast_path(
-            &source,
-            &suggestion.diff,
-            options,
-            refiner,
-            Some(suggestion.rationale.as_str()),
-        )
-        .await
-        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+    workspace_root: &std::path::Path,
+) -> Result<(crate::apply_model::BatchOutcome, crate::apply_model::FastPathTier), anyhow::Error> {
+    use crate::apply_model::{EditOrigin, OpsApplier};
+
+    // Hard workspace-containment check: a hallucinated/absolute suggestion path
+    // must never escape the workspace. Do NOT add the file's own parent to
+    // allowed_roots (that made the containment guard a no-op and let the model
+    // write anywhere on disk).
+    if !crate::util::path_is_within(&suggestion.file_path, workspace_root) {
+        anyhow::bail!(
+            "NEP suggestion path escapes workspace: {}",
+            suggestion.file_path.display()
+        );
+    }
+
     if let Some(parent) = suggestion.file_path.parent()
         && !parent.as_os_str().is_empty()
     {
         tokio::fs::create_dir_all(parent).await.ok();
     }
-    // Conflict guard: the diff was generated against `source`; abort if the file
-    // changed on disk in the meantime rather than silently clobbering it.
-    if let Ok(current) = tokio::fs::read_to_string(&suggestion.file_path).await {
-        if current != source {
-            return Err(anyhow::anyhow!(
-                "file {} changed on disk during NEP apply; aborting to avoid overwriting concurrent changes",
-                suggestion.file_path.display()
-            ));
-        }
+
+    let applier = OpsApplier::locked_for_workspace(workspace_root.to_path_buf());
+
+    let mut options = options.clone();
+    if options.path.is_none() {
+        options.path = Some(suggestion.file_path.clone());
     }
-    let write_path = suggestion.file_path.clone();
-    let write_bytes = outcome.applied.clone().into_bytes();
-    tokio::task::spawn_blocking(move || crate::util::atomic_write(&write_path, &write_bytes))
+
+    let (outcome, tier) = applier
+        .apply_unified_diff_with_fast_path(
+            suggestion.file_path.clone(),
+            &suggestion.diff,
+            &options,
+            refiner,
+            Some(suggestion.rationale.as_str()),
+            EditOrigin::InlineEdit,
+        )
         .await
-        .map_err(|e| anyhow::anyhow!("NEP apply write task join failed: {e}"))?
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "failed to write {}: {e}",
-                suggestion.file_path.display()
-            )
-        })?;
+        .map_err(|e| anyhow::anyhow!(e.to_string()))?;
+
+    crate::session::record_write_for_current_session(&suggestion.file_path);
     Ok((outcome, tier))
 }
 

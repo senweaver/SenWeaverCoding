@@ -161,6 +161,7 @@ pub enum AgentEvent {
         tool_name: String,
         tool_id: String,
         args_summary: String,
+        arguments: serde_json::Value,
     },
 
     QuestionAsked {

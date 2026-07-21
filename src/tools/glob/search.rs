@@ -9,30 +9,7 @@ use std::sync::Arc;
 
 const MAX_RESULTS: usize = 1000;
 
-const WALK_TIMEOUT_SECS: u64 = 10;
-
-const SKIP_DIRS: &[&str] = &[
-    ".git",
-    "node_modules",
-    "target",
-    "dist",
-    "build",
-    ".venv",
-    ".tox",
-    "__pycache__",
-    ".idea",
-    ".vscode",
-    ".next",
-];
-
-fn crosses_skip_dir(path: &std::path::Path) -> bool {
-    path.components().any(|component| {
-        component
-            .as_os_str()
-            .to_str()
-            .is_some_and(|name| SKIP_DIRS.contains(&name))
-    })
-}
+use super::{GLOB_WALK_TIMEOUT_SECS as WALK_TIMEOUT_SECS, crosses_skip_dir};
 
 pub struct GlobSearchTool {
     security: Arc<SecurityPolicy>,

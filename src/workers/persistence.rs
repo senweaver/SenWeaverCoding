@@ -193,12 +193,18 @@ pub fn write_meta<P: AsRef<Path>>(
     let dir = worker_dir(workspace_root, &meta.worker_id);
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(META_FILE);
-    let tmp = dir.join(format!("{META_FILE}.tmp"));
+    let tmp = dir.join(format!(
+        "{META_FILE}.tmp.{}",
+        uuid::Uuid::new_v4().simple()
+    ));
     let bytes = serde_json::to_vec_pretty(meta).map_err(|e| {
         std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
     })?;
     std::fs::write(&tmp, &bytes)?;
-    std::fs::rename(&tmp, &path)?;
+    if let Err(e) = std::fs::rename(&tmp, &path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e);
+    }
     Ok(())
 }
 

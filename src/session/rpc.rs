@@ -2,13 +2,64 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use crate::observability::session_write_mode_metrics;
 use crate::session::state::{RemoteDelta, SessionActor, SessionDelta};
+
+/// Authenticated envelope for cross-process session deltas. The listener applies
+/// nothing without a matching `auth` token, so a co-resident process cannot inject
+/// forged ToolResult/ApprovalResponded/TurnFinished events (or a malicious pipe
+/// client on Windows, where the default named-pipe ACL allows any local user).
+#[derive(serde::Serialize, serde::Deserialize)]
+struct AuthEnvelope {
+    auth: String,
+    remote: RemoteDelta,
+}
+
+/// Path of the 0600 secret file that sits next to the socket/pipe key and holds
+/// the shared token both the listener and peers use.
+fn secret_path_for(socket_path: &Path) -> PathBuf {
+    let mut s = socket_path.as_os_str().to_os_string();
+    s.push(".secret");
+    PathBuf::from(s)
+}
+
+/// Read the shared secret, creating it (owner-only) if missing. Both the listener
+/// (on startup) and peers (before send) call this; whoever wins the race writes a
+/// random token and the other reads it.
+fn ensure_session_rpc_secret(socket_path: &Path) -> std::io::Result<String> {
+    let path = secret_path_for(socket_path);
+    if let Ok(existing) = std::fs::read_to_string(&path) {
+        let trimmed = existing.trim().to_string();
+        if !trimmed.is_empty() {
+            return Ok(trimmed);
+        }
+    }
+    let token = uuid::Uuid::new_v4().simple().to_string();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    crate::util::atomic_write(&path, token.as_bytes())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
+    }
+    // Re-read in case another process wrote first (atomic_write + rename means the
+    // last writer wins; converge on the on-disk value).
+    match std::fs::read_to_string(&path) {
+        Ok(s) if !s.trim().is_empty() => Ok(s.trim().to_string()),
+        _ => Ok(token),
+    }
+}
+
+fn secrets_match(a: &str, b: &str) -> bool {
+    crate::security::pairing::constant_time_eq(a, b)
+}
 
 #[async_trait::async_trait]
 pub trait SessionRpcTransport: Send + Sync + 'static {
@@ -67,6 +118,7 @@ pub async fn spawn_rpc_listener(
     socket_path: PathBuf,
 ) -> tokio::task::JoinHandle<()> {
     crate::runtime::spawn_supervised("session.rpc.listener", async move {
+        let listener_secret = ensure_session_rpc_secret(&socket_path).unwrap_or_default();
         #[cfg(unix)]
         {
 
@@ -84,35 +136,11 @@ pub async fn spawn_rpc_listener(
                         match listener.accept().await {
                             Ok((mut stream, _peer)) => {
                                 let actor = actor.clone();
+                                let expected = listener_secret.clone();
                                 crate::runtime::spawn_supervised("session.rpc.conn", async move {
                                     let mut buf = Vec::new();
                                     if stream.read_to_end(&mut buf).await.is_ok() {
-                                        match serde_json::from_slice::<RemoteDelta>(&buf) {
-                                            Ok(remote) => {
-                                                actor.apply_remote(remote);
-                                            }
-                                            Err(parse_err) => {
-
-                                                if let Ok(delta) =
-                                                    serde_json::from_slice::<SessionDelta>(&buf)
-                                                {
-                                                    let remote = RemoteDelta {
-                                                        source_session_id: String::new(),
-                                                        last_seen_seq: delta
-                                                            .seq
-                                                            .saturating_sub(1),
-                                                        delta,
-                                                    };
-                                                    actor.apply_remote(remote);
-                                                } else {
-                                                    tracing::warn!(
-                                                        target: "session.rpc",
-                                                        error = %parse_err,
-                                                        "failed to parse incoming delta"
-                                                    );
-                                                }
-                                            }
-                                        }
+                                        apply_authenticated_delta(&actor, &buf, &expected);
                                     }
                                 });
                             }
@@ -164,9 +192,7 @@ pub async fn spawn_rpc_listener(
                         }
                         let mut buf = Vec::new();
                         if server.read_to_end(&mut buf).await.is_ok() {
-                            if let Ok(remote) = serde_json::from_slice::<RemoteDelta>(&buf) {
-                                actor.apply_remote(remote);
-                            }
+                            apply_authenticated_delta(&actor, &buf, &listener_secret);
                         }
 
                         match transport.server() {
@@ -216,11 +242,40 @@ pub async fn send_delta_to_peer(
     send_remote_delta_to_peer(socket_path, &remote).await
 }
 
+/// Validate and apply a delta received over the local IPC channel. Anything that
+/// isn't a correctly-authenticated `AuthEnvelope` is dropped (and logged), which
+/// is what closes the unauthenticated-injection hole.
+fn apply_authenticated_delta(actor: &Arc<SessionActor>, buf: &[u8], expected: &str) {
+    match serde_json::from_slice::<AuthEnvelope>(buf) {
+        Ok(env) if !expected.is_empty() && secrets_match(&env.auth, expected) => {
+            actor.apply_remote(env.remote);
+        }
+        Ok(_) => {
+            tracing::warn!(
+                target: "session.rpc",
+                "dropped session delta with missing/incorrect auth token"
+            );
+        }
+        Err(parse_err) => {
+            tracing::warn!(
+                target: "session.rpc",
+                error = %parse_err,
+                "failed to parse authenticated session delta envelope"
+            );
+        }
+    }
+}
+
 pub async fn send_remote_delta_to_peer(
     socket_path: &std::path::Path,
     remote: &RemoteDelta,
 ) -> std::io::Result<()> {
-    let payload = serde_json::to_vec(remote)
+    let auth = ensure_session_rpc_secret(socket_path)?;
+    let envelope = AuthEnvelope {
+        auth,
+        remote: remote.clone(),
+    };
+    let payload = serde_json::to_vec(&envelope)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
 
     #[cfg(unix)]

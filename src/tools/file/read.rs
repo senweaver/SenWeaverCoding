@@ -202,7 +202,14 @@ impl Tool for FileReadTool {
                         tokio::task::spawn_blocking(move || {
                             match crate::tools::file::office::extract_pdf_text_if_pdf(&bytes) {
                                 Some(text) => text,
-                                None => String::from_utf8_lossy(&bytes).into_owned(),
+                                None => {
+                                    // Decode legacy encodings (GBK/Big5/Shift-JIS/…) properly
+                                    // instead of a lossy UTF-8 round-trip that would corrupt
+                                    // every non-ASCII byte the model then edits against.
+                                    let (text, _label) =
+                                        crate::tools::file::encoding::decode_best_effort(&bytes);
+                                    text
+                                }
                             }
                         })
                         .await
@@ -221,21 +228,27 @@ impl Tool for FileReadTool {
             && (contents.len() >= AUTO_SMART_BYTE_THRESHOLD
                 || contents.lines().count() >= AUTO_SMART_LINE_THRESHOLD)
         {
-            level = crate::token_saver::ReadLevel::Smart;
+            level = crate::token_saver::ReadLevel::Signatures;
         }
 
         if level != crate::token_saver::ReadLevel::Default && crate::token_saver::is_enabled() {
             let path_owned = path.to_string();
             let body = std::mem::take(&mut contents);
+            let total_lines = body.lines().count();
             let level_for_compact = level;
             let compacted = tokio::task::spawn_blocking(move || {
                 crate::token_saver::compact_file_content(&path_owned, &body, level_for_compact)
             })
             .await
             .map_err(|e| anyhow::anyhow!("file compact task failed: {e}"))?;
+            let footer = format!(
+                "\n[Compacted view ({}) - {total_lines} lines total{mtime_suffix}; \
+                 use level=default for full content]",
+                level.as_str()
+            );
             return Ok(ToolResult {
                 success: true,
-                output: compacted,
+                output: format!("{compacted}{footer}"),
                 error: None,
             });
         }
@@ -278,6 +291,19 @@ impl Tool for FileReadTool {
             });
         }
 
+        const MAX_READ_OUTPUT_BYTES: usize = 384 * 1024;
+        let mut clipped_end = end;
+        let mut emitted_bytes = 0usize;
+        for (i, line) in lines[start..end].iter().enumerate() {
+            emitted_bytes += line.len() + 16;
+            if emitted_bytes > MAX_READ_OUTPUT_BYTES {
+                clipped_end = (start + i).max(start + 1);
+                break;
+            }
+        }
+        let byte_clipped = clipped_end < end;
+        let end = clipped_end;
+
         let numbered: String = lines[start..end]
             .iter()
             .enumerate()
@@ -286,7 +312,15 @@ impl Tool for FileReadTool {
             .join("\n");
 
         let partial = start > 0 || end < total;
-        let summary = if partial {
+        let summary = if byte_clipped {
+            format!(
+                "\n[Lines {}-{} of {total}{mtime_suffix}; output clipped at {} KB - use offset={} with a smaller limit to continue]",
+                start + 1,
+                end,
+                MAX_READ_OUTPUT_BYTES / 1024,
+                end + 1
+            )
+        } else if partial {
             format!("\n[Lines {}-{} of {total}{mtime_suffix}]", start + 1, end)
         } else {
             format!("\n[{total} lines total{mtime_suffix}]")

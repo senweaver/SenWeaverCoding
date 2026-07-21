@@ -27,8 +27,7 @@ pub mod plugin_service;
 pub mod prevent_sleep;
 pub mod prompt_suggestion;
 pub mod settings_sync;
-pub mod team_runtime;
-pub mod team_store;
+pub mod team;
 pub mod template_library;
 pub mod tool_telemetry;
 

@@ -28,6 +28,23 @@ impl TimelineEntry {
 }
 
 pub fn build_timeline(root: &Path, graph: &SymbolGraph) -> HashMap<SymbolId, TimelineEntry> {
+    build_timeline_scoped(root, graph, DEFAULT_MAX_BLAME_FILES)
+}
+
+/// Upper bound on how many files `recent_changes` will blame in one call. A blame
+/// is one git subprocess per file; blaming an entire large repo (tens of
+/// thousands of files) previously spawned tens of thousands of processes and took
+/// minutes. We restrict to the files touched by recent commits, capped here.
+const DEFAULT_MAX_BLAME_FILES: usize = 400;
+
+/// Build the timeline but only blame files that appear in recent git history,
+/// capped at `max_files`. Symbols in unblamed files get an empty entry (they are
+/// not "recently changed", which is exactly what this query asks for).
+pub fn build_timeline_scoped(
+    root: &Path,
+    graph: &SymbolGraph,
+    max_files: usize,
+) -> HashMap<SymbolId, TimelineEntry> {
     let mut out: HashMap<SymbolId, TimelineEntry> = HashMap::new();
     if !is_git_repo(root) {
         for entry in &graph.symbols {
@@ -35,6 +52,8 @@ pub fn build_timeline(root: &Path, graph: &SymbolGraph) -> HashMap<SymbolId, Tim
         }
         return out;
     }
+
+    let recent = recently_changed_files(root, max_files);
 
     let mut by_file: HashMap<&std::path::Path, Vec<&SymbolId>> = HashMap::new();
     for entry in &graph.symbols {
@@ -45,8 +64,16 @@ pub fn build_timeline(root: &Path, graph: &SymbolGraph) -> HashMap<SymbolId, Tim
     }
 
     for (file, syms) in by_file {
-        let lines_of_interest: Vec<u32> = syms.iter().map(|s| s.line).collect();
-        let blame = run_blame(root, file, &lines_of_interest).unwrap_or_default();
+        // Only blame files git says changed recently; everything else gets an
+        // empty entry without spawning a subprocess.
+        let should_blame = recent.is_empty()
+            || recent.contains(&normalize_rel(file));
+        let blame = if should_blame {
+            let lines_of_interest: Vec<u32> = syms.iter().map(|s| s.line).collect();
+            run_blame(root, file, &lines_of_interest).unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
         for sym in syms {
             let entry = blame
                 .get(&sym.line)
@@ -56,6 +83,44 @@ pub fn build_timeline(root: &Path, graph: &SymbolGraph) -> HashMap<SymbolId, Tim
         }
     }
     out
+}
+
+fn normalize_rel(p: &Path) -> String {
+    p.to_string_lossy().replace('\\', "/")
+}
+
+/// Returns the set of files (workspace-relative, `/`-separated) touched by recent
+/// commits, capped at `max_files`. Uses a single `git log --name-only` instead of
+/// per-file blame so the caller can prune the blame set up front.
+fn recently_changed_files(root: &Path, max_files: usize) -> std::collections::HashSet<String> {
+    let mut set = std::collections::HashSet::new();
+    let out = crate::util::hidden_sync_command("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "log",
+            "--name-only",
+            "--pretty=format:",
+            "-n",
+            "400",
+            "--since=180.days",
+        ])
+        .output();
+    if let Ok(o) = out {
+        if o.status.success() {
+            for line in String::from_utf8_lossy(&o.stdout).lines() {
+                let l = line.trim();
+                if l.is_empty() {
+                    continue;
+                }
+                set.insert(l.replace('\\', "/"));
+                if set.len() >= max_files {
+                    break;
+                }
+            }
+        }
+    }
+    set
 }
 
 fn is_git_repo(root: &Path) -> bool {

@@ -146,6 +146,13 @@ impl WorkerSupervisor {
             return Ok(Vec::new());
         }
         let parent = specs[0].parent_session_id.clone();
+        if parent.trim().is_empty() {
+            return Err(
+                "workers cannot be spawned without a parent session id: per-session quotas and \
+                 cancel-on-parent-exit would silently break"
+                    .to_string(),
+            );
+        }
         let _guard = self.admission_lock.lock();
 
         let per_parent = self.active_count_for_parent(&parent);

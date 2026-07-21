@@ -2,8 +2,8 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use regex::Regex;
@@ -12,27 +12,34 @@ use serde_json::json;
 use crate::agent::flows::checkpoint::Checkpoint;
 use crate::agent::flows::registry::global_checkpoint_store;
 use crate::agent::flows::traits::Artifact;
+use crate::apply_model::{EditBatch, EditOp, EditOrigin, OpsApplier};
 use crate::code_intel::symbol_graph::SymbolGraph;
+use crate::security::SecurityPolicy;
 
 use super::super::traits::{Tool, ToolResult};
 
-pub struct CodeXfileRefactorTool;
+pub struct CodeXfileRefactorTool {
+    security: Arc<SecurityPolicy>,
+    ops_applier: Arc<OpsApplier>,
+}
 
 impl CodeXfileRefactorTool {
-    pub fn new() -> Self {
-        Self
+    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+        let ops_applier = Arc::new(
+            OpsApplier::default_for_shared_workspace(security.workspace_root_handle())
+                .with_allowed_roots(security.allowed_roots.clone()),
+        );
+        Self {
+            security,
+            ops_applier,
+        }
     }
-}
 
-impl Default for CodeXfileRefactorTool {
-    fn default() -> Self {
-        Self::new()
+    #[must_use]
+    pub fn with_ops_applier(mut self, ops_applier: Arc<OpsApplier>) -> Self {
+        self.ops_applier = ops_applier;
+        self
     }
-}
-
-fn resolve_workspace(arg: Option<&str>) -> PathBuf {
-    arg.map(PathBuf::from)
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
 }
 
 fn word_boundary_re(name: &str) -> anyhow::Result<Regex> {
@@ -41,7 +48,6 @@ fn word_boundary_re(name: &str) -> anyhow::Result<Regex> {
 }
 
 fn unified_diff(old: &str, new: &str, path: &Path) -> String {
-
     let old_lines: Vec<&str> = old.lines().collect();
     let new_lines: Vec<&str> = new.lines().collect();
     let mut out = String::new();
@@ -63,6 +69,66 @@ fn unified_diff(old: &str, new: &str, path: &Path) -> String {
     out
 }
 
+struct FileRename {
+    rel: PathBuf,
+    abs: PathBuf,
+    old: String,
+    new: String,
+    identifier_scoped: bool,
+}
+
+#[cfg(feature = "code-intel")]
+fn rename_identifiers_ast(
+    source: &str,
+    path: &Path,
+    symbol: &str,
+    new_name: &str,
+) -> Option<(String, usize)> {
+    let lang = crate::apply_model::grammar_id_for_path(path)?;
+    let language = crate::code_intel::grammars::grammar_for(lang)?;
+    let mut parser = tree_sitter::Parser::new();
+    parser.set_language(&language).ok()?;
+    let tree = parser.parse(source, None)?;
+    let root = tree.root_node();
+    let bytes = source.as_bytes();
+    let mut walker = root.walk();
+    let mut stack = vec![root];
+    let mut ranges: Vec<(usize, usize)> = Vec::new();
+    while let Some(node) = stack.pop() {
+        if node.child_count() == 0 {
+            let kind = node.kind();
+            if kind.contains("identifier")
+                && let Ok(text) = node.utf8_text(bytes)
+                && text == symbol
+            {
+                ranges.push((node.start_byte(), node.end_byte()));
+            }
+        } else {
+            for child in node.children(&mut walker) {
+                stack.push(child);
+            }
+        }
+    }
+    if ranges.is_empty() {
+        return Some((source.to_string(), 0));
+    }
+    ranges.sort_by_key(|(s, _)| *s);
+    let mut out = String::with_capacity(source.len());
+    let mut last = 0usize;
+    let mut count = 0usize;
+    for (s, e) in ranges {
+        if s < last {
+            continue;
+        }
+        out.push_str(&source[last..s]);
+        out.push_str(new_name);
+        last = e;
+        count += 1;
+    }
+    out.push_str(&source[last..]);
+    Some((out, count))
+}
+
 #[async_trait]
 impl Tool for CodeXfileRefactorTool {
     fn name(&self) -> &str {
@@ -72,8 +138,11 @@ impl Tool for CodeXfileRefactorTool {
     fn description(&self) -> &str {
         "Cross-file symbol refactor guided by the workspace \
          SymbolGraph.  `mode=preview` returns per-file diffs without \
-         writing; `mode=apply` performs the rename and pushes a \
-         checkpoint so `flow_rollback` can undo it."
+         writing; `mode=apply` performs the rename through the shared \
+         edit pipeline (journal + validation + rollback) and pushes a \
+         checkpoint so `flow_rollback` can undo it.  With code-intel the \
+         rename only touches identifier tokens, never matches inside \
+         comments or string literals."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -87,28 +156,46 @@ impl Tool for CodeXfileRefactorTool {
                     "enum": ["preview", "apply"],
                     "description": "Default: preview.",
                 },
-                "workspace": { "type": "string" },
+                "workspace": {
+                    "type": "string",
+                    "description": "Optional workspace root; must resolve inside the session workspace.",
+                },
             },
             "required": ["symbol", "new_name"],
         })
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        tokio::task::spawn_blocking(move || run_xfile_refactor(args))
-            .await
-            .map_err(|e| anyhow::anyhow!("code_xfile_refactor task panicked: {e}"))?
-    }
-}
+        if !self.security.can_act() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Action blocked: autonomy is read-only".into()),
+            });
+        }
+        if self.security.is_rate_limited() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some("Rate limit exceeded: too many actions in the last hour".into()),
+            });
+        }
 
-fn run_xfile_refactor(args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let symbol = args.get("symbol").and_then(|v| v.as_str()).unwrap_or("");
-        let new_name = args.get("new_name").and_then(|v| v.as_str()).unwrap_or("");
+        let symbol = args
+            .get("symbol")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+        let new_name = args
+            .get("new_name")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
         let mode = args
             .get("mode")
             .and_then(|v| v.as_str())
             .unwrap_or("preview")
             .to_string();
-        let workspace = resolve_workspace(args.get("workspace").and_then(|v| v.as_str()));
 
         if symbol.is_empty() || new_name.is_empty() {
             return Ok(ToolResult {
@@ -125,51 +212,109 @@ fn run_xfile_refactor(args: serde_json::Value) -> anyhow::Result<ToolResult> {
             });
         }
 
-        let graph = match SymbolGraph::load(&workspace) {
-            Ok(Some(g)) => g,
-            _ => match SymbolGraph::build(&workspace) {
-                Ok(g) => {
-                    let _ = g.persist(&workspace);
-                    g
-                }
-                Err(e) => {
+        let workspace = match args.get("workspace").and_then(|v| v.as_str()) {
+            Some(ws) => {
+                if !self.security.is_path_allowed(ws) {
                     return Ok(ToolResult {
                         success: false,
                         output: String::new(),
-                        error: Some(format!("could not build SymbolGraph: {e}")),
+                        error: Some(format!(
+                            "workspace '{ws}' is outside the session workspace"
+                        )),
                     });
                 }
-            },
+                let resolved = self.security.resolve_tool_path(ws);
+                let canonical = tokio::fs::canonicalize(&resolved)
+                    .await
+                    .unwrap_or(resolved);
+                if !self.security.is_resolved_path_allowed(&canonical) {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(
+                            self.security.resolved_path_violation_message(&canonical),
+                        ),
+                    });
+                }
+                canonical
+            }
+            None => self.security.workspace_dir(),
         };
 
-        let mut affected_files: Vec<PathBuf> = Vec::new();
-        for entry in &graph.symbols {
-            if entry.id.name == symbol && !affected_files.contains(&entry.id.file) {
-                affected_files.push(entry.id.file.clone());
-            }
-        }
-        for edge in &graph.edges {
-            if (edge.to.name == symbol || edge.from.name == symbol)
-                && !affected_files.contains(&edge.from.file)
-            {
-                affected_files.push(edge.from.file.clone());
-            }
-        }
-
-        let re = word_boundary_re(symbol)?;
-        let mut per_file: Vec<(PathBuf, String, String)> = Vec::new();
-        for rel in &affected_files {
-            let abs = workspace.join(rel);
-            let Ok(old) = fs::read_to_string(&abs) else {
-                continue;
+        let symbol_for_blocking = symbol.clone();
+        let new_name_for_blocking = new_name.clone();
+        let workspace_for_blocking = workspace.clone();
+        let computed = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<FileRename>> {
+            let graph = match SymbolGraph::load(&workspace_for_blocking) {
+                Ok(Some(g)) => g,
+                _ => {
+                    let g = SymbolGraph::build(&workspace_for_blocking)?;
+                    let _ = g.persist(&workspace_for_blocking);
+                    g
+                }
             };
-            let new = re.replace_all(&old, new_name).to_string();
-            if new != old {
-                per_file.push((rel.clone(), old, new));
-            }
-        }
 
-        if per_file.is_empty() {
+            let mut affected_files: Vec<PathBuf> = Vec::new();
+            for entry in &graph.symbols {
+                if entry.id.name == symbol_for_blocking
+                    && !affected_files.contains(&entry.id.file)
+                {
+                    affected_files.push(entry.id.file.clone());
+                }
+            }
+            for edge in &graph.edges {
+                if (edge.to.name == symbol_for_blocking || edge.from.name == symbol_for_blocking)
+                    && !affected_files.contains(&edge.from.file)
+                {
+                    affected_files.push(edge.from.file.clone());
+                }
+            }
+
+            let re = word_boundary_re(&symbol_for_blocking)?;
+            let mut renames: Vec<FileRename> = Vec::new();
+            for rel in &affected_files {
+                let abs = workspace_for_blocking.join(rel);
+                let Ok(old) = std::fs::read_to_string(&abs) else {
+                    continue;
+                };
+
+                #[cfg(feature = "code-intel")]
+                let (new, identifier_scoped) = match rename_identifiers_ast(
+                    &old,
+                    &abs,
+                    &symbol_for_blocking,
+                    &new_name_for_blocking,
+                ) {
+                    Some((rewritten, _)) => (rewritten, true),
+                    None => (
+                        re.replace_all(&old, new_name_for_blocking.as_str())
+                            .to_string(),
+                        false,
+                    ),
+                };
+                #[cfg(not(feature = "code-intel"))]
+                let (new, identifier_scoped) = (
+                    re.replace_all(&old, new_name_for_blocking.as_str())
+                        .to_string(),
+                    false,
+                );
+
+                if new != old {
+                    renames.push(FileRename {
+                        rel: rel.clone(),
+                        abs,
+                        old,
+                        new,
+                        identifier_scoped,
+                    });
+                }
+            }
+            Ok(renames)
+        })
+        .await
+        .map_err(|e| anyhow::anyhow!("code_xfile_refactor task panicked: {e}"))??;
+
+        if computed.is_empty() {
             return Ok(ToolResult {
                 success: true,
                 output: json!({
@@ -184,15 +329,28 @@ fn run_xfile_refactor(args: serde_json::Value) -> anyhow::Result<ToolResult> {
             });
         }
 
+        let regex_only = computed.iter().any(|r| !r.identifier_scoped);
+        let regex_note = if regex_only {
+            Some(
+                "regex word-boundary match used for at least one file (no code-intel grammar); \
+                 matches inside comments or string literals may have been renamed - review the diff"
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+
         match mode.as_str() {
             "preview" => {
                 let payload = json!({
                     "mode": "preview",
                     "symbol": symbol,
                     "new_name": new_name,
-                    "files": per_file.iter().map(|(rel, old, new)| json!({
-                        "file": rel,
-                        "diff": unified_diff(old, new, rel),
+                    "identifier_scoped": !regex_only,
+                    "note": regex_note,
+                    "files": computed.iter().map(|r| json!({
+                        "file": r.rel,
+                        "diff": unified_diff(&r.old, &r.new, &r.rel),
                     })).collect::<Vec<_>>(),
                 });
                 Ok(ToolResult {
@@ -202,60 +360,95 @@ fn run_xfile_refactor(args: serde_json::Value) -> anyhow::Result<ToolResult> {
                 })
             }
             "apply" => {
-                // Capture every pre-image up front so a partial failure can be
-                // fully rolled back, and push the checkpoint before writing.
-                let artifacts_pre: Vec<Artifact> = per_file
-                    .iter()
-                    .map(|(rel, old, _)| Artifact::new(rel.to_string_lossy(), old.clone()))
-                    .collect();
-
-                let mut written: Vec<&PathBuf> = Vec::new();
-                for (rel, _old, new) in &per_file {
-                    let abs = workspace.join(rel);
-                    if let Err(e) = crate::util::atomic_write(&abs, new.as_bytes()) {
-                        // Roll back the files already written this batch.
-                        for done_rel in &written {
-                            if let Some((_, old, _)) =
-                                per_file.iter().find(|(r, _, _)| r == *done_rel)
-                            {
-                                let done_abs = workspace.join(done_rel);
-                                let _ = crate::util::atomic_write(&done_abs, old.as_bytes());
-                            }
+                let planned_paths: Vec<PathBuf> =
+                    computed.iter().map(|r| r.abs.clone()).collect();
+                let _resource_guards =
+                    match crate::session::acquire_many_file_writes_for_current_session(
+                        planned_paths.clone(),
+                    )
+                    .await
+                    {
+                        Some(Ok(g)) => Some(g),
+                        Some(Err(e)) => {
+                            return Ok(ToolResult {
+                                success: false,
+                                output: String::new(),
+                                error: Some(format!("{e}")),
+                            });
                         }
+                        None => None,
+                    };
+
+                for p in &planned_paths {
+                    if crate::session::is_stale_for_current_session(p) {
                         return Ok(ToolResult {
                             success: false,
                             output: String::new(),
-                            error: Some(format!(
-                                "write failed for {} (rolled back {} already-written file(s)): {e}",
-                                abs.display(),
-                                written.len()
-                            )),
+                            error: Some(crate::session::stale_file_error_message(p)),
                         });
                     }
-                    written.push(rel);
                 }
 
-                let cp = Checkpoint::new(
-                    format!("xfile_refactor::{symbol}->{new_name}"),
-                    format!("rename {symbol} -> {new_name}"),
-                    artifacts_pre,
-                    vec![],
-                );
-                global_checkpoint_store().push(cp);
+                let mut batch = EditBatch::new(EditOrigin::XfileRefactorTool).with_atomic(true);
+                for r in &computed {
+                    batch.push(EditOp::Replace {
+                        path: r.abs.clone(),
+                        byte_range: 0..r.old.len(),
+                        old_text: r.old.clone(),
+                        new_text: r.new.clone(),
+                        anchor: None,
+                    });
+                }
+                let batch_id = batch.batch_id.clone();
 
-                Ok(ToolResult {
-                    success: true,
-                    output: json!({
-                        "mode": "apply",
-                        "symbol": symbol,
-                        "new_name": new_name,
-                        "files_changed": per_file.len(),
-                        "files": per_file.iter().map(|(rel, _, _)| rel).collect::<Vec<_>>(),
-                        "checkpoint_pushed": true,
-                    })
-                    .to_string(),
-                    error: None,
-                })
+                let artifacts_pre: Vec<Artifact> = computed
+                    .iter()
+                    .map(|r| Artifact::new(r.rel.to_string_lossy(), r.old.clone()))
+                    .collect();
+
+                match self.ops_applier.apply_batch(batch).await {
+                    Ok(_) => {
+                        for r in &computed {
+                            crate::session::record_write_for_current_session(&r.abs);
+                            crate::agent::file_edit_emitter::emit_file_edit(
+                                &r.abs,
+                                Some(r.old.as_bytes()),
+                                Some(r.new.as_bytes()),
+                                Some(batch_id.clone()),
+                            )
+                            .await;
+                        }
+                        let cp = Checkpoint::new(
+                            format!("xfile_refactor::{symbol}->{new_name}"),
+                            format!("rename {symbol} -> {new_name}"),
+                            artifacts_pre,
+                            vec![],
+                        );
+                        global_checkpoint_store().push(cp);
+                        Ok(ToolResult {
+                            success: true,
+                            output: json!({
+                                "mode": "apply",
+                                "symbol": symbol,
+                                "new_name": new_name,
+                                "identifier_scoped": !regex_only,
+                                "note": regex_note,
+                                "files_changed": computed.len(),
+                                "files": computed.iter().map(|r| &r.rel).collect::<Vec<_>>(),
+                            })
+                            .to_string(),
+                            error: None,
+                        })
+                    }
+                    Err(e) => Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "cross-file refactor failed (rolled back {} file(s)): {e}",
+                            computed.len()
+                        )),
+                    }),
+                }
             }
             other => Ok(ToolResult {
                 success: false,
@@ -263,4 +456,5 @@ fn run_xfile_refactor(args: serde_json::Value) -> anyhow::Result<ToolResult> {
                 error: Some(format!("unknown mode: {other}")),
             }),
         }
+    }
 }

@@ -198,6 +198,15 @@ pub(crate) fn apply_outgoing_pii_sanitization(
 ) -> crate::services::governance::pii_sanitizer::SanitizationReport {
     let mut report = crate::services::governance::pii_sanitizer::SanitizationReport::default();
     if !matches!(coding_mode, Some(crate::agent::coding_mode::CodingMode::Debug)) {
+        for msg in messages.iter_mut() {
+            let redacted =
+                crate::services::governance::credential_vault::redact_for_audit_optional(
+                    &msg.content,
+                );
+            if redacted != msg.content {
+                msg.content = redacted;
+            }
+        }
         return report;
     }
     if !crate::services::governance::pii_sanitizer::global_sanitizer().enabled() {
@@ -219,6 +228,54 @@ pub(crate) fn apply_outgoing_pii_sanitization(
     }
 
     report
+}
+
+pub(crate) const REDACTION_SENTINELS: [&str; 2] = ["*[REDACTED]", "[CRED:"];
+
+pub(crate) fn is_verbatim_content_tool(tool_name: &str) -> bool {
+    matches!(
+        tool_name,
+        "file_read"
+            | "content_search"
+            | "glob_search"
+            | "codebase_search"
+            | "read_file"
+            | "read_many_files"
+    )
+}
+
+pub(crate) fn scrub_tool_output(tool_name: &str, output: &str) -> String {
+    if is_verbatim_content_tool(tool_name) {
+        output.to_string()
+    } else {
+        scrub_credentials(output)
+    }
+}
+
+pub(crate) fn introduced_redaction_sentinel(
+    original: Option<&str>,
+    new_content: &str,
+) -> Option<&'static str> {
+    for sentinel in REDACTION_SENTINELS {
+        let new_count = new_content.matches(sentinel).count();
+        if new_count == 0 {
+            continue;
+        }
+        let old_count = original.map_or(0, |o| o.matches(sentinel).count());
+        if new_count > old_count {
+            return Some(sentinel);
+        }
+    }
+    None
+}
+
+pub(crate) fn redaction_writeback_error(sentinel: &str, path: &str) -> String {
+    format!(
+        "Refusing to write file '{path}': the new content introduces a credential-redaction \
+         marker (`{sentinel}`) that is not in the original file. This means it was copied from a \
+         redacted tool output rather than the real file bytes. Re-read the file with file_read \
+         and rebuild the edit from the actual content."
+    )
 }
 
 pub(crate) fn scrub_credentials(input: &str) -> String {

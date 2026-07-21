@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 pub mod edit;
+pub mod encoding;
 pub mod match_diagnostics;
 pub mod office;
 pub mod read;

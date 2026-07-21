@@ -331,14 +331,17 @@ impl Verifier for TestRunnerVerifier {
                 let secs = self.config.timeout.as_secs();
                 return Ok(VerificationReport {
                     verifier: self.name(),
-                    passed: true,
+                    passed: false,
                     issues: vec![VerificationIssue {
                         line: 0,
                         column: 0,
-                        message: format!("test_runner timed out after {secs}s ({label})"),
+                        message: format!(
+                            "test_runner timed out after {secs}s ({label}); result is UNKNOWN, \
+                             not a pass - re-run verification or raise the timeout"
+                        ),
                         severity: IssueSeverity::Warning,
                     }],
-                    summary: format!("status=timeout label={label} timeout_secs={secs}"),
+                    summary: format!("status=timeout(unknown) label={label} timeout_secs={secs}"),
                 });
             }
         };

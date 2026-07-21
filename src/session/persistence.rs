@@ -242,11 +242,20 @@ impl SessionEventLog {
         })?;
         match tx.try_send(SessionLogMsg::Append(evt.clone())) {
             Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_)) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::WouldBlock,
-                    "session event log write queue is full (writer falling behind)",
-                ));
+            Err(mpsc::TrySendError::Full(_msg)) => {
+                // `append` runs synchronously on a tokio worker thread (via
+                // SessionActor::apply_event). The old blocking `std::thread::sleep`
+                // backoff (up to ~1.9s) stalled that worker and any other async
+                // task sharing it. Go straight to the non-blocking emergency
+                // direct-append fallback instead.
+                self.write_degraded.store(true, Ordering::Relaxed);
+                let failures = self.write_failures.fetch_add(1, Ordering::Relaxed) + 1;
+                tracing::warn!(
+                    session_id = %self.id,
+                    total_failures = failures,
+                    "session event log write queue full; writing event directly (no blocking backoff)"
+                );
+                self.emergency_append(evt)?;
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 return Err(std::io::Error::new(
@@ -258,6 +267,18 @@ impl SessionEventLog {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let _bumped = self.since_snapshot.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(seq)
+    }
+
+    fn emergency_append(&self, evt: &SessionEvent) -> std::io::Result<()> {
+        let line = serde_json::to_string(evt)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.root.join(EVENTS_FILE))?;
+        file.write_all(line.as_bytes())?;
+        file.write_all(b"\n")?;
+        file.flush()
     }
 
     pub fn needs_snapshot(&self) -> bool {
@@ -364,12 +385,12 @@ impl SessionEventLog {
             // (set when a crash happened between snapshot write and log rotation);
             // 0 in the normal case. When the snapshot was corrupt we rebuilt from
             // rotated logs above, so the whole active log must be replayed.
-            let skip = if snapshot_corrupt {
-                0
+            let (skip, expected_hash) = if snapshot_corrupt {
+                (0, None)
             } else {
                 read_absorbed_marker(&self.root)
             };
-            apply_event_file_skipping(&events_path, id, &mut working, skip)?;
+            apply_event_file_skipping(&events_path, id, &mut working, skip, expected_hash)?;
             recovered_any = true;
         }
 
@@ -383,7 +404,7 @@ fn apply_event_file(
     id: &str,
     state: &mut SessionState,
 ) -> std::io::Result<bool> {
-    apply_event_file_skipping(path, id, state, 0)
+    apply_event_file_skipping(path, id, state, 0, None)
 }
 
 fn apply_event_file_skipping(
@@ -391,7 +412,35 @@ fn apply_event_file_skipping(
     id: &str,
     state: &mut SessionState,
     skip_nonempty: u64,
+    expected_prefix_hash: Option<u64>,
 ) -> std::io::Result<bool> {
+    use std::hash::Hasher as _;
+    let mut effective_skip = skip_nonempty;
+    if let (Some(expected), true) = (expected_prefix_hash, skip_nonempty > 0) {
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        let mut seen = 0u64;
+        for line in BufReader::new(File::open(path)?).lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            hash_line(&mut hasher, &line);
+            seen += 1;
+            if seen == skip_nonempty {
+                break;
+            }
+        }
+        if seen < skip_nonempty || hasher.finish() != expected {
+            tracing::error!(
+                session_id = %id,
+                file = %path.display(),
+                marker_lines = skip_nonempty,
+                lines_present = seen,
+                "absorbed marker does not match the active event log prefix; replaying the whole log (some entries may be duplicated instead of silently dropped)"
+            );
+            effective_skip = 0;
+        }
+    }
     let reader = BufReader::new(File::open(path)?);
     let mut applied = false;
     let mut skipped = 0u64;
@@ -400,7 +449,7 @@ fn apply_event_file_skipping(
         if line.trim().is_empty() {
             continue;
         }
-        if skipped < skip_nonempty {
+        if skipped < effective_skip {
             skipped += 1;
             continue;
         }
@@ -483,7 +532,20 @@ fn session_writer_loop(
         let mut dirty = false;
         let mut batch_failed = false;
         let mut next = Some(first);
+        let mut batch_started = std::time::Instant::now();
+        let mut batch_processed = 0u64;
         while let Some(msg) = next {
+            batch_processed += 1;
+            if batch_processed.is_multiple_of(1024)
+                || batch_started.elapsed().as_secs() >= LOCK_TOUCH_INTERVAL_SECS / 2
+            {
+                let _ = writer.flush();
+                lock.touch();
+                if lock.is_degraded() {
+                    write_degraded.store(true, Ordering::Relaxed);
+                }
+                batch_started = std::time::Instant::now();
+            }
             match msg {
                 SessionLogMsg::Append(evt) => match serde_json::to_string(&evt) {
                     Ok(line) => {
@@ -575,31 +637,53 @@ fn flush_with_retry(writer: &mut BufWriter<File>, write_failures: &AtomicU64) ->
     }
 }
 
-fn count_nonempty_lines(path: &Path) -> u64 {
-    let Ok(file) = File::open(path) else {
-        return 0;
-    };
-    BufReader::new(file)
-        .lines()
-        .map_while(Result::ok)
-        .filter(|l| !l.trim().is_empty())
-        .count() as u64
+fn hash_line(hasher: &mut std::collections::hash_map::DefaultHasher, line: &str) {
+    use std::hash::Hash as _;
+    line.hash(hasher);
 }
 
-fn write_absorbed_marker(root: &Path, count: u64) {
+fn count_and_hash_nonempty_lines(path: &Path) -> (u64, u64) {
+    use std::hash::Hasher as _;
+    let Ok(file) = File::open(path) else {
+        return (0, 0);
+    };
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut count = 0u64;
+    for line in BufReader::new(file).lines().map_while(Result::ok) {
+        if line.trim().is_empty() {
+            continue;
+        }
+        count += 1;
+        hash_line(&mut hasher, &line);
+    }
+    (count, hasher.finish())
+}
+
+fn write_absorbed_marker(root: &Path, count: u64, prefix_hash: u64) {
     let path = root.join(ABSORBED_FILE);
     if count == 0 {
         let _ = std::fs::remove_file(&path);
         return;
     }
-    let _ = crate::util::atomic_write(&path, count.to_string().as_bytes());
+    let _ = crate::util::atomic_write(
+        &path,
+        format!("{count}:{prefix_hash:016x}").as_bytes(),
+    );
 }
 
-fn read_absorbed_marker(root: &Path) -> u64 {
-    std::fs::read_to_string(root.join(ABSORBED_FILE))
-        .ok()
-        .and_then(|s| s.trim().parse::<u64>().ok())
-        .unwrap_or(0)
+fn read_absorbed_marker(root: &Path) -> (u64, Option<u64>) {
+    let Some(raw) = std::fs::read_to_string(root.join(ABSORBED_FILE)).ok() else {
+        return (0, None);
+    };
+    let raw = raw.trim();
+    match raw.split_once(':') {
+        Some((count, hash)) => {
+            let count = count.parse::<u64>().unwrap_or(0);
+            let hash = u64::from_str_radix(hash, 16).ok();
+            (count, hash)
+        }
+        None => (raw.parse::<u64>().unwrap_or(0), None),
+    }
 }
 
 fn write_snapshot_to_disk(
@@ -615,7 +699,7 @@ fn write_snapshot_to_disk(
     // crash after writing the snapshot but before rotating the active log, replay
     // uses this marker to skip the already-absorbed prefix and avoid re-applying
     // (which would duplicate turns/tool calls, since apply() is append-style).
-    let absorbed = count_nonempty_lines(&active);
+    let (absorbed, absorbed_hash) = count_and_hash_nonempty_lines(&active);
 
     let snap_path = root.join(SNAPSHOT_FILE);
     let tmp_path = root.join(format!("{SNAPSHOT_FILE}.tmp"));
@@ -635,37 +719,72 @@ fn write_snapshot_to_disk(
     }
     std::fs::rename(&tmp_path, &snap_path)?;
     // Snapshot is now durable and reflects `absorbed` leading active-log lines.
-    write_absorbed_marker(root, absorbed);
+    write_absorbed_marker(root, absorbed, absorbed_hash);
 
     let rotated = root.join(format!("events.{}.jsonl", state.version));
     let mut rotation_failed = false;
+    let mut rotation_succeeded = false;
     if active.exists() {
-        if let Err(e) = std::fs::rename(&active, &rotated) {
-            rotation_failed = true;
-            tracing::warn!(
-                error = %e,
-                active = %active.display(),
-                "failed to rotate session event log after snapshot; truncating active log because its events are already durable in the snapshot"
-            );
+        match std::fs::rename(&active, &rotated) {
+            Ok(()) => rotation_succeeded = true,
+            Err(e) => {
+                rotation_failed = true;
+                tracing::warn!(
+                    error = %e,
+                    active = %active.display(),
+                    "failed to rotate session event log after snapshot; truncating active log because its events are already durable in the snapshot"
+                );
+            }
         }
     }
-    let new_file = if rotation_failed {
+    let open_truncated = || {
         OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
-            .open(&active)?
-    } else {
+            .open(&active)
+    };
+    let open_appending = || {
         OpenOptions::new()
             .create(true)
             .append(true)
             .truncate(false)
-            .open(&active)?
+            .open(&active)
+    };
+    let (new_file, marker_after_reopen) = if rotation_failed {
+        (open_truncated()?, 0)
+    } else {
+        match open_appending() {
+            Ok(file) => (file, 0),
+            Err(open_err) if rotation_succeeded => {
+                match std::fs::rename(&rotated, &active) {
+                    Ok(()) => {
+                        tracing::warn!(
+                            error = %open_err,
+                            "failed to reopen fresh session event log; rolled the rotation back to keep appends replayable"
+                        );
+                        (open_appending()?, absorbed)
+                    }
+                    Err(rollback_err) => {
+                        tracing::error!(
+                            error = %open_err,
+                            rollback_error = %rollback_err,
+                            rotated = %rotated.display(),
+                            "failed to reopen fresh session event log AND failed to roll back rotation; subsequent events will not be replayable"
+                        );
+                        return Err(open_err);
+                    }
+                }
+            }
+            Err(open_err) => return Err(open_err),
+        }
     };
     *writer = BufWriter::new(new_file);
-    // Active log is now fresh (rotated away or truncated), so nothing in it is
-    // already absorbed by the snapshot.
-    write_absorbed_marker(root, 0);
+    if marker_after_reopen > 0 {
+        write_absorbed_marker(root, marker_after_reopen, absorbed_hash);
+    } else {
+        write_absorbed_marker(root, 0, 0);
+    }
     prune_rotated(root, 3);
     Ok(())
 }

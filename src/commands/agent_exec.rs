@@ -84,7 +84,7 @@ async fn exec_subagent(name: &str, prompt: &str) -> CommandResult {
                     Ok(m) => m,
                     Err(_) => {
                         return CommandResult::err(
-                            "未添加模型，请先在提供商设置页添加 / no_model_configured: please add at least one model in Provider settings",
+                            "no_model_configured: please add at least one model in Provider settings",
                         );
                     }
                 };

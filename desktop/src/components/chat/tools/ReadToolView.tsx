@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import type { ToolViewProps } from './ToolViewProps'
+import { useTranslation } from '../../../i18n'
 import { CodeViewer } from '../CodeViewer'
 import { CopyButton } from '../../shared/CopyButton'
 import {
@@ -22,6 +23,7 @@ function isUnchangedOrEmptyResult(result: ToolViewProps['result']): boolean {
 }
 
 export function ReadHeader({ input, result }: ToolViewProps) {
+  const t = useTranslation()
   const path = extractPath(input)
   const range = extractRange(input)
   const tail = basename(path) || path || 'file'
@@ -57,9 +59,9 @@ export function ReadHeader({ input, result }: ToolViewProps) {
       {showUnchangedChip && (
         <span
           className="shrink-0 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-2 py-0.5 text-[10px] text-[var(--color-text-tertiary)]"
-          title="File unchanged since last read"
+          title={t('tool.read.unchangedTitle')}
         >
-          unchanged
+          {t('tool.read.unchanged')}
         </span>
       )}
     </span>
@@ -67,6 +69,7 @@ export function ReadHeader({ input, result }: ToolViewProps) {
 }
 
 export function ReadDetail({ input, result }: ToolViewProps) {
+  const t = useTranslation()
   const path = extractPath(input)
   const text = result ? extractTextContent(result.content) : ''
   const inputJson = JSON.stringify(input ?? null, null, 2)
@@ -90,7 +93,7 @@ export function ReadDetail({ input, result }: ToolViewProps) {
       )}
       <div className="overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-surface)]">
         <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-1.5 text-[10px] uppercase tracking-[0.18em] text-[var(--color-outline)]">
-          <span>Tool Input</span>
+          <span>{t('tool.toolInput')}</span>
           <CopyButton
             text={inputJson}
             className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] normal-case tracking-normal text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"

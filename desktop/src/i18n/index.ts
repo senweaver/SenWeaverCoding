@@ -8,6 +8,8 @@ import type { TranslationKey } from './locales/en'
 
 export type Locale = 'en' | 'zh'
 
+export const LOCALE_CHANGED_EVENT = 'sen://locale-changed'
+
 const translations: Partial<Record<Locale, Record<string, string>>> = {}
 
 export async function ensureLocaleLoaded(locale: Locale): Promise<void> {

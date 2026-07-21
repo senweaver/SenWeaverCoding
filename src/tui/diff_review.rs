@@ -226,30 +226,100 @@ pub fn hunks_to_unified_diff(path: &Path, hunks: &[HunkView]) -> String {
     out
 }
 
-pub fn revert_file_entry(entry: &PendingEdit, workspace: &Path) -> anyhow::Result<String> {
-    let history = crate::tools::edit_history::EditHistory::new(workspace.to_path_buf());
-    if let Some(batch_id) = entry.edit_batch_id.as_deref() {
-        let reverted = history.revert_batch(batch_id)?;
-        if reverted.is_empty() {
+#[derive(Debug)]
+pub struct RevertFileOutcome {
+    pub summary: String,
+    pub reverted: Vec<String>,
+    pub skipped: Vec<String>,
+    pub batch_id: Option<String>,
+}
 
+pub fn revert_file_entry(
+    entry: &PendingEdit,
+    workspace: &Path,
+) -> anyhow::Result<RevertFileOutcome> {
+    let history = crate::tools::edit_history::EditHistory::shared_for_workspace(workspace);
+    if let Some(batch_id) = entry.edit_batch_id.as_deref() {
+        let outcome = history.revert_batch_guarded(batch_id, false)?;
+        if !outcome.skipped_stale.is_empty() {
+            let summary = format!(
+                "reverted {} file(s) via batch {}; skipped {} changed after the batch (not clobbered): {}",
+                outcome.reverted.len(),
+                batch_id,
+                outcome.skipped_stale.len(),
+                outcome.skipped_stale.join(", ")
+            );
+            return Ok(RevertFileOutcome {
+                summary,
+                reverted: outcome.reverted,
+                skipped: outcome.skipped_stale,
+                batch_id: Some(batch_id.to_string()),
+            });
+        }
+        if outcome.reverted.is_empty() {
+            // Batch journal missing: the explicit 'R' keypress is the user's
+            // confirmation for the coarser revert-to-latest fallback.
             history.revert_to_latest(Path::new(&entry.path))?;
-            Ok(format!(
-                "reverted {} via revert_to_latest (batch journal missing)",
-                entry.path
-            ))
+            Ok(RevertFileOutcome {
+                summary: format!(
+                    "reverted {} via revert_to_latest (batch journal missing)",
+                    entry.path
+                ),
+                reverted: vec![entry.path.clone()],
+                skipped: Vec::new(),
+                batch_id: Some(batch_id.to_string()),
+            })
         } else {
-            Ok(format!(
-                "reverted {} file(s) via batch {}",
-                reverted.len(),
-                batch_id
-            ))
+            Ok(RevertFileOutcome {
+                summary: format!(
+                    "reverted {} file(s) via batch {}",
+                    outcome.reverted.len(),
+                    batch_id
+                ),
+                reverted: outcome.reverted,
+                skipped: Vec::new(),
+                batch_id: Some(batch_id.to_string()),
+            })
         }
     } else {
         history.revert_to_latest(Path::new(&entry.path))?;
-        Ok(format!(
-            "reverted {} via revert_to_latest (no batch id)",
-            entry.path
-        ))
+        Ok(RevertFileOutcome {
+            summary: format!("reverted {} via revert_to_latest (no batch id)", entry.path),
+            reverted: vec![entry.path.clone()],
+            skipped: Vec::new(),
+            batch_id: None,
+        })
+    }
+}
+
+/// Applies a file-revert outcome to the registry with path-level precision: an
+/// entry is painted Reverted only when ITS file actually rolled back — skipped
+/// stale files stay Pending, and sibling entries of the same batch whose files
+/// were reverted are updated too (previously only the selected entry flipped,
+/// and even when its file was skipped).
+pub fn apply_file_revert_outcome(
+    registry: &mut EditBatchRegistry,
+    entry_id: u64,
+    outcome: &RevertFileOutcome,
+) {
+    let norm = |p: &str| p.replace('\\', "/");
+    let reverted: Vec<String> = outcome.reverted.iter().map(|p| norm(p)).collect();
+    let path_was_reverted = |path: &str| -> bool {
+        let p = norm(path);
+        reverted
+            .iter()
+            .any(|r| p == *r || p.ends_with(&format!("/{r}")) || r.ends_with(&format!("/{p}")))
+    };
+    for entry in registry.entries_mut() {
+        let same_batch = matches!(
+            (&outcome.batch_id, &entry.edit_batch_id),
+            (Some(a), Some(b)) if a == b
+        );
+        if (entry.id == entry_id || same_batch) && path_was_reverted(&entry.path) {
+            for s in entry.hunk_status.iter_mut() {
+                *s = HunkStatus::Reverted;
+            }
+        }
     }
 }
 
@@ -287,9 +357,7 @@ pub async fn revert_single_hunk(
         atomic: true,
     };
 
-    let history = crate::tools::edit_history::EditHistory::new(workspace.to_path_buf());
-    let applier = crate::apply_model::ops_applier::OpsApplier::default_for_workspace(workspace)
-        .with_edit_history(history);
+    let applier = crate::apply_model::ops_applier::OpsApplier::locked_for_workspace(workspace);
     let outcome = applier.apply_batch(batch).await?;
     Ok(outcome.batch_id)
 }

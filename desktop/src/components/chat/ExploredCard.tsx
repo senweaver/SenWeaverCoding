@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useState } from 'react'
+import { memo, useEffect, useState } from 'react'
 import { ToolCard } from './tools/ToolCard'
 import { ThinkingBlock, ActiveThinkingBlock } from './ThinkingBlock'
 import { useTranslation } from '../../i18n'
@@ -69,7 +69,7 @@ export function buildExploredSummary(items: UIMessage[]): ExploredSummary {
   return { reads, lists, searches, recalls, thinkingCount }
 }
 
-export function ExploredCard({
+function ExploredCardImpl({
   items,
   resultMap,
   summary,
@@ -166,3 +166,5 @@ export function ExploredCard({
     </div>
   )
 }
+
+export const ExploredCard = memo(ExploredCardImpl)

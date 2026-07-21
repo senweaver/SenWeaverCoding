@@ -3,8 +3,8 @@
 // Licensed under the MIT License.
 
 pub mod ask;
+pub mod background;
 pub mod backup_tool;
-pub mod background_registry;
 pub mod brief;
 pub mod browser;
 pub mod claude_code;
@@ -23,10 +23,7 @@ pub mod hardware;
 pub mod image;
 pub mod deck_compile;
 pub mod design_system_read;
-pub mod designer_lint;
-pub mod designer_scaffold;
-pub mod designer_skill_read;
-pub mod designer_template_read;
+pub mod designer;
 pub mod figma_fetch;
 pub mod inline;
 pub mod mcp;
@@ -192,6 +189,7 @@ pub use document::PdfOpsTool;
 pub use document::PresentationCreateTool;
 pub use error::ToolErrorCause;
 
+pub use code::codebase_search::CodebaseSearchTool;
 pub use code::graph_query::CodeGraphQueryTool;
 pub use code::outline::CodeOutlineTool;
 pub use code::review::CodeReviewTool;
@@ -228,10 +226,10 @@ pub use http_request::HttpRequestTool;
 pub use image::generate::ImageGenTool;
 pub use deck_compile::DeckCompileTool;
 pub use design_system_read::DesignSystemReadTool;
-pub use designer_lint::DesignerLintTool;
-pub use designer_scaffold::DesignerScaffoldTool;
-pub use designer_skill_read::DesignerSkillReadTool;
-pub use designer_template_read::DesignerTemplateReadTool;
+pub use designer::lint::DesignerLintTool;
+pub use designer::scaffold::DesignerScaffoldTool;
+pub use designer::skill_read::DesignerSkillReadTool;
+pub use designer::template_read::DesignerTemplateReadTool;
 pub use figma_fetch::FigmaFetchTool;
 pub use media::MediaGenTool;
 #[cfg(feature = "tool-image")]
@@ -427,6 +425,25 @@ fn boxed_registry_from_arcs(tools: Vec<Arc<dyn Tool>>) -> Vec<Box<dyn Tool>> {
     tools.into_iter().map(ArcDelegatingTool::boxed).collect()
 }
 
+// One TaskManager per workspace, shared across every agent (parent, delegate
+// subagents, coordinator) that builds a tool set against that workspace, so
+// task_create/task_get/... actually track shared state cross-agent. Different
+// workspaces remain fully isolated.
+fn shared_task_manager_for(workspace_root: &std::path::Path) -> TaskManagerHandle {
+    static REGISTRY: std::sync::LazyLock<
+        parking_lot::Mutex<std::collections::HashMap<std::path::PathBuf, TaskManagerHandle>>,
+    > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+    let key = if workspace_root.as_os_str().is_empty() {
+        std::path::PathBuf::from("__no_workspace__")
+    } else {
+        crate::util::normalize_path_for_containment(workspace_root)
+    };
+    let mut reg = REGISTRY.lock();
+    reg.entry(key)
+        .or_insert_with(|| Arc::new(RwLock::new(TaskManager::new())))
+        .clone()
+}
+
 pub fn default_tools(security: Arc<SecurityPolicy>) -> Vec<Box<dyn Tool>> {
     default_tools_with_runtime(security, Arc::new(NativeRuntime::new()))
 }
@@ -436,27 +453,45 @@ pub fn default_tools_with_runtime(
     runtime: Arc<dyn RuntimeAdapter>,
 ) -> Vec<Box<dyn Tool>> {
 
-    let lock_provider: Arc<dyn crate::apply_model::LockProvider> =
-        match crate::agent::multi_agent_runtime::global_runtime() {
-            Some(rt) => Arc::new(crate::apply_model::LockManagerProvider::new(
-                rt.coordinator.clone(),
-                "tool_runtime",
-            )),
-            None => Arc::new(crate::apply_model::NoopLockProvider),
-        };
+    // Lazy: resolves the multi-agent runtime at each acquire, so a tool surface
+    // built before init_global_runtime() still serializes with later writers.
+    let lock_provider: Arc<dyn crate::apply_model::LockProvider> = Arc::new(
+        crate::apply_model::lock_manager_provider::LazyRuntimeLockProvider::new("tool_runtime"),
+    );
+    let default_workspace_root = security.workspace_root_handle().read().clone();
+    let default_history_root = if default_workspace_root.as_os_str().is_empty() {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    } else {
+        default_workspace_root
+    };
+    let shared_edit_history =
+        crate::tools::edit_history::EditHistory::shared_for_workspace(&default_history_root);
     let shared_ops = Arc::new(
         crate::apply_model::OpsApplier::default_for_shared_workspace(
             security.workspace_root_handle(),
         )
         .with_allowed_roots(security.allowed_roots.clone())
-        .with_lock_provider(lock_provider),
+        .with_lock_provider(lock_provider)
+        .with_edit_history(shared_edit_history.clone()),
     );
 
     vec![
         Box::new(ShellTool::new(security.clone(), runtime)),
+        Box::new(background::status::BackgroundStatusTool::new()),
+        Box::new(background::logs::BackgroundLogsTool::new()),
+        Box::new(background::kill::BackgroundKillTool::new()),
+        Box::new(background::wait::BackgroundWaitTool::new()),
         Box::new(FileReadTool::new(security.clone())),
-        Box::new(FileWriteTool::new(security.clone()).with_ops_applier(shared_ops.clone())),
-        Box::new(FileEditTool::new(security.clone()).with_ops_applier(shared_ops.clone())),
+        Box::new(
+            FileWriteTool::new(security.clone())
+                .with_ops_applier(shared_ops.clone())
+                .with_edit_history(shared_edit_history.clone()),
+        ),
+        Box::new(
+            FileEditTool::new(security.clone())
+                .with_ops_applier(shared_ops.clone())
+                .with_edit_history(shared_edit_history.clone()),
+        ),
         Box::new(
             NotebookEditTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
         ),
@@ -464,7 +499,9 @@ pub fn default_tools_with_runtime(
         Box::new(
             GlobEditTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
         ),
-        Box::new(LspRenameTool::new(security.clone())),
+        Box::new(
+            LspRenameTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
+        ),
         Box::new(lsp::format::LspFormatTool::new(security.clone())),
         Box::new(
             PatchApplyTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
@@ -623,7 +660,12 @@ pub fn all_tools_with_runtime(
         },
     );
     let plan_mode_flag: PlanModeFlag = PlanModeFlag::new();
-    let task_manager: TaskManagerHandle = Arc::new(RwLock::new(TaskManager::new()));
+    // Share one TaskManager per workspace so a parent agent and its
+    // delegate/coordinator subagents (which build their own tool set against the
+    // same workspace) observe the SAME task list. Previously each agent got a
+    // private in-memory manager, so cross-agent task tracking silently did
+    // nothing. Different workspaces stay isolated.
+    let task_manager: TaskManagerHandle = shared_task_manager_for(&workspace_root_pb);
     #[cfg(not(feature = "tool-utility-misc"))]
     let _ = canvas_store;
     #[cfg(not(feature = "tool-productivity"))]
@@ -634,20 +676,23 @@ pub fn all_tools_with_runtime(
         parking_lot::RwLock::new(incremental_optimize::OptimizationState::default()),
     );
 
-    let lock_provider: Arc<dyn crate::apply_model::LockProvider> =
-        match crate::agent::multi_agent_runtime::global_runtime() {
-            Some(rt) => Arc::new(crate::apply_model::LockManagerProvider::new(
-                rt.coordinator.clone(),
-                "tool_runtime",
-            )),
-            None => Arc::new(crate::apply_model::NoopLockProvider),
-        };
+    let lock_provider: Arc<dyn crate::apply_model::LockProvider> = Arc::new(
+        crate::apply_model::lock_manager_provider::LazyRuntimeLockProvider::new("tool_runtime"),
+    );
+    let edit_history_root = if workspace_root_pb.as_os_str().is_empty() {
+        workspace_dir.to_path_buf()
+    } else {
+        workspace_root_pb.clone()
+    };
+    let shared_edit_history =
+        crate::tools::edit_history::EditHistory::shared_for_workspace(&edit_history_root);
     let shared_ops = Arc::new(
         crate::apply_model::OpsApplier::default_for_shared_workspace(
             security.workspace_root_handle(),
         )
         .with_allowed_roots(security.allowed_roots.clone())
-        .with_lock_provider(lock_provider),
+        .with_lock_provider(lock_provider)
+        .with_edit_history(shared_edit_history.clone()),
     );
 
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
@@ -655,10 +700,26 @@ pub fn all_tools_with_runtime(
             ShellTool::new_with_sandbox(security.clone(), runtime, sandbox)
                 .with_timeout_secs(root_config.shell_tool.timeout_secs),
         ),
+        Arc::new(background::status::BackgroundStatusTool::new()),
+        Arc::new(background::logs::BackgroundLogsTool::new()),
+        Arc::new(background::kill::BackgroundKillTool::new()),
+        Arc::new(background::wait::BackgroundWaitTool::new()),
         Arc::new(FileReadTool::new(security.clone())),
-        Arc::new(FileWriteTool::new(security.clone()).with_ops_applier(shared_ops.clone())),
-        Arc::new(FileEditTool::new(security.clone()).with_ops_applier(shared_ops.clone())),
-        Arc::new(MultiEditTool::new(security.clone()).with_ops_applier(shared_ops.clone())),
+        Arc::new(
+            FileWriteTool::new(security.clone())
+                .with_ops_applier(shared_ops.clone())
+                .with_edit_history(shared_edit_history.clone()),
+        ),
+        Arc::new(
+            FileEditTool::new(security.clone())
+                .with_ops_applier(shared_ops.clone())
+                .with_edit_history(shared_edit_history.clone()),
+        ),
+        Arc::new(
+            MultiEditTool::new(security.clone())
+                .with_ops_applier(shared_ops.clone())
+                .with_edit_history(shared_edit_history.clone()),
+        ),
         Arc::new(
             NotebookEditTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
         ),
@@ -821,9 +882,12 @@ pub fn all_tools_with_runtime(
         Arc::new(FlowRunTool::new()),
         Arc::new(FlowRollbackTool::new()),
         Arc::new(CodeGraphQueryTool::new()),
+        Arc::new(CodebaseSearchTool::new()),
         Arc::new(CodeOutlineTool::new(workspace_dir.to_path_buf())),
         Arc::new(CodeReviewTool::new()),
-        Arc::new(CodeXfileRefactorTool::new()),
+        Arc::new(
+            CodeXfileRefactorTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
+        ),
         #[cfg(feature = "tool-utility-misc")]
         Arc::new(WeatherTool::new()),
         #[cfg(feature = "tool-utility-misc")]
@@ -916,7 +980,9 @@ pub fn all_tools_with_runtime(
     tool_arcs.push(Arc::new(
         GlobEditTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
     ));
-    tool_arcs.push(Arc::new(LspRenameTool::new(security.clone())));
+    tool_arcs.push(Arc::new(
+        LspRenameTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
+    ));
     tool_arcs.push(Arc::new(lsp::format::LspFormatTool::new(security.clone())));
     tool_arcs.push(Arc::new(
         PatchApplyTool::new(security.clone()).with_ops_applier(shared_ops.clone()),

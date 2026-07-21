@@ -171,6 +171,10 @@ export function useKeyboardShortcuts() {
       const isEditingForGlobalSearch = isChatInput
 
       if (ctrlOrMeta && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'p') {
+        // Ctrl+P is the global quick-open (go-to-file), matching VS Code, and must
+        // fire even when the Monaco editor is focused. Do NOT early-return for
+        // Monaco: standalone Monaco does not bind Ctrl+P, so letting it through
+        // would fall to the WebView2 print dialog instead.
         e.preventDefault()
         e.stopPropagation()
         useUIStore.getState().openWorkspaceFinder('quick-open')

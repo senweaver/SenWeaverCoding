@@ -120,42 +120,48 @@ export function TabBar() {
     setContextMenu({ sessionId, x: e.clientX, y: e.clientY })
   }
 
-  const handleCloseOthers = (sessionId: string) => {
-    setContextMenu(null)
-    const otherIds = tabs.filter((t) => t.sessionId !== sessionId).map((t) => t.sessionId)
-    for (const id of otherIds) {
+  // Batch closes must respect the same "don't drop a running/queued session
+  // silently" rule as single close. Rather than pop N confirmation modals, skip
+  // sessions with a pending queue or an in-flight turn and only close idle ones.
+  const closeIdleSessionsOnly = (ids: string[]) => {
+    for (const id of ids) {
+      const tab = tabs.find((t) => t.sessionId === id)
+      if (tab && tab.type !== 'session') {
+        closeTab(id)
+        continue
+      }
+      const queueLen = useWorkspaceQueueStore.getState().getQueueForSession(id).length
+      if (queueLen > 0) continue
+      const sessionState = useChatStore.getState().sessions[id]
+      const isRunning = sessionState && sessionState.chatState !== 'idle'
+      if (isRunning) continue
       suspendSession(id)
       closeTab(id)
     }
+  }
+
+  const handleCloseOthers = (sessionId: string) => {
+    setContextMenu(null)
+    closeIdleSessionsOnly(
+      tabs.filter((t) => t.sessionId !== sessionId).map((t) => t.sessionId),
+    )
   }
 
   const handleCloseLeft = (sessionId: string) => {
     setContextMenu(null)
     const idx = tabs.findIndex((t) => t.sessionId === sessionId)
-    const leftIds = tabs.slice(0, idx).map((t) => t.sessionId)
-    for (const id of leftIds) {
-      suspendSession(id)
-      closeTab(id)
-    }
+    closeIdleSessionsOnly(tabs.slice(0, idx).map((t) => t.sessionId))
   }
 
   const handleCloseRight = (sessionId: string) => {
     setContextMenu(null)
     const idx = tabs.findIndex((t) => t.sessionId === sessionId)
-    const rightIds = tabs.slice(idx + 1).map((t) => t.sessionId)
-    for (const id of rightIds) {
-      suspendSession(id)
-      closeTab(id)
-    }
+    closeIdleSessionsOnly(tabs.slice(idx + 1).map((t) => t.sessionId))
   }
 
   const handleCloseAll = () => {
     setContextMenu(null)
-    const allIds = tabs.map((t) => t.sessionId)
-    for (const id of allIds) {
-      suspendSession(id)
-      closeTab(id)
-    }
+    closeIdleSessionsOnly(tabs.map((t) => t.sessionId))
   }
 
   const getTargetIndexFromClientX = useCallback((clientX: number) => {

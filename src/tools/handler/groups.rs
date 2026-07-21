@@ -167,7 +167,7 @@ impl ToolGroupRegistry {
                 name: "web".to_string(),
                 description: "Web research and browsing tools".to_string(),
                 tools: vec![
-                    "web_search".into(),
+                    "web_search_tool".into(),
                     "multi_search".into(),
                     "web_fetch".into(),
                     "image_search".into(),

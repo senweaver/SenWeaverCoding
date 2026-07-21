@@ -100,7 +100,10 @@ impl EvalSuite for HumanEvalSuite {
             verdict,
             output: output.to_string(),
             latency_ms: 0,
-            notes: None,
+            notes: Some(
+                "heuristic exact-match judge; NOT an execution-based HumanEval verdict"
+                    .to_string(),
+            ),
         }
     }
 }

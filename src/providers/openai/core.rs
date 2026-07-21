@@ -86,9 +86,13 @@ struct NativeChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    parallel_tool_calls: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     max_completion_tokens: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prompt_cache_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -178,6 +182,8 @@ struct PromptTokensDetails {
 #[derive(Debug, Deserialize)]
 struct NativeChoice {
     message: NativeResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -253,6 +259,28 @@ impl OpenAiProvider {
         }
     }
 
+    fn is_official_endpoint(&self) -> bool {
+        self.base_url.starts_with("https://api.openai.com")
+    }
+
+    fn session_cache_key(&self) -> Option<String> {
+        if !self.is_official_endpoint() {
+            return None;
+        }
+        crate::session::current_session_context()
+            .map(|ctx| format!("sen-{}", ctx.session_id))
+            .filter(|k| k.len() > 4)
+    }
+
+    fn parallel_tool_calls_field(&self, model: &str, has_tools: bool) -> Option<bool> {
+        if !has_tools || !self.is_official_endpoint() || Self::uses_max_completion_tokens(model)
+        {
+            None
+        } else {
+            Some(true)
+        }
+    }
+
     fn max_completion_tokens_field(max: Option<u32>, model: &str) -> Option<u32> {
         if Self::uses_max_completion_tokens(model) {
             max
@@ -262,29 +290,7 @@ impl OpenAiProvider {
     }
 
     fn adjust_temperature_for_model(model: &str, requested_temperature: f64) -> f64 {
-
-        let requires_1_0 = matches!(
-            model,
-            "gpt-5"
-                | "gpt-5-2025-08-07"
-                | "gpt-5-mini"
-                | "gpt-5-mini-2025-08-07"
-                | "gpt-5-nano"
-                | "gpt-5-nano-2025-08-07"
-                | "gpt-5.1-chat-latest"
-                | "gpt-5.2-chat-latest"
-                | "gpt-5.3-chat-latest"
-                | "o1"
-                | "o1-2024-12-17"
-                | "o3"
-                | "o3-2025-04-16"
-                | "o3-mini"
-                | "o3-mini-2025-01-31"
-                | "o4-mini"
-                | "o4-mini-2025-04-16"
-        );
-
-        if requires_1_0 {
+        if Self::uses_max_completion_tokens(model) {
             1.0
         } else {
             requested_temperature
@@ -381,10 +387,13 @@ impl OpenAiProvider {
                                 value.get("tool_use_id").and_then(serde_json::Value::as_str)
                             })
                             .map(ToString::to_string);
-                        let content = value
-                            .get("content")
-                            .and_then(serde_json::Value::as_str)
-                            .map(ToString::to_string);
+                        // OpenAI rejects a tool message with no content string. If
+                        // the envelope carries a non-string content (object/array),
+                        // stringify it rather than dropping the field.
+                        let content = value.get("content").map(|c| match c.as_str() {
+                            Some(s) => s.to_string(),
+                            None => c.to_string(),
+                        });
                         return NativeMessage {
                             role: "tool".to_string(),
                             content,
@@ -553,6 +562,8 @@ impl OpenAiProvider {
             tool_calls,
             usage: None,
             reasoning_content,
+            thinking_signature: None,
+            stop_reason: None,
         }
     }
 
@@ -759,9 +770,11 @@ impl Provider for OpenAiProvider {
             messages: Self::convert_messages(&sanitized_messages),
             temperature: adjusted_temperature,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
+            parallel_tool_calls: self.parallel_tool_calls_field(model, tools.is_some()),
             tools,
             max_tokens: Self::max_tokens_field(self.max_tokens, model),
             max_completion_tokens: Self::max_completion_tokens_field(self.max_tokens, model),
+            prompt_cache_key: self.session_cache_key(),
             stream: None,
             stream_options: None,
         };
@@ -789,14 +802,18 @@ impl Provider for OpenAiProvider {
                 cache_creation_input_tokens: None,
             }
         });
-        let message = native_response
+        let choice = native_response
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from OpenAI"))?;
-        let mut result = Self::parse_native_response(message);
+        let stop_reason = choice
+            .finish_reason
+            .as_deref()
+            .and_then(crate::providers::traits::StopReason::from_wire);
+        let mut result = Self::parse_native_response(choice.message);
         result.usage = usage;
+        result.stop_reason = stop_reason;
         Ok(result)
     }
 
@@ -843,9 +860,11 @@ impl Provider for OpenAiProvider {
             messages: Self::convert_messages(&sanitized_messages),
             temperature: adjusted_temperature,
             tool_choice: native_tools.as_ref().map(|_| "auto".to_string()),
+            parallel_tool_calls: self.parallel_tool_calls_field(model, native_tools.is_some()),
             tools: native_tools,
             max_tokens: Self::max_tokens_field(self.max_tokens, model),
             max_completion_tokens: Self::max_completion_tokens_field(self.max_tokens, model),
+            prompt_cache_key: self.session_cache_key(),
             stream: None,
             stream_options: None,
         };
@@ -873,14 +892,18 @@ impl Provider for OpenAiProvider {
                 cache_creation_input_tokens: None,
             }
         });
-        let message = native_response
+        let choice = native_response
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from OpenAI"))?;
-        let mut result = Self::parse_native_response(message);
+        let stop_reason = choice
+            .finish_reason
+            .as_deref()
+            .and_then(crate::providers::traits::StopReason::from_wire);
+        let mut result = Self::parse_native_response(choice.message);
         result.usage = usage;
+        result.stop_reason = stop_reason;
         Ok(result)
     }
 
@@ -906,13 +929,21 @@ impl Provider for OpenAiProvider {
             }
         });
 
-        let body = serde_json::json!({
+        let mut body = serde_json::json!({
             "model": model,
             "messages": Self::convert_messages(messages),
             "temperature": adjusted_temperature,
             "response_format": response_format,
-            "max_tokens": self.max_tokens,
         });
+        if let Some(obj) = body.as_object_mut() {
+            if Self::uses_max_completion_tokens(model) {
+                if let Some(mt) = self.max_tokens {
+                    obj.insert("max_completion_tokens".to_string(), serde_json::json!(mt));
+                }
+            } else if let Some(mt) = self.max_tokens {
+                obj.insert("max_tokens".to_string(), serde_json::json!(mt));
+            }
+        }
 
         let response = self
             .http_client()
@@ -999,9 +1030,11 @@ impl Provider for OpenAiProvider {
             messages: Self::convert_messages(&sanitized_messages),
             temperature: adjusted_temperature,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
+            parallel_tool_calls: self.parallel_tool_calls_field(model, tools.is_some()),
             tools,
             max_tokens: Self::max_tokens_field(self.max_tokens, model),
             max_completion_tokens: Self::max_completion_tokens_field(self.max_tokens, model),
+            prompt_cache_key: self.session_cache_key(),
             stream: Some(options.enabled),
             stream_options: options
                 .enabled

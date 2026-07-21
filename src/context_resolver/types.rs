@@ -18,6 +18,9 @@ pub enum ContextTag {
     Selection,
 
     Codebase(String),
+
+    /// `@problems` — current workspace LSP diagnostics (errors/warnings).
+    Problems,
 }
 
 impl ContextTag {
@@ -34,6 +37,7 @@ impl ContextTag {
             Self::Recent => "recent",
             Self::Selection => "selection",
             Self::Codebase(_) => "codebase",
+            Self::Problems => "problems",
         }
     }
 }

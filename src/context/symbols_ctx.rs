@@ -15,7 +15,11 @@ pub struct SymbolSnapshot {
 
     pub line: u32,
 
+    pub line_end: u32,
+
     pub signature: Option<String>,
 
     pub dependents: Vec<String>,
+
+    pub imports: Vec<String>,
 }

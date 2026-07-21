@@ -34,7 +34,7 @@ pub use resource_lock::{
     has_read_in_current_session, install_global as install_global_workspace_resources,
     is_stale_for_current_session,
     record_read_for_current_session, record_write_for_current_session, scope_session_context,
-    stale_file_error_message,
+    stale_file_error_message, subagent_session_context,
 };
 pub use run_state::{SessionRunGuard, SessionRunStateEvent, SessionRunStateRegistry};
 pub use turn_feed::{
@@ -54,7 +54,7 @@ pub use state::{
     SessionState, Turn,
 };
 pub use sync::SessionSyncHub;
-pub use translators::{is_forwardable, session_to_agent_events};
+pub use translators::session_to_agent_events;
 
 use std::sync::Arc;
 

@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import { useEffect, useState, type MouseEvent } from 'react'
+import { useTranslation } from '../../i18n'
 import { copyTextToClipboard } from '../chat/clipboard'
 
 type Props = {
@@ -18,13 +19,16 @@ type Props = {
 
 export function CopyButton({
   text,
-  label = 'Copy',
-  copiedLabel = 'Copied',
+  label,
+  copiedLabel,
   displayLabel,
   displayCopiedLabel,
   className = '',
   onClick,
 }: Props) {
+  const t = useTranslation()
+  const effectiveLabel = label ?? t('common.copy')
+  const effectiveCopiedLabel = copiedLabel ?? t('common.copied')
   const [copied, setCopied] = useState(false)
 
   useEffect(() => {
@@ -47,10 +51,10 @@ export function CopyButton({
     }
   }
 
-  const currentLabel = copied ? copiedLabel : label
+  const currentLabel = copied ? effectiveCopiedLabel : effectiveLabel
   const buttonText = copied
-    ? (displayCopiedLabel ?? copiedLabel)
-    : (displayLabel ?? label)
+    ? (displayCopiedLabel ?? effectiveCopiedLabel)
+    : (displayLabel ?? effectiveLabel)
 
   return (
     <button

@@ -295,26 +295,23 @@ impl ScriptHookRunner {
             other => vec![other],
         };
 
-        let mut chosen: Option<&HooksSource> = None;
+        // Merge matching commands from ALL sources (home/global + workspace)
+        // rather than letting the highest-precedence source shadow the rest. A
+        // workspace hooks.json must not be able to silently disable a user's
+        // global security/audit hook for an event like preToolUse just by
+        // defining its own handler; security semantics are additive.
+        let mut out: Vec<&HookCommand> = Vec::new();
         for src in &self.sources {
-            if lookup_events
-                .iter()
-                .any(|ev| src.config.hooks.contains_key(ev))
-            {
-                chosen = Some(src);
+            for ev in &lookup_events {
+                if let Some(cmds) = src.config.hooks.get(ev) {
+                    out.extend(
+                        cmds.iter()
+                            .filter(|c| matcher_matches(c.matchers.as_ref(), payload)),
+                    );
+                }
             }
         }
-        let Some(src) = chosen else {
-            return Vec::new();
-        };
-        lookup_events
-            .iter()
-            .filter_map(|ev| src.config.hooks.get(ev))
-            .flat_map(|cmds| {
-                cmds.iter()
-                    .filter(|c| matcher_matches(c.matchers.as_ref(), payload))
-            })
-            .collect()
+        out
     }
 
     pub async fn dispatch(&self, event: HookEvent, payload: HookPayload) -> HookDecision {

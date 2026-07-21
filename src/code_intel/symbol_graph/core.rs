@@ -90,6 +90,9 @@ pub struct SymbolGraph {
     symbol_index: HashMap<SymbolId, usize>,
 
     #[serde(skip)]
+    symbols_by_file_name: HashMap<String, Vec<usize>>,
+
+    #[serde(skip)]
     recent_edits: VecDeque<(SymbolId, Instant)>,
 }
 
@@ -174,6 +177,41 @@ impl SymbolGraph {
         Ok(target)
     }
 
+    pub fn load_cached(root: &Path) -> Option<std::sync::Arc<Self>> {
+        static CACHE: std::sync::OnceLock<
+            parking_lot::Mutex<
+                HashMap<PathBuf, (std::time::SystemTime, std::sync::Arc<SymbolGraph>)>,
+            >,
+        > = std::sync::OnceLock::new();
+        let cache = CACHE.get_or_init(|| parking_lot::Mutex::new(HashMap::new()));
+
+        let path = root.join(".sen").join("symbol_graph.json");
+        let mtime = fs::metadata(&path).ok()?.modified().ok()?;
+        {
+            let guard = cache.lock();
+            if let Some((cached_mtime, graph)) = guard.get(&path) {
+                if *cached_mtime == mtime {
+                    return Some(std::sync::Arc::clone(graph));
+                }
+            }
+        }
+        let graph = Self::load(root).ok().flatten()?;
+        let arc = std::sync::Arc::new(graph);
+        let mut guard = cache.lock();
+        guard.insert(path, (mtime, std::sync::Arc::clone(&arc)));
+        if guard.len() > 8 {
+            let stale: Vec<PathBuf> = guard
+                .iter()
+                .filter(|(p, _)| !p.exists())
+                .map(|(p, _)| p.clone())
+                .collect();
+            for p in stale {
+                guard.remove(&p);
+            }
+        }
+        Some(arc)
+    }
+
     pub fn load(root: &Path) -> io::Result<Option<Self>> {
         let path = root.join(".sen").join("symbol_graph.json");
         if !path.exists() {
@@ -210,14 +248,33 @@ impl SymbolGraph {
     pub fn rebuild_name_index(&mut self) {
         self.name_index.clear();
         self.symbol_index.clear();
+        self.symbols_by_file_name.clear();
         for (idx, sym) in self.symbols.iter().enumerate() {
             self.name_index
                 .entry(sym.id.name.clone())
                 .or_default()
                 .push(sym.id.clone());
             self.symbol_index.insert(sym.id.clone(), idx);
+            let file_key = sym
+                .id
+                .file
+                .file_name()
+                .map(|n| n.to_string_lossy().to_ascii_lowercase())
+                .unwrap_or_default();
+            self.symbols_by_file_name
+                .entry(file_key)
+                .or_default()
+                .push(idx);
         }
         self.rebuild_edge_index();
+    }
+
+    #[must_use]
+    pub fn symbol_indices_for_file_name(&self, file_name_lower: &str) -> &[usize] {
+        self.symbols_by_file_name
+            .get(file_name_lower)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     fn rebuild_edge_index(&mut self) {
@@ -354,10 +411,40 @@ impl SymbolGraph {
             .cloned()
             .collect();
 
+        // Files that reference a symbol in (or import) a dirty file are the "callers".
+        // Their outgoing edges (the reverse/caller edges into the changed symbols) must
+        // be recomputed against the changed file's new symbol positions; otherwise every
+        // edit silently strips caller information the moment a target file is touched.
+        const MAX_CALLER_RESCAN: usize = 512;
+        let mut caller_rel: HashSet<PathBuf> = HashSet::new();
+        for e in &self.edges {
+            if dirty_rel.contains(&e.to.file) && !dirty_rel.contains(&e.from.file) {
+                caller_rel.insert(e.from.file.clone());
+            }
+        }
+        if caller_rel.len() > MAX_CALLER_RESCAN {
+            tracing::debug!(
+                target: "code_intel.symbol_graph",
+                callers = caller_rel.len(),
+                cap = MAX_CALLER_RESCAN,
+                "capping caller re-scan for symbol-graph partial rebuild"
+            );
+            let capped: HashSet<PathBuf> =
+                caller_rel.into_iter().take(MAX_CALLER_RESCAN).collect();
+            caller_rel = capped;
+        }
+
+        // Recompute set = changed files (whose symbols are re-added) plus caller files
+        // (bodies re-scanned for edges only; their symbols stay as-is).
+        let mut rescan_rel: HashSet<PathBuf> = dirty_rel.clone();
+        rescan_rel.extend(caller_rel.iter().cloned());
+
         self.symbols.retain(|s| !dirty_rel.contains(&s.id.file));
 
+        // Drop only edges that ORIGINATE from a file we are about to re-scan (or from a
+        // removed file). Incoming edges from clean, non-caller files are preserved.
         self.edges
-            .retain(|e| !dirty_rel.contains(&e.from.file) && !removed_rel.contains(&e.to.file));
+            .retain(|e| !rescan_rel.contains(&e.from.file) && !removed_rel.contains(&e.to.file));
 
         let mut per_file: Vec<(PathBuf, String, Vec<OutlineEntry>)> = Vec::new();
         let mut test_syms: HashSet<SymbolId> = HashSet::new();
@@ -392,6 +479,21 @@ impl SymbolGraph {
             per_file.push((rel, src, entries));
         }
 
+        // Re-scan caller bodies for edges without touching their symbols.
+        for rel in &caller_rel {
+            let abs_path = root.join(rel);
+            let Ok(src) = fs::read_to_string(&abs_path) else {
+                continue;
+            };
+            let entries = match extract_outline(&abs_path, None) {
+                Ok(v) => v,
+                Err(OutlineError::UnsupportedLanguage(_)) | Err(OutlineError::Io { .. }) => {
+                    continue;
+                }
+            };
+            per_file.push((rel.clone(), src, entries));
+        }
+
         let mut known_files: HashSet<PathBuf> =
             self.symbols.iter().map(|s| s.id.file.clone()).collect();
         known_files.extend(changed_rel.iter().cloned());
@@ -417,6 +519,21 @@ fn collect_edges(
     known_files: &HashSet<PathBuf>,
 ) -> Vec<Edge> {
     let mut edge_set: BTreeSet<(SymbolId, SymbolId, EdgeKind)> = BTreeSet::new();
+
+    // Build the name lookup and a single Aho-Corasick automaton once for the
+    // whole graph so call/use detection is one linear scan per body instead of
+    // O(symbols x body). Same-name symbols keep every candidate so resolution
+    // can prefer the one in (or nearest) the calling file.
+    let mut name_to: HashMap<&str, Vec<&SymbolId>> = HashMap::new();
+    for entry in &view.symbols {
+        if entry.id.name.is_empty() {
+            continue;
+        }
+        name_to.entry(entry.id.name.as_str()).or_default().push(&entry.id);
+    }
+    let names: Vec<&str> = name_to.keys().copied().collect();
+    let call_use_ac = aho_corasick::AhoCorasick::new(&names).ok();
+
     for (rel, src, entries) in per_file {
         let ranges = compute_symbol_ranges(entries, src);
         for (placeholder, body) in ranges {
@@ -426,7 +543,11 @@ fn collect_edges(
                 line: placeholder.line,
             };
             let sym_is_test = test_syms.contains(&sym);
-            for target in detect_calls(&body, view) {
+            let (calls, uses) = match call_use_ac.as_ref() {
+                Some(ac) => detect_calls_and_uses(&body, rel, &name_to, ac, &names),
+                None => (Vec::new(), Vec::new()),
+            };
+            for target in calls {
                 if target == sym {
                     continue;
                 }
@@ -435,13 +556,13 @@ fn collect_edges(
                     edge_set.insert((sym.clone(), target, EdgeKind::TestedBy));
                 }
             }
-            for target in detect_implements(&body, view) {
+            for target in detect_implements(&body, rel, &name_to) {
                 if target == sym {
                     continue;
                 }
                 edge_set.insert((sym.clone(), target, EdgeKind::Implements));
             }
-            for target in detect_uses(&body, view) {
+            for target in uses {
                 if target == sym {
                     continue;
                 }
@@ -500,6 +621,7 @@ fn walk_source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
                     if matches!(
                         ext,
                         "rs" | "py" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "cjs" | "go"
+                            | "java" | "c" | "h" | "cpp" | "hpp" | "cc"
                     ) {
                         out.push(path);
                     }
@@ -556,28 +678,86 @@ fn compute_symbol_ranges(entries: &[OutlineEntry], src: &str) -> Vec<(SymbolId, 
     out
 }
 
-fn detect_calls(body: &str, graph: &SymbolGraph) -> Vec<SymbolId> {
-    let mut name_to: HashMap<&str, &SymbolId> = HashMap::new();
-    for entry in &graph.symbols {
-        if entry.id.name.is_empty() {
-            continue;
-        }
-        name_to.entry(entry.id.name.as_str()).or_insert(&entry.id);
-    }
-    let mut out = Vec::new();
-    for (name, sym) in name_to {
-        if name.is_empty() {
-            continue;
-        }
-        let needle = format!("{name}(");
-        if body.contains(&needle) {
-            out.push((*sym).clone());
-        }
-    }
-    out
+fn resolve_same_name<'a>(
+    candidates: &[&'a SymbolId],
+    from_file: &Path,
+) -> Option<&'a SymbolId> {
+    candidates
+        .iter()
+        .find(|s| s.file == from_file)
+        .or_else(|| {
+            candidates
+                .iter()
+                .find(|s| s.file.parent() == from_file.parent())
+        })
+        .or_else(|| candidates.first())
+        .copied()
 }
 
-fn detect_implements(body: &str, graph: &SymbolGraph) -> Vec<SymbolId> {
+fn detect_calls_and_uses(
+    body: &str,
+    from_file: &Path,
+    name_to: &HashMap<&str, Vec<&SymbolId>>,
+    ac: &aho_corasick::AhoCorasick,
+    names: &[&str],
+) -> (Vec<SymbolId>, Vec<SymbolId>) {
+    let bytes = body.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
+    let mut call_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut use_names: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    for m in ac.find_overlapping_iter(body) {
+        let start = m.start();
+        let end = m.end();
+        let before_ok = start == 0 || !is_ident(bytes[start - 1]);
+        if !before_ok {
+            continue;
+        }
+        let after_byte = bytes.get(end).copied();
+        if after_byte.map(is_ident).unwrap_or(false) {
+            continue;
+        }
+        let name = names[m.pattern().as_usize()];
+        if after_byte == Some(b'(') {
+            call_names.insert(name);
+        } else {
+            use_names.insert(name);
+        }
+    }
+    for name in &call_names {
+        use_names.remove(name);
+    }
+    let calls = call_names
+        .iter()
+        .filter_map(|n| name_to.get(*n).and_then(|c| resolve_same_name(c, from_file)))
+        .cloned()
+        .collect();
+    let uses = use_names
+        .iter()
+        .filter_map(|n| name_to.get(*n).and_then(|c| resolve_same_name(c, from_file)))
+        .cloned()
+        .collect();
+    (calls, uses)
+}
+
+fn detect_implements(
+    body: &str,
+    from_file: &Path,
+    name_to: &HashMap<&str, Vec<&SymbolId>>,
+) -> Vec<SymbolId> {
+    // O(1) name lookup via the prebuilt index instead of scanning every symbol in
+    // the graph per matched line (previously O(lines * symbols), which on large
+    // repos dominated the whole build).
+    let resolve = |name: &str, out: &mut Vec<SymbolId>| {
+        if name.is_empty() {
+            return;
+        }
+        if let Some(candidates) = name_to.get(name) {
+            if let Some(id) = resolve_same_name(candidates, from_file) {
+                out.push(id.clone());
+            }
+        }
+    };
+
     let mut out = Vec::new();
     for line in body.lines() {
         let t = line.trim_start();
@@ -589,11 +769,7 @@ fn detect_implements(body: &str, graph: &SymbolGraph) -> Vec<SymbolId> {
                     .next()
                     .unwrap_or("")
                     .trim();
-                if !trait_name.is_empty() {
-                    if let Some(sym) = graph.symbols.iter().find(|s| s.id.name == trait_name) {
-                        out.push(sym.id.clone());
-                    }
-                }
+                resolve(trait_name, &mut out);
             }
         }
 
@@ -603,13 +779,7 @@ fn detect_implements(body: &str, graph: &SymbolGraph) -> Vec<SymbolId> {
                     if r > l {
                         let parents = &rest[l + 1..r];
                         for parent in parents.split(',') {
-                            let p = parent.trim();
-                            if p.is_empty() {
-                                continue;
-                            }
-                            if let Some(sym) = graph.symbols.iter().find(|s| s.id.name == p) {
-                                out.push(sym.id.clone());
-                            }
+                            resolve(parent.trim(), &mut out);
                         }
                     }
                 }
@@ -617,60 +787,14 @@ fn detect_implements(body: &str, graph: &SymbolGraph) -> Vec<SymbolId> {
             if let Some(ext_idx) = rest.find(" extends ") {
                 let tail = &rest[ext_idx + " extends ".len()..];
                 let parent = tail.split([' ', '{']).next().unwrap_or("").trim();
-                if !parent.is_empty() {
-                    if let Some(sym) = graph.symbols.iter().find(|s| s.id.name == parent) {
-                        out.push(sym.id.clone());
-                    }
-                }
+                resolve(parent, &mut out);
             }
             if let Some(impl_idx) = rest.find(" implements ") {
                 let tail = &rest[impl_idx + " implements ".len()..];
                 for parent in tail.split([',', '{']) {
-                    let p = parent.trim();
-                    if p.is_empty() {
-                        continue;
-                    }
-                    if let Some(sym) = graph.symbols.iter().find(|s| s.id.name == p) {
-                        out.push(sym.id.clone());
-                    }
+                    resolve(parent.trim(), &mut out);
                 }
             }
-        }
-    }
-    out
-}
-
-fn detect_uses(body: &str, graph: &SymbolGraph) -> Vec<SymbolId> {
-    let mut out = Vec::new();
-    for entry in &graph.symbols {
-        let sym = &entry.id;
-        let name = &sym.name;
-        if name.is_empty() {
-            continue;
-        }
-
-        let mut found = false;
-        for (idx, _) in body.match_indices(name.as_str()) {
-            let before_ok = idx == 0
-                || !body
-                    .as_bytes()
-                    .get(idx.saturating_sub(1))
-                    .map(|b| b.is_ascii_alphanumeric() || *b == b'_')
-                    .unwrap_or(false);
-            let after = idx + name.len();
-            let after_ok = after >= body.len()
-                || !body
-                    .as_bytes()
-                    .get(after)
-                    .map(|b| b.is_ascii_alphanumeric() || *b == b'_')
-                    .unwrap_or(false);
-            if before_ok && after_ok {
-                found = true;
-                break;
-            }
-        }
-        if found {
-            out.push(sym.clone());
         }
     }
     out

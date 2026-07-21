@@ -2,11 +2,36 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+use std::collections::HashSet;
 use std::sync::LazyLock;
 
 use regex::Regex;
 
 use crate::providers::ToolCall;
+
+// Gate for the two loosest text fallbacks (GLM one-line shorthand and bare JSON
+// scanning). Those layers have a very wide false-positive surface: a final
+// answer that merely contains `docs/setup>see README` or a `{"name":...}`
+// example would otherwise be executed as a real tool call. They only make sense
+// for providers that cannot emit native tool calls, and only when the parsed
+// name is an actually-registered tool.
+#[derive(Clone, Copy)]
+pub(crate) struct ParseGate<'a> {
+    pub native_tools_supported: bool,
+    pub known_tools: &'a HashSet<String>,
+}
+
+impl ParseGate<'_> {
+    fn loose_fallbacks_enabled(gate: Option<&ParseGate<'_>>) -> bool {
+        // No gate => permissive (preserves behavior for callers without context).
+        gate.is_none_or(|g| !g.native_tools_supported)
+    }
+
+    fn name_is_known(gate: Option<&ParseGate<'_>>, name: &str) -> bool {
+        // No gate => cannot verify, accept. With a gate, require registry membership.
+        gate.is_none_or(|g| g.known_tools.contains(name))
+    }
+}
 
 pub(crate) fn parse_arguments_value(raw: Option<&serde_json::Value>) -> serde_json::Value {
     match raw {
@@ -633,7 +658,7 @@ pub(crate) fn map_tool_name_alias(tool_name: &str) -> &str {
 
         "browser" => "browser",
         "browser_open" => "browser_open",
-        "web_search" | "websearch" => "web_search",
+        "web_search" | "websearch" => "web_search_tool",
 
         "send_message" | "sendmessage" | "message_send" => "send_message",
 
@@ -871,6 +896,13 @@ pub(crate) fn parse_glm_shortened_body(body: &str) -> Option<ParsedToolCall> {
 }
 
 pub(crate) fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
+    parse_tool_calls_gated(response, None)
+}
+
+pub(crate) fn parse_tool_calls_gated(
+    response: &str,
+    gate: Option<&ParseGate<'_>>,
+) -> (String, Vec<ParsedToolCall>) {
 
     let cleaned = strip_think_tags(response);
     let response = cleaned.as_str();
@@ -1188,8 +1220,11 @@ pub(crate) fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) 
         }
     }
 
-    if calls.is_empty() {
-        let glm_calls = parse_glm_style_tool_calls(remaining);
+    if calls.is_empty() && ParseGate::loose_fallbacks_enabled(gate) {
+        let glm_calls: Vec<_> = parse_glm_style_tool_calls(remaining)
+            .into_iter()
+            .filter(|(name, _, _)| ParseGate::name_is_known(gate, name))
+            .collect();
         if !glm_calls.is_empty() {
             let mut cleaned_text = remaining.to_string();
             for (name, args, raw) in &glm_calls {
@@ -1210,8 +1245,11 @@ pub(crate) fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) 
         }
     }
 
-    if calls.is_empty() {
-        let bare = scan_bare_json_tool_calls(remaining);
+    if calls.is_empty() && ParseGate::loose_fallbacks_enabled(gate) {
+        let bare: Vec<_> = scan_bare_json_tool_calls(remaining)
+            .into_iter()
+            .filter(|(call, _)| ParseGate::name_is_known(gate, &call.name))
+            .collect();
         if !bare.is_empty() {
             let mut cleaned_text = remaining.to_string();
             for (call, raw) in &bare {

@@ -116,11 +116,32 @@ fn derive_key_legacy(salt: &[u8]) -> [u8; 32] {
     key
 }
 
+/// High-entropy secret input for the vault KDF. Prefers a user-supplied
+/// passphrase (env var), otherwise falls back to the machine hostname hint.
+///
+/// The hostname alone is low-entropy and often known, so an attacker who copies
+/// `credentials.bin` + `credentials.salt` could brute-force the Argon2 key. Set
+/// SENAGENTOS_VAULT_PASSPHRASE (or SEN_VAULT_PASSPHRASE) to a strong secret to
+/// make the KDF meaningful; the hostname is retained as an additional input so
+/// existing vaults still open when no passphrase is configured.
+fn vault_kdf_secret() -> Vec<u8> {
+    let mut secret = Vec::with_capacity(96);
+    secret.extend_from_slice(b"senweavercoding.credential_vault.v2");
+    if let Some(pass) = std::env::var("SENAGENTOS_VAULT_PASSPHRASE")
+        .ok()
+        .or_else(|| std::env::var("SEN_VAULT_PASSPHRASE").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+    {
+        secret.extend_from_slice(pass.as_bytes());
+    }
+    secret.extend_from_slice(machine_hint().as_bytes());
+    secret
+}
+
 fn derive_key_argon2(salt: &[u8]) -> Result<[u8; 32]> {
     use argon2::{Algorithm, Argon2, Params, Version};
-    let mut secret = Vec::with_capacity(64);
-    secret.extend_from_slice(b"senweavercoding.credential_vault.v2");
-    secret.extend_from_slice(machine_hint().as_bytes());
+    let secret = vault_kdf_secret();
     let params = Params::default();
     let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
     let mut key = [0u8; 32];

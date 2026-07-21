@@ -121,6 +121,20 @@ pub async fn prepare_messages_for_provider(
     messages: &[ChatMessage],
     config: &MultimodalConfig,
 ) -> anyhow::Result<PreparedMessages> {
+    let mut composed: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    for msg in messages {
+        let mut base = msg.composed_for_send();
+        let companion = base
+            .metadata
+            .remove(crate::providers::traits::TURN_COMPANION_KEY)
+            .and_then(|v| v.as_str().map(str::to_string));
+        composed.push(base);
+        if let Some(text) = companion {
+            composed.push(ChatMessage::user(text));
+        }
+    }
+    let messages = composed.as_slice();
+
     let (max_images, max_image_size_mb) = config.effective_limits();
     let max_bytes = max_image_size_mb.saturating_mul(1024 * 1024);
 
@@ -135,7 +149,7 @@ pub async fn prepare_messages_for_provider(
 
     if found_images == 0 {
         return Ok(PreparedMessages {
-            messages: messages.to_vec(),
+            messages: composed,
             contains_images: false,
         });
     }

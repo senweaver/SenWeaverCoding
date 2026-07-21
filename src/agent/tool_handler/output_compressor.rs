@@ -126,7 +126,7 @@ impl ToolOutputCompressor {
         let mut result = output.to_string();
         let mut strategies: Vec<&'static str> = Vec::new();
 
-        if self.config.dedup_lines {
+        if self.config.dedup_lines && max_chars > 0 && result.len() > max_chars {
             let before = result.len();
             result = dedup_lines(&result);
             if result.len() < before {

@@ -237,20 +237,42 @@ fn parse_patch_with(
         Ok(())
     };
 
-    for line in patch_content.lines() {
+    let lines: Vec<&str> = patch_content.lines().collect();
+    let mut remaining_old: Option<i64> = None;
+    let mut remaining_new: Option<i64> = None;
+
+    for (idx, line) in lines.iter().enumerate() {
+        let line = *line;
         let is_git_header = line.starts_with("diff --git ");
-        // A `--- ` line starts a new file only when we are not already inside one
-        // (plain unified diff without a `diff --git` header).
+
+        let in_hunk = pending
+            .as_ref()
+            .is_some_and(|p| !p.hunk_starts.is_empty());
+        let counts_known = remaining_old.is_some() && remaining_new.is_some();
+        let body_open = in_hunk
+            && match (remaining_old, remaining_new) {
+                (Some(o), Some(n)) => o > 0 || n > 0,
+                _ => true,
+            };
+
+        // A `--- ` line starts a new file only when we are not inside an open hunk
+        // body; inside a body it is content (e.g. deleting a `-- comment` line).
         let is_plain_old_marker = line.starts_with("--- ")
             && pending
                 .as_ref()
                 .map(|p| p.path_hint.is_some() || p.from_hint.is_some() || !p.hunk_starts.is_empty())
-                .unwrap_or(true);
+                .unwrap_or(true)
+            && (!in_hunk
+                || !body_open
+                || (!counts_known
+                    && lines.get(idx + 1).is_some_and(|n| n.starts_with("+++ "))));
 
         if is_git_header || is_plain_old_marker {
             if let Some(prev) = pending.take() {
                 finalize(prev, &mut files)?;
             }
+            remaining_old = None;
+            remaining_new = None;
             let mut fresh = PendingFile {
                 lines: Vec::new(),
                 hunk_starts: Vec::new(),
@@ -275,24 +297,72 @@ fn parse_patch_with(
             continue;
         };
 
-        if let Some(rest) = line.strip_prefix("--- ") {
-            cur.from_hint = git_path_from_marker(rest);
-            cur.from_dev_null = is_dev_null_marker(rest);
-        } else if let Some(rest) = line.strip_prefix("+++ ") {
-            cur.to_hint = git_path_from_marker(rest);
-            cur.to_dev_null = is_dev_null_marker(rest);
-        } else if let Some(rest) = line.strip_prefix("@@ ") {
-            if let Some(end) = rest.find(" @@") {
-                let parts: Vec<&str> = rest[..end].split_whitespace().collect();
-                if let Some(old_token) = parts.first() {
-                    let old_start = old_token
-                        .trim_start_matches(['+', '-'])
-                        .split(',')
-                        .next()
-                        .and_then(|s| s.parse::<u32>().ok())
-                        .unwrap_or(1);
-                    cur.hunk_starts.push(old_start);
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            let mut old_start: Option<u32> = None;
+            let mut old_count: Option<i64> = None;
+            let mut new_count: Option<i64> = None;
+            for token in rest.split_whitespace() {
+                if token == "@@" {
+                    break;
                 }
+                if let Some(spec) = token.strip_prefix('-') {
+                    if old_start.is_none() {
+                        let mut parts = spec.splitn(2, ',');
+                        old_start = parts.next().and_then(|s| s.parse::<u32>().ok());
+                        if old_start.is_some() {
+                            old_count = parts.next().and_then(|s| s.parse::<i64>().ok());
+                        }
+                    }
+                } else if let Some(spec) = token.strip_prefix('+') {
+                    if new_count.is_none() && spec.split(',').next().is_some_and(|s| s.parse::<u32>().is_ok()) {
+                        new_count = spec.splitn(2, ',').nth(1).and_then(|s| s.parse::<i64>().ok());
+                    }
+                }
+            }
+            cur.hunk_starts.push(old_start.unwrap_or(1));
+            remaining_old = old_count;
+            remaining_new = new_count;
+            cur.lines.push(line.to_string());
+            continue;
+        }
+
+        if !body_open {
+            if let Some(rest) = line.strip_prefix("--- ") {
+                cur.from_hint = git_path_from_marker(rest);
+                cur.from_dev_null = is_dev_null_marker(rest);
+                cur.lines.push(line.to_string());
+                continue;
+            }
+            if let Some(rest) = line.strip_prefix("+++ ") {
+                cur.to_hint = git_path_from_marker(rest);
+                cur.to_dev_null = is_dev_null_marker(rest);
+                cur.lines.push(line.to_string());
+                continue;
+            }
+        }
+
+        if body_open {
+            match line.as_bytes().first() {
+                Some(b'\\') => {}
+                Some(b'-') => {
+                    if let Some(o) = remaining_old.as_mut() {
+                        *o -= 1;
+                    }
+                }
+                Some(b'+') => {
+                    if let Some(n) = remaining_new.as_mut() {
+                        *n -= 1;
+                    }
+                }
+                Some(b' ') | None => {
+                    if let Some(o) = remaining_old.as_mut() {
+                        *o -= 1;
+                    }
+                    if let Some(n) = remaining_new.as_mut() {
+                        *n -= 1;
+                    }
+                }
+                Some(_) => {}
             }
         }
         cur.lines.push(line.to_string());
@@ -545,6 +615,7 @@ impl Tool for PatchApplyTool {
                                 path: file.path.clone(),
                                 contents: contents.clone(),
                                 overwrite: false,
+                                encoding: None,
                             });
                         }
                         PatchFileAction::Delete => {

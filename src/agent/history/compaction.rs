@@ -9,7 +9,6 @@ use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
 use crate::providers::ChatMessage;
-use crate::util::truncate_with_ellipsis;
 
 const MAX_SESSION_HISTORY_BYTES: u64 = 256 * 1024 * 1024;
 
@@ -35,10 +34,9 @@ pub(crate) fn build_compaction_transcript(messages: &[ChatMessage], max_chars: u
         let _ = writeln!(transcript, "{role}: {}", msg.content.trim());
     }
 
-    if transcript.chars().count() > max_chars {
-        truncate_with_ellipsis(&transcript, max_chars)
-    } else {
-        transcript
+    match crate::util::truncate_head_tail(&transcript, max_chars, 20) {
+        Some(clipped) => clipped,
+        None => transcript,
     }
 }
 
@@ -159,6 +157,9 @@ pub(crate) fn load_interactive_session_history(
         state.history.push(ChatMessage::system(system_prompt));
     } else if state.history.first().map(|msg| msg.role.as_str()) != Some("system") {
         state.history.insert(0, ChatMessage::system(system_prompt));
+    }
+    for msg in state.history.iter_mut() {
+        msg.strip_ephemeral_context();
     }
 
     Ok(state.history)

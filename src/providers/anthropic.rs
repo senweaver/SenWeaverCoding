@@ -17,6 +17,9 @@ pub struct AnthropicProvider {
     credential: Option<String>,
     base_url: String,
     max_tokens: u32,
+    explicit_max_tokens: bool,
+    reasoning_enabled: bool,
+    reasoning_effort: Option<String>,
     timeout_secs: u64,
     extra_headers: std::collections::HashMap<String, String>,
 }
@@ -33,11 +36,34 @@ struct NativeChatRequest<'a> {
     messages: Vec<NativeMessage>,
     temperature: f64,
     #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingParam>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<NativeToolSpec<'a>>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ThinkingParam {
+    #[serde(rename = "type")]
+    thinking_type: String,
+    budget_tokens: u32,
+}
+
+impl ThinkingParam {
+    fn for_effort(effort: &str) -> Self {
+        let budget_tokens = match effort.trim().to_ascii_lowercase().as_str() {
+            "low" | "minimal" => 4_096,
+            "high" | "max" => 24_576,
+            _ => 10_240,
+        };
+        Self {
+            thinking_type: "enabled".to_string(),
+            budget_tokens,
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -132,6 +158,8 @@ struct NativeChatResponse {
     content: Vec<NativeContentIn>,
     #[serde(default)]
     usage: Option<AnthropicUsage>,
+    #[serde(default)]
+    stop_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -160,6 +188,8 @@ struct NativeContentIn {
     input: Option<serde_json::Value>,
     #[serde(default)]
     thinking: Option<String>,
+    #[serde(default)]
+    signature: Option<String>,
 }
 
 impl AnthropicProvider {
@@ -179,6 +209,9 @@ impl AnthropicProvider {
                 .map(ToString::to_string),
             base_url,
             max_tokens: DEFAULT_ANTHROPIC_MAX_TOKENS,
+            explicit_max_tokens: false,
+            reasoning_enabled: false,
+            reasoning_effort: None,
             timeout_secs: DEFAULT_ANTHROPIC_TIMEOUT_SECS,
             extra_headers: std::collections::HashMap::new(),
         }
@@ -186,7 +219,88 @@ impl AnthropicProvider {
 
     pub fn with_max_tokens(mut self, max_tokens: u32) -> Self {
         self.max_tokens = max_tokens;
+        self.explicit_max_tokens = true;
         self
+    }
+
+    pub fn with_reasoning(mut self, enabled: Option<bool>, effort: Option<String>) -> Self {
+        self.reasoning_enabled = enabled.unwrap_or(false);
+        self.reasoning_effort = effort;
+        self
+    }
+
+    fn model_output_ceiling(model: &str) -> u32 {
+        let id = model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase();
+        // Anthropic rejects requests whose max_tokens exceeds the model's real
+        // output ceiling with a 400. These are the documented per-family caps;
+        // the generic api_limits table returns EXTENDED_THINKING_MAX_OUTPUT
+        // (65_536) which is ABOVE the real 64_000/32_000 caps and 400s on every
+        // unconfigured request.
+        if id.contains("claude-3-7") || id.contains("claude-3.7") {
+            64_000
+        } else if id.contains("claude-3-5") || id.contains("claude-3.5") {
+            8_192
+        } else if id.contains("claude-3") {
+            4_096
+        } else if id.contains("opus-4-1")
+            || id.contains("opus-4.1")
+            || id.contains("opus-4-0")
+            || id.contains("opus-4.0")
+            || id == "claude-opus-4"
+            || id.contains("claude-opus-4-2")
+        {
+            // opus 4 / 4.1 real max output is 32k.
+            32_000
+        } else if id.contains("sonnet-4")
+            || id.contains("opus-4")
+            || id.contains("haiku-4")
+        {
+            // sonnet-4/4.5, opus-4.5, haiku-4.5 real max output is 64k.
+            64_000
+        } else if id.contains("claude") {
+            // Unknown future Claude: stay at the safe 64k cap rather than the
+            // generic table's 65_536 which would 400.
+            64_000
+        } else {
+            crate::constants::api_limits::max_output_for_model(&id)
+        }
+    }
+
+    fn effective_max_tokens(&self, model: &str) -> u32 {
+        let ceiling = Self::model_output_ceiling(model);
+        if self.explicit_max_tokens {
+            self.max_tokens.min(ceiling)
+        } else {
+            ceiling
+        }
+    }
+
+    fn thinking_param(&self) -> Option<ThinkingParam> {
+        if !self.reasoning_enabled {
+            return None;
+        }
+        Some(ThinkingParam::for_effort(
+            self.reasoning_effort.as_deref().unwrap_or("medium"),
+        ))
+    }
+
+    fn request_tuning(&self, model: &str, temperature: f64) -> (u32, f64, Option<ThinkingParam>) {
+        let ceiling = Self::model_output_ceiling(model);
+        let thinking = if ceiling > 16_384 {
+            self.thinking_param()
+        } else {
+            None
+        };
+        let mut max_tokens = self.effective_max_tokens(model);
+        let temperature = if let Some(t) = thinking.as_ref() {
+            max_tokens = max_tokens
+                .max(t.budget_tokens.saturating_add(4_096))
+                .min(ceiling);
+            1.0
+        } else {
+            temperature
+        };
+        (max_tokens, temperature, thinking)
     }
 
     pub fn with_timeout_secs(mut self, timeout_secs: u64) -> Self {
@@ -225,25 +339,34 @@ impl AnthropicProvider {
     }
 
     fn apply_oauth_system_prompt(system: Option<SystemPrompt>) -> Option<SystemPrompt> {
-        let prefix = SystemBlock {
+        // Anthropic caps a request at 4 `cache_control` breakpoints. Prompt caching is
+        // prefix-based, so a breakpoint on the following system block already caches
+        // this stable preamble; giving the preamble its own breakpoint added a 5th
+        // and made OAuth (Claude Code) requests fail. Only cache the preamble itself
+        // when it is the sole system block.
+        let prefix_uncached = SystemBlock {
             block_type: "text".to_string(),
             text: "You are Claude Code, Anthropic's official CLI for Claude.".to_string(),
-            cache_control: Some(CacheControl::ephemeral()),
+            cache_control: None,
         };
         match system {
             Some(SystemPrompt::Blocks(mut blocks)) => {
-                blocks.insert(0, prefix);
+                blocks.insert(0, prefix_uncached);
                 Some(SystemPrompt::Blocks(blocks))
             }
             Some(SystemPrompt::String(s)) => Some(SystemPrompt::Blocks(vec![
-                prefix,
+                prefix_uncached,
                 SystemBlock {
                     block_type: "text".to_string(),
                     text: s,
                     cache_control: Some(CacheControl::ephemeral()),
                 },
             ])),
-            None => Some(SystemPrompt::Blocks(vec![prefix])),
+            None => Some(SystemPrompt::Blocks(vec![SystemBlock {
+                block_type: "text".to_string(),
+                text: "You are Claude Code, Anthropic's official CLI for Claude.".to_string(),
+                cache_control: Some(CacheControl::ephemeral()),
+            }])),
         }
     }
 
@@ -260,17 +383,36 @@ impl AnthropicProvider {
             .is_some_and(|m| m.content.len() >= ATTACHMENT_THRESHOLD)
     }
 
+    fn mark_message_cacheable(message: &mut NativeMessage) -> bool {
+        if let Some(last_content) = message.content.last_mut() {
+            match last_content {
+                NativeContentOut::Text { cache_control, .. }
+                | NativeContentOut::ToolResult { cache_control, .. } => {
+                    *cache_control = Some(CacheControl::ephemeral());
+                    return true;
+                }
+                NativeContentOut::ToolUse { .. }
+                | NativeContentOut::Image { .. }
+                | NativeContentOut::Thinking { .. } => {}
+            }
+        }
+        false
+    }
+
     fn apply_cache_to_last_message(messages: &mut [NativeMessage]) {
-        if let Some(last_msg) = messages.last_mut() {
-            if let Some(last_content) = last_msg.content.last_mut() {
-                match last_content {
-                    NativeContentOut::Text { cache_control, .. }
-                    | NativeContentOut::ToolResult { cache_control, .. } => {
-                        *cache_control = Some(CacheControl::ephemeral());
-                    }
-                    NativeContentOut::ToolUse { .. }
-                    | NativeContentOut::Image { .. }
-                    | NativeContentOut::Thinking { .. } => {}
+        let len = messages.len();
+        if len == 0 {
+            return;
+        }
+        let mut marked = 0usize;
+        if Self::mark_message_cacheable(&mut messages[len - 1]) {
+            marked += 1;
+        }
+        if marked > 0 && len > 6 {
+            let anchor = len - 5;
+            for idx in (0..=anchor).rev() {
+                if Self::mark_message_cacheable(&mut messages[idx]) {
+                    break;
                 }
             }
         }
@@ -430,18 +572,19 @@ impl AnthropicProvider {
     }
 
     fn extract_thinking_block(msg: &ChatMessage) -> Option<NativeContentOut> {
+        // Do NOT trim: the signature is a cryptographic hash over the EXACT
+        // thinking text, so any whitespace change makes Anthropic reject the
+        // replayed block with a 400. Only presence is checked.
         let thinking = msg
             .metadata
             .get("reasoning_content")
             .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|t| !t.is_empty())?;
+            .filter(|t| !t.trim().is_empty())?;
         let signature = msg
             .metadata
             .get("thinking_signature")
             .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())?;
+            .filter(|s| !s.trim().is_empty())?;
         Some(NativeContentOut::Thinking {
             thinking: thinking.to_string(),
             signature: signature.to_string(),
@@ -452,13 +595,11 @@ impl AnthropicProvider {
         let thinking = value
             .get("reasoning_content")
             .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|t| !t.is_empty())?;
+            .filter(|t| !t.trim().is_empty())?;
         let signature = value
             .get("thinking_signature")
             .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty())?;
+            .filter(|s| !s.trim().is_empty())?;
         Some(NativeContentOut::Thinking {
             thinking: thinking.to_string(),
             signature: signature.to_string(),
@@ -498,12 +639,18 @@ impl AnthropicProvider {
             if v.get("type").and_then(|t| t.as_str()) != Some("tool_result") {
                 continue;
             }
-            let tool_use_id = v
+            // Skip a malformed block rather than discarding the whole array: one
+            // block missing tool_use_id must not force every valid tool_result in
+            // the message to fall back to plain-text user content.
+            let Some(tool_use_id) = v
                 .get("tool_use_id")
                 .and_then(|t| t.as_str())
                 .or_else(|| v.get("tool_call_id").and_then(|t| t.as_str()))
                 .map(str::to_string)
-                .filter(|s| !s.trim().is_empty())?;
+                .filter(|s| !s.trim().is_empty())
+            else {
+                continue;
+            };
             let body = match v.get("content") {
                 Some(serde_json::Value::String(s)) => s.clone(),
                 Some(other) => other.to_string(),
@@ -526,13 +673,30 @@ impl AnthropicProvider {
 
     fn convert_messages(messages: &[ChatMessage]) -> (Option<SystemPrompt>, Vec<NativeMessage>) {
         let mut system_parts: Vec<String> = Vec::new();
-        let mut native_messages = Vec::new();
+        let mut native_messages: Vec<NativeMessage> = Vec::new();
 
         for msg in messages {
             match msg.role.as_str() {
                 "system" => {
-                    if !msg.content.trim().is_empty() {
+                    if msg.content.trim().is_empty() {
+                        continue;
+                    }
+                    if native_messages.is_empty() {
                         system_parts.push(msg.content.clone());
+                        continue;
+                    }
+                    let note = NativeMessage {
+                        role: "user".to_string(),
+                        content: vec![NativeContentOut::Text {
+                            text: format!("[system-note]\n{}", msg.content),
+                            cache_control: None,
+                        }],
+                    };
+                    let same_role = native_messages.last().is_some_and(|m| m.role == "user");
+                    if let (true, Some(last)) = (same_role, native_messages.last_mut()) {
+                        last.content.extend(note.content);
+                    } else {
+                        native_messages.push(note);
                     }
                 }
                 "assistant" => {
@@ -682,6 +846,11 @@ impl AnthropicProvider {
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
         let mut thinking_parts: Vec<String> = Vec::new();
+        let mut signed_thinking: Option<(String, String)> = None;
+        let stop_reason = response
+            .stop_reason
+            .as_deref()
+            .and_then(crate::providers::traits::StopReason::from_wire);
 
         let usage = response.usage.map(|u| {
             let cached = u.cache_read_input_tokens;
@@ -705,8 +874,18 @@ impl AnthropicProvider {
                     }
                 }
                 "thinking" => {
+                    // The signature is a hash over ONE thinking block's exact text.
+                    // Keep the (text, signature) as a matched pair from the same
+                    // block so replay never sends concatenated text with a
+                    // mismatched signature (which Anthropic rejects with a 400).
+                    // With interleaved thinking the last signed block is the one
+                    // that must be replayed before the following tool_use.
                     if let Some(t) = block.thinking.filter(|s| !s.is_empty()) {
-                        thinking_parts.push(t);
+                        if let Some(sig) = block.signature.filter(|s| !s.is_empty()) {
+                            signed_thinking = Some((t, sig));
+                        } else {
+                            thinking_parts.push(t);
+                        }
                     }
                 }
                 "tool_use" => {
@@ -730,10 +909,12 @@ impl AnthropicProvider {
             }
         }
 
-        let reasoning_content = if thinking_parts.is_empty() {
-            None
-        } else {
-            Some(thinking_parts.join("\n"))
+        // Prefer the signed block (its text+signature form a verifiable pair for
+        // replay); fall back to unsigned thinking for display only.
+        let (reasoning_content, thinking_signature) = match signed_thinking {
+            Some((text, sig)) => (Some(text), Some(sig)),
+            None if !thinking_parts.is_empty() => (Some(thinking_parts.join("\n")), None),
+            None => (None, None),
         };
 
         ProviderChatResponse {
@@ -745,6 +926,8 @@ impl AnthropicProvider {
             tool_calls,
             usage,
             reasoning_content,
+            thinking_signature,
+            stop_reason,
         }
     }
 
@@ -813,6 +996,7 @@ impl AnthropicProvider {
         let mut tool_input_json = String::new();
         let mut made_progress = false;
         let mut usage_acc = AnthropicStreamUsage::default();
+        let mut thinking_sig_buf = String::new();
 
         loop {
             let line = match lines.next_line().await {
@@ -858,6 +1042,14 @@ impl AnthropicProvider {
                     if let Some(usage) = event.get("usage") {
                         usage_acc.merge(usage);
                     }
+                    if let Some(reason) = event
+                        .get("delta")
+                        .and_then(|d| d.get("stop_reason"))
+                        .and_then(|r| r.as_str())
+                        .and_then(crate::providers::traits::StopReason::from_wire)
+                    {
+                        let _ = tx.send(Ok(StreamEvent::StopReason(reason))).await;
+                    }
                 }
                 "content_block_start" => {
                     if let Some(block) = event.get("content_block") {
@@ -867,21 +1059,29 @@ impl AnthropicProvider {
                             .unwrap_or_default();
                         if block_type == "tool_use" {
                             if tool_id.is_some() {
-                                let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
-                                    tool_id.take(),
-                                    crate::providers::sanitize::ProviderKind::Anthropic,
-                                );
                                 let name = tool_name.take().unwrap_or_default();
-                                let input = std::mem::take(&mut tool_input_json);
-                                let safe_input = sanitize_tool_call_arguments(input);
-                                made_progress = true;
-                                let _ = tx
-                                    .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
-                                        id,
-                                        name,
-                                        arguments: safe_input,
-                                    })))
-                                    .await;
+                                // Never emit a nameless tool call (mirrors the guard
+                                // in flush_pending_tool_call); an empty name would be
+                                // an unusable ToolCall for the agent loop.
+                                if !name.trim().is_empty() {
+                                    let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                                        tool_id.take(),
+                                        crate::providers::sanitize::ProviderKind::Anthropic,
+                                    );
+                                    let input = std::mem::take(&mut tool_input_json);
+                                    let safe_input = sanitize_tool_call_arguments(input);
+                                    made_progress = true;
+                                    let _ = tx
+                                        .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
+                                            id,
+                                            name,
+                                            arguments: safe_input,
+                                        })))
+                                        .await;
+                                }
+                                // The empty-name case needs no cleanup: tool_id,
+                                // tool_name, and tool_input_json are all reset for
+                                // the newly started block immediately below.
                             }
                             tool_id = block
                                 .get("id")
@@ -943,27 +1143,56 @@ impl AnthropicProvider {
                                     tool_input_json.push_str(json);
                                 }
                             }
+                            "signature_delta" => {
+                                // Buffer here and emit exactly ONE signature per
+                                // thinking block at content_block_stop, so the
+                                // consumer can treat each event as a complete
+                                // per-block signature (deltas of one block are
+                                // concatenated; distinct blocks stay separate).
+                                if let Some(sig) =
+                                    delta.get("signature").and_then(|s| s.as_str())
+                                {
+                                    thinking_sig_buf.push_str(sig);
+                                }
+                            }
                             _ => {}
                         }
                     }
                 }
                 "content_block_stop" => {
+                    if !thinking_sig_buf.is_empty() {
+                        let sig = std::mem::take(&mut thinking_sig_buf);
+                        if tx
+                            .send(Ok(StreamEvent::ReasoningSignature(sig)))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
                     if tool_id.is_some() {
-                        let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
-                            tool_id.take(),
-                            crate::providers::sanitize::ProviderKind::Anthropic,
-                        );
                         let name = tool_name.take().unwrap_or_default();
-                        let input = std::mem::take(&mut tool_input_json);
-                        let safe_input = sanitize_tool_call_arguments(input);
-                        made_progress = true;
-                        let _ = tx
-                            .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
-                                id,
-                                name,
-                                arguments: safe_input,
-                            })))
-                            .await;
+                        // Same guard as content_block_start/flush_pending_tool_call:
+                        // never emit a nameless ToolCall the agent loop can't use.
+                        if name.trim().is_empty() {
+                            tool_id = None;
+                            tool_input_json.clear();
+                        } else {
+                            let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                                tool_id.take(),
+                                crate::providers::sanitize::ProviderKind::Anthropic,
+                            );
+                            let input = std::mem::take(&mut tool_input_json);
+                            let safe_input = sanitize_tool_call_arguments(input);
+                            made_progress = true;
+                            let _ = tx
+                                .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
+                                    id,
+                                    name,
+                                    arguments: safe_input,
+                                })))
+                                .await;
+                        }
                     }
                 }
                 "message_stop" => {
@@ -1146,9 +1375,10 @@ impl Provider for AnthropicProvider {
             system
         };
 
+        let (max_tokens, temperature, thinking) = self.request_tuning(model, temperature);
         let request = NativeChatRequest {
             model: model.to_string(),
-            max_tokens: self.max_tokens,
+            max_tokens,
             system,
             messages: vec![NativeMessage {
                 role: "user".to_string(),
@@ -1158,6 +1388,7 @@ impl Provider for AnthropicProvider {
                 }],
             }],
             temperature,
+            thinking,
             tools: None,
             tool_choice: None,
             stream: None,
@@ -1197,11 +1428,15 @@ impl Provider for AnthropicProvider {
             )
         })?;
 
+        let tools_reserve = request
+            .tools
+            .map(crate::providers::traits::estimate_tool_specs_tokens)
+            .unwrap_or(0);
         let messages_owned = std::sync::Arc::new(
             crate::providers::sanitize::sanitize_messages_before_send_for_provider(
                 request.messages.to_vec(),
                 model,
-                self.max_tokens as usize,
+                (self.effective_max_tokens(model) as usize).saturating_add(tools_reserve),
                 None,
                 crate::providers::sanitize::ProviderKind::Anthropic,
             ),
@@ -1235,12 +1470,40 @@ impl Provider for AnthropicProvider {
         } else {
             system_prompt
         };
+        let (max_tokens, mut tuned_temperature, mut thinking) =
+            self.request_tuning(model, temperature);
+
+        // Anthropic rejects extended thinking when tool_choice is forced to a
+        // non-auto value (e.g. the "any" override used by chat_structured). Drop
+        // thinking in that case and restore the caller's temperature, so
+        // structured output still works with reasoning-enabled configs instead of
+        // hard-400ing.
+        let forces_tool_use = tool_choice
+            .as_ref()
+            .and_then(|tc| tc.get("type"))
+            .and_then(|t| t.as_str())
+            .is_some_and(|t| t != "auto");
+        let mut messages = messages;
+        if forces_tool_use && thinking.is_some() {
+            thinking = None;
+            tuned_temperature = temperature;
+            // With thinking disabled, Anthropic rejects assistant messages that
+            // still carry thinking blocks (replayed from a reasoning-enabled
+            // history). Strip them, and drop any message left with no content.
+            for msg in messages.iter_mut() {
+                msg.content
+                    .retain(|block| !matches!(block, NativeContentOut::Thinking { .. }));
+            }
+            messages.retain(|m| !m.content.is_empty());
+        }
+
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            max_tokens: self.max_tokens,
+            max_tokens,
             system: system_prompt,
             messages,
-            temperature,
+            temperature: tuned_temperature,
+            thinking,
             tools: native_tools,
             tool_choice,
             stream: None,
@@ -1411,11 +1674,15 @@ impl Provider for AnthropicProvider {
             }
         };
 
+        let tools_reserve = request
+            .tools
+            .map(crate::providers::traits::estimate_tool_specs_tokens)
+            .unwrap_or(0);
         let sanitized_messages =
             crate::providers::sanitize::sanitize_messages_before_send_for_provider(
                 request.messages.to_vec(),
                 model,
-                self.max_tokens as usize,
+                (self.effective_max_tokens(model) as usize).saturating_add(tools_reserve),
                 None,
                 crate::providers::sanitize::ProviderKind::Anthropic,
             );
@@ -1427,10 +1694,12 @@ impl Provider for AnthropicProvider {
         let request_tools: Option<Vec<ToolSpec>> = request.tools.map(<[ToolSpec]>::to_vec);
 
         let model_owned = model.to_string();
-        let max_tokens = self.max_tokens;
+        let requested_temperature = temperature;
+        let (max_tokens, temperature, thinking) = self.request_tuning(model, temperature);
         let client = self.stream_http_client();
         let url = format!("{}/v1/messages", self.base_url);
         let is_oauth = Self::is_setup_token(&credential);
+        let reasoning_enabled = self.reasoning_enabled;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(64);
 
@@ -1467,6 +1736,27 @@ impl Provider for AnthropicProvider {
                 None
             };
 
+            // Mirror the non-streaming chat() guard: Anthropic rejects extended
+            // thinking together with a forced (non-auto) tool_choice, and with
+            // thinking disabled it also rejects replayed thinking blocks.
+            let mut temperature = temperature;
+            let mut thinking = thinking;
+            let mut messages = messages;
+            let forces_tool_use = tool_choice
+                .as_ref()
+                .and_then(|tc| tc.get("type"))
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| t != "auto");
+            if forces_tool_use && thinking.is_some() {
+                thinking = None;
+                temperature = requested_temperature;
+                for msg in messages.iter_mut() {
+                    msg.content
+                        .retain(|block| !matches!(block, NativeContentOut::Thinking { .. }));
+                }
+                messages.retain(|m| !m.content.is_empty());
+            }
+
             let system_prompt = if is_oauth {
                 Self::apply_oauth_system_prompt(system_prompt)
             } else {
@@ -1479,6 +1769,7 @@ impl Provider for AnthropicProvider {
                 system: system_prompt,
                 messages,
                 temperature,
+                thinking,
                 tools: native_tools,
                 tool_choice,
                 stream: Some(true),
@@ -1511,7 +1802,17 @@ impl Provider for AnthropicProvider {
                     )
                     .header("anthropic-dangerous-direct-browser-access", "true");
             } else {
+                // API-key path: enable the same streaming betas the OAuth path
+                // gets. fine-grained tool streaming lets tool-call arguments
+                // stream incrementally to the UI; interleaved thinking (when
+                // reasoning is on) lets Claude 4 think between tool calls.
                 req = req.header("x-api-key", &credential);
+                let beta = if reasoning_enabled {
+                    "fine-grained-tool-streaming-2025-05-14,interleaved-thinking-2025-05-14"
+                } else {
+                    "fine-grained-tool-streaming-2025-05-14"
+                };
+                req = req.header("anthropic-beta", beta);
             }
 
             let response = match req.send().await {

@@ -18,7 +18,7 @@ use super::symbols_ctx::SymbolSnapshot;
 
 pub trait SymbolGraphLookup: Send + Sync {
 
-    fn snapshot_for_focus(&self, paths: &[PathBuf]) -> Vec<SymbolSnapshot>;
+    fn snapshot_for_focus(&self, paths: &[PathBuf], query: Option<&str>) -> Vec<SymbolSnapshot>;
 }
 
 #[async_trait::async_trait]
@@ -45,6 +45,8 @@ pub struct QueryContext {
     pub outline: Vec<OutlineNode>,
     pub lsp_info: Vec<LspSnapshot>,
     pub rag_hits: Vec<SearchHit>,
+
+    pub symbol_graph_building: bool,
 }
 
 impl QueryContext {
@@ -62,6 +64,9 @@ impl QueryContext {
             return String::new();
         }
         let mut out = String::from("[Query context]\n");
+        if self.symbol_graph_building {
+            out.push_str("symbol_graph: building (first workspace index in progress)\n");
+        }
         if let Some(ref git) = self.git {
             let branch_line = match git.default_branch.as_deref() {
                 Some(def) if !def.is_empty() && def != git.branch => {
@@ -104,13 +109,42 @@ impl QueryContext {
         if !self.symbols.is_empty() {
             out.push_str("symbols:\n");
             for s in &self.symbols {
-                out.push_str(&format!(
-                    "- {} ({}) @ {}:{}\n",
-                    s.name,
-                    s.kind,
-                    s.path.display(),
-                    s.line
-                ));
+                if s.line_end > s.line {
+                    out.push_str(&format!(
+                        "- {} ({}) @ {}:{}-{}",
+                        s.name,
+                        s.kind,
+                        s.path.display(),
+                        s.line,
+                        s.line_end
+                    ));
+                } else {
+                    out.push_str(&format!(
+                        "- {} ({}) @ {}:{}",
+                        s.name,
+                        s.kind,
+                        s.path.display(),
+                        s.line
+                    ));
+                }
+                if let Some(ref sig) = s.signature {
+                    let short = if sig.len() > 120 {
+                        format!("{}…", crate::util::truncate_str_bytes(sig, 120))
+                    } else {
+                        sig.clone()
+                    };
+                    out.push_str(&format!(" | {short}"));
+                }
+                if !s.dependents.is_empty() {
+                    let deps: Vec<&str> = s.dependents.iter().take(4).map(String::as_str).collect();
+                    out.push_str(&format!(" | deps: {}", deps.join(", ")));
+                }
+                if !s.imports.is_empty() {
+                    let imports: Vec<&str> =
+                        s.imports.iter().take(6).map(String::as_str).collect();
+                    out.push_str(&format!(" | imports: {}", imports.join(", ")));
+                }
+                out.push('\n');
             }
         }
         if !self.outline.is_empty() {
@@ -159,6 +193,7 @@ pub struct ContextBuilder {
     open_files_source: Option<Arc<dyn OpenFilesSource>>,
     focus_files: Vec<PathBuf>,
     symbol_graph: Option<Arc<dyn SymbolGraphLookup>>,
+    symbol_graph_building: bool,
     lsp_source: Option<Arc<dyn LspContextSource>>,
     rag_source: Option<Arc<dyn RagSource>>,
     rag_query: Option<String>,
@@ -174,6 +209,7 @@ impl ContextBuilder {
             open_files_source: None,
             focus_files: Vec::new(),
             symbol_graph: None,
+            symbol_graph_building: false,
             lsp_source: None,
             rag_source: None,
             rag_query: None,
@@ -198,6 +234,12 @@ impl ContextBuilder {
     #[must_use]
     pub fn with_symbol_graph(mut self, graph: Arc<dyn SymbolGraphLookup>) -> Self {
         self.symbol_graph = Some(graph);
+        self
+    }
+
+    #[must_use]
+    pub fn with_symbol_graph_building(mut self, building: bool) -> Self {
+        self.symbol_graph_building = building;
         self
     }
 
@@ -236,19 +278,25 @@ impl ContextBuilder {
         let memory_fut = async { MemoryFileContext::default() };
 
         let focus_for_outline = self.focus_files.clone();
+        let outline_query = self.rag_query.clone();
         let outline_fut = async move {
-            tokio::task::spawn_blocking(move || collect_outline_for_focus(&focus_for_outline))
-                .await
-                .unwrap_or_default()
+            tokio::task::spawn_blocking(move || {
+                collect_outline_for_focus(&focus_for_outline, outline_query.as_deref())
+            })
+            .await
+            .unwrap_or_default()
         };
 
         let symbol_graph_ref = self.symbol_graph.clone();
         let focus_for_symbols = self.focus_files.clone();
+        let symbols_query = self.rag_query.clone();
         let symbols_fut = async move {
             match symbol_graph_ref {
-                Some(g) => tokio::task::spawn_blocking(move || g.snapshot_for_focus(&focus_for_symbols))
-                    .await
-                    .unwrap_or_default(),
+                Some(g) => tokio::task::spawn_blocking(move || {
+                    g.snapshot_for_focus(&focus_for_symbols, symbols_query.as_deref())
+                })
+                .await
+                .unwrap_or_default(),
                 None => Vec::new(),
             }
         };
@@ -281,33 +329,42 @@ impl ContextBuilder {
             }
         };
 
-        let rag_hits = match (self.rag_source.as_ref(), self.rag_query.as_ref()) {
-            (Some(rag), Some(q)) => {
-                match tokio::time::timeout(
-                    std::time::Duration::from_secs(30),
-                    rag.retrieve(q, self.rag_top_k),
-                )
-                .await
-                {
-                    Ok(hits) => hits,
-                    Err(_) => {
-                        tracing::warn!(
-                            "RAG retrieval timed out after 30s; continuing without RAG context"
-                        );
-                        Vec::new()
+        // Run RAG concurrently with every other source instead of awaiting it
+        // first; otherwise total latency was rag(<=30s) + max(others). An 8s cap
+        // keeps a slow lexical/dense backend from stalling every user message.
+        let rag_source = self.rag_source.clone();
+        let rag_query = self.rag_query.clone();
+        let rag_top_k = self.rag_top_k;
+        let rag_fut = async move {
+            match (rag_source, rag_query) {
+                (Some(rag), Some(q)) => {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(8),
+                        rag.retrieve(&q, rag_top_k),
+                    )
+                    .await
+                    {
+                        Ok(hits) => hits,
+                        Err(_) => {
+                            tracing::warn!(
+                                "RAG retrieval timed out after 8s; continuing without RAG context"
+                            );
+                            Vec::new()
+                        }
                     }
                 }
+                _ => Vec::new(),
             }
-            _ => Vec::new(),
         };
 
-        let (git_res, memory, outline, symbols, open_files, lsp_info) = tokio::join!(
+        let (git_res, memory, outline, symbols, open_files, lsp_info, rag_hits) = tokio::join!(
             git_fut,
             memory_fut,
             outline_fut,
             symbols_fut,
             open_files_fut,
-            lsp_fut
+            lsp_fut,
+            rag_fut
         );
         let git = git_res.ok();
 
@@ -325,6 +382,7 @@ impl ContextBuilder {
             outline,
             lsp_info,
             rag_hits,
+            symbol_graph_building: self.symbol_graph_building,
         };
 
         crate::observability::code_intel_metrics::incr_context_build_success();
@@ -435,21 +493,57 @@ impl FocusPathRegistry {
     }
 }
 
-fn collect_outline_for_focus(focus: &[PathBuf]) -> Vec<OutlineNode> {
-    let mut out = Vec::new();
+fn collect_outline_for_focus(focus: &[PathBuf], query: Option<&str>) -> Vec<OutlineNode> {
+    const MAX_OUTLINE_NODES: usize = 80;
+    // Rough token budget (~4 chars/token => ~1k tokens) so a few huge files
+    // cannot crowd the injection block; query-matching symbols are kept first.
+    const MAX_OUTLINE_BYTES: usize = 4096;
+    let query_terms: Vec<String> = query
+        .map(|q| {
+            q.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+                .filter(|t| t.len() >= 3)
+                .map(|t| t.to_ascii_lowercase())
+                .collect()
+        })
+        .unwrap_or_default();
+
+    let mut scored: Vec<(u32, usize, OutlineNode)> = Vec::new();
     for path in focus {
         let entries = match crate::code_intel::outline::extract_outline(path, None) {
             Ok(v) => v,
             Err(_) => continue,
         };
         for entry in entries {
-            out.push(OutlineNode::leaf(
-                path.clone(),
-                entry.kind,
-                entry.name,
-                entry.line,
+            let name_lc = entry.name.to_ascii_lowercase();
+            let mut score = 0u32;
+            for term in &query_terms {
+                if name_lc == *term {
+                    score += 2;
+                } else if name_lc.contains(term.as_str()) {
+                    score += 1;
+                }
+            }
+            let approx = entry.kind.len() + entry.name.len() + 16;
+            scored.push((
+                score,
+                approx,
+                OutlineNode::leaf(path.clone(), entry.kind, entry.name, entry.line),
             ));
         }
+    }
+
+    if !query_terms.is_empty() {
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+    }
+
+    let mut out = Vec::new();
+    let mut used = 0usize;
+    for (_, approx, node) in scored {
+        if out.len() >= MAX_OUTLINE_NODES || used + approx > MAX_OUTLINE_BYTES {
+            break;
+        }
+        used += approx;
+        out.push(node);
     }
     out
 }

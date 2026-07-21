@@ -4,7 +4,6 @@
 
 use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use senweavercoding::editor_core::buffer::{Position, Selection, TextBuffer};
-use senweavercoding::editor_core::search::{SearchOptions, find_all, replace_all};
 use std::hint::black_box;
 
 fn gen_source_code(size_kb: usize) -> String {
@@ -120,63 +119,6 @@ fn bench_clone(c: &mut Criterion) {
     });
 }
 
-fn bench_search_literal(c: &mut Criterion) {
-    let text = gen_source_code(100);
-    let buf = TextBuffer::from_text(&text);
-    c.bench_function("editor_core/search_literal_100kb", |b| {
-        b.iter(|| black_box(find_all(&buf, black_box("item"), &SearchOptions::default())));
-    });
-}
-
-fn bench_search_case_insensitive(c: &mut Criterion) {
-    let text = gen_source_code(100);
-    let buf = TextBuffer::from_text(&text);
-    c.bench_function("editor_core/search_ci_100kb", |b| {
-        b.iter(|| {
-            black_box(find_all(
-                &buf,
-                black_box("Item"),
-                &SearchOptions {
-                    case_insensitive: true,
-                    whole_word: false,
-                },
-            ))
-        });
-    });
-}
-
-fn bench_search_whole_word(c: &mut Criterion) {
-    let text = gen_source_code(100);
-    let buf = TextBuffer::from_text(&text);
-    c.bench_function("editor_core/search_whole_word_100kb", |b| {
-        b.iter(|| {
-            black_box(find_all(
-                &buf,
-                black_box("fn"),
-                &SearchOptions {
-                    case_insensitive: false,
-                    whole_word: true,
-                },
-            ))
-        });
-    });
-}
-
-fn bench_replace_all(c: &mut Criterion) {
-    let text = gen_source_code(100);
-    let buf = TextBuffer::from_text(&text);
-    c.bench_function("editor_core/replace_all_100kb", |b| {
-        b.iter(|| {
-            black_box(replace_all(
-                &buf,
-                black_box("fn"),
-                black_box("func"),
-                &SearchOptions::default(),
-            ))
-        });
-    });
-}
-
 fn bench_scaling(c: &mut Criterion) {
     let mut group = c.benchmark_group("editor_core/scaling");
     for size_kb in [10, 50, 100, 500] {
@@ -196,22 +138,6 @@ fn bench_scaling(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_search_scaling(c: &mut Criterion) {
-    let mut group = c.benchmark_group("editor_core/search_scaling");
-    for size_kb in [10, 50, 100, 500] {
-        group.bench_with_input(
-            BenchmarkId::from_parameter(size_kb),
-            &size_kb,
-            |b, &size| {
-                let text = gen_source_code(size);
-                let buf = TextBuffer::from_text(&text);
-                b.iter(|| black_box(find_all(&buf, black_box("item"), &SearchOptions::default())));
-            },
-        );
-    }
-    group.finish();
-}
-
 criterion_group!(
     editor_core_benches,
     bench_from_str,
@@ -224,11 +150,6 @@ criterion_group!(
     bench_char_idx_roundtrip,
     bench_to_string,
     bench_clone,
-    bench_search_literal,
-    bench_search_case_insensitive,
-    bench_search_whole_word,
-    bench_replace_all,
     bench_scaling,
-    bench_search_scaling,
 );
 criterion_main!(editor_core_benches);

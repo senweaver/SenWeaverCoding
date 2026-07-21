@@ -6,6 +6,7 @@ pub mod hook;
 pub mod replay;
 pub mod session;
 pub mod skillgen;
+pub mod template_match;
 pub mod text_capture;
 pub mod types;
 

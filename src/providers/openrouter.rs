@@ -20,6 +20,8 @@ pub struct OpenRouterProvider {
     credential: Option<String>,
     timeout_secs: u64,
     max_tokens: Option<u32>,
+    reasoning_enabled: Option<bool>,
+    reasoning_effort: Option<String>,
     model_context_windows: std::collections::HashMap<String, u32>,
     extra_headers: std::collections::HashMap<String, String>,
 }
@@ -169,11 +171,25 @@ struct UsageInfo {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    // OpenRouter mirrors OpenAI's prompt_tokens_details.cached_tokens for
+    // providers that support caching (e.g. Claude/DeepSeek routed through it);
+    // capture it so cost accounting applies the cache discount instead of
+    // billing every cache hit at full price.
+    #[serde(default)]
+    prompt_tokens_details: Option<PromptTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PromptTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
 struct NativeChoice {
     message: NativeResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -195,9 +211,17 @@ impl OpenRouterProvider {
                 .filter(|secs| *secs > 0)
                 .unwrap_or(DEFAULT_OPENROUTER_TIMEOUT_SECS),
             max_tokens: None,
+            reasoning_enabled: None,
+            reasoning_effort: None,
             model_context_windows: std::collections::HashMap::new(),
             extra_headers: std::collections::HashMap::new(),
         }
+    }
+
+    pub fn with_reasoning(mut self, enabled: Option<bool>, effort: Option<String>) -> Self {
+        self.reasoning_enabled = enabled;
+        self.reasoning_effort = effort;
+        self
     }
 
     pub fn with_timeout_secs(mut self, secs: u64) -> Self {
@@ -271,9 +295,20 @@ impl OpenRouterProvider {
         if Self::is_reasoning_blacklisted(model) {
             return None;
         }
+        let enabled = match self.reasoning_enabled {
+            Some(v) => v,
+            None => self.reasoning_effort.is_some(),
+        };
+        if !enabled {
+            return None;
+        }
+        let effort = self
+            .reasoning_effort
+            .clone()
+            .unwrap_or_else(|| "medium".to_string());
         Some(serde_json::json!({
             "enabled": true,
-            "effort": "high",
+            "effort": effort,
         }))
     }
 
@@ -574,6 +609,8 @@ impl OpenRouterProvider {
             tool_calls,
             usage: None,
             reasoning_content,
+            thinking_signature: None,
+            stop_reason: None,
         }
     }
 
@@ -955,17 +992,23 @@ impl Provider for OpenRouterProvider {
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
-            cached_input_tokens: None,
+            cached_input_tokens: u
+                .prompt_tokens_details
+                .and_then(|d| d.cached_tokens),
             cache_creation_input_tokens: None,
         });
-        let message = native_response
+        let choice = native_response
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from OpenRouter"))?;
-        let mut result = Self::parse_native_response(message);
+        let stop_reason = choice
+            .finish_reason
+            .as_deref()
+            .and_then(crate::providers::traits::StopReason::from_wire);
+        let mut result = Self::parse_native_response(choice.message);
         result.usage = usage;
+        result.stop_reason = stop_reason;
         Ok(result)
     }
 
@@ -1096,17 +1139,23 @@ impl Provider for OpenRouterProvider {
         let usage = native_response.usage.map(|u| TokenUsage {
             input_tokens: u.prompt_tokens,
             output_tokens: u.completion_tokens,
-            cached_input_tokens: None,
+            cached_input_tokens: u
+                .prompt_tokens_details
+                .and_then(|d| d.cached_tokens),
             cache_creation_input_tokens: None,
         });
-        let message = native_response
+        let choice = native_response
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from OpenRouter"))?;
-        let mut result = Self::parse_native_response(message);
+        let stop_reason = choice
+            .finish_reason
+            .as_deref()
+            .and_then(crate::providers::traits::StopReason::from_wire);
+        let mut result = Self::parse_native_response(choice.message);
         result.usage = usage;
+        result.stop_reason = stop_reason;
         Ok(result)
     }
 

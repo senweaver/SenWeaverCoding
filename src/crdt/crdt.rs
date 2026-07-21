@@ -10,6 +10,8 @@ use crate::apply_model::edit_op::EditOp;
 use crate::observability::coordination_metrics;
 
 const MAX_HISTORY_ENTRIES: usize = 10_000;
+const MAX_OUTBOX_ENTRIES: usize = 4_096;
+const CONTEXT_WINDOW_BYTES: usize = 64;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -17,35 +19,70 @@ pub enum CrdtUpdate {
 
     Replace {
         clock: u64,
+        #[serde(default)]
+        site: String,
         path: String,
         start: usize,
         end: usize,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_hash: Option<String>,
     },
 
     Insert {
         clock: u64,
+        #[serde(default)]
+        site: String,
         path: String,
         at: usize,
         text: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_hash: Option<String>,
     },
 
     Delete {
         clock: u64,
+        #[serde(default)]
+        site: String,
         path: String,
         start: usize,
         end: usize,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        pre_hash: Option<String>,
     },
 }
 
 impl CrdtUpdate {
-    fn clock(&self) -> u64 {
+    pub fn clock(&self) -> u64 {
         match self {
             CrdtUpdate::Replace { clock, .. }
             | CrdtUpdate::Insert { clock, .. }
             | CrdtUpdate::Delete { clock, .. } => *clock,
         }
     }
+
+    pub fn site(&self) -> &str {
+        match self {
+            CrdtUpdate::Replace { site, .. }
+            | CrdtUpdate::Insert { site, .. }
+            | CrdtUpdate::Delete { site, .. } => site,
+        }
+    }
+
+    pub fn payload_len(&self) -> usize {
+        match self {
+            CrdtUpdate::Replace { text, .. } | CrdtUpdate::Insert { text, .. } => text.len(),
+            CrdtUpdate::Delete { .. } => 0,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RemoteApplyOutcome {
+    Applied,
+    Duplicate,
+    OwnOp,
+    Conflict(&'static str),
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -61,6 +98,51 @@ pub enum CrdtError {
     Decode(String),
 }
 
+pub fn region_hash(text: &str) -> String {
+    use sha2::{Digest, Sha256};
+    let digest = Sha256::digest(text.as_bytes());
+    hex::encode(&digest[..16])
+}
+
+fn snap_left(text: &str, mut i: usize) -> usize {
+    if i > text.len() {
+        i = text.len();
+    }
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
+}
+
+fn snap_right(text: &str, mut i: usize) -> usize {
+    if i >= text.len() {
+        return text.len();
+    }
+    while i < text.len() && !text.is_char_boundary(i) {
+        i += 1;
+    }
+    i
+}
+
+pub fn context_pair_hash(text: &str, before_end: usize, after_start: usize) -> String {
+    let be = snap_left(text, before_end);
+    let bs = snap_left(text, be.saturating_sub(CONTEXT_WINDOW_BYTES));
+    let a_start = snap_right(text, after_start.min(text.len()));
+    let a_end = snap_right(
+        text,
+        after_start
+            .saturating_add(CONTEXT_WINDOW_BYTES)
+            .min(text.len()),
+    );
+    let mut buf = String::with_capacity((be - bs) + (a_end - a_start) + 1);
+    buf.push_str(&text[bs..be]);
+    buf.push('\u{1}');
+    if a_start < a_end {
+        buf.push_str(&text[a_start..a_end]);
+    }
+    region_hash(&buf)
+}
+
 pub struct Document {
     path: std::path::PathBuf,
     text: String,
@@ -68,7 +150,9 @@ pub struct Document {
 
     history: Vec<CrdtUpdate>,
 
-    last_export_clock: u64,
+    outbox: Vec<CrdtUpdate>,
+
+    consumed_seq: u64,
 }
 
 impl Document {
@@ -79,12 +163,16 @@ impl Document {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(CrdtError::Io(e)),
         };
+        // Seed the lamport clock from wall time so a restarted process never
+        // reuses (site, clock) pairs that peers may still hold in history.
+        let seed = chrono::Utc::now().timestamp_millis().max(0) as u64;
         Ok(Self {
             path: path.to_path_buf(),
             text,
-            clock: 0,
+            clock: seed,
             history: Vec::new(),
-            last_export_clock: 0,
+            outbox: Vec::new(),
+            consumed_seq: 0,
         })
     }
 
@@ -93,7 +181,18 @@ impl Document {
         self.clock
     }
 
-    pub fn apply_local(&mut self, op: &EditOp) -> Result<(), CrdtError> {
+    fn record_local(&mut self, update: CrdtUpdate) {
+        self.history.push(update.clone());
+        if self.outbox.len() >= MAX_OUTBOX_ENTRIES {
+            let drop = self.outbox.len() + 1 - MAX_OUTBOX_ENTRIES;
+            self.outbox.drain(..drop);
+        }
+        self.outbox.push(update);
+        self.prune_history();
+        coordination_metrics::incr_crdt_local_ops(1);
+    }
+
+    pub fn apply_local(&mut self, op: &EditOp, site: &str) -> Result<(), CrdtError> {
         match op {
             EditOp::Replace {
                 path,
@@ -117,14 +216,17 @@ impl Document {
                         "replace range {start}..{end} is not aligned to UTF-8 boundaries"
                     )));
                 }
+                let pre_hash = Some(region_hash(&self.text[start..end]));
                 self.text.replace_range(start..end, new_text);
                 let clock = self.next_clock();
-                self.history.push(CrdtUpdate::Replace {
+                self.record_local(CrdtUpdate::Replace {
                     clock,
+                    site: site.to_string(),
                     path: path.display().to_string(),
                     start,
                     end,
                     text: new_text.clone(),
+                    pre_hash,
                 });
             }
             EditOp::Insert {
@@ -142,13 +244,16 @@ impl Document {
                         "insert at {at} is not a UTF-8 character boundary"
                     )));
                 }
+                let pre_hash = Some(context_pair_hash(&self.text, at, at));
                 self.text.insert_str(at, text);
                 let clock = self.next_clock();
-                self.history.push(CrdtUpdate::Insert {
+                self.record_local(CrdtUpdate::Insert {
                     clock,
+                    site: site.to_string(),
                     path: path.display().to_string(),
                     at,
                     text: text.clone(),
+                    pre_hash,
                 });
             }
             EditOp::Delete {
@@ -170,13 +275,16 @@ impl Document {
                         "delete range {start}..{end} is not aligned to UTF-8 boundaries"
                     )));
                 }
+                let pre_hash = Some(context_pair_hash(&self.text, start, end));
                 self.text.replace_range(start..end, "");
                 let clock = self.next_clock();
-                self.history.push(CrdtUpdate::Delete {
+                self.record_local(CrdtUpdate::Delete {
                     clock,
+                    site: site.to_string(),
                     path: path.display().to_string(),
                     start,
                     end,
+                    pre_hash,
                 });
             }
             other => {
@@ -186,99 +294,207 @@ impl Document {
                 )));
             }
         }
-        self.prune_history();
-        coordination_metrics::incr_crdt_local_ops(1);
+        Ok(())
+    }
+
+    pub fn observe_local(&mut self, op: &EditOp, site: &str) -> Result<(), CrdtError> {
+        self.resync_from_disk()?;
+        match op {
+            EditOp::Replace {
+                path,
+                byte_range,
+                old_text,
+                new_text,
+                ..
+            } => {
+                let clock = self.next_clock();
+                self.record_local(CrdtUpdate::Replace {
+                    clock,
+                    site: site.to_string(),
+                    path: path.display().to_string(),
+                    start: byte_range.start,
+                    end: byte_range.end,
+                    text: new_text.clone(),
+                    pre_hash: Some(region_hash(old_text)),
+                });
+            }
+            EditOp::Insert {
+                path, at_byte, text, ..
+            } => {
+                // Post-write text: the pre-image context around the insertion
+                // point is [at-W..at] ++ [at+len(text)..at+len(text)+W].
+                let after_start = at_byte.saturating_add(text.len());
+                let pre_hash = Some(context_pair_hash(&self.text, *at_byte, after_start));
+                let clock = self.next_clock();
+                self.record_local(CrdtUpdate::Insert {
+                    clock,
+                    site: site.to_string(),
+                    path: path.display().to_string(),
+                    at: *at_byte,
+                    text: text.clone(),
+                    pre_hash,
+                });
+            }
+            EditOp::Delete {
+                path, byte_range, ..
+            } => {
+                // Post-write text: both sides of the excision are adjacent at
+                // byte_range.start.
+                let pre_hash = Some(context_pair_hash(
+                    &self.text,
+                    byte_range.start,
+                    byte_range.start,
+                ));
+                let clock = self.next_clock();
+                self.record_local(CrdtUpdate::Delete {
+                    clock,
+                    site: site.to_string(),
+                    path: path.display().to_string(),
+                    start: byte_range.start,
+                    end: byte_range.end,
+                    pre_hash,
+                });
+            }
+            other => {
+                return Err(CrdtError::UnsupportedOp(format!(
+                    "{:?} is not representable in the CRDT store",
+                    other
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    pub fn resync_from_disk(&mut self) -> Result<(), CrdtError> {
+        self.text = match std::fs::read_to_string(&self.path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(CrdtError::Io(e)),
+        };
         Ok(())
     }
 
     fn prune_history(&mut self) {
-        if self.history.len() <= MAX_HISTORY_ENTRIES {
-            return;
-        }
-        let mut excess = self.history.len() - MAX_HISTORY_ENTRIES;
-        let exported = self.last_export_clock;
-        self.history.retain(|u| {
-            if excess > 0 && u.clock() <= exported {
-                excess -= 1;
-                false
-            } else {
-                true
-            }
-        });
-        let hard_cap = MAX_HISTORY_ENTRIES.saturating_mul(4);
-        if self.history.len() > hard_cap {
-            let drop = self.history.len() - hard_cap;
+        if self.history.len() > MAX_HISTORY_ENTRIES {
+            let drop = self.history.len() - MAX_HISTORY_ENTRIES;
             self.history.drain(..drop);
         }
     }
 
-    pub fn apply_remote(&mut self, update: &[u8]) -> Result<(), CrdtError> {
-        let updates: Vec<CrdtUpdate> = match serde_json::from_slice::<Vec<CrdtUpdate>>(update) {
-            Ok(batch) => batch,
-            Err(_) => {
-                let single: CrdtUpdate = serde_json::from_slice(update)
-                    .map_err(|e| CrdtError::Decode(format!("{e}")))?;
-                vec![single]
-            }
-        };
-        for parsed in updates {
-            self.apply_remote_update(parsed);
+    pub fn apply_remote_update(
+        &mut self,
+        parsed: CrdtUpdate,
+        local_site: &str,
+    ) -> RemoteApplyOutcome {
+        if !local_site.is_empty() && parsed.site() == local_site {
+            self.clock = self.clock.max(parsed.clock());
+            return RemoteApplyOutcome::OwnOp;
         }
-        Ok(())
-    }
-
-    fn apply_remote_update(&mut self, parsed: CrdtUpdate) {
-        if self.history.iter().any(|u| *u == parsed) {
-            return;
-        }
-        let clock = parsed.clock();
-        match &parsed {
-            CrdtUpdate::Replace { start, end, text, .. } => {
-                if *start <= *end
-                    && *end <= self.text.len()
-                    && self.text.is_char_boundary(*start)
-                    && self.text.is_char_boundary(*end)
-                {
-                    self.text.replace_range(*start..*end, text);
-                }
-            }
-            CrdtUpdate::Insert { at, text, .. } => {
-                if *at <= self.text.len() && self.text.is_char_boundary(*at) {
-                    self.text.insert_str(*at, text);
-                }
-            }
-            CrdtUpdate::Delete { start, end, .. } => {
-                if *start <= *end
-                    && *end <= self.text.len()
-                    && self.text.is_char_boundary(*start)
-                    && self.text.is_char_boundary(*end)
-                {
-                    self.text.replace_range(*start..*end, "");
-                }
-            }
-        }
-        self.clock = self.clock.max(clock);
-        self.history.push(parsed);
-        self.prune_history();
-        coordination_metrics::incr_crdt_remote_updates(1);
-    }
-
-    pub fn encode_update(&mut self) -> Vec<u8> {
-        let new_updates: Vec<&CrdtUpdate> = self
+        if self
             .history
             .iter()
-            .filter(|u| u.clock() > self.last_export_clock)
-            .collect();
-        if new_updates.is_empty() {
-            return Vec::new();
+            .any(|u| u.site() == parsed.site() && u.clock() == parsed.clock())
+        {
+            return RemoteApplyOutcome::Duplicate;
         }
-        let last = new_updates
-            .iter()
-            .map(|u| u.clock())
-            .max()
-            .unwrap_or(self.last_export_clock);
-        self.last_export_clock = last;
-        serde_json::to_vec(&new_updates).unwrap_or_default()
+
+        let verdict: Result<(), &'static str> = match &parsed {
+            CrdtUpdate::Replace {
+                start,
+                end,
+                pre_hash,
+                ..
+            } => {
+                if *start > *end
+                    || *end > self.text.len()
+                    || !self.text.is_char_boundary(*start)
+                    || !self.text.is_char_boundary(*end)
+                {
+                    Err("replace range out of bounds for local text")
+                } else {
+                    match pre_hash {
+                        Some(h) if region_hash(&self.text[*start..*end]) == *h => Ok(()),
+                        Some(_) => Err("replace pre-image mismatch"),
+                        None => Err("replace missing pre-image"),
+                    }
+                }
+            }
+            CrdtUpdate::Insert { at, pre_hash, .. } => {
+                if *at > self.text.len() || !self.text.is_char_boundary(*at) {
+                    Err("insert offset out of bounds for local text")
+                } else {
+                    match pre_hash {
+                        Some(h) if context_pair_hash(&self.text, *at, *at) == *h => Ok(()),
+                        Some(_) => Err("insert context mismatch"),
+                        None => Err("insert missing pre-image"),
+                    }
+                }
+            }
+            CrdtUpdate::Delete {
+                start,
+                end,
+                pre_hash,
+                ..
+            } => {
+                if *start > *end
+                    || *end > self.text.len()
+                    || !self.text.is_char_boundary(*start)
+                    || !self.text.is_char_boundary(*end)
+                {
+                    Err("delete range out of bounds for local text")
+                } else {
+                    match pre_hash {
+                        Some(h) if context_pair_hash(&self.text, *start, *end) == *h => Ok(()),
+                        Some(_) => Err("delete context mismatch"),
+                        None => Err("delete missing pre-image"),
+                    }
+                }
+            }
+        };
+
+        match verdict {
+            Ok(()) => {
+                match &parsed {
+                    CrdtUpdate::Replace {
+                        start, end, text, ..
+                    } => self.text.replace_range(*start..*end, text),
+                    CrdtUpdate::Insert { at, text, .. } => self.text.insert_str(*at, text),
+                    CrdtUpdate::Delete { start, end, .. } => {
+                        self.text.replace_range(*start..*end, "")
+                    }
+                }
+                self.clock = self.clock.max(parsed.clock());
+                self.history.push(parsed);
+                self.prune_history();
+                coordination_metrics::incr_crdt_remote_updates(1);
+                RemoteApplyOutcome::Applied
+            }
+            Err(reason) => {
+                coordination_metrics::incr_crdt_conflicts(1);
+                RemoteApplyOutcome::Conflict(reason)
+            }
+        }
+    }
+
+    pub fn pending_updates(&self) -> Option<Vec<CrdtUpdate>> {
+        if self.outbox.is_empty() {
+            None
+        } else {
+            Some(self.outbox.clone())
+        }
+    }
+
+    pub fn mark_exported(&mut self, count: usize) {
+        let n = count.min(self.outbox.len());
+        self.outbox.drain(..n);
+    }
+
+    pub fn consumed_seq(&self) -> u64 {
+        self.consumed_seq
+    }
+
+    pub fn set_consumed_seq(&mut self, seq: u64) {
+        self.consumed_seq = seq;
     }
 
     pub fn current_text(&self) -> &str {
@@ -289,7 +505,7 @@ impl Document {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        std::fs::write(&self.path, &self.text)
+        crate::util::atomic_write(&self.path, self.text.as_bytes())
     }
 
     pub fn path(&self) -> &Path {

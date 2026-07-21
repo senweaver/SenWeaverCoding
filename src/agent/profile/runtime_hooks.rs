@@ -89,8 +89,6 @@ pub struct LearningHooks {
     pub self_eval_enabled: bool,
     pub feedback_enabled: bool,
     pub experience_enabled: bool,
-    pub reflection_enabled: bool,
-    pub skill_evolution_enabled: bool,
 }
 
 impl LearningHooks {
@@ -99,8 +97,6 @@ impl LearningHooks {
             self_eval_enabled: config.self_eval.enabled,
             feedback_enabled: config.feedback.enabled,
             experience_enabled: config.experience.enabled,
-            reflection_enabled: config.self_reflection.enabled,
-            skill_evolution_enabled: config.skill_evolution.enabled,
         }
     }
 
@@ -171,14 +167,6 @@ impl LearningHooks {
         }
     }
 
-    pub fn record_tool_execution(&self, tool_name: &str, success: bool, duration_ms: u64) {
-        if !self.skill_evolution_enabled {
-            return;
-        }
-
-        let engine = crate::agent::skill_evolution::global_engine();
-        engine.record_execution(tool_name, success, duration_ms, None, "general", 0.0);
-    }
 }
 
 pub fn publish_lifecycle_event(phase: &str) {
@@ -194,6 +182,19 @@ pub fn publish_lifecycle_event(phase: &str) {
 }
 
 pub fn publish_tool_event(tool_name: &str, success: bool, duration_ms: u64) {
+    if let Some(svc) = crate::services::try_get_services() {
+        let cfg = svc.config().skill_evolution.clone();
+        if cfg.enabled {
+            crate::agent::skill_evolution::ensure_global_engine(&cfg).record_execution(
+                tool_name,
+                success,
+                duration_ms,
+                None,
+                "general",
+                if success { 0.5 } else { -0.5 },
+            );
+        }
+    }
     let name = tool_name.to_string();
     crate::runtime::task_manager::spawn_supervised("agent.tool_event", async move {
         crate::event_bus::integration::publish_tool_call("agent_loop", &name, success, duration_ms)

@@ -49,7 +49,11 @@ impl EvalSuite for SweBenchLiteSuite {
             verdict,
             output: output.to_string(),
             latency_ms: 0,
-            notes: None,
+            notes: Some(
+                "heuristic string-containment judge; NOT an execution-based SWE-bench verdict \
+                 - use the swebench_docker runner for real test-suite judging"
+                    .to_string(),
+            ),
         }
     }
 }

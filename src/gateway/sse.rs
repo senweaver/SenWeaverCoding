@@ -5,7 +5,7 @@
 use super::AppState;
 use axum::{
     extract::State,
-    http::{HeaderMap, StatusCode, header},
+    http::HeaderMap,
     response::{
         IntoResponse,
         sse::{Event, KeepAlive, Sse},
@@ -17,32 +17,11 @@ use tokio_stream::wrappers::BroadcastStream;
 
 pub async fn handle_sse_events(
     State(state): State<AppState>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
 ) -> impl IntoResponse {
-
-    let token = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|auth| auth.strip_prefix("Bearer "))
-        .unwrap_or("");
-
-    if state.exposed {
-        // When the gateway is exposed (public bind/tunnel), a valid token is
-        // mandatory regardless of the pairing toggle — matching the WS/API paths,
-        // so the event stream cannot be subscribed anonymously from the network.
-        if !state.pairing.is_authenticated_strict(token) {
-            return (
-                StatusCode::UNAUTHORIZED,
-                "Unauthorized  -  this gateway is exposed; a valid Bearer token is required",
-            )
-                .into_response();
-        }
-    } else if state.pairing.require_pairing() && !state.pairing.is_authenticated(token) {
-        return (
-            StatusCode::UNAUTHORIZED,
-            "Unauthorized  -  provide Authorization: Bearer <token>",
-        )
-            .into_response();
+    if let Err(err) = super::api::require_auth_with_peer(&state, &headers, Some(peer)) {
+        return err.into_response();
     }
 
     let rx = state.event_tx.subscribe();

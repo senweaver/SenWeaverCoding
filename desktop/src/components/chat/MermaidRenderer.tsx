@@ -4,9 +4,9 @@
 
 import { useEffect, useRef, useState, useCallback } from 'react'
 import DOMPurify from 'dompurify'
-import mermaid from 'mermaid'
 import { Modal } from '../shared/Modal'
 import { CopyButton } from '../shared/CopyButton'
+import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 
 type Props = {
@@ -14,6 +14,17 @@ type Props = {
 }
 
 type MermaidTheme = 'default' | 'dark'
+
+// mermaid is ~1.5MB; load it lazily (only when a diagram actually renders) so it
+// never lands in the first-screen bundle.
+type MermaidApi = typeof import('mermaid')['default']
+let mermaidModulePromise: Promise<MermaidApi> | null = null
+function loadMermaid(): Promise<MermaidApi> {
+  if (!mermaidModulePromise) {
+    mermaidModulePromise = import('mermaid').then((m) => m.default)
+  }
+  return mermaidModulePromise
+}
 
 let currentMermaidTheme: MermaidTheme | null = null
 const MIN_PREVIEW_ZOOM = 0.5
@@ -33,7 +44,7 @@ type DragState = {
   scrollTop: number
 }
 
-function initMermaid(theme: MermaidTheme) {
+function initMermaid(mermaid: MermaidApi, theme: MermaidTheme) {
   if (currentMermaidTheme === theme) return
   mermaid.initialize({
     startOnLoad: false,
@@ -145,6 +156,7 @@ function parseSvgMetrics(svg: string): SvgMetrics | null {
 }
 
 export function MermaidRenderer({ code }: Props) {
+  const t = useTranslation()
   const containerRef = useRef<HTMLDivElement>(null)
   const previewViewportRef = useRef<HTMLDivElement>(null)
   const previewContentRef = useRef<HTMLDivElement>(null)
@@ -202,21 +214,32 @@ export function MermaidRenderer({ code }: Props) {
     }
     let cancelled = false
     let cancelIdle: (() => void) | null = null
-    initMermaid(mermaidTheme)
 
     const runRender = () => {
-      const id = `mermaid-${++mermaidIdCounter}`
-      mermaid.render(id, code).then(
-        ({ svg: renderedSvg }) => {
-          if (!cancelled) {
-            if (MERMAID_SVG_CACHE.size >= MERMAID_SVG_CACHE_MAX) {
-              const oldest = MERMAID_SVG_CACHE.keys().next().value
-              if (oldest !== undefined) MERMAID_SVG_CACHE.delete(oldest)
-            }
-            MERMAID_SVG_CACHE.set(cacheKey, renderedSvg)
-            setSvg(renderedSvg)
-            setError(null)
-          }
+      loadMermaid().then(
+        (mermaid) => {
+          if (cancelled) return
+          initMermaid(mermaid, mermaidTheme)
+          const id = `mermaid-${++mermaidIdCounter}`
+          mermaid.render(id, code).then(
+            ({ svg: renderedSvg }) => {
+              if (!cancelled) {
+                if (MERMAID_SVG_CACHE.size >= MERMAID_SVG_CACHE_MAX) {
+                  const oldest = MERMAID_SVG_CACHE.keys().next().value
+                  if (oldest !== undefined) MERMAID_SVG_CACHE.delete(oldest)
+                }
+                MERMAID_SVG_CACHE.set(cacheKey, renderedSvg)
+                setSvg(renderedSvg)
+                setError(null)
+              }
+            },
+            (err) => {
+              if (!cancelled) {
+                setError(String(err?.message || err))
+                setSvg(null)
+              }
+            },
+          )
         },
         (err) => {
           if (!cancelled) {
@@ -356,7 +379,7 @@ export function MermaidRenderer({ code }: Props) {
         <div className="flex items-center justify-between border-b border-[var(--color-error)]/20 bg-[var(--color-error-container)] px-3 py-1.5 text-[11px] font-semibold uppercase tracking-[0.14em] text-[var(--color-error)]">
           <div className="flex items-center gap-2">
             <span className="material-symbols-outlined text-[14px]">error</span>
-            Mermaid Error
+            {t('mermaid.error')}
           </div>
           <CopyButton
             text={code}
@@ -381,7 +404,7 @@ export function MermaidRenderer({ code }: Props) {
       >
         <div className="flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
           <span className="material-symbols-outlined animate-spin text-[16px]">progress_activity</span>
-          {shouldRender ? 'Rendering diagram...' : 'Diagram queued'}
+          {shouldRender ? t('mermaid.rendering') : t('mermaid.queued')}
         </div>
       </div>
     )
@@ -402,7 +425,7 @@ export function MermaidRenderer({ code }: Props) {
               className="flex items-center gap-1 rounded-md border border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container-lowest)] px-2 py-1 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-text-primary)]"
             >
               <span className="material-symbols-outlined text-[12px]">fullscreen</span>
-              Preview
+              {t('mermaid.preview')}
             </button>
             <CopyButton
               text={code}
@@ -427,14 +450,14 @@ export function MermaidRenderer({ code }: Props) {
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2 text-sm font-semibold text-[var(--color-text-primary)]">
               <span className="material-symbols-outlined text-[18px]">account_tree</span>
-              Mermaid Diagram
+              {t('mermaid.diagramTitle')}
             </div>
             <div className="flex items-center gap-2">
               <div className="flex items-center gap-1 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-1 py-1">
                 <button
                   type="button"
                   onClick={zoomOut}
-                  aria-label="Zoom out"
+                  aria-label={t('mermaid.zoomOut')}
                   className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
                 >
                   <span className="material-symbols-outlined text-[16px]">remove</span>
@@ -449,7 +472,7 @@ export function MermaidRenderer({ code }: Props) {
                 <button
                   type="button"
                   onClick={zoomIn}
-                  aria-label="Zoom in"
+                  aria-label={t('mermaid.zoomIn')}
                   className="flex h-8 w-8 items-center justify-center rounded-md text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
                 >
                   <span className="material-symbols-outlined text-[16px]">add</span>
@@ -488,7 +511,7 @@ export function MermaidRenderer({ code }: Props) {
             </div>
           </div>
           <div className="text-[11px] text-[var(--color-text-tertiary)]">
-            Use the zoom controls to enlarge the diagram. Drag inside the preview to pan, or use the trackpad, mouse wheel, and scrollbars. Hold Ctrl/Command while scrolling to zoom.
+            {t('mermaid.previewHint')}
           </div>
         </div>
       </Modal>

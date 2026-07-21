@@ -17,6 +17,29 @@ use tracing::{debug, info, trace, warn};
 use super::registry::AgentId;
 use crate::observability::coordination_metrics::{self, LockAcquireOutcome};
 
+fn path_escapes_session_workspace(path: &Path) -> bool {
+    // Without a session workspace (e.g. a headless delegate_parallel executor
+    // whose workspace may differ from the process CWD) there is no reliable
+    // boundary to check against, so do not fabricate one — return "no escape"
+    // as before. The real path allowlist is enforced by SecurityPolicy; this
+    // region-lock check only adds a boundary when a session workspace is known.
+    let root = match crate::session::current_session_context() {
+        Some(ctx) if !ctx.workspace_dir.trim().is_empty() => PathBuf::from(&ctx.workspace_dir),
+        _ => return false,
+    };
+    if root.as_os_str().is_empty() {
+        return false;
+    }
+    let norm_root = crate::util::normalize_path_for_containment(&root);
+    let candidate = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        norm_root.join(path)
+    };
+    let norm_candidate = crate::util::normalize_path_for_containment(&candidate);
+    !crate::util::path_is_within(&norm_candidate, &norm_root)
+}
+
 #[derive(Debug, Clone)]
 struct LockEntry {
 
@@ -80,7 +103,7 @@ impl std::fmt::Display for LockError {
                 holder
             ),
             LockError::Deadlock { cycle } => {
-                write!(f, "deadlock detected: cycle = {}", cycle.join(" ??"))
+                write!(f, "deadlock detected: cycle = {}", cycle.join(" -> "))
             }
             LockError::Timeout { path, range } => write!(
                 f,
@@ -246,7 +269,7 @@ impl Drop for BufferLock {
     fn drop(&mut self) {
         let released = self.manager.locks.write().remove(&self.resource);
         if released.is_some() {
-            debug!(resource = %self.resource, agent = %self.agent_id, "BufferLock dropped ??lock released");
+            debug!(resource = %self.resource, agent = %self.agent_id, "BufferLock dropped - lock released");
         }
     }
 }
@@ -432,10 +455,23 @@ impl LockManager {
     }
 
     pub fn release_all_for_agent(&self, agent_id: &str) -> usize {
-        let mut locks = self.locks.write();
-        let before = locks.len();
-        locks.retain(|_, entry| entry.owner != agent_id);
-        let released = before - locks.len();
+        let mut released = {
+            let mut locks = self.locks.write();
+            let before = locks.len();
+            locks.retain(|_, entry| entry.owner != agent_id);
+            before - locks.len()
+        };
+        // Also drop any file-region locks the agent still holds, otherwise a dead
+        // agent's byte-range locks linger until TTL and needlessly block siblings.
+        {
+            let mut regions = self.file_regions.write();
+            for entries in regions.values_mut() {
+                let before = entries.len();
+                entries.retain(|e| e.holder != agent_id);
+                released += before - entries.len();
+            }
+            regions.retain(|_, entries| !entries.is_empty());
+        }
         if released > 0 {
             debug!(agent = %agent_id, count = released, "Released all locks for agent");
         }
@@ -534,6 +570,10 @@ impl LockManager {
         opts: AcquireOpts,
     ) -> Result<RegionLockToken, LockError> {
         if path.as_os_str().is_empty() {
+            coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Conflict);
+            return Err(LockError::WorkspaceEscape);
+        }
+        if path_escapes_session_workspace(path) {
             coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Conflict);
             return Err(LockError::WorkspaceEscape);
         }
@@ -650,6 +690,10 @@ impl LockManager {
         opts: AcquireOpts,
     ) -> Result<RegionLockToken, LockError> {
         if path.as_os_str().is_empty() {
+            coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Conflict);
+            return Err(LockError::WorkspaceEscape);
+        }
+        if path_escapes_session_workspace(path) {
             coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Conflict);
             return Err(LockError::WorkspaceEscape);
         }
@@ -1008,7 +1052,7 @@ impl BarrierManager {
 
             if barrier.arrived.is_superset(&barrier.expected) {
                 barriers.remove(barrier_name);
-                info!(barrier = %barrier_name, "Barrier released ??all agents arrived");
+                info!(barrier = %barrier_name, "Barrier released - all agents arrived");
                 BarrierResult::Released
             } else {
                 BarrierResult::Waiting {
@@ -1106,6 +1150,8 @@ pub enum VotingResult {
 
     AlreadyVoted,
 
+    NotEligible,
+
     TimedOut,
 }
 
@@ -1166,6 +1212,15 @@ impl VotingManager {
                 let _tally = Self::compute_tally(&session.votes);
                 sessions.remove(session_id);
                 return VotingResult::TimedOut;
+            }
+
+            if !session.eligible.is_empty() && !session.eligible.contains(agent_id) {
+                debug!(
+                    session = %session_id,
+                    agent = %agent_id,
+                    "vote rejected: agent not in the eligible set"
+                );
+                return VotingResult::NotEligible;
             }
 
             if session.votes.iter().any(|v| v.agent_id == agent_id) {

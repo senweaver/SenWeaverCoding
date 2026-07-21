@@ -57,7 +57,10 @@ impl LspDiagnosticFetcher for LspPoolDiagnosticFetcher {
 
             Ok(Err(e)) => Err(e),
 
-            Err(_) => Ok(Vec::new()),
+            Err(_) => anyhow::bail!(
+                "lsp diagnostics fetch timed out after {:?}; result is unknown, not clean",
+                self.timeout
+            ),
         }
     }
 }

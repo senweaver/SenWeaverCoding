@@ -760,9 +760,6 @@ pub struct Config {
     pub experience: crate::agent::reward::experience::ExperienceConfig,
 
     #[serde(default)]
-    pub self_reflection: crate::agent::self_assess::reflection::SelfReflectionConfig,
-
-    #[serde(default)]
     pub prompt_optimizer: crate::agent::prompt::optimizer::PromptOptimizerConfig,
 
     #[serde(default)]
@@ -2125,7 +2122,12 @@ pub struct CodeRagConfig {
     #[serde(default = "default_code_rag_top_k")]
     pub top_k: usize,
 
-    #[serde(default)]
+    // On by default so semantic code retrieval works out of the box whenever an
+    // embedder is reachable (local Ollama, or the openai backend inheriting the
+    // configured provider key). When no embedder is reachable the vector seed
+    // simply produces nothing and retrieval degrades gracefully to the lexical
+    // index — never an error.
+    #[serde(default = "default_true")]
     pub dense_enabled: bool,
 
     #[serde(default)]
@@ -2137,7 +2139,7 @@ impl Default for CodeRagConfig {
         Self {
             enabled: true,
             top_k: default_code_rag_top_k(),
-            dense_enabled: false,
+            dense_enabled: true,
             embedder: CodeRagEmbedderConfig::default(),
         }
     }
@@ -3849,10 +3851,14 @@ pub struct AutonomyConfig {
     #[serde(default)]
     pub auto_approve_mode_transitions: Vec<String>,
 
-    #[serde(default)]
+    #[serde(default = "default_true")]
     pub enable_command_policy: bool,
 
-    #[serde(default = "default_true")]
+    // Default false: on channel/daemon/one-shot surfaces there is no human to
+    // approve, so auto-running shell (incl. medium-risk) there is unsafe,
+    // especially stacked on top of untrusted content ingestion. Opt in
+    // explicitly for trusted automation surfaces.
+    #[serde(default)]
     pub allow_shell_in_non_interactive: bool,
 }
 
@@ -3861,7 +3867,10 @@ fn default_auto_approve() -> Vec<String> {
         "file_read".into(),
         "memory_recall".into(),
         "web_search_tool".into(),
-        "web_fetch".into(),
+        // web_fetch is intentionally NOT auto-approved: it ingests arbitrary
+        // remote page text that can carry prompt-injection payloads which then
+        // drive tool calls. Require an explicit approval (or an opt-in Always)
+        // before fetching untrusted URLs.
         "calculator".into(),
         "glob_search".into(),
         "content_search".into(),
@@ -3953,8 +3962,8 @@ impl Default for AutonomyConfig {
             protect_browser_tools: true,
             protect_mcp_tools: true,
             auto_approve_mode_transitions: Vec::new(),
-            enable_command_policy: false,
-            allow_shell_in_non_interactive: true,
+            enable_command_policy: true,
+            allow_shell_in_non_interactive: false,
         }
     }
 }
@@ -4839,7 +4848,6 @@ pub enum OtpMethod {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct OtpConfig {
 
     #[serde(default)]
@@ -4905,7 +4913,6 @@ impl Default for OtpConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct EstopConfig {
 
     #[serde(default)]
@@ -4933,7 +4940,6 @@ impl Default for EstopConfig {
 }
 
 #[derive(Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct NevisConfig {
 
     #[serde(default)]
@@ -5058,7 +5064,6 @@ impl Default for NevisConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(deny_unknown_fields)]
 pub struct NevisRoleMappingConfig {
 
     pub nevis_role: String,
@@ -5744,7 +5749,6 @@ impl Default for Config {
             self_eval: crate::agent::self_assess::eval::SelfEvalConfig::default(),
             feedback: crate::agent::reward::feedback::FeedbackConfig::default(),
             experience: crate::agent::reward::experience::ExperienceConfig::default(),
-            self_reflection: crate::agent::self_assess::reflection::SelfReflectionConfig::default(),
             prompt_optimizer: crate::agent::prompt::optimizer::PromptOptimizerConfig::default(),
             skill_evolution: crate::agent::skill_evolution::SkillEvolutionConfig::default(),
             reinforcement: crate::agent::reward::reinforcement::ReinforcementConfig::default(),
@@ -5811,6 +5815,82 @@ fn is_temp_directory(path: &Path) -> bool {
     let canon_temp = temp.canonicalize().unwrap_or_else(|_| temp.clone());
     let canon_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     canon_path.starts_with(&canon_temp)
+}
+
+struct ConfigWriteLock {
+    path: PathBuf,
+    held: bool,
+}
+
+impl ConfigWriteLock {
+    const STALE_AFTER: std::time::Duration = std::time::Duration::from_secs(30);
+    const ACQUIRE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+    async fn acquire(config_path: &Path) -> Self {
+        let lock_path = {
+            let name = config_path
+                .file_name()
+                .and_then(|v| v.to_str())
+                .unwrap_or("config.toml");
+            config_path.with_file_name(format!("{name}.lock"))
+        };
+        let deadline = std::time::Instant::now() + Self::ACQUIRE_TIMEOUT;
+        loop {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&lock_path)
+            {
+                Ok(_) => {
+                    return Self {
+                        path: lock_path,
+                        held: true,
+                    };
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    // Steal a stale lock left behind by a crashed writer.
+                    let stale = std::fs::metadata(&lock_path)
+                        .and_then(|m| m.modified())
+                        .map(|t| t.elapsed().unwrap_or_default() > Self::STALE_AFTER)
+                        .unwrap_or(false);
+                    if stale {
+                        let _ = std::fs::remove_file(&lock_path);
+                        continue;
+                    }
+                    if std::time::Instant::now() >= deadline {
+                        tracing::warn!(
+                            path = %lock_path.display(),
+                            "config write lock still held after timeout; proceeding without it"
+                        );
+                        return Self {
+                            path: lock_path,
+                            held: false,
+                        };
+                    }
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        path = %lock_path.display(),
+                        error = %e,
+                        "could not create config write lock; proceeding without it"
+                    );
+                    return Self {
+                        path: lock_path,
+                        held: false,
+                    };
+                }
+            }
+        }
+    }
+}
+
+impl Drop for ConfigWriteLock {
+    fn drop(&mut self) {
+        if self.held {
+            let _ = std::fs::remove_file(&self.path);
+        }
+    }
 }
 
 async fn load_persisted_workspace_dirs(
@@ -5929,9 +6009,38 @@ async fn persist_active_workspace_config_dir_in(
     Ok(())
 }
 
+// Stamp file sen writes into every config dir it owns. Its presence is the
+// authoritative signal that a directory is a sen config home, so we never adopt
+// or overwrite an unrelated project's `config.toml`.
+pub(crate) const SEN_CONFIG_DIR_MARKER: &str = ".sen-config-dir";
+
+// A directory is a sen config home only if it carries a sen marker — never
+// merely because it contains a `config.toml`. Many code projects ship their own
+// unrelated `config.toml`; adopting one silently clobbers the user's file.
+pub(crate) fn is_sen_config_dir(dir: &Path) -> bool {
+    if dir.join(SEN_CONFIG_DIR_MARKER).exists() {
+        return true;
+    }
+    // The default `~/.senweavercoding` home is sen-owned by name.
+    if dir
+        .file_name()
+        .is_some_and(|n| n == std::ffi::OsStr::new(".senweavercoding"))
+    {
+        return dir.join("config.toml").exists();
+    }
+    // Backward-compat for portable homes created before the stamp existed: a
+    // `config.toml` sitting next to an unambiguously sen-created artifact.
+    if dir.join("config.toml").exists() {
+        const SEN_ARTIFACTS: &[&str] =
+            &[".secret_key", "sessions", "workspace", ACTIVE_WORKSPACE_STATE_FILE];
+        return SEN_ARTIFACTS.iter().any(|a| dir.join(a).exists());
+    }
+    false
+}
+
 pub(crate) fn resolve_config_dir_for_workspace(workspace_dir: &Path) -> (PathBuf, PathBuf) {
     let workspace_config_dir = workspace_dir.to_path_buf();
-    if workspace_config_dir.join("config.toml").exists() {
+    if is_sen_config_dir(&workspace_config_dir) {
         return (
             workspace_config_dir.clone(),
             workspace_config_dir.join("workspace"),
@@ -5942,7 +6051,7 @@ pub(crate) fn resolve_config_dir_for_workspace(workspace_dir: &Path) -> (PathBuf
         .parent()
         .map(|parent| parent.join(".senweavercoding"));
     if let Some(legacy_dir) = legacy_config_dir {
-        if legacy_dir.join("config.toml").exists() {
+        if is_sen_config_dir(&legacy_dir) {
             return (legacy_dir, workspace_config_dir);
         }
 
@@ -5952,6 +6061,17 @@ pub(crate) fn resolve_config_dir_for_workspace(workspace_dir: &Path) -> (PathBuf
         {
             return (legacy_dir, workspace_config_dir);
         }
+    }
+
+    // The target holds a foreign (non-sen) `config.toml`. Do NOT claim it: keep
+    // the directory as the workspace and namespace sen's own config into a
+    // clearly sen-owned `.senweavercoding` subdir so the user's file is never
+    // read as ours, renamed, or overwritten.
+    if workspace_config_dir.join("config.toml").exists() {
+        return (
+            workspace_config_dir.join(".senweavercoding"),
+            workspace_config_dir,
+        );
     }
 
     (
@@ -6470,21 +6590,36 @@ impl Config {
             let mut config: Config = match toml::from_str(&contents) {
                 Ok(cfg) => cfg,
                 Err(err) => {
+                    // Only rename/overwrite a config.toml that sen actually owns.
+                    // If this directory is not a sen config home (e.g. a project
+                    // dir with an unrelated config.toml resolution landed on),
+                    // degrade read-only: boot with in-memory defaults and never
+                    // touch the user's file.
+                    let owned = is_sen_config_dir(&sen_dir);
                     let backup_suffix = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .map(|d| d.as_secs())
                         .unwrap_or(0);
                     let backup_path =
                         config_path.with_extension(format!("toml.bak-{backup_suffix}"));
-                    let backup_ok = match fs::rename(&config_path, &backup_path).await {
-                        Ok(()) => true,
-                        Err(rename_err) => {
-                            tracing::warn!(
-                                error = %rename_err,
-                                backup = %backup_path.display(),
-                                "could not back up corrupted config; leaving original in place"
-                            );
-                            false
+                    let backup_ok = if !owned {
+                        tracing::warn!(
+                            path = %config_path.display(),
+                            "config.toml failed to parse and this directory is not a sen config \
+                             home; booting with in-memory defaults without modifying the file"
+                        );
+                        false
+                    } else {
+                        match fs::rename(&config_path, &backup_path).await {
+                            Ok(()) => true,
+                            Err(rename_err) => {
+                                tracing::warn!(
+                                    error = %rename_err,
+                                    backup = %backup_path.display(),
+                                    "could not back up corrupted config; leaving original in place"
+                                );
+                                false
+                            }
                         }
                     };
                     tracing::warn!(
@@ -8609,6 +8744,11 @@ impl Config {
             )
         })?;
 
+        // Serialize concurrent writers (CLI + desktop + gateway may all persist
+        // config.toml) with a cross-process advisory lock file so they cannot
+        // clobber each other's read-modify-write with a last-writer-wins overwrite.
+        let _config_write_lock = ConfigWriteLock::acquire(&config_path).await;
+
         let file_name = config_path
             .file_name()
             .and_then(|v| v.to_str())
@@ -8668,6 +8808,24 @@ impl Config {
                     "Failed to harden config permissions to 0600 at {}: {}",
                     config_path.display(),
                     err
+                );
+            }
+        }
+
+        // Stamp the dir as sen-owned so future resolution never mistakes a
+        // neighbouring project's config.toml for ours (and vice versa).
+        let marker_path = parent_dir.join(SEN_CONFIG_DIR_MARKER);
+        if !marker_path.exists() {
+            if let Err(err) = fs::write(
+                &marker_path,
+                b"This directory is a SenWeaverCoding config home. Do not remove.\n",
+            )
+            .await
+            {
+                tracing::debug!(
+                    error = %err,
+                    path = %marker_path.display(),
+                    "could not write sen config-dir marker"
                 );
             }
         }

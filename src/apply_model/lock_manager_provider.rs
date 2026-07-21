@@ -93,10 +93,20 @@ impl LockManagerProvider {
 
         let lock_manager = self.coordinator.locks_arc();
 
-        let holder_string = if holder.is_empty() {
-            self.holder_id.clone()
-        } else {
-            format!("{}/{}", self.holder_id, holder)
+        // Fold the current session identity into the lock holder so that distinct
+        // agent sessions (including subagents/delegates, which each run under their
+        // own session id) become distinct lock holders and therefore mutually
+        // exclude on overlapping regions. Without this discriminator every writer
+        // shares the fixed provider holder id and region locks become a no-op
+        // across agents.
+        let session = crate::session::resource_lock::current_session_context()
+            .map(|ctx| ctx.session_id)
+            .filter(|id| !id.trim().is_empty());
+        let holder_string = match (session, holder.is_empty()) {
+            (Some(session), true) => format!("{}/{}", self.holder_id, session),
+            (Some(session), false) => format!("{}/{}/{}", self.holder_id, session, holder),
+            (None, true) => self.holder_id.clone(),
+            (None, false) => format!("{}/{}", self.holder_id, holder),
         };
 
         let result = tokio::task::spawn_blocking(move || {
@@ -108,6 +118,62 @@ impl LockManagerProvider {
         match result {
             Ok(tokens) => Ok(Box::new(RegionLockGuard { _tokens: tokens })),
             Err(err) => Err(LockProviderError::Acquire(format_lock_error(&err))),
+        }
+    }
+}
+
+/// Resolves the coordinator's lock manager at acquire time instead of freezing
+/// the decision when the applier is constructed. Appliers built before the
+/// multi-agent runtime is initialized (early CLI paths, lazily-created flows)
+/// would otherwise silently keep a no-op provider for their whole lifetime and
+/// never serialize against other writers.
+#[derive(Debug, Clone)]
+pub struct LazyRuntimeLockProvider {
+    holder_id: &'static str,
+}
+
+impl LazyRuntimeLockProvider {
+    #[must_use]
+    pub fn new(holder_id: &'static str) -> Self {
+        Self { holder_id }
+    }
+}
+
+impl Default for LazyRuntimeLockProvider {
+    fn default() -> Self {
+        Self::new("edit_path")
+    }
+}
+
+#[async_trait]
+impl LockProvider for LazyRuntimeLockProvider {
+    async fn acquire_for_paths(
+        &self,
+        paths: &[std::path::PathBuf],
+        holder: &str,
+    ) -> Result<Box<dyn LockGuard>, LockProviderError> {
+        match crate::agent::multi_agent_runtime::global_runtime() {
+            Some(rt) => {
+                LockManagerProvider::new(rt.coordinator.clone(), self.holder_id)
+                    .acquire_for_paths(paths, holder)
+                    .await
+            }
+            None => Ok(Box::new(super::ops_applier::NoopLockGuard)),
+        }
+    }
+
+    async fn acquire_for_regions(
+        &self,
+        regions: &[RegionLockRequest],
+        holder: &str,
+    ) -> Result<Box<dyn LockGuard>, LockProviderError> {
+        match crate::agent::multi_agent_runtime::global_runtime() {
+            Some(rt) => {
+                LockManagerProvider::new(rt.coordinator.clone(), self.holder_id)
+                    .acquire_for_regions(regions, holder)
+                    .await
+            }
+            None => Ok(Box::new(super::ops_applier::NoopLockGuard)),
         }
     }
 }

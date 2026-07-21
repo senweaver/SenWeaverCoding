@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import type { ToolViewProps } from './ToolViewProps'
+import { useTranslation } from '../../../i18n'
 import { CodeViewer } from '../CodeViewer'
 import { CopyButton } from '../../shared/CopyButton'
 import {
@@ -63,6 +64,7 @@ export function CodeIntelHeader({ toolName, input }: ToolViewProps) {
 }
 
 export function CodeIntelDetail({ toolName, input, result }: ToolViewProps) {
+  const t = useTranslation()
   const path = extractPath(input)
   const symbol = readSymbolLabel(input)
   const action = readString(input, ['action', 'method', 'kind', 'mode'])
@@ -103,7 +105,7 @@ export function CodeIntelDetail({ toolName, input, result }: ToolViewProps) {
       {!metaRows.length && (
         <div className="overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-surface)]">
           <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-1.5 text-[10px] uppercase tracking-[0.18em] text-[var(--color-outline)]">
-            <span>Tool Input · {toolName}</span>
+            <span>{t('tool.toolInput')} · {toolName}</span>
             <CopyButton
               text={inputJson}
               className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] normal-case tracking-normal text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
@@ -121,7 +123,7 @@ export function CodeIntelDetail({ toolName, input, result }: ToolViewProps) {
           }`}
         >
           <div className="flex items-center justify-between border-b border-[var(--color-border)] px-3 py-1.5 text-[10px] uppercase tracking-[0.18em] text-[var(--color-outline)]">
-            <span>{result?.isError ? 'Error' : 'Output'}</span>
+            <span>{result?.isError ? t('tool.errorOutput') : t('tool.toolOutput')}</span>
             <CopyButton
               text={text}
               className="rounded-md border border-[var(--color-border)] px-2 py-0.5 text-[10px] normal-case tracking-normal text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
