@@ -233,58 +233,74 @@ fn entry_for_root(root: &Path, build_if_missing: bool) -> Option<Arc<GlobalWrite
     Some(stored)
 }
 
-// Starts the workspace fs watcher exactly once per graph root, and only when a
-// tokio runtime is actually available on the current thread. This is called
-// from async contexts (edit-apply path); it is deliberately NOT invoked from
-// `entry_for_root`, because the writer is frequently first created inside a
-// `spawn_blocking` thread where `Handle::try_current()` fails and the watcher
-// would silently never start.
+#[cfg(feature = "fs-watch")]
+static LEXICAL_ONLY_WATCHERS: std::sync::OnceLock<
+    parking_lot::Mutex<std::collections::HashSet<PathBuf>>,
+> = std::sync::OnceLock::new();
+
+#[cfg(feature = "fs-watch")]
+fn lexical_only_watchers() -> &'static parking_lot::Mutex<std::collections::HashSet<PathBuf>> {
+    LEXICAL_ONLY_WATCHERS.get_or_init(|| parking_lot::Mutex::new(std::collections::HashSet::new()))
+}
+
 #[cfg(feature = "fs-watch")]
 pub fn ensure_workspace_watcher(root: &Path) {
     use std::sync::atomic::Ordering;
     if tokio::runtime::Handle::try_current().is_err() {
         return;
     }
-    let Some(entry) = entry_for_root(root, false) else {
-        return;
-    };
-    if entry
-        .watcher_started
-        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-        .is_err()
-    {
-        return;
+    match entry_for_root(root, false) {
+        Some(entry) => {
+            if entry
+                .watcher_started
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                return;
+            }
+            lexical_only_watchers().lock().remove(root);
+            spawn_fs_watcher_for_root(root.to_path_buf(), Some(entry));
+        }
+        None => {
+            {
+                let mut guard = lexical_only_watchers().lock();
+                if !guard.insert(root.to_path_buf()) {
+                    return;
+                }
+            }
+            spawn_fs_watcher_for_root(root.to_path_buf(), None);
+        }
     }
-    spawn_fs_watcher_for_root(root.to_path_buf(), entry);
 }
 
 #[cfg(not(feature = "fs-watch"))]
 pub fn ensure_workspace_watcher(_root: &Path) {}
 
-// Watches the workspace so files changed OUTSIDE the agent's own edit tools
-// (user edits, git checkout, formatters) also flow into the incremental
-// symbol-graph rebuild. Agent-driven edits arrive via note_files_changed_global.
 #[cfg(feature = "fs-watch")]
-fn spawn_fs_watcher_for_root(root: PathBuf, entry: Arc<GlobalWriterEntry>) {
+fn spawn_fs_watcher_for_root(root: PathBuf, entry: Option<Arc<GlobalWriterEntry>>) {
+    fn release_start_flag(entry: &Option<Arc<GlobalWriterEntry>>, root: &Path) {
+        match entry {
+            Some(e) => e
+                .watcher_started
+                .store(false, std::sync::atomic::Ordering::Release),
+            None => {
+                lexical_only_watchers().lock().remove(root);
+            }
+        }
+    }
     let Ok(handle) = tokio::runtime::Handle::try_current() else {
-        // Caller (ensure_workspace_watcher) already flipped watcher_started;
-        // undo it so a later async caller can retry.
-        entry
-            .watcher_started
-            .store(false, std::sync::atomic::Ordering::Release);
+        release_start_flag(&entry, &root);
         return;
     };
     let watcher = match crate::code_intel::file_watcher_notify::NotifyWatcher::open(&root) {
         Ok(w) => w,
         Err(err) => {
-            entry
-                .watcher_started
-                .store(false, std::sync::atomic::Ordering::Release);
+            release_start_flag(&entry, &root);
             tracing::debug!(
                 target: "code_intel.fs_watch",
                 root = %root.display(),
                 error = %err,
-                "symbol-graph fs watcher unavailable; incremental updates limited to agent edits"
+                "workspace fs watcher unavailable; incremental updates limited to agent edits"
             );
             return;
         }
@@ -292,10 +308,17 @@ fn spawn_fs_watcher_for_root(root: PathBuf, entry: Arc<GlobalWriterEntry>) {
     handle.spawn(async move {
         loop {
             tokio::time::sleep(Duration::from_secs(2)).await;
+            if entry.is_none() && !lexical_only_watchers().lock().contains(&root) {
+                return;
+            }
             let poll_watcher = std::sync::Arc::clone(&watcher);
-            let events = tokio::task::spawn_blocking(move || poll_watcher.poll())
-                .await
-                .unwrap_or_default();
+            let events = match tokio::task::spawn_blocking(move || poll_watcher.poll()).await {
+                Ok(events) => {
+                    crate::agent::loop_::services::note_lexical_watcher_alive(&root);
+                    events
+                }
+                Err(_) => continue,
+            };
             if events.is_empty() {
                 continue;
             }
@@ -311,16 +334,15 @@ fn spawn_fs_watcher_for_root(root: PathBuf, entry: Arc<GlobalWriterEntry>) {
             if changed.is_empty() && removed.is_empty() {
                 continue;
             }
-            if !changed.is_empty() {
-                entry.writer.on_files_changed(&changed);
+            if let Some(entry) = entry.as_ref() {
+                if !changed.is_empty() {
+                    entry.writer.on_files_changed(&changed);
+                }
+                if !removed.is_empty() {
+                    entry.writer.on_files_removed(&removed);
+                }
+                schedule_global_drain(Arc::clone(entry));
             }
-            if !removed.is_empty() {
-                entry.writer.on_files_removed(&removed);
-            }
-            schedule_global_drain(Arc::clone(&entry));
-            // Keep any already-running LSP server in sync with external edits
-            // (user save, git checkout, formatter) so diagnostics/definitions
-            // don't drift. Guarded so it never spawns a server.
             if let Some(svc) = crate::services::try_get_services() {
                 for p in &changed {
                     svc.lsp.notify_external_change_if_open(p).await;
@@ -349,13 +371,7 @@ fn watch_relevant(path: &Path) -> bool {
     if SKIP_SEGMENTS.iter().any(|seg| s.contains(seg)) {
         return false;
     }
-    matches!(
-        path.extension().and_then(|e| e.to_str()),
-        Some(
-            "rs" | "py" | "js" | "jsx" | "ts" | "tsx" | "go" | "java" | "c" | "h" | "cpp"
-                | "hpp" | "cc"
-        )
-    )
+    crate::agent::loop_::services::is_seedable_source_file(path)
 }
 
 #[must_use]
@@ -430,9 +446,6 @@ fn spawn_background_build(root: &Path) -> bool {
     spawned
 }
 
-// Called from the edit-apply layer after files change on disk. Marks the
-// owning workspace's graph dirty and schedules a debounced partial rebuild so
-// context injection sees fresh symbols without a manual re-index.
 pub fn note_files_changed_global(paths: &[PathBuf]) {
     if paths.is_empty() {
         return;
@@ -450,8 +463,6 @@ pub fn note_files_changed_global(paths: &[PathBuf]) {
         };
         entry.writer.on_files_changed(&group);
         schedule_global_drain(entry);
-        // Lazily start the external-edit watcher from this async context; the
-        // read-side (context injection) path runs in spawn_blocking and cannot.
         #[cfg(feature = "fs-watch")]
         ensure_workspace_watcher(&root);
     }
@@ -600,10 +611,18 @@ impl SymbolGraphWriter {
             }
             guard.drain()
         };
-        let mut graph = self.graph.write();
-        graph.partial_rebuild(&changed, &removed, &self.root);
-        if self.persist_limiter.try_acquire() {
-            let _ = graph.persist(&self.root);
+        let payload = {
+            let mut graph = self.graph.write();
+            graph.partial_rebuild(&changed, &removed, &self.root);
+            if self.persist_limiter.try_acquire() {
+                let read = parking_lot::RwLockWriteGuard::downgrade(graph);
+                read.serialize_for_persist().ok()
+            } else {
+                None
+            }
+        };
+        if let Some(body) = payload {
+            let _ = SymbolGraph::persist_bytes(&self.root, &body);
         }
         crate::observability::code_intel_metrics::incr_symbol_graph_sync_executed();
         true

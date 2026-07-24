@@ -64,9 +64,6 @@ impl OpenAiStyleProvider {
     }
 
     pub fn build_prompt(req: &InlineCompletionRequest) -> String {
-        // Fold the pre-computed InlineContext (imports + enclosing symbol) into
-        // the prompt. It was previously built by the caller and then discarded
-        // here, so completions had no repo signal beyond the raw prefix/suffix.
         let mut context_block = String::new();
         if !req.context.imports.is_empty() {
             context_block.push_str("--- imports in scope ---\n");

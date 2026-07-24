@@ -561,7 +561,19 @@ impl Tool for WebFetchTool {
     }
 
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        let url_hint = args
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("web_fetch")
+            .to_string();
         let mut result = self.fetch_to_result(args).await?;
+        if result.success {
+            result.output =
+                crate::security::prompt_guard::core::PromptGuard::screen_untrusted_web_content(
+                    &url_hint,
+                    std::mem::take(&mut result.output),
+                );
+        }
         if result.success && crate::token_saver::is_enabled() {
             result.output = crate::token_saver::compact_tool_output(
                 "web_fetch",

@@ -53,8 +53,6 @@ impl FastApplyRefiner {
         }
     }
 
-    /// Last-resort full-file merge: prefer the fast tier (Morph/Relace-style), fall
-    /// back to the full tier, whichever advertises support.
     async fn merge_full_file(
         &self,
         source: &str,
@@ -210,10 +208,6 @@ async fn apply_via_full_tier(
     }
 }
 
-/// When diff-based application has exhausted its retries, ask the refiner to
-/// produce the COMPLETE merged file and use it directly as the outcome. This is
-/// the Morph/Relace fast-apply escape hatch that avoids the double failure mode of
-/// "model produces a diff + the diff fails to locate".
 async fn merge_full_file_fallback(
     refiner: &FastApplyRefiner,
     source: &str,
@@ -232,8 +226,6 @@ async fn merge_full_file_fallback(
             };
             Ok((outcome, merged))
         }
-        // Preserve the original diff-application error if full-file merge is
-        // unavailable or also fails, so the caller sees the meaningful failure.
         Err(_) => Err(prior_err),
     }
 }

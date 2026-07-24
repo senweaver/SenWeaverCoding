@@ -185,8 +185,6 @@ async fn run_due_hand(
     effective_config.workspace_dir = config.workspace_dir.clone();
 
     let started = Instant::now();
-    // Bound each hand run so one hung provider call cannot freeze the sequential
-    // hands processing loop indefinitely.
     const HAND_RUN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(1800);
     let run_fut = Box::pin(crate::agent::run(
         effective_config,

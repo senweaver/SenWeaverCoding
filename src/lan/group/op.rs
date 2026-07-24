@@ -60,9 +60,6 @@ impl HlcClock {
             millis: now,
             counter: 0,
         };
-        // Clamp a remote timestamp that is implausibly far in the future so a
-        // (malicious or badly-skewed) peer cannot poison the local clock and win
-        // every subsequent LWW conflict forever.
         const MAX_DRIFT_MS: u64 = 5 * 60 * 1000;
         let remote = if remote.millis > now.saturating_add(MAX_DRIFT_MS) {
             tracing::warn!(

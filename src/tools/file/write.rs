@@ -285,8 +285,9 @@ impl Tool for FileWriteTool {
                 )),
             });
         }
-        // When the file already exists in a non-UTF-8 encoding (e.g. GBK), preserve
-        // that encoding on write so we don't corrupt it by forcing UTF-8 bytes.
+        let utf8_bom = original_bytes
+            .as_deref()
+            .is_some_and(|b| b.starts_with(&[0xEF, 0xBB, 0xBF]));
         let preserved_encoding: Option<String> = match (&original_bytes, &original_text) {
             (Some(bytes), None) => {
                 let label = crate::tools::file::encoding::detect_label(bytes);
@@ -296,10 +297,11 @@ impl Tool for FileWriteTool {
                     Some(label.to_string())
                 }
             }
+            (Some(_), Some(_)) if utf8_bom => Some("UTF-8-BOM".to_string()),
             _ => None,
         };
         let op = match (existed, original_text) {
-            (true, Some(original_text)) => {
+            (true, Some(original_text)) if !utf8_bom => {
                 let original_len = original_text.len();
                 EditOp::Replace {
                     path: resolved_target.clone(),

@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 import { create } from 'zustand'
-import { getBaseUrl } from '../api/client'
+import { getBaseUrl, withAuthToken } from '../api/client'
 import {
   deleteRecording,
   generateRecordingSkill,
@@ -72,7 +72,6 @@ function closeSocket() {
       socket.onopen = null
       socket.close()
     } catch {
-      /* ignore */
     }
     socket = null
   }
@@ -84,7 +83,6 @@ function genRecId(): string {
       return crypto.randomUUID()
     }
   } catch {
-    /* ignore */
   }
   return `rec-${Date.now()}-${Math.random().toString(36).slice(2)}`
 }
@@ -114,7 +112,6 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
       try {
         socket.send(JSON.stringify({ type: 'discard' }))
       } catch {
-        /* ignore */
       }
     }
     closeSocket()
@@ -130,7 +127,7 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
       startedAt: null,
     })
 
-    const wsUrl = `${getBaseUrl().replace(/^http/, 'ws')}/ws/computer-record/${recId}`
+    const wsUrl = withAuthToken(`${getBaseUrl().replace(/^http/, 'ws')}/ws/computer-record/${recId}`)
     let ws: WebSocket
     try {
       ws = new WebSocket(wsUrl)
@@ -195,7 +192,6 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
     try {
       socket?.send(JSON.stringify({ type: 'stop' }))
     } catch {
-      /* ignore */
     }
   },
 
@@ -203,7 +199,6 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
     try {
       socket?.send(JSON.stringify({ type: 'discard' }))
     } catch {
-      /* ignore */
     }
     closeSocket()
     set({
@@ -348,7 +343,6 @@ async function pollSkillGenerated(
         return true
       }
     } catch {
-      /* transient; keep polling */
     }
   }
   return false

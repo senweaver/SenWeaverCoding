@@ -226,8 +226,6 @@ impl Tool for GlobEditTool {
                                 break;
                             }
                             let Ok(path) = entry else { continue };
-                            // Prune build/vendor/VCS trees so a bulk sweep never edits or even
-                            // stats files under node_modules/target/.git/etc.
                             if super::crosses_skip_dir(&path) {
                                 continue;
                             }

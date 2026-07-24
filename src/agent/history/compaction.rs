@@ -27,17 +27,49 @@ pub(crate) fn estimate_tokens_filtered(history: &[ChatMessage], is_system: bool)
         .sum()
 }
 
-pub(crate) fn build_compaction_transcript(messages: &[ChatMessage], max_chars: usize) -> String {
+pub(crate) fn build_compaction_transcript_full(messages: &[ChatMessage]) -> String {
     let mut transcript = String::new();
     for msg in messages {
         let role = msg.role.to_uppercase();
         let _ = writeln!(transcript, "{role}: {}", msg.content.trim());
     }
+    transcript
+}
 
-    match crate::util::truncate_head_tail(&transcript, max_chars, 20) {
-        Some(clipped) => clipped,
-        None => transcript,
+pub(crate) fn split_transcript_chunks(
+    transcript: &str,
+    chunk_chars: usize,
+    max_chunks: usize,
+) -> Vec<String> {
+    let chunk_chars = chunk_chars.max(1_024);
+    let max_chunks = max_chunks.max(1);
+    if transcript.len() <= chunk_chars {
+        return vec![transcript.to_string()];
     }
+    let mut chunks: Vec<String> = Vec::new();
+    let mut current = String::with_capacity(chunk_chars.min(transcript.len()));
+    for line in transcript.split_inclusive('\n') {
+        if chunks.len() == max_chunks - 1 {
+            current.push_str(line);
+            continue;
+        }
+        if !current.is_empty() && current.len() + line.len() > chunk_chars {
+            chunks.push(std::mem::take(&mut current));
+        }
+        current.push_str(line);
+    }
+    if !current.is_empty() {
+        if current.len() > chunk_chars {
+            let clipped = crate::util::truncate_head_tail(&current, chunk_chars, 30)
+                .unwrap_or(current);
+            chunks.push(format!(
+                "[NOTE: this final part exceeded the chunk budget; its middle was elided]\n{clipped}"
+            ));
+        } else {
+            chunks.push(current);
+        }
+    }
+    chunks
 }
 
 pub(crate) fn replace_history_range_with_assistant(

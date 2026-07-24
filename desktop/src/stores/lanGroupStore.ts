@@ -158,7 +158,6 @@ export const useLanGroupStore = create<LanGroupState>((set, get) => {
       try {
         socket?.close()
       } catch {
-        // ignore
       }
     }
   }
@@ -192,7 +191,6 @@ export const useLanGroupStore = create<LanGroupState>((set, get) => {
         const res = await lanGroupApi.list()
         set({ groups: res.groups, unread: res.unread })
       } catch {
-        // ignore transient errors
       }
     },
 
@@ -222,7 +220,6 @@ export const useLanGroupStore = create<LanGroupState>((set, get) => {
           messagesByGroup: { ...state.messagesByGroup, [groupId]: res.messages },
         }))
       } catch {
-        // ignore
       }
       await get().markRead(groupId)
     },
@@ -234,7 +231,6 @@ export const useLanGroupStore = create<LanGroupState>((set, get) => {
           snapshots: { ...state.snapshots, [groupId]: snapshot },
         }))
       } catch {
-        // ignore
       }
     },
 
@@ -332,7 +328,6 @@ export const useLanGroupStore = create<LanGroupState>((set, get) => {
           groups: state.groups.map((g) => (g.id === groupId ? { ...g, unread: 0 } : g)),
         }))
       } catch {
-        // ignore
       }
     },
 

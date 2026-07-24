@@ -152,7 +152,15 @@ impl CostTracker {
             usage,
         );
 
-        {
+        if tokio::runtime::Handle::try_current().is_ok() {
+            let storage = Arc::clone(&self.storage);
+            let persisted = record.clone();
+            tokio::task::spawn_blocking(move || {
+                if let Err(e) = storage.lock().add_record(persisted) {
+                    tracing::warn!(error = %e, "cost record persistence failed");
+                }
+            });
+        } else {
             let mut storage = self.lock_storage();
             storage.add_record(record.clone())?;
         }
@@ -165,6 +173,34 @@ impl CostTracker {
         fire_usage_notify(&record);
 
         Ok(())
+    }
+
+    pub fn check_session_budget(
+        &self,
+        chat_session_id: &str,
+        estimated_cost_usd: f64,
+    ) -> BudgetCheck {
+        if !self.config.enabled || self.config.per_session_limit_usd <= 0.0 {
+            return BudgetCheck::Allowed;
+        }
+        let session_cost = self.cost_for_chat_session(chat_session_id);
+        let projected = session_cost + estimated_cost_usd.max(0.0);
+        if projected > self.config.per_session_limit_usd {
+            return BudgetCheck::Exceeded {
+                current_usd: session_cost,
+                limit_usd: self.config.per_session_limit_usd,
+                period: UsagePeriod::Session,
+            };
+        }
+        let warn_threshold = f64::from(self.config.warn_at_percent.min(100)) / 100.0;
+        if projected >= self.config.per_session_limit_usd * warn_threshold {
+            return BudgetCheck::Warning {
+                current_usd: session_cost,
+                limit_usd: self.config.per_session_limit_usd,
+                period: UsagePeriod::Session,
+            };
+        }
+        BudgetCheck::Allowed
     }
 
     pub fn cost_for_chat_session(&self, chat_session_id: &str) -> f64 {
@@ -357,6 +393,8 @@ fn build_session_model_stats(session_costs: &[CostRecord]) -> HashMap<String, Mo
     by_model
 }
 
+const COMPACT_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
+
 struct CostStorage {
     path: PathBuf,
     daily_cost_usd: f64,
@@ -364,6 +402,7 @@ struct CostStorage {
     cached_day: NaiveDate,
     cached_year: i32,
     cached_month: u32,
+    compact_floor: u64,
 }
 
 impl CostStorage {
@@ -382,6 +421,7 @@ impl CostStorage {
             cached_day: now.date_naive(),
             cached_year: now.year(),
             cached_month: now.month(),
+            compact_floor: COMPACT_THRESHOLD_BYTES,
         };
 
         storage.rebuild_aggregates(
@@ -517,19 +557,13 @@ impl CostStorage {
         Ok((self.daily_cost_usd, self.monthly_cost_usd))
     }
 
-    /// Bound unbounded growth of costs.jsonl: once the file grows past a size
-    /// threshold, rewrite it atomically keeping only records within the retention
-    /// window. The window comfortably covers daily + monthly aggregation, so the
-    /// visible budget numbers are unaffected while historical rows stop
-    /// accumulating forever.
-    fn maybe_compact(&self) -> Result<()> {
-        const COMPACT_THRESHOLD_BYTES: u64 = 4 * 1024 * 1024;
+    fn maybe_compact(&mut self) -> Result<()> {
         const RETENTION_DAYS: i64 = 92;
 
         let Ok(meta) = fs::metadata(&self.path) else {
             return Ok(());
         };
-        if meta.len() < COMPACT_THRESHOLD_BYTES {
+        if meta.len() < self.compact_floor {
             return Ok(());
         }
 
@@ -546,9 +580,12 @@ impl CostStorage {
 
         crate::util::atomic_write(&self.path, kept.as_bytes())
             .with_context(|| format!("Failed to compact cost storage {}", self.path.display()))?;
+        self.compact_floor = COMPACT_THRESHOLD_BYTES
+            .max((kept.len() as u64).saturating_mul(2));
         tracing::info!(
             path = %self.path.display(),
             retention_days = RETENTION_DAYS,
+            next_compact_at_bytes = self.compact_floor,
             "compacted cost storage to bound file growth"
         );
         Ok(())

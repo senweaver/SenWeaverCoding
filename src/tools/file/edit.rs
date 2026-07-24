@@ -37,6 +37,19 @@ pub struct FileEditTool {
     ops_applier: Arc<OpsApplier>,
 }
 
+async fn read_text_for_edit(
+    path: &std::path::Path,
+) -> std::io::Result<(String, Option<String>)> {
+    let bytes = tokio::fs::read(path).await?;
+    let (text, label) = crate::tools::file::encoding::decode_best_effort(&bytes);
+    let non_utf8 = if crate::tools::file::encoding::is_utf8_label(label) {
+        None
+    } else {
+        Some(label.to_string())
+    };
+    Ok((text, non_utf8))
+}
+
 async fn fresh_mtime_note(path: &std::path::Path) -> String {
     match tokio::fs::metadata(path).await {
         Ok(meta) => meta
@@ -185,6 +198,13 @@ impl Tool for FileEditTool {
                     "description": "Expected file modification time in milliseconds since epoch. \
                                     If the file has been modified since this timestamp, the edit is \
                                     rejected to prevent overwriting manual edits."
+                },
+                "near_line": {
+                    "type": "integer",
+                    "description": "Optional 1-based line-number anchor. When old_string matches \
+                                    multiple locations, the match whose start is closest to this \
+                                    line is used instead of failing on ambiguity. Copy the line \
+                                    number from a fresh file_read."
                 }
             },
             "required": ["path", "new_string"]
@@ -358,6 +378,22 @@ impl Tool for FileEditTool {
             });
         }
 
+        if resolved_target.exists()
+            && args.get("expected_mtime_ms").is_none()
+            && !crate::session::has_read_in_current_session(&resolved_target)
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "Refusing to edit '{}': this session has not read the file yet. \
+                     Use file_read on it first (the edit needs to be based on the file's \
+                     CURRENT contents), then retry the edit.",
+                    resolved_target.display()
+                )),
+            });
+        }
+
         const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
         if let Ok(meta) = tokio::fs::metadata(&resolved_target).await {
             if meta.len() > MAX_FILE_SIZE {
@@ -426,20 +462,30 @@ impl Tool for FileEditTool {
 
 impl FileEditTool {
 
-    async fn dispatch_full_file_rewrite(
+    async fn dispatch_full_file_rewrite_encoded(
         &self,
         path: &std::path::Path,
         original: &str,
         new_content: &str,
+        encoding: Option<String>,
     ) -> Result<(), String> {
         self.snapshot_before_write(path).await;
-        let batch = EditBatch::new(EditOrigin::FileEditTool).with_op(EditOp::Replace {
-            path: path.to_path_buf(),
-            byte_range: 0..original.len(),
-            old_text: original.to_string(),
-            new_text: new_content.to_string(),
-            anchor: None,
-        });
+        let op = match encoding {
+            Some(label) => EditOp::CreateFile {
+                path: path.to_path_buf(),
+                contents: new_content.to_string(),
+                overwrite: true,
+                encoding: Some(label),
+            },
+            None => EditOp::Replace {
+                path: path.to_path_buf(),
+                byte_range: 0..original.len(),
+                old_text: original.to_string(),
+                new_text: new_content.to_string(),
+                anchor: None,
+            },
+        };
+        let batch = EditBatch::new(EditOrigin::FileEditTool).with_op(op);
         let batch_id = batch.batch_id.clone();
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
@@ -457,10 +503,6 @@ impl FileEditTool {
         }
     }
 
-    /// Apply a single contiguous slice replacement as a range-scoped `EditOp::Replace`
-    /// (carrying only the changed bytes, not the whole file). `whole_before` is the
-    /// current full file content, used to render the UI diff only when the file is
-    /// small enough; above the threshold the whole-file emit is skipped entirely.
     async fn dispatch_range_replace(
         &self,
         path: &std::path::Path,
@@ -495,12 +537,13 @@ impl FileEditTool {
                     )
                     .await;
                 } else {
-                    tracing::debug!(
-                        target: "tools.file_edit",
-                        path = %path.display(),
-                        bytes = whole_before.len(),
-                        "skipping whole-file edit emit for a large file; range op applied and journaled"
-                    );
+                    Self::emit_edit_if_small(
+                        path,
+                        old_slice.as_bytes(),
+                        new_slice.as_bytes(),
+                        batch_id,
+                    )
+                    .await;
                 }
                 Ok(())
             }
@@ -515,11 +558,13 @@ impl FileEditTool {
         batch_id: String,
     ) {
         if before.len() > WHOLE_FILE_EMIT_THRESHOLD && after.len() > WHOLE_FILE_EMIT_THRESHOLD {
-            tracing::debug!(
-                target: "tools.file_edit",
-                path = %path.display(),
-                "skipping whole-file edit emit for a large file"
-            );
+            crate::agent::file_edit_emitter::emit_file_edit_large(
+                path,
+                before.len(),
+                after.len(),
+                Some(batch_id),
+            )
+            .await;
             return;
         }
         crate::agent::file_edit_emitter::emit_file_edit(
@@ -563,7 +608,7 @@ impl FileEditTool {
             });
         }
 
-        let content = match tokio::fs::read_to_string(resolved_target).await {
+        let (content, encoding_label) = match read_text_for_edit(resolved_target).await {
             Ok(c) => c,
             Err(e) => {
                 return Ok(ToolResult {
@@ -633,7 +678,12 @@ impl FileEditTool {
                     out.push_str(&adapted_new);
                     out.push_str(&content[span_end..]);
                     return match self
-                        .dispatch_full_file_rewrite(resolved_target, &content, &out)
+                        .dispatch_full_file_rewrite_encoded(
+                            resolved_target,
+                            &content,
+                            &out,
+                            encoding_label.clone(),
+                        )
                         .await
                     {
                         Ok(()) => {
@@ -657,9 +707,53 @@ impl FileEditTool {
                     };
                 }
             }
+            if !replace_all && scope_name.is_none() {
+                if let Some((ws_start, ws_end, adjusted_new)) =
+                    super::match_diagnostics::find_whitespace_insensitive_unique(
+                        &content, old_string, new_string,
+                    )
+                {
+                    let mut out =
+                        String::with_capacity(content.len() + adjusted_new.len());
+                    out.push_str(&content[..ws_start]);
+                    out.push_str(&adjusted_new);
+                    out.push_str(&content[ws_end..]);
+                    return match self
+                        .dispatch_full_file_rewrite_encoded(
+                            resolved_target,
+                            &content,
+                            &out,
+                            encoding_label.clone(),
+                        )
+                        .await
+                    {
+                        Ok(()) => {
+                            let diff = self.generate_diff(
+                                display_path,
+                                &content[ws_start..ws_end],
+                                &adjusted_new,
+                            );
+                            Ok(ToolResult {
+                                success: true,
+                                output: format!(
+                                    "Edited {display_path}: replaced 1 occurrence(s) \
+                                     [auto-recovered a whitespace/indentation mismatch; the \
+                                     replacement was re-indented to the file's actual \
+                                     indentation]{}\n{diff}",
+                                    fresh_mtime_note(resolved_target).await
+                                ),
+                                error: None,
+                            })
+                        }
+                        Err(e) => Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("Failed to write file: {e}")),
+                        }),
+                    };
+                }
+            }
             let error = if let Some(name) = scope_name.as_deref() {
-                // Scoped search failed inside the named scope; still analyze the
-                // whole file so the model sees where the text actually lives.
                 let mut msg = format!("old_string not found in scope '{name}'.");
                 if let Some(diag) = super::match_diagnostics::diagnose(&content, old_string) {
                     msg.push('\n');
@@ -683,6 +777,26 @@ impl FileEditTool {
             });
         }
 
+        let mut hits = hits;
+        let mut near_line_note = "";
+        if !replace_all && hits.len() > 1 {
+            let near_line = args.get("near_line").and_then(|v| v.as_u64());
+            if let Some(anchor_line) = near_line {
+                let all_hits: Vec<usize> = finder
+                    .find_iter(&bytes[search_range.clone()])
+                    .map(|pos| search_range.start + pos)
+                    .collect();
+                let nearest = all_hits.iter().copied().min_by_key(|pos| {
+                    let (line_no, _) = locate_line(&content, *pos);
+                    (line_no as i64 - anchor_line as i64).unsigned_abs()
+                });
+                if let Some(best) = nearest {
+                    hits = vec![best];
+                    near_line_note =
+                        " [disambiguated by near_line: nearest match selected]";
+                }
+            }
+        }
         if !replace_all && hits.len() > 1 {
 
             let total = if hits.len() == 4 {
@@ -703,7 +817,8 @@ impl FileEditTool {
                 ));
             }
             msg.push_str(
-                "Use exact, longer old_string (include surrounding lines) to disambiguate.",
+                "Use exact, longer old_string (include surrounding lines) to disambiguate, \
+                 or pass near_line=<line number> to anchor the intended match.",
             );
             return Ok(ToolResult {
                 success: false,
@@ -712,11 +827,7 @@ impl FileEditTool {
             });
         }
 
-        // Single, unambiguous occurrence: emit a range-scoped Replace carrying only
-        // the changed slice instead of the whole file (avoids sending/logging the
-        // entire file for a small edit). replace_all still rewrites whole-file since
-        // its multiple non-contiguous slices cannot be one contiguous range op.
-        if !replace_all {
+        if !replace_all && encoding_label.is_none() {
             let pos = hits[0];
             let range = pos..(pos + old_string.len());
             return match self
@@ -734,7 +845,7 @@ impl FileEditTool {
                     Ok(ToolResult {
                         success: true,
                         output: format!(
-                            "Edited {display_path}: replaced 1 occurrence(s){}\n{diff}",
+                            "Edited {display_path}: replaced 1 occurrence(s){near_line_note}{}\n{diff}",
                             fresh_mtime_note(resolved_target).await
                         ),
                         error: None,
@@ -761,11 +872,15 @@ impl FileEditTool {
             out
         };
 
-        // `hits` is capped at 4 for the ambiguity check; count the real total.
         let replaced_count = finder.find_iter(&bytes[search_range.clone()]).count();
 
         match self
-            .dispatch_full_file_rewrite(resolved_target, &content, &new_content)
+            .dispatch_full_file_rewrite_encoded(
+                resolved_target,
+                &content,
+                &new_content,
+                encoding_label.clone(),
+            )
             .await
         {
             Ok(()) => {
@@ -793,7 +908,7 @@ impl FileEditTool {
         resolved_target: &std::path::Path,
         display_path: &str,
     ) -> anyhow::Result<ToolResult> {
-        let content = match tokio::fs::read_to_string(resolved_target).await {
+        let (content, encoding_label) = match read_text_for_edit(resolved_target).await {
             Ok(c) => c,
             Err(e) => {
                 return Ok(ToolResult {
@@ -813,7 +928,12 @@ impl FileEditTool {
         let new_content = format!("{content}{to_append}");
 
         match self
-            .dispatch_full_file_rewrite(resolved_target, &content, &new_content)
+            .dispatch_full_file_rewrite_encoded(
+                resolved_target,
+                &content,
+                &new_content,
+                encoding_label,
+            )
             .await
         {
             Ok(()) => Ok(ToolResult {
@@ -836,7 +956,7 @@ impl FileEditTool {
         resolved_target: &std::path::Path,
         display_path: &str,
     ) -> anyhow::Result<ToolResult> {
-        let content = match tokio::fs::read_to_string(resolved_target).await {
+        let (content, encoding_label) = match read_text_for_edit(resolved_target).await {
             Ok(c) => c,
             Err(e) => {
                 return Ok(ToolResult {
@@ -888,7 +1008,12 @@ impl FileEditTool {
         let new_content = format!("{}{}{}", &content[..insert_pos], new_string, &content[insert_pos..]);
 
         match self
-            .dispatch_full_file_rewrite(resolved_target, &content, &new_content)
+            .dispatch_full_file_rewrite_encoded(
+                resolved_target,
+                &content,
+                &new_content,
+                encoding_label,
+            )
             .await
         {
             Ok(()) => Ok(ToolResult {
@@ -914,7 +1039,7 @@ impl FileEditTool {
         resolved_target: &std::path::Path,
         display_path: &str,
     ) -> anyhow::Result<ToolResult> {
-        let content = match tokio::fs::read_to_string(resolved_target).await {
+        let (content, encoding_label) = match read_text_for_edit(resolved_target).await {
             Ok(c) => c,
             Err(e) => {
                 return Ok(ToolResult {
@@ -965,7 +1090,12 @@ impl FileEditTool {
         let new_content = format!("{}{}{}", &content[..pos], new_string, &content[pos..]);
 
         match self
-            .dispatch_full_file_rewrite(resolved_target, &content, &new_content)
+            .dispatch_full_file_rewrite_encoded(
+                resolved_target,
+                &content,
+                &new_content,
+                encoding_label,
+            )
             .await
         {
             Ok(()) => Ok(ToolResult {
@@ -985,19 +1115,41 @@ impl FileEditTool {
     }
 
     fn generate_diff(&self, path: &str, old_string: &str, new_string: &str) -> String {
-        let old_lines: Vec<&str> = old_string.lines().collect();
-        let new_lines: Vec<&str> = new_string.lines().collect();
-        let mut diff_buf = format!("--- a/{path}\n+++ b/{path}\n");
-        let old_line_count = old_lines.len();
-        let new_line_count = new_lines.len();
-        diff_buf.push_str(&format!("@@ -{old_line_count} +{new_line_count} @@\n"));
-        for line in &old_lines {
-            diff_buf.push_str(&format!("-{line}\n"));
+        use similar::TextDiff;
+        let diff = TextDiff::from_lines(old_string, new_string);
+        let mut out = format!("--- a/{path}\n+++ b/{path}\n");
+        for group in diff.grouped_ops(3).iter() {
+            let (first, last) = (group.first(), group.last());
+            let (Some(first), Some(last)) = (first, last) else {
+                continue;
+            };
+            let old_start = first.old_range().start;
+            let old_end = last.old_range().end;
+            let new_start = first.new_range().start;
+            let new_end = last.new_range().end;
+            out.push_str(&format!(
+                "@@ -{},{} +{},{} @@\n",
+                old_start + 1,
+                old_end - old_start,
+                new_start + 1,
+                new_end - new_start,
+            ));
+            for op in group {
+                for change in diff.iter_changes(op) {
+                    let sign = match change.tag() {
+                        similar::ChangeTag::Delete => '-',
+                        similar::ChangeTag::Insert => '+',
+                        similar::ChangeTag::Equal => ' ',
+                    };
+                    out.push(sign);
+                    out.push_str(change.value());
+                    if !change.value().ends_with('\n') {
+                        out.push('\n');
+                    }
+                }
+            }
         }
-        for line in &new_lines {
-            diff_buf.push_str(&format!("+{line}\n"));
-        }
-        diff_buf
+        out
     }
 }
 

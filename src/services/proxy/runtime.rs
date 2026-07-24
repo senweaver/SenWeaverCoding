@@ -293,10 +293,6 @@ impl ProxyRuntime {
     ) -> reqwest::Client {
         crate::services::proxy::registry::register(service_key);
 
-        // Reuse a pooled client instead of building one per request (the hot
-        // non-streaming provider path called this every request, discarding the
-        // connection pool and re-doing TLS each time). Key on timeouts + a
-        // stable hash of the header set + proxy fingerprint.
         let headers_fp = {
             use std::hash::{Hash, Hasher};
             let mut pairs: Vec<(&String, &String)> = headers.iter().collect();
@@ -375,10 +371,6 @@ impl ProxyRuntime {
     ) -> reqwest::Client {
         crate::services::proxy::registry::register(service_key);
 
-        // Reuse a pooled client instead of rebuilding one (and a fresh TLS
-        // connection pool) on every streamed request. Keyed on timeouts + a
-        // stable hash of the header set + proxy fingerprint, matching the
-        // non-streaming client cache.
         let headers_fp = {
             use std::hash::{Hash, Hasher};
             let mut pairs: Vec<(String, &[u8])> = headers

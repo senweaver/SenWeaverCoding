@@ -19,6 +19,10 @@ use super::symbols_ctx::SymbolSnapshot;
 pub trait SymbolGraphLookup: Send + Sync {
 
     fn snapshot_for_focus(&self, paths: &[PathBuf], query: Option<&str>) -> Vec<SymbolSnapshot>;
+
+    fn repo_map(&self, _max_files: usize, _max_symbols_per_file: usize, _max_chars: usize) -> String {
+        String::new()
+    }
 }
 
 #[async_trait::async_trait]
@@ -46,6 +50,8 @@ pub struct QueryContext {
     pub lsp_info: Vec<LspSnapshot>,
     pub rag_hits: Vec<SearchHit>,
 
+    pub repo_map: String,
+
     pub symbol_graph_building: bool,
 }
 
@@ -59,6 +65,7 @@ impl QueryContext {
             && self.outline.is_empty()
             && self.lsp_info.is_empty()
             && self.rag_hits.is_empty()
+            && self.repo_map.is_empty()
             && self.git.is_none()
         {
             return String::new();
@@ -66,6 +73,9 @@ impl QueryContext {
         let mut out = String::from("[Query context]\n");
         if self.symbol_graph_building {
             out.push_str("symbol_graph: building (first workspace index in progress)\n");
+        }
+        if !self.repo_map.is_empty() {
+            out.push_str(&self.repo_map);
         }
         if let Some(ref git) = self.git {
             let branch_line = match git.default_branch.as_deref() {
@@ -178,8 +188,36 @@ impl QueryContext {
         }
         if !self.rag_hits.is_empty() {
             out.push_str("rag_hits:\n");
+            const RAG_SECTION_MAX_BYTES: usize = 6144;
+            let section_start = out.len();
             for h in &self.rag_hits {
-                out.push_str(&format!("- {}:{} {}\n", h.path.display(), h.line, h.snippet));
+                if out.len().saturating_sub(section_start) >= RAG_SECTION_MAX_BYTES {
+                    out.push_str("- … (more hits elided)\n");
+                    break;
+                }
+                match h.end_line {
+                    Some(end) if h.snippet.contains('\n') => {
+                        out.push_str(&format!(
+                            "- {}:{}-{}\n",
+                            h.path.display(),
+                            h.line,
+                            end
+                        ));
+                        for line in h.snippet.lines() {
+                            out.push_str("    ");
+                            out.push_str(line);
+                            out.push('\n');
+                        }
+                    }
+                    _ => {
+                        out.push_str(&format!(
+                            "- {}:{} {}\n",
+                            h.path.display(),
+                            h.line,
+                            h.snippet.replace('\n', " ")
+                        ));
+                    }
+                }
             }
         }
         out.push_str("[/Query context]\n");
@@ -272,9 +310,6 @@ impl ContextBuilder {
 
         let git_fut = GitContext::gather(&self.cwd);
 
-        // AGENTS.md/CLAUDE.md are already injected into the system prompt by
-        // the personality loader; re-reading them per turn here was pure IO
-        // waste because the injection block never rendered them.
         let memory_fut = async { MemoryFileContext::default() };
 
         let focus_for_outline = self.focus_files.clone();
@@ -298,6 +333,19 @@ impl ContextBuilder {
                 .await
                 .unwrap_or_default(),
                 None => Vec::new(),
+            }
+        };
+
+        let repo_map_graph = self.symbol_graph.clone();
+        let repo_map_needed = self.focus_files.is_empty();
+        let repo_map_fut = async move {
+            match (repo_map_graph, repo_map_needed) {
+                (Some(g), true) => tokio::task::spawn_blocking(move || {
+                    g.repo_map(12, 6, 4 * 1024)
+                })
+                .await
+                .unwrap_or_default(),
+                _ => String::new(),
             }
         };
 
@@ -329,9 +377,6 @@ impl ContextBuilder {
             }
         };
 
-        // Run RAG concurrently with every other source instead of awaiting it
-        // first; otherwise total latency was rag(<=30s) + max(others). An 8s cap
-        // keeps a slow lexical/dense backend from stalling every user message.
         let rag_source = self.rag_source.clone();
         let rag_query = self.rag_query.clone();
         let rag_top_k = self.rag_top_k;
@@ -357,14 +402,15 @@ impl ContextBuilder {
             }
         };
 
-        let (git_res, memory, outline, symbols, open_files, lsp_info, rag_hits) = tokio::join!(
+        let (git_res, memory, outline, symbols, open_files, lsp_info, rag_hits, repo_map) = tokio::join!(
             git_fut,
             memory_fut,
             outline_fut,
             symbols_fut,
             open_files_fut,
             lsp_fut,
-            rag_fut
+            rag_fut,
+            repo_map_fut
         );
         let git = git_res.ok();
 
@@ -382,6 +428,7 @@ impl ContextBuilder {
             outline,
             lsp_info,
             rag_hits,
+            repo_map,
             symbol_graph_building: self.symbol_graph_building,
         };
 
@@ -407,8 +454,6 @@ pub fn empty_open_files_source() -> Arc<dyn OpenFilesSource> {
 
 pub struct FocusPathRegistry;
 
-// Keyed per session so one session's focus files never leak into another's
-// context. Falls back to a shared key only when there is no active session.
 static FOCUS_REGISTRY: Lazy<RwLock<std::collections::HashMap<String, Vec<PathBuf>>>> =
     Lazy::new(|| RwLock::new(std::collections::HashMap::new()));
 
@@ -446,8 +491,6 @@ impl FocusPathRegistry {
         }
     }
 
-    // Most-recently-touched files float to the front and the per-session list
-    // stays capped, so injection reflects what the agent is working on now.
     pub fn note(paths: &[PathBuf]) {
         if paths.is_empty() {
             return;
@@ -495,8 +538,6 @@ impl FocusPathRegistry {
 
 fn collect_outline_for_focus(focus: &[PathBuf], query: Option<&str>) -> Vec<OutlineNode> {
     const MAX_OUTLINE_NODES: usize = 80;
-    // Rough token budget (~4 chars/token => ~1k tokens) so a few huge files
-    // cannot crowd the injection block; query-matching symbols are kept first.
     const MAX_OUTLINE_BYTES: usize = 4096;
     let query_terms: Vec<String> = query
         .map(|q| {

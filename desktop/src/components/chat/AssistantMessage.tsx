@@ -19,6 +19,35 @@ type Props = {
   disableFork?: boolean
 }
 
+function splitStreamingCommit(content: string): { committed: string; tail: string } {
+  let lastBoundary = 0
+  const fenceRe = /```/g
+  const blankRe = /\n[ \t]*\n/g
+  const fencePositions: number[] = []
+  let fenceMatch: RegExpExecArray | null
+  while ((fenceMatch = fenceRe.exec(content)) !== null) {
+    fencePositions.push(fenceMatch.index)
+  }
+  let fenceIdx = 0
+  let blankMatch: RegExpExecArray | null
+  while ((blankMatch = blankRe.exec(content)) !== null) {
+    const pos = blankMatch.index + blankMatch[0].length
+    while (fenceIdx < fencePositions.length && (fencePositions[fenceIdx] ?? Infinity) < pos) {
+      fenceIdx += 1
+    }
+    if (fenceIdx % 2 === 0) {
+      lastBoundary = pos
+    }
+  }
+  if (lastBoundary <= 0) {
+    return { committed: '', tail: content }
+  }
+  return {
+    committed: content.slice(0, lastBoundary),
+    tail: content.slice(lastBoundary),
+  }
+}
+
 export const AssistantMessage = memo(function AssistantMessage({
   content,
   isStreaming,
@@ -27,8 +56,12 @@ export const AssistantMessage = memo(function AssistantMessage({
   workDir,
   disableFork,
 }: Props) {
-  const safeContent = sanitizeNarration(content)
+  const safeContent = useMemo(() => sanitizeNarration(content), [content])
   const documentLayout = useMemo(() => shouldUseDocumentLayout(safeContent), [safeContent])
+  const streamingSplit = useMemo(
+    () => (isStreaming ? splitStreamingCommit(safeContent) : null),
+    [isStreaming, safeContent],
+  )
   const showActions =
     !isStreaming && Boolean(assistantTurnCopyText?.trim())
 
@@ -47,7 +80,18 @@ export const AssistantMessage = memo(function AssistantMessage({
         >
           <div className={`text-[var(--color-text-primary)] ${documentLayout ? 'w-full' : 'max-w-full'}`}>
             {isStreaming ? (
-              <StreamingMarkdownRenderer content={safeContent} />
+              <>
+                {streamingSplit && streamingSplit.committed && (
+                  <MarkdownRenderer
+                    content={streamingSplit.committed}
+                    variant={documentLayout ? 'document' : 'default'}
+                    scale="chat"
+                  />
+                )}
+                <StreamingMarkdownRenderer
+                  content={streamingSplit ? streamingSplit.tail : safeContent}
+                />
+              </>
             ) : (
               <MarkdownRenderer
                 content={safeContent}

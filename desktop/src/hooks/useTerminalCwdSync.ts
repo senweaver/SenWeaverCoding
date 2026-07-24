@@ -15,13 +15,9 @@ function isWindows(): boolean {
 
 function buildCdCommand(path: string): string {
   if (isWindows()) {
-    // Default Windows shell is cmd.exe: backslashes are literal inside quotes and
-    // `/d` also switches drive. Windows paths cannot contain a double quote, so
-    // strip any stray ones defensively rather than mis-escape them.
     const safe = path.replace(/"/g, '')
     return `cd /d "${safe}"\r`
   }
-  // POSIX shells: escape the characters that are special inside double quotes.
   const safe = path.replace(/([\\"$`])/g, '\\$1')
   return `cd "${safe}"\r`
 }
@@ -48,9 +44,6 @@ export function useTerminalCwdSync() {
     for (const tab of tabs) {
       if (tab.kind !== 'pty') continue
       if (tab.sessionId == null) continue
-      // Never write into a terminal the user has already typed into: it may be
-      // running vim / a REPL / a dev server, where `cd ...` would be injected as
-      // input. Only pristine, idle-at-prompt terminals are safe to redirect.
       if (tab.interacted) continue
       if (tab.status !== 'running') continue
       void terminalApi.write(tab.sessionId, cmd).catch(() => {})

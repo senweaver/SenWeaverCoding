@@ -994,8 +994,9 @@ pub fn sync_declarative_jobs(
                          SET expression = ?1, command = ?2, schedule = ?3, job_type = ?4,
                              prompt = ?5, name = ?6, session_target = ?7, model = ?8,
                              enabled = ?9, delivery = ?10, delete_after_run = ?11,
-                             allowed_tools = ?12, source = 'declarative', next_run = ?13
-                         WHERE id = ?14",
+                             allowed_tools = ?12, folder_path = ?13, use_worktree = ?14,
+                             source = 'declarative', next_run = ?15
+                         WHERE id = ?16",
                         params![
                             expression,
                             command,
@@ -1009,6 +1010,8 @@ pub fn sync_declarative_jobs(
                             delivery_json,
                             i32::from(delete_after_run),
                             allowed_tools_json,
+                            decl.folder_path,
+                            decl.use_worktree.map(i32::from),
                             next_run.to_rfc3339(),
                             decl.id,
                         ],
@@ -1022,8 +1025,9 @@ pub fn sync_declarative_jobs(
                          SET expression = ?1, command = ?2, schedule = ?3, job_type = ?4,
                              prompt = ?5, name = ?6, session_target = ?7, model = ?8,
                              enabled = ?9, delivery = ?10, delete_after_run = ?11,
-                             allowed_tools = ?12, source = 'declarative'
-                         WHERE id = ?13",
+                             allowed_tools = ?12, folder_path = ?13, use_worktree = ?14,
+                             source = 'declarative'
+                         WHERE id = ?15",
                         params![
                             expression,
                             command,
@@ -1037,6 +1041,8 @@ pub fn sync_declarative_jobs(
                             delivery_json,
                             i32::from(delete_after_run),
                             allowed_tools_json,
+                            decl.folder_path,
+                            decl.use_worktree.map(i32::from),
                             decl.id,
                         ],
                     )
@@ -1053,8 +1059,8 @@ pub fn sync_declarative_jobs(
                     "INSERT INTO cron_jobs (
                         id, expression, command, schedule, job_type, prompt, name,
                         session_target, model, enabled, delivery, delete_after_run,
-                        allowed_tools, source, created_at, next_run
-                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, 'declarative', ?14, ?15)",
+                        allowed_tools, folder_path, use_worktree, source, created_at, next_run
+                     ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, 'declarative', ?16, ?17)",
                     params![
                         decl.id,
                         expression,
@@ -1069,6 +1075,8 @@ pub fn sync_declarative_jobs(
                         delivery_json,
                         i32::from(delete_after_run),
                         allowed_tools_json,
+                        decl.folder_path,
+                        decl.use_worktree.map(i32::from),
                         now.to_rfc3339(),
                         next_run.to_rfc3339(),
                     ],
@@ -1194,9 +1202,6 @@ fn with_connection<T>(config: &Config, f: impl FnOnce(&Connection) -> Result<T>)
     let conn = Connection::open(&db_path)
         .with_context(|| format!("Failed to open cron DB: {}", db_path.display()))?;
 
-    // WAL + busy_timeout so the desktop app and a CLI daemon can both poll/claim
-    // jobs without SQLITE_BUSY silently dropping a tick (which lost scheduled
-    // runs). Matches brain.db's connection setup.
     conn.execute_batch(
         "PRAGMA journal_mode = WAL;
          PRAGMA synchronous = NORMAL;

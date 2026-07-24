@@ -87,10 +87,6 @@ impl Tool for DeckCompileTool {
         {
             Some(d) => d.to_string(),
             None => {
-                // The pipeline creates the deck under a unique `deck-<hex>/` directory, not a
-                // fixed `deck/`. When the agent omits `dir`, auto-discover the actual deck
-                // directory (the most recently modified subdir containing deck.json) so compile
-                // does not fail on a stale default path.
                 let session_rel =
                     crate::agent::designer::pipeline::designer_session_dir(&session.session_id);
                 discover_deck_dir(&workspace, &session_rel)

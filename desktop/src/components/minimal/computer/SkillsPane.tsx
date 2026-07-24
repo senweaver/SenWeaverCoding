@@ -86,7 +86,6 @@ export function SkillsPane({ onReplayStarted }: SkillsPaneProps) {
             const rec = list.find((r) => r.name === name)
             if (!rec || rec.has_skill) break
           } catch {
-            /* transient; keep polling */
           }
         }
       } catch (err) {

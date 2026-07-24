@@ -156,13 +156,40 @@ impl SecretStore {
 
     fn load_or_create_key(&self) -> Result<Vec<u8>> {
         if self.key_path.exists() {
-            let hex_key =
-                fs::read_to_string(&self.key_path).context("Failed to read secret key file")?;
-            let key_bytes = hex_decode(hex_key.trim()).context("Secret key file is corrupt")?;
+            let raw = fs::read_to_string(&self.key_path)
+                .context("Failed to read secret key file")?;
+            let raw = raw.trim();
+
+            #[cfg(windows)]
+            if let Some(hex_blob) = raw.strip_prefix("dpapi:") {
+                let blob = hex_decode(hex_blob).context("DPAPI key blob is corrupt")?;
+                let key = dpapi_unprotect(&blob)
+                    .context("Failed to unprotect the DPAPI-wrapped master key")?;
+                anyhow::ensure!(key.len() == 32, "DPAPI-wrapped key has wrong length");
+                return Ok(key);
+            }
+
+            #[cfg(target_os = "macos")]
+            if raw.starts_with("keychain:") {
+                let hex_key = keychain_load_master_key()
+                    .context("master key marker present but Keychain lookup failed")?;
+                let key = hex_decode(hex_key.trim()).context("Keychain key is corrupt")?;
+                anyhow::ensure!(key.len() == 32, "Keychain key has wrong length");
+                return Ok(key);
+            }
+
+            let key_bytes = hex_decode(raw).context("Secret key file is corrupt")?;
             if key_bytes.len() != 32 {
                 anyhow::bail!(
                     "Secret key file is corrupt: expected 32 bytes, got {}",
                     key_bytes.len()
+                );
+            }
+            if let Err(err) = self.persist_key_protected(&key_bytes) {
+                tracing::warn!(
+                    error = %err,
+                    "could not migrate plaintext master key to OS-protected storage; \
+                     keeping the permission-restricted key file"
                 );
             }
             Ok(key_bytes)
@@ -171,7 +198,7 @@ impl SecretStore {
             if let Some(parent) = self.key_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::write(&self.key_path, hex_encode(&key))
+            self.persist_key_protected(&key)
                 .context("Failed to write secret key file")?;
 
             #[cfg(unix)]
@@ -240,6 +267,166 @@ impl SecretStore {
             Ok(key)
         }
     }
+
+    fn persist_key_protected(&self, key: &[u8]) -> Result<()> {
+        #[cfg(windows)]
+        {
+            match dpapi_protect(key) {
+                Ok(blob) => {
+                    fs::write(&self.key_path, format!("dpapi:{}", hex_encode(&blob)))
+                        .context("Failed to write DPAPI-wrapped key file")?;
+                    return Ok(());
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        error = %err,
+                        "DPAPI protection unavailable; storing master key with file \
+                         permissions only"
+                    );
+                }
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        {
+            if keychain_store_master_key(&hex_encode(key)) {
+                fs::write(&self.key_path, "keychain:v1")
+                    .context("Failed to write keychain marker file")?;
+                return Ok(());
+            }
+            tracing::warn!(
+                "macOS Keychain unavailable; storing master key with file permissions only"
+            );
+        }
+
+        fs::write(&self.key_path, hex_encode(key)).context("Failed to write secret key file")?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.key_path, fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
+    }
+}
+
+#[cfg(windows)]
+const DPAPI_ENTROPY: &[u8] = b"senweavercoding-master-key-v1";
+
+#[cfg(windows)]
+fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData,
+    };
+    unsafe {
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: data.len() as u32,
+            pbData: data.as_ptr() as *mut u8,
+        };
+        let entropy = CRYPT_INTEGER_BLOB {
+            cbData: DPAPI_ENTROPY.len() as u32,
+            pbData: DPAPI_ENTROPY.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let ok = CryptProtectData(
+            &input,
+            std::ptr::null(),
+            &entropy,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        );
+        if ok == 0 || output.pbData.is_null() {
+            anyhow::bail!("CryptProtectData failed");
+        }
+        let blob = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        windows_sys::Win32::Foundation::LocalFree(output.pbData.cast());
+        Ok(blob)
+    }
+}
+
+#[cfg(windows)]
+fn dpapi_unprotect(blob: &[u8]) -> Result<Vec<u8>> {
+    use windows_sys::Win32::Security::Cryptography::{
+        CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
+    };
+    unsafe {
+        let input = CRYPT_INTEGER_BLOB {
+            cbData: blob.len() as u32,
+            pbData: blob.as_ptr() as *mut u8,
+        };
+        let entropy = CRYPT_INTEGER_BLOB {
+            cbData: DPAPI_ENTROPY.len() as u32,
+            pbData: DPAPI_ENTROPY.as_ptr() as *mut u8,
+        };
+        let mut output = CRYPT_INTEGER_BLOB {
+            cbData: 0,
+            pbData: std::ptr::null_mut(),
+        };
+        let ok = CryptUnprotectData(
+            &input,
+            std::ptr::null_mut(),
+            &entropy,
+            std::ptr::null_mut(),
+            std::ptr::null_mut(),
+            CRYPTPROTECT_UI_FORBIDDEN,
+            &mut output,
+        );
+        if ok == 0 || output.pbData.is_null() {
+            anyhow::bail!("CryptUnprotectData failed (wrong user profile or corrupt blob)");
+        }
+        let key = std::slice::from_raw_parts(output.pbData, output.cbData as usize).to_vec();
+        windows_sys::Win32::Foundation::LocalFree(output.pbData.cast());
+        Ok(key)
+    }
+}
+
+#[cfg(target_os = "macos")]
+const KEYCHAIN_SERVICE: &str = "senweavercoding-master-key";
+
+#[cfg(target_os = "macos")]
+fn keychain_account() -> String {
+    std::env::var("USER").unwrap_or_else(|_| "senweavercoding".to_string())
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_store_master_key(hex_key: &str) -> bool {
+    crate::util::hidden_sync_command("security")
+        .args([
+            "add-generic-password",
+            "-U",
+            "-a",
+            &keychain_account(),
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-w",
+            hex_key,
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn keychain_load_master_key() -> Result<String> {
+    let out = crate::util::hidden_sync_command("security")
+        .args([
+            "find-generic-password",
+            "-a",
+            &keychain_account(),
+            "-s",
+            KEYCHAIN_SERVICE,
+            "-w",
+        ])
+        .output()
+        .context("failed to invoke `security find-generic-password`")?;
+    if !out.status.success() {
+        anyhow::bail!("Keychain entry for the master key not found");
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 fn xor_cipher(data: &[u8], key: &[u8]) -> Vec<u8> {

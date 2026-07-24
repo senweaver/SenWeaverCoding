@@ -9,9 +9,6 @@ pub fn workspace_key_from_path(path: &Path, fallback_session_id: &str) -> String
     if s.is_empty() {
         return format!("__solo::{fallback_session_id}");
     }
-    // Canonicalize first so symlinks, 8.3 short names, `\\?\` prefixes and
-    // trailing-slash variants of the SAME directory collapse to one key; only
-    // fall back to string normalization when the path does not exist yet.
     let canonical = crate::util::normalize_path_for_containment(path);
     let key_src = if canonical.as_os_str().is_empty() {
         s

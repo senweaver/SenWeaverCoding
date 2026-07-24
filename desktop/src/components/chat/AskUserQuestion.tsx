@@ -132,11 +132,6 @@ export function AskUserQuestion({ toolUseId, input, result, sessionId: ownerSess
   const [hasSubmitted, setHasSubmitted] = useState(false)
 
   const pendingRequest = pendingPermission?.toolUseId === toolUseId ? pendingPermission : null
-  // `submitted` (answered via this card) is the ONLY positive "answered" signal — drive the
-  // muted/interactive styling off it, NOT off `pendingRequest`. The PermissionRequest arrives a
-  // beat after the tool-use card mounts; keying mute on pendingRequest would flash an "answered"
-  // state for the freshly-asked question before it becomes pending. Options stay clickable while
-  // unanswered; actually submitting still requires a live pendingRequest.
   const submitted = hasSubmitted
   const muted = submitted
   const canInteract = !submitted && !isCrossSession
@@ -158,7 +153,6 @@ export function AskUserQuestion({ toolUseId, input, result, sessionId: ownerSess
     }
     const details = readDetailsFromComposer()
 
-    // Must carry at least one answer or free-form details (unless explicitly skipping).
     if (!skipped && Object.keys(answers).length === 0 && !details) return
 
     setHasSubmitted(true)
@@ -177,17 +171,11 @@ export function AskUserQuestion({ toolUseId, input, result, sessionId: ownerSess
     clearComposer()
   }
 
-  // Composer "Enter" (ChatInput dispatches this when a question is pending) submits the active
-  // question card, and Escape skips it. Listeners attach ONLY for the live, same-session,
-  // unanswered question, so historical cards never react to global key/submit events.
   useEffect(() => {
     if (submitted || isCrossSession || !pendingRequest) return
     const onSubmit = () => submit(false)
     const onKey = (e: KeyboardEvent) => {
       if (e.key !== 'Escape') return
-      // Escape presses that were already consumed elsewhere (closing a modal,
-      // cancelling IME composition, dismissing a menu) must not silently skip
-      // the pending question.
       if (e.defaultPrevented || e.isComposing) return
       const target = e.target as HTMLElement | null
       if (target) {

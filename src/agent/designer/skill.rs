@@ -185,7 +185,6 @@ fn mode_for_submode(submode_id: &str) -> &'static str {
         "video" | "hyperframes" => "video",
         "audio" => "audio",
         "template" => "template",
-        // prototype, live-artifact, figma all draw from prototype skills
         _ => "prototype",
     }
 }
@@ -224,9 +223,6 @@ pub fn optimal_skill_for_submode(submode_id: &str) -> Option<String> {
     if !curated.is_empty() && is_known(curated) {
         return Some(curated.to_string());
     }
-    // Sub-modes without a curated skill (notably `diagram`, which already carries a rich
-    // in-prompt skill) must NOT fall back to an unrelated first catalog entry (e.g. apple-hig) —
-    // that only adds noise and token cost. Inject nothing instead.
     None
 }
 

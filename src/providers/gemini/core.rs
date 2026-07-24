@@ -253,8 +253,6 @@ struct ThinkingConfig {
     include_thoughts: bool,
 }
 
-/// Only Gemini 2.5 "thinking" models accept `thinkingConfig`; sending it to other
-/// models is rejected, so gate conservatively and default to omitting it.
 fn thinking_config_for_model(model: &str) -> Option<ThinkingConfig> {
     let m = model.to_ascii_lowercase();
     let supported = m.contains("2.5") || m.contains("flash-thinking") || m.contains("-thinking");
@@ -933,8 +931,6 @@ impl GeminiProvider {
     }
 
     fn stream_http_client(&self) -> Client {
-        // Streaming needs a read-idle timeout, not a total-request timeout, so a
-        // long streamed response is not truncated while data is still arriving.
         let read_timeout_secs = self.timeout_secs.max(300);
         let mut headers = reqwest::header::HeaderMap::new();
         for (key, value) in &self.extra_headers {
@@ -1852,6 +1848,10 @@ impl Provider for GeminiProvider {
         self.auth.as_ref().is_some_and(GeminiAuth::is_api_key)
     }
 
+    fn supports_streaming_tool_events(&self) -> bool {
+        self.auth.as_ref().is_some_and(GeminiAuth::is_api_key)
+    }
+
     fn stream_chat(
         &self,
         request: crate::providers::traits::ChatRequest<'_>,
@@ -2020,9 +2020,6 @@ impl Provider for GeminiProvider {
                         continue;
                     };
                     let piece = content.into_candidate();
-                    // Forward thinking/reasoning during streaming instead of
-                    // silently dropping it, so the UI shows Gemini's reasoning
-                    // stream like the other providers.
                     if let Some(reasoning) = piece.reasoning.filter(|t| !t.is_empty()) {
                         made_progress = true;
                         if tx

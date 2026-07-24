@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use std::sync::OnceLock;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 use tauri::AppHandle;
@@ -146,14 +146,18 @@ pub fn install_kill_on_close_job() {
     platform::install_kill_on_close_job();
 }
 
-static SHUTDOWN_LATCH: OnceLock<()> = OnceLock::new();
+static SHUTDOWN_LATCH: AtomicBool = AtomicBool::new(false);
 
 pub fn is_shutting_down() -> bool {
-    SHUTDOWN_LATCH.get().is_some()
+    SHUTDOWN_LATCH.load(Ordering::SeqCst)
+}
+
+pub fn reset_shutdown_latch() {
+    SHUTDOWN_LATCH.store(false, Ordering::SeqCst);
 }
 
 pub fn run_full_shutdown(app: &AppHandle, deadline: Duration) {
-    if SHUTDOWN_LATCH.set(()).is_err() {
+    if SHUTDOWN_LATCH.swap(true, Ordering::SeqCst) {
         return;
     }
 

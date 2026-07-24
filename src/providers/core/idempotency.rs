@@ -55,6 +55,21 @@ pub fn fingerprint_json(
     fingerprint(provider, model, &m, &t)
 }
 
+tokio::task_local! {
+    static IDEMPOTENCY_KEY: String;
+}
+
+pub async fn scope_idempotency_key<F>(key: String, fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    IDEMPOTENCY_KEY.scope(key, fut).await
+}
+
+pub fn current_idempotency_key() -> Option<String> {
+    IDEMPOTENCY_KEY.try_with(|k| k.clone()).ok()
+}
+
 fn canonical_json(v: &serde_json::Value) -> String {
     match v {
         serde_json::Value::Object(map) => {

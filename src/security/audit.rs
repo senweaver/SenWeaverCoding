@@ -18,10 +18,6 @@ const GENESIS_PREV_HASH: &str = "00000000000000000000000000000000000000000000000
 
 static GLOBAL_AUDIT: OnceLock<Arc<AuditLogger>> = OnceLock::new();
 
-/// Returns the process-wide tamper-evident audit logger, lazily building it from
-/// the active service config on first successful call. Returns `None` until
-/// services + config are available or when auditing is disabled; callers should
-/// treat `None` as "auditing off" and continue.
 pub fn global_audit_logger() -> Option<&'static Arc<AuditLogger>> {
     if let Some(existing) = GLOBAL_AUDIT.get() {
         return Some(existing);
@@ -41,8 +37,6 @@ pub fn global_audit_logger() -> Option<&'static Arc<AuditLogger>> {
     GLOBAL_AUDIT.get()
 }
 
-/// Append a command-execution entry to the tamper-evident audit chain. No-op
-/// when auditing is disabled or not yet initialized.
 pub fn record_command_execution(
     channel: &str,
     command: &str,

@@ -57,9 +57,6 @@ pub struct PruneStats {
 }
 
 fn estimate_tokens(messages: &[ChatMessage]) -> usize {
-    // Use the shared estimator (ASCII/4 + one token per wide char) so pruning
-    // thresholds agree with the compaction estimator instead of a byte/4 guess
-    // that badly overcounts CJK.
     messages
         .iter()
         .map(crate::providers::traits::estimate_message_tokens)

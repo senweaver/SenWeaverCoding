@@ -17,6 +17,7 @@ import {
   type MonacoModelHandle,
 } from '../../stores/workspaceFilesStore'
 import { applyAiDecorations } from '../../lib/aiDecorations'
+import { editorAssistApi, type InlineEditResult } from '../../api/editorAssist'
 import { formatBytes } from '../../lib/formatBytes'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
 import { revealInExplorer } from '../../lib/revealInExplorer'
@@ -34,12 +35,6 @@ const EDITOR_PREFS_STORAGE_KEY = 'sen-workspace-editor-prefs'
 
 const lspProvidersRegistered = new Set<string>()
 
-// Monaco language providers are registered once per language (module-level
-// guard) but their closures read the editor context. Back that context with a
-// module-level singleton so a remounted editor updates the SAME object the
-// already-registered providers captured — otherwise providers keep reading a
-// frozen ref from a stale (unmounted) instance and hover/completion/go-to
-// resolve against the wrong file.
 const sharedLspCtx: {
   uri: string | null
   languageId: string
@@ -929,7 +924,38 @@ export function MonacoFileEditor({ workDir }: Props) {
     if (!s.activeTab) return undefined
     return s.externalChanged[s.activeTab]
   })
-  const updateDraft = useWorkspaceFilesStore((s) => s.updateDraft)
+  const pendingDraftRef = useRef<{ relPath: string; value: string } | null>(null)
+  const draftFlushTimerRef = useRef<number | null>(null)
+  const flushPendingDraft = useCallback(() => {
+    if (draftFlushTimerRef.current !== null) {
+      window.clearTimeout(draftFlushTimerRef.current)
+      draftFlushTimerRef.current = null
+    }
+    const pending = pendingDraftRef.current
+    if (pending) {
+      pendingDraftRef.current = null
+      useWorkspaceFilesStore.getState().updateDraft(pending.relPath, pending.value)
+    }
+  }, [])
+  const scheduleDraftUpdate = useCallback((relPath: string, value: string) => {
+    pendingDraftRef.current = { relPath, value }
+    if (draftFlushTimerRef.current !== null) {
+      window.clearTimeout(draftFlushTimerRef.current)
+    }
+    draftFlushTimerRef.current = window.setTimeout(() => {
+      draftFlushTimerRef.current = null
+      const latest = pendingDraftRef.current
+      if (latest) {
+        pendingDraftRef.current = null
+        useWorkspaceFilesStore.getState().updateDraft(latest.relPath, latest.value)
+      }
+    }, 150)
+  }, [])
+  useEffect(() => {
+    return () => {
+      flushPendingDraft()
+    }
+  }, [flushPendingDraft])
   const saveFile = useWorkspaceFilesStore((s) => s.saveFile)
   const reloadFile = useWorkspaceFilesStore((s) => s.reloadFile)
   const acknowledgeExternalChange = useWorkspaceFilesStore(
@@ -1108,6 +1134,7 @@ export function MonacoFileEditor({ workDir }: Props) {
 
   const handleSave = useCallback(async () => {
     if (!activeTab || !buffer || buffer.isBinary) return
+    flushPendingDraft()
     if (formatOnSave) {
       await runFormatBeforeSave()
       if (fileUri) {
@@ -1148,6 +1175,7 @@ export function MonacoFileEditor({ workDir }: Props) {
     addToast,
     buffer,
     fileUri,
+    flushPendingDraft,
     formatOnSave,
     languageId,
     root,
@@ -1188,6 +1216,113 @@ export function MonacoFileEditor({ workDir }: Props) {
     landedAt: number
   } | null>(null)
   const [diffOverlayOpen, setDiffOverlayOpen] = useState(false)
+
+  const [inlineEditState, setInlineEditState] = useState<{
+    relPath: string
+    selectionText: string
+    range: MonacoNs.IRange
+    loading: boolean
+    error: string | null
+    result: InlineEditResult | null
+  } | null>(null)
+  const [inlineEditInstruction, setInlineEditInstruction] = useState('')
+  const inlineEditStateRef = useRef(inlineEditState)
+  inlineEditStateRef.current = inlineEditState
+  const inlineEditInstructionRef = useRef(inlineEditInstruction)
+  inlineEditInstructionRef.current = inlineEditInstruction
+
+  const openInlineEdit = useCallback(() => {
+    const editor = editorRef.current
+    if (!editor) return
+    const model = editor.getModel()
+    const rel = useWorkspaceFilesStore.getState().activeTab
+    if (!model || !rel) return
+    const selection = editor.getSelection()
+    let range: MonacoNs.IRange
+    let text: string
+    if (selection && !selection.isEmpty()) {
+      range = {
+        startLineNumber: selection.startLineNumber,
+        startColumn: selection.startColumn,
+        endLineNumber: selection.endLineNumber,
+        endColumn: selection.endColumn,
+      }
+      text = model.getValueInRange(selection)
+    } else {
+      const lineCount = model.getLineCount()
+      range = {
+        startLineNumber: 1,
+        startColumn: 1,
+        endLineNumber: lineCount,
+        endColumn: model.getLineMaxColumn(lineCount),
+      }
+      text = model.getValue()
+    }
+    if (!text.trim()) return
+    setInlineEditInstruction('')
+    setInlineEditState({
+      relPath: rel,
+      selectionText: text,
+      range,
+      loading: false,
+      error: null,
+      result: null,
+    })
+  }, [])
+  const openInlineEditRef = useRef(openInlineEdit)
+  openInlineEditRef.current = openInlineEdit
+
+  const submitInlineEdit = useCallback(async () => {
+    const st = inlineEditStateRef.current
+    const instruction = inlineEditInstructionRef.current.trim()
+    if (!st || st.loading || !instruction) return
+    setInlineEditState({ ...st, loading: true, error: null })
+    try {
+      const result = await editorAssistApi.inlineEdit(
+        {
+          path: absPath ?? st.relPath,
+          selection: st.selectionText,
+          instruction,
+        },
+        { timeout: 180_000 },
+      )
+      setInlineEditState((prev) =>
+        prev && prev.relPath === st.relPath
+          ? { ...prev, loading: false, result }
+          : prev,
+      )
+    } catch (err) {
+      setInlineEditState((prev) =>
+        prev && prev.relPath === st.relPath
+          ? {
+              ...prev,
+              loading: false,
+              error: err instanceof Error ? err.message : String(err),
+            }
+          : prev,
+      )
+    }
+  }, [absPath])
+
+  const applyInlineEditResult = useCallback(
+    (content: string) => {
+      const st = inlineEditStateRef.current
+      const editor = editorRef.current
+      if (!st || !editor) return
+      const model = editor.getModel()
+      if (!model) return
+      editor.executeEdits('inline-edit', [
+        { range: st.range, text: content, forceMoveMarkers: true },
+      ])
+      setInlineEditState(null)
+      editor.focus()
+    },
+    [],
+  )
+
+  useEffect(() => {
+    setInlineEditState(null)
+  }, [activeTab])
 
   const [now, setNow] = useState(() => Date.now())
   useEffect(() => {
@@ -1427,6 +1562,10 @@ export function MonacoFileEditor({ workDir }: Props) {
 
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
       void handleSave()
+    })
+
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
+      openInlineEditRef.current()
     })
 
     editor.addAction({
@@ -1782,6 +1921,77 @@ export function MonacoFileEditor({ workDir }: Props) {
           },
         })
       }
+
+      monaco.languages.registerInlineCompletionsProvider(lang, {
+        debounceDelayMs: 300,
+        provideInlineCompletions: async (
+          model: MonacoNs.editor.ITextModel,
+          position: MonacoNs.Position,
+          _context: MonacoNs.languages.InlineCompletionContext,
+          token: MonacoNs.CancellationToken,
+        ) => {
+          const rel = useWorkspaceFilesStore.getState().activeTab
+          const workspaceRoot = ctxRef.current.workspaceRoot
+          if (!rel || !workspaceRoot) return { items: [] }
+          const prefix = model.getValueInRange({
+            startLineNumber: 1,
+            startColumn: 1,
+            endLineNumber: position.lineNumber,
+            endColumn: position.column,
+          })
+          if (prefix.trim().length < 3) return { items: [] }
+          const lineCount = model.getLineCount()
+          const suffix = model.getValueInRange({
+            startLineNumber: position.lineNumber,
+            startColumn: position.column,
+            endLineNumber: lineCount,
+            endColumn: model.getLineMaxColumn(lineCount),
+          })
+          try {
+            const res = await editorAssistApi.inlineComplete(
+              {
+                prefix,
+                suffix,
+                path: rel,
+                root: workspaceRoot,
+                maxTokens: 128,
+              },
+              { signal: tokenToSignal(token), timeout: 20_000 },
+            )
+            return {
+              items: res.suggestions
+                .filter((s) => s.insertText.length > 0)
+                .map((s) => ({ insertText: s.insertText })),
+            }
+          } catch {
+            return { items: [] }
+          }
+        },
+        handleItemDidShow: () => {
+          void editorAssistApi.completionFeedback('shown')
+        },
+        handlePartialAccept: () => {
+          void editorAssistApi.completionFeedback('accepted_partial')
+        },
+        handleEndOfLifetime: (
+          _completions: MonacoNs.languages.InlineCompletions,
+          _item: MonacoNs.languages.InlineCompletion,
+          reason: MonacoNs.languages.InlineCompletionEndOfLifeReason,
+        ) => {
+          if (
+            reason.kind ===
+            monaco.languages.InlineCompletionEndOfLifeReasonKind.Accepted
+          ) {
+            void editorAssistApi.completionFeedback('accepted')
+          } else if (
+            reason.kind ===
+            monaco.languages.InlineCompletionEndOfLifeReasonKind.Rejected
+          ) {
+            void editorAssistApi.completionFeedback('rejected')
+          }
+        },
+        disposeInlineCompletions: () => {},
+      })
 
       monaco.languages.registerLinkProvider(lang, {
         provideLinks: async (
@@ -2578,7 +2788,6 @@ export function MonacoFileEditor({ workDir }: Props) {
           e.setScrollLeft(persisted.scrollLeft)
         }
       } catch {
-        /* ignore */
       }
     }
 
@@ -2625,7 +2834,6 @@ export function MonacoFileEditor({ workDir }: Props) {
         editor.setPosition({ lineNumber, column })
         editor.focus()
       } catch {
-        /* ignore */
       }
       consumeNavigation()
     }
@@ -2850,7 +3058,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             onMount={onMount}
             onChange={(value) => {
               if (typeof value === 'string' && !truncated) {
-                updateDraft(activeTab, value)
+                scheduleDraftUpdate(activeTab, value)
               }
             }}
             options={{
@@ -2891,6 +3099,85 @@ export function MonacoFileEditor({ workDir }: Props) {
             currentContent={pendingDiff.currentContent}
             languageId={languageId}
             onClose={() => setDiffOverlayOpen(false)}
+            editable
+            onApply={(content) => {
+              const rel = pendingDiff.relPath
+              flushPendingDraft()
+              useWorkspaceFilesStore.getState().updateDraft(rel, content)
+              void useWorkspaceFilesStore.getState().saveFile(rel)
+              setDiffOverlayOpen(false)
+              setPendingDiff(null)
+            }}
+          />
+        )}
+        {inlineEditState && inlineEditState.relPath === activeTab && !inlineEditState.result && (
+          <div className="absolute left-1/2 top-3 z-30 w-[min(560px,92%)] -translate-x-1/2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-2 shadow-lg">
+            <div className="mb-1.5 flex items-center gap-1.5 text-[11px] font-medium text-[var(--color-text-secondary)]">
+              <span className="material-symbols-outlined text-[13px] text-[var(--color-accent)]">
+                auto_fix_high
+              </span>
+              {t('editor.inlineEdit.title')}
+            </div>
+            <input
+              autoFocus
+              type="text"
+              value={inlineEditInstruction}
+              onChange={(e) => setInlineEditInstruction(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && !e.shiftKey) {
+                  e.preventDefault()
+                  void submitInlineEdit()
+                } else if (e.key === 'Escape') {
+                  e.preventDefault()
+                  setInlineEditState(null)
+                  editorRef.current?.focus()
+                }
+              }}
+              placeholder={t('editor.inlineEdit.placeholder')}
+              disabled={inlineEditState.loading}
+              className="w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 py-1 text-[12px] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)] disabled:opacity-60"
+            />
+            {inlineEditState.error && (
+              <div className="mt-1.5 text-[11px] text-[var(--color-danger)]">
+                {inlineEditState.error}
+              </div>
+            )}
+            <div className="mt-1.5 flex items-center justify-end gap-1.5">
+              {inlineEditState.loading && (
+                <span className="mr-auto flex items-center gap-1 text-[11px] text-[var(--color-text-tertiary)]">
+                  <span className="h-1.5 w-1.5 rounded-full bg-[var(--color-accent)] animate-pulse-dot" />
+                  {t('editor.inlineEdit.loading')}
+                </span>
+              )}
+              <button
+                type="button"
+                onClick={() => {
+                  setInlineEditState(null)
+                  editorRef.current?.focus()
+                }}
+                className="rounded px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+              >
+                {t('editor.inlineEdit.cancel')}
+              </button>
+              <button
+                type="button"
+                onClick={() => void submitInlineEdit()}
+                disabled={inlineEditState.loading || !inlineEditInstruction.trim()}
+                className="rounded bg-[var(--color-accent)]/15 px-2 py-0.5 text-[11px] font-medium text-[var(--color-accent)] hover:bg-[var(--color-accent)]/25 disabled:opacity-40 disabled:hover:bg-[var(--color-accent)]/15"
+              >
+                {t('editor.inlineEdit.submit')}
+              </button>
+            </div>
+          </div>
+        )}
+        {inlineEditState && inlineEditState.relPath === activeTab && inlineEditState.result && (
+          <MonacoDiffOverlay
+            previousContent={inlineEditState.selectionText}
+            currentContent={inlineEditState.result.applied}
+            languageId={languageId}
+            onClose={() => setInlineEditState(null)}
+            editable
+            onApply={(content) => applyInlineEditResult(content)}
           />
         )}
       </div>

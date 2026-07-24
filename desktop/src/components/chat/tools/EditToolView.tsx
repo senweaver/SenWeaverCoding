@@ -2,6 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+import { diffLines } from 'diff'
 import type { ToolViewProps } from './ToolViewProps'
 import { DiffViewer } from '../DiffViewer'
 import { CodeViewer } from '../CodeViewer'
@@ -63,12 +64,9 @@ function readMultiEditEntries(input: unknown): MultiEditEntry[] {
 }
 
 function changedLineCount(a: string, b: string): number {
-  const aLines = a.split('\n')
-  const bLines = b.split('\n')
   let changed = 0
-  const max = Math.max(aLines.length, bLines.length)
-  for (let i = 0; i < max; i++) {
-    if ((aLines[i] ?? '') !== (bLines[i] ?? '')) changed++
+  for (const part of diffLines(a, b)) {
+    if (part.added || part.removed) changed += part.count ?? 0
   }
   return changed
 }
@@ -350,8 +348,6 @@ export function EditDetail({ toolName, input, result, isStreaming }: ToolViewPro
     return <DiffViewer filePath={path} oldString={oldStr} newString={newStr} />
   }
   if ((toolName === 'file_write' || toolName === 'Write' || toolName === 'file_create') && content) {
-    // A whole-file write is all-additions: rendering it through the diff engine is needlessly
-    // heavy. Show a truncated, syntax-highlighted code preview instead.
     return (
       <CodeViewer
         code={content}

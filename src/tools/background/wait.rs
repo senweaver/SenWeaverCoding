@@ -84,7 +84,6 @@ impl Tool for BackgroundWaitTool {
             None => None,
         };
 
-        // Confirm the shell exists in this session up front.
         if super::registry::logs_for(id, 1).is_none() {
             return Ok(ToolResult {
                 success: false,

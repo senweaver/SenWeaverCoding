@@ -15,8 +15,6 @@ type Props = {
 
 type MermaidTheme = 'default' | 'dark'
 
-// mermaid is ~1.5MB; load it lazily (only when a diagram actually renders) so it
-// never lands in the first-screen bundle.
 type MermaidApi = typeof import('mermaid')['default']
 let mermaidModulePromise: Promise<MermaidApi> | null = null
 function loadMermaid(): Promise<MermaidApi> {
@@ -203,8 +201,6 @@ export function MermaidRenderer({ code }: Props) {
 
   useEffect(() => {
     if (!shouldRender) return
-    // Mermaid layout/SVG generation is CPU-heavy; cache by theme+source so identical diagrams
-    // (e.g. re-mounted while streaming the surrounding markdown) reuse the rendered SVG.
     const cacheKey = `${mermaidTheme}::${code}`
     const cachedSvg = MERMAID_SVG_CACHE.get(cacheKey)
     if (cachedSvg !== undefined) {

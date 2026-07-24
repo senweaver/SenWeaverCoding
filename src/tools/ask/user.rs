@@ -141,11 +141,6 @@ impl Tool for AskUserTool {
             .and_then(|v| v.as_str())
             .map(|s| s.trim().to_string());
 
-        // In an interactive GUI/TUI session the user is on THIS surface: routing
-        // the question to some configured messaging channel (arbitrary HashMap
-        // order) would leak it to another surface and block this turn until the
-        // channel timeout with nothing shown here. Only an explicit `channel`
-        // argument may override.
         if requested_channel.is_none() && crate::session::current_session_context().is_some() {
             return Ok(ToolResult {
                 success: false,

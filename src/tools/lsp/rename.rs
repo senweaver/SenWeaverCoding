@@ -448,8 +448,6 @@ impl LspRenameTool {
         let lang = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
 
         let path_fwd = file_path.display().to_string().replace('\\', "/");
-        // Windows absolute paths (`D:/x`) need the extra leading slash so the URI is
-        // `file:///D:/x`; POSIX paths already start with `/`.
         let file_uri = if path_fwd.starts_with('/') {
             format!("file://{path_fwd}")
         } else {
@@ -570,7 +568,6 @@ fn uri_to_local_path(uri: &str) -> PathBuf {
     if cfg!(windows) {
         PathBuf::from(decoded.replace('/', std::path::MAIN_SEPARATOR_STR))
     } else {
-        // On Unix, `file:///home/x` -> we stripped the leading slash; restore it.
         PathBuf::from(format!("/{decoded}"))
     }
 }
@@ -638,7 +635,6 @@ fn apply_edits_to_content(content: &str, edits: &[serde_json::Value]) -> (String
             Some((start, end, new_text))
         })
         .collect();
-    // Apply from the end backwards so earlier byte offsets stay valid.
     resolved_edits.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
     let mut out = content.to_string();
     let mut applied = 0usize;
@@ -659,7 +655,6 @@ fn apply_edits_to_content(content: &str, edits: &[serde_json::Value]) -> (String
 
 fn collect_edit_groups(resp: &serde_json::Value) -> Vec<(String, Vec<serde_json::Value>)> {
     let mut groups: Vec<(String, Vec<serde_json::Value>)> = Vec::new();
-    // rust-analyzer and most modern servers prefer `documentChanges`.
     if let Some(doc_changes) = resp.get("documentChanges").and_then(|v| v.as_array()) {
         for change in doc_changes {
             let Some(uri) = change.pointer("/textDocument/uri").and_then(|v| v.as_str()) else {

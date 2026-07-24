@@ -51,14 +51,6 @@ impl MultiAgentRuntime {
             let reg = registry.clone();
             supervisor.set_restart_callback(Box::new(move |info| {
                 let id = info.id.as_str();
-                // A "stale" agent that still holds a task is almost always a
-                // false positive: subagents emit no heartbeat during a single
-                // long LLM call (minutes are common), so check_stale flags them
-                // as dead. Resetting such an agent to Idle here would let
-                // find_best_available hand it a SECOND task (double-dispatch past
-                // max_concurrency, then a load underflow masked by saturating_sub).
-                // Treat the heartbeat as a lease: for a busy agent just renew it;
-                // only genuinely task-free agents are restored to Idle.
                 if reg.get(id).and_then(|a| a.current_task).is_some() {
                     let _ = reg.heartbeat(id);
                     tracing::debug!(
@@ -214,9 +206,6 @@ impl MultiAgentRuntime {
 
     pub fn maintenance(&self) -> MaintenanceReport {
         let supervisor_events = self.supervisor.health_check();
-        // When an agent is confirmed dead (restart failed / shut down), release
-        // the region locks it still holds instead of waiting out their TTL, so a
-        // sibling agent is not blocked on a corpse.
         for event in &supervisor_events {
             if matches!(
                 event.kind,
@@ -241,8 +230,6 @@ impl MultiAgentRuntime {
             .task_queue
             .inner()
             .reclaim_stale_running(Self::STALE_RUNNING_TASK_MAX);
-        // Drop long-finished tasks so the in-memory task map cannot grow without
-        // bound across a long-lived multi-agent session.
         let purged_tasks = self
             .task_queue
             .inner()
@@ -722,8 +709,6 @@ pub fn session_scoped_namespace(namespace: &str) -> String {
 pub fn register_configured_agents(rt: &MultiAgentRuntime, config: &crate::config::Config) {
     use crate::agent::registry::{AgentCapability, AgentInfo};
 
-    // Adopt the user's configured subagent concurrency ceiling (the global runtime
-    // limiter is built with the default before config is available).
     rt.subagent_limiter
         .set_max_concurrent(config.agent_runtime.subagent_limit.max_concurrent);
 

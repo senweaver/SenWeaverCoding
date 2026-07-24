@@ -26,7 +26,6 @@ fn read_symbol_definition(root: &Path, rel: &Path, line: u32, line_end: u32) -> 
     if start >= lines.len() {
         return None;
     }
-    // Cap at 60 lines so a huge function cannot blow the injection budget.
     let end = if line_end > line {
         (line_end as usize).min(lines.len()).min(start + 60)
     } else {
@@ -54,12 +53,10 @@ fn load_file_body(root: &Path, path: &PathBuf) -> Result<String, ContextResolveE
 }
 
 fn finish_file_item(path: &PathBuf, body: String, budget: &ContextBudget) -> ContextItem {
-    let want = body.len() / 4;
+    let want = crate::providers::traits::estimate_content_tokens(&body);
     let granted = budget.reserve_at_most(want);
     let final_body = if granted < want {
-
-        let take_chars = granted * 4;
-        take_prefix_by_chars(&body, take_chars)
+        clip_to_token_budget(&body, granted)
     } else {
         body
     };
@@ -69,6 +66,38 @@ fn finish_file_item(path: &PathBuf, body: String, budget: &ContextBudget) -> Con
         final_body,
     )
     .with_source("fs")
+}
+
+pub(crate) fn budget_clip_body(body: String, budget: &ContextBudget) -> String {
+    let want = crate::providers::traits::estimate_content_tokens(&body).max(1);
+    let granted = budget.reserve_at_most(want);
+    if granted < want {
+        clip_to_token_budget(&body, granted)
+    } else {
+        body
+    }
+}
+
+fn clip_to_token_budget(body: &str, granted: usize) -> String {
+    if granted == 0 {
+        return String::new();
+    }
+    let mut ascii_units = 0usize;
+    let mut wide_tokens = 0usize;
+    let mut end = 0usize;
+    for (idx, ch) in body.char_indices() {
+        if ch.is_ascii() {
+            ascii_units += 1;
+        } else {
+            wide_tokens += 1;
+        }
+        let tokens = ascii_units * 10 / 34 + wide_tokens;
+        if tokens > granted {
+            break;
+        }
+        end = idx + ch.len_utf8();
+    }
+    body[..end].to_string()
 }
 
 pub fn resolve_file(
@@ -105,13 +134,7 @@ fn load_folder_listing(root: &Path, path: &PathBuf) -> Result<String, ContextRes
 }
 
 fn finish_folder_item(path: &PathBuf, body: String, budget: &ContextBudget) -> ContextItem {
-    let want = body.len() / 4;
-    let granted = budget.reserve_at_most(want);
-    let final_body = if granted < want {
-        take_prefix_by_chars(&body, granted * 4)
-    } else {
-        body
-    };
+    let final_body = budget_clip_body(body, budget);
     ContextItem::new(
         format!("folder:{}", path.display()),
         format!("Folder listing: {}", path.display()),
@@ -146,17 +169,17 @@ pub fn resolve_symbol(
 ) -> Result<ContextItem, ContextResolveError> {
     let mut body = String::new();
     {
-        if let Some(graph) =
-            crate::code_intel::symbol_graph::core::SymbolGraph::load_cached(root)
+        if let crate::code_intel::symbol_graph::incremental::WriterAvailability::Ready(writer) =
+            crate::code_intel::symbol_graph::incremental::get_writer_nonblocking(root)
         {
+            let graph_lock = writer.graph();
+            let graph = graph_lock.read();
             let name_lc = name.to_ascii_lowercase();
             let mut matches: Vec<&crate::code_intel::symbol_graph::SymbolEntry> = graph
                 .symbols
                 .iter()
                 .filter(|sym| sym.id.name.to_ascii_lowercase().contains(&name_lc))
                 .collect();
-            // Exact name matches first so the inlined definition below is the
-            // most likely intended symbol rather than a substring cousin.
             matches.sort_by_key(|sym| sym.id.name.to_ascii_lowercase() != name_lc);
             for (idx, sym) in matches.iter().take(8).enumerate() {
                 let _ = writeln!(
@@ -167,8 +190,6 @@ pub fn resolve_symbol(
                     sym.id.file.display(),
                     sym.id.line
                 );
-                // Inline the definition body of the single best (first) hit so
-                // the model sees the actual code, not just a location.
                 if idx == 0 {
                     if let Some(def) =
                         read_symbol_definition(root, &sym.id.file, sym.id.line, sym.line_end)
@@ -184,13 +205,7 @@ pub fn resolve_symbol(
             "<symbol> {name} </symbol>\n(No symbol_graph hit; use code_outline / content_search.)"
         );
     }
-    let want = body.len() / 4;
-    let granted = budget.reserve_at_most(want.max(1));
-    let final_body = if granted < want {
-        take_prefix_by_chars(&body, granted * 4)
-    } else {
-        body
-    };
+    let final_body = budget_clip_body(body, budget);
     Ok(ContextItem::new(
         format!("symbol:{name}"),
         format!("Symbol reference: {name}"),
@@ -205,9 +220,6 @@ pub fn resolve_diff(
     budget: &ContextBudget,
 ) -> Result<ContextItem, ContextResolveError> {
     let range = range.trim();
-    // Never let a model/user-supplied range be parsed as a git flag (e.g.
-    // `--output=FILE` would write to an arbitrary path). Reject leading-dash
-    // ranges and end option parsing with `--` before the revision.
     if range.starts_with('-') {
         return Ok(ContextItem::new(
             format!("diff:{range}"),
@@ -218,9 +230,6 @@ pub fn resolve_diff(
     }
     let mut cmd = crate::util::hidden_sync_command("git");
     cmd.current_dir(root);
-    // range is a revision or revision-range (e.g. HEAD~1, main..feature); the
-    // leading-dash guard above already blocks flag injection, so it stays a
-    // positional arg rather than being forced to a pathspec with `--`.
     let args: Vec<&str> = if range.is_empty() {
         vec!["diff", "-U3"]
     } else {
@@ -243,13 +252,7 @@ pub fn resolve_diff(
         }
         Err(e) => format!("<diff> {range} </diff>\n(git unavailable: {e})"),
     };
-    let want = body.len() / 4;
-    let granted = budget.reserve_at_most(want.max(1));
-    let final_body = if granted < want {
-        take_prefix_by_chars(&body, granted * 4)
-    } else {
-        body
-    };
+    let final_body = budget_clip_body(body, budget);
     Ok(ContextItem::new(
         format!("diff:{range}"),
         format!("Git diff: {range}"),
@@ -300,13 +303,7 @@ pub fn resolve_doc(
     } else {
         format!("<doc> {name} </doc>\n(No matching doc file found under workspace.)")
     };
-    let want = body.len() / 4;
-    let granted = budget.reserve_at_most(want.max(1));
-    let final_body = if granted < want {
-        take_prefix_by_chars(&body, granted * 4)
-    } else {
-        body
-    };
+    let final_body = budget_clip_body(body, budget);
     Ok(ContextItem::new(
         format!("doc:{name}"),
         format!("Documentation: {name}"),
@@ -347,13 +344,6 @@ pub fn resolve_selection(
     )
 }
 
-fn take_prefix_by_chars(s: &str, chars: usize) -> String {
-    s.chars().take(chars).collect()
-}
-
-pub(crate) fn take_prefix_by_chars_public(s: &str, chars: usize) -> String {
-    take_prefix_by_chars(s, chars)
-}
 
 pub fn resolve_tag(
     tag: &ContextTag,
@@ -373,8 +363,6 @@ pub fn resolve_tag(
         ContextTag::Recent => resolve_recent(recents, budget),
         ContextTag::Selection => resolve_selection(selection, budget),
         ContextTag::Codebase(q) => super::codebase::resolve_codebase(root, q, budget),
-        // Diagnostics require an async services lookup; the async resolver handles
-        // it. This sync arm is only reached if a caller bypasses resolve_tag_async.
         ContextTag::Problems => Ok(ContextItem::new(
             "problems",
             "Problems",
@@ -413,6 +401,25 @@ pub async fn resolve_tag_async(
             Ok(finish_folder_item(p, body, budget))
         }
         ContextTag::Codebase(q) => {
+            if let Some(source) = crate::agent::loop_::services::rag_source(root) {
+                let hits = source.retrieve(q, 8).await;
+                if !hits.is_empty() {
+                    let mut body = String::with_capacity(1024);
+                    for (i, hit) in hits.iter().enumerate() {
+                        let rel = crate::util::path_relative_to(&hit.path, root)
+                            .unwrap_or_else(|| hit.path.clone());
+                        let rel_str = rel.to_string_lossy().replace('\\', "/");
+                        body.push_str(&format!("{}. {}:{}\n", i + 1, rel_str, hit.line));
+                        for line in hit.snippet.trim_end().lines().take(6) {
+                            body.push_str("    ");
+                            body.push_str(line);
+                            body.push('\n');
+                        }
+                        body.push('\n');
+                    }
+                    return Ok(super::codebase::finish_codebase_item(q, body, budget));
+                }
+            }
             let root_owned = root.to_path_buf();
             let query_owned = q.clone();
             let body = tokio::task::spawn_blocking(move || {
@@ -427,8 +434,6 @@ pub async fn resolve_tag_async(
     }
 }
 
-/// `@problems`: summarize the workspace's current LSP diagnostics (errors first)
-/// from the running language servers. Empty/clean workspaces get a short note.
 async fn resolve_problems(
     root: &Path,
     budget: &ContextBudget,
@@ -472,12 +477,6 @@ async fn resolve_problems(
             lines.join("\n")
         )
     };
-    let want = body.len() / 4;
-    let granted = budget.reserve_at_most(want);
-    let final_body = if granted < want {
-        take_prefix_by_chars(&body, granted * 4)
-    } else {
-        body
-    };
+    let final_body = budget_clip_body(body, budget);
     Ok(ContextItem::new("problems", "Workspace problems", final_body).with_source("lsp"))
 }

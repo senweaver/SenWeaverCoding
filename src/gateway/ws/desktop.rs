@@ -121,13 +121,6 @@ async fn handle_socket(
     let (control_tx, mut control_rx) =
         tokio::sync::mpsc::channel::<OutboundFrame>(64);
 
-    // Created before the writer so the writer can cancel them on a stalled send.
-    // A half-open client used to block sink.send forever, which cascaded back
-    // through the tee/forward chain and wedged the whole turn with no escape.
-    // conn_token breaks the connection loop; turn_abort_token is a DEDICATED
-    // signal wired (once the agent exists) to cancel the in-flight turn — kept
-    // separate from conn_token so a graceful disconnect still gets its 60s
-    // reconnect grace instead of killing the running turn.
     let conn_token = tokio_util::sync::CancellationToken::new();
     let turn_abort_token = tokio_util::sync::CancellationToken::new();
     let writer_conn_token = conn_token.clone();
@@ -136,10 +129,6 @@ async fn handle_socket(
     let writer_handle = crate::runtime::spawn_supervised("ws_desktop.writer", async move {
         const COALESCE_WINDOW_MS: u64 = 24;
         const COALESCE_MAX_FRAMES: usize = 64;
-        // A healthy client drains frames in milliseconds; exceeding this means
-        // the socket is half-open/stuck. Treat it as a disconnect: cancel the
-        // connection token so the in-flight turn stops instead of blocking on
-        // backpressure indefinitely.
         const WRITER_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         macro_rules! send_frame {
             ($msg:expr) => {{
@@ -190,10 +179,6 @@ async fn handle_socket(
             thinking_buf.clear();
             let mut send_failed = false;
 
-            // Coalesce consecutive content/thinking deltas and serialize the merged
-            // text exactly ONCE per flush. Deltas arrive as structured frames (no
-            // per-token JSON round-trip): the hot path never serializes or re-parses
-            // per token, only once per coalesced window here.
             macro_rules! flush_buf {
                 ($kind:expr, $buf:expr) => {{
                     if !$buf.is_empty() {
@@ -479,10 +464,6 @@ async fn handle_socket(
                 &serde_json::json!({ "type": "status", "state": "thinking" }),
             )
             .await;
-            // Replay approval prompts that fired while this client was
-            // disconnected: the live feed only carries NEW frames, so without
-            // this the reconnected UI shows a busy session with no dialog and
-            // the agent-side waiter blocks until its timeout.
             for frame in crate::approval::pending_replays_for_session(&session_id) {
                 let _ = send_json(&outbound_tx, &frame).await;
             }
@@ -532,10 +513,6 @@ async fn handle_socket(
     let cancel_signal_handle = agent.cancel_signal_handle();
     let cancelled_atomic = agent.cancel_token();
 
-    // Bridge a stalled-writer abort to the in-flight turn: when the writer gives
-    // up on a half-open socket it cancels turn_abort_token; propagate that to the
-    // agent's cancel signal so run_turn actually stops instead of the turn only
-    // being noticed on the next loop iteration (which never comes while blocked).
     {
         let abort_token = turn_abort_token.clone();
         let atom = std::sync::Arc::clone(&cancelled_atomic);
@@ -1378,25 +1355,30 @@ async fn handle_socket(
                     .get("persist")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
-                let snapshot = {
-                    let mut cfg = state.config.lock();
 
-                    if let Some(p) = provider.as_deref() {
-                        if let Some(profile) = cfg.model_providers.get(p).cloned() {
-                            crate::gateway::desktop::routes::apply_active_profile_to_top_level(
-                                &mut cfg, p, &profile,
-                            );
-                        } else {
-                            cfg.default_provider = Some(p.to_string());
-                        }
-                    }
-                    if let Some(m) = model.as_ref() {
-                        cfg.default_model = Some(m.clone());
-                    }
-                    cfg.clone()
-                };
+                if let (Some(p), Some(m)) = (provider.as_ref(), model.as_ref()) {
+                    agent.signal_runtime_model_switch(p.clone(), m.clone());
+                }
 
                 if persist {
+                    let snapshot = {
+                        let mut cfg = state.config.lock();
+
+                        if let Some(p) = provider.as_deref() {
+                            if let Some(profile) = cfg.model_providers.get(p).cloned() {
+                                crate::gateway::desktop::routes::apply_active_profile_to_top_level(
+                                    &mut cfg, p, &profile,
+                                );
+                            } else {
+                                cfg.default_provider = Some(p.to_string());
+                            }
+                        }
+                        if let Some(m) = model.as_ref() {
+                            cfg.default_model = Some(m.clone());
+                        }
+                        cfg.clone()
+                    };
+
                     if let Err(e) = snapshot.save().await {
                         tracing::warn!(
                             target: "ws_desktop_runtime_config",
@@ -1414,13 +1396,11 @@ async fn handle_socket(
                         )
                         .await;
                     }
+
+                    state.push_live_config(snapshot);
+                    state.rebuild_runtime_from_config_async().await;
                 }
 
-                state.push_live_config(snapshot);
-                state.rebuild_runtime_from_config_async().await;
-                if let (Some(p), Some(m)) = (provider.as_ref(), model.as_ref()) {
-                    agent.signal_runtime_model_switch(p.clone(), m.clone());
-                }
                 if let Err(e) = agent.apply_runtime_config_now().await {
                     tracing::warn!(
                         target: "ws_desktop_runtime_config",
@@ -2389,7 +2369,6 @@ async fn handle_socket(
     }
 
     conn_token.cancel();
-    // Reap the turn-abort bridge task (harmless now that the loop has exited).
     turn_abort_token.cancel();
     reader_handle.abort();
     heartbeat_handle.abort();
@@ -2417,6 +2396,9 @@ async fn handle_socket(
     }
     desktop_runtime_state().clear_session_permission_mode(&session_key);
     crate::security::sandbox::unregister_session_workspace_root(&session_id);
+    if let Some(mgr) = crate::session::global_workspace_resources() {
+        mgr.clear_session_snapshots(&session_id);
+    }
 
     let _ = crate::services::governance::credential_vault::purge_session_ephemeral(&session_key);
     if let Some(ctl) = crate::tools::browser::dock_controller() {
@@ -2692,6 +2674,18 @@ fn unregister_session_sender(session_id: &str, seq: u64) {
     }
 }
 
+fn is_critical_broadcast(payload: &serde_json::Value) -> bool {
+    matches!(
+        payload.get("type").and_then(|v| v.as_str()),
+        Some(
+            "session_history_changed"
+                | "workspace_busy"
+                | "permission_request"
+                | "message_complete"
+        )
+    )
+}
+
 pub fn broadcast_session_event(session_id: &str, payload: &serde_json::Value) {
     let senders: Vec<(u64, OutboundSender)> = {
         let guard = session_out_senders().lock();
@@ -2704,12 +2698,30 @@ pub fn broadcast_session_event(session_id: &str, payload: &serde_json::Value) {
         return;
     }
     let text = payload.to_string();
+    let critical = is_critical_broadcast(payload);
     let mut dead: Vec<u64> = Vec::new();
     for (seq, tx) in senders {
-        if let Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) =
-            tx.try_send(OutboundFrame::Text(text.clone()))
-        {
-            dead.push(seq);
+        match tx.try_send(OutboundFrame::Text(text.clone())) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => dead.push(seq),
+            Err(tokio::sync::mpsc::error::TrySendError::Full(frame)) => {
+                if critical {
+                    let tx_owned = tx.clone();
+                    crate::runtime::spawn_supervised(
+                        "ws_desktop.critical_broadcast_backpressure",
+                        async move {
+                            let _ = tx_owned.send(frame).await;
+                        },
+                    );
+                } else {
+                    tracing::warn!(
+                        target: "ws_desktop",
+                        session_id,
+                        frame_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("?"),
+                        "dropping non-critical session frame: outbound queue full"
+                    );
+                }
+            }
         }
     }
     for seq in dead {
@@ -2771,9 +2783,6 @@ async fn send_error(outbound: &OutboundSender, message: &str, code: &str) {
     .await;
 }
 
-// Only treat input as a slash command when the first token looks like a
-// command name; this keeps chat messages that start with an absolute path
-// (e.g. "/etc/hosts is broken") flowing to the model as plain text.
 fn is_probable_slash_command(input: &str) -> bool {
     let Some(rest) = input.strip_prefix('/') else {
         return false;
@@ -2824,9 +2833,6 @@ const MAX_PERSIST_RETRIES: u32 = 20;
 
 static PERSIST_PENDING: AtomicUsize = AtomicUsize::new(0);
 
-/// Per-session outstanding persist jobs. Lets turn-start await "everything for
-/// THIS session is on disk" (bounded), so `count_user_messages`-derived indexes
-/// can't race the async queue and misattribute edit batches to the wrong turn.
 static SESSION_PERSIST_PENDING: once_cell::sync::Lazy<
     parking_lot::Mutex<std::collections::HashMap<String, usize>>,
 > = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
@@ -2919,11 +2925,6 @@ fn persist_sender(
         crate::runtime::spawn_supervised("ws_desktop.persist_worker", async move {
             let mut retry_queue: std::collections::VecDeque<(PersistJob, tokio::time::Instant)> =
                 std::collections::VecDeque::new();
-            // Same-session jobs arriving while a failed batch waits for its retry
-            // backoff park here. Row order defines the served transcript, so a
-            // later batch must never be written before an earlier one of the same
-            // session — otherwise tool/assistant rows land after the next user
-            // message and the conversation renders permanently out of order.
             let mut blocked: std::collections::HashMap<
                 String,
                 std::collections::VecDeque<PersistJob>,
@@ -2964,16 +2965,12 @@ fn persist_sender(
                         None => break,
                     }
                 } else if let Some((job, due)) = retry_queue.pop_front() {
-                    // Channel closed (shutdown): drain remaining retries instead
-                    // of dropping them with the pending counter stuck.
                     tokio::time::sleep_until(due).await;
                     job
                 } else {
                     break;
                 };
 
-                // A parked head for this session is still awaiting its backoff;
-                // queue behind it instead of overtaking (per-session FIFO).
                 if retry_queue
                     .iter()
                     .any(|(parked, _)| parked.session_key == job.session_key)
@@ -2985,8 +2982,6 @@ fn persist_sender(
                     continue;
                 }
 
-                // Write this job, then drain the session's blocked backlog inline
-                // so released jobs can't be overtaken by fresh channel arrivals.
                 loop {
                     let session_key = job.session_key.clone();
                     let backend_for_write = std::sync::Arc::clone(&backend);
@@ -3637,6 +3632,9 @@ async fn run_turn(
         return None;
     }
 
+    let _rewind_guard =
+        crate::gateway::api::core::acquire_rewind_lock(session_id).await;
+
     let feed_for_pump = crate::session::register_turn_feed(
         session_id,
         agent.cancel_token(),
@@ -3650,9 +3648,6 @@ async fn run_turn(
         while let Some(frame) = tee_rx.recv().await {
             match &frame {
                 OutboundFrame::Text(text) => feed_for_pump.publish(text),
-                // Mirror live content/thinking deltas to secondary connections only
-                // when one is actually attached, so the single-connection hot path
-                // never pays a per-token serialize just for the feed.
                 OutboundFrame::ContentDelta(t) if feed_for_pump.has_subscribers() => {
                     feed_for_pump.publish(
                         &serde_json::json!({ "type": "content_delta", "text": t }).to_string(),
@@ -3691,38 +3686,45 @@ async fn run_turn(
     let started = std::time::Instant::now();
 
     let user_message_index: i64 = if let Some(ref backend) = state.session_backend {
-        // The user row was enqueued fire-and-forget; counting before the persist
-        // worker flushes it yields an off-by-one index that misattributes this
-        // turn's edit batches to the PREVIOUS user message (rewind then reverts
-        // the wrong files). Await this session's queue (bounded) before counting.
-        let _ = wait_session_persist_drained(
+        let drained = wait_session_persist_drained(
             session_key,
-            std::time::Duration::from_secs(5),
+            std::time::Duration::from_secs(30),
         )
         .await;
-        let backend_arc = std::sync::Arc::clone(backend);
-        let session_key_owned = session_key.to_string();
-        match tokio::task::spawn_blocking(move || {
-            let total = backend_arc.count_user_messages(&session_key_owned);
-            #[allow(clippy::cast_possible_wrap)]
+        if !drained {
+            tracing::warn!(
+                target: "ws_desktop_persist",
+                session_key,
+                "session persist queue did not drain before turn start; \
+                 disabling edit-batch rewind attribution for this turn to avoid \
+                 reverting the wrong user message's files"
+            );
+            -1
+        } else {
+            let backend_arc = std::sync::Arc::clone(backend);
+            let session_key_owned = session_key.to_string();
+            match tokio::task::spawn_blocking(move || {
+                let total = backend_arc.count_user_messages(&session_key_owned);
+                #[allow(clippy::cast_possible_wrap)]
+                {
+                    (total.saturating_sub(1)) as i64
+                }
+            })
+            .await
             {
-                (total.saturating_sub(1)) as i64
-            }
-        })
-        .await
-        {
-            Ok(idx) => idx,
-            Err(e) => {
-                tracing::warn!(
-                    target: "ws_desktop_persist",
-                    error = %e,
-                    "failed to compute user_message_index; defaulting to 0"
-                );
-                0
+                Ok(idx) => idx,
+                Err(e) => {
+                    tracing::warn!(
+                        target: "ws_desktop_persist",
+                        error = %e,
+                        "failed to compute user_message_index; disabling rewind attribution for this turn"
+                    );
+                    -1
+                }
             }
         }
     } else {
-        0
+        -1
     };
     let mut recorded_batches: std::collections::HashSet<String> =
         std::collections::HashSet::new();
@@ -3851,11 +3853,6 @@ async fn run_turn(
     };
 
     let forward_fut = async {
-        // Approval prompts emitted on the in-process gateway bus (tool_search
-        // activation gate, RPC guardrail approvals) never flow through the
-        // TurnEvent pipeline; without forwarding them here the desktop shows no
-        // prompt and the waiter silently blocks until its 300s timeout. Only
-        // prompts registered under THIS session are surfaced.
         let mut approval_bus_rx = crate::gateway::ws::gateway_approval_bus().subscribe();
         loop {
             let event = tokio::select! {
@@ -4110,7 +4107,14 @@ async fn run_turn(
                 } => {
 
                     if let Some(ref batch) = edit_batch_id {
-                        if !batch.is_empty() && recorded_batches.insert(batch.clone()) {
+                        if user_message_index < 0 {
+                            tracing::debug!(
+                                target: "rewind",
+                                session_key,
+                                batch = %batch,
+                                "skipping edit-batch attribution: user_message_index unresolved for this turn"
+                            );
+                        } else if !batch.is_empty() && recorded_batches.insert(batch.clone()) {
                             if let Some(ref backend) = state.session_backend {
                                 let backend_arc = std::sync::Arc::clone(backend);
                                 let session_key_owned = session_key.to_string();
@@ -4328,6 +4332,13 @@ async fn run_turn(
                     .await;
                 }
                 TurnEvent::Error { message } => {
+                    let hooks_for_notify = std::sync::Arc::clone(&state.hooks);
+                    let message_for_notify = message.clone();
+                    crate::runtime::spawn_supervised("hooks.notification", async move {
+                        hooks_for_notify
+                            .fire_notification("error", &message_for_notify)
+                            .await;
+                    });
                     send_error(outbound, &message, "TURN_ERROR").await;
                 }
                 TurnEvent::PiiSanitized { report } => {
@@ -4600,8 +4611,24 @@ async fn run_turn(
                 } else {
                     recorder.finish()
                 };
-                if rows.is_empty() && !final_text.trim().is_empty() {
-                    rows.push(crate::providers::ChatMessage::assistant(final_text.clone()));
+                if !final_text.trim().is_empty() && (!turn_panicked || rows.is_empty()) {
+                    let has_assistant_text = rows.iter().any(|m| {
+                        if m.role != "assistant" {
+                            return false;
+                        }
+                        match serde_json::from_str::<serde_json::Value>(&m.content) {
+                            Ok(serde_json::Value::Array(blocks)) => blocks.iter().any(|b| {
+                                b.get("type").and_then(|t| t.as_str()) == Some("text")
+                                    && b.get("text")
+                                        .and_then(|t| t.as_str())
+                                        .is_some_and(|t| !t.trim().is_empty())
+                            }),
+                            _ => !m.content.trim().is_empty(),
+                        }
+                    });
+                    if !has_assistant_text {
+                        rows.push(crate::providers::ChatMessage::assistant(final_text.clone()));
+                    }
                 }
                 if turn_panicked {
                     if let Some(row) = make_error_history_row(
@@ -4612,10 +4639,6 @@ async fn run_turn(
                     }
                 }
                 enqueue_persist(state, session_key, rows).await;
-                // Give the persist queue a brief window to land this turn's rows
-                // before signalling completion: a client that reloads history on
-                // message_complete (or reconnects immediately) would otherwise
-                // read a transcript missing the turn it just watched.
                 let _ = wait_session_persist_drained(
                     session_key,
                     std::time::Duration::from_secs(1),

@@ -452,7 +452,6 @@ export function DeckSpecRenderer({
         })
         await designerApi.lintArtifact(sessionId, manifestRelPath)
       } catch {
-        /* compile feedback surfaces through the canvas refresh */
       } finally {
         setSwitchingTheme(false)
         setThemeOpen(false)

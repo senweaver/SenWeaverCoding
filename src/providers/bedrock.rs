@@ -390,6 +390,10 @@ struct BedrockUsage {
     input_tokens: Option<u64>,
     #[serde(default)]
     output_tokens: Option<u64>,
+    #[serde(default)]
+    cache_read_input_tokens: Option<u64>,
+    #[serde(default)]
+    cache_write_input_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -532,9 +536,6 @@ impl BedrockProvider {
         for msg in messages {
             match msg.role.as_str() {
                 "system" => {
-                    // Concatenate every system message (join with a blank line) so
-                    // multi-part system prompts are preserved instead of silently
-                    // dropping all but the first block.
                     system_blocks.push(SystemBlock::Text(TextBlock {
                         text: msg.content.clone(),
                     }));
@@ -822,8 +823,8 @@ impl BedrockProvider {
         let usage = response.usage.map(|u| TokenUsage {
             input_tokens: u.input_tokens,
             output_tokens: u.output_tokens,
-            cached_input_tokens: None,
-            cache_creation_input_tokens: None,
+            cached_input_tokens: u.cache_read_input_tokens,
+            cache_creation_input_tokens: u.cache_write_input_tokens,
         });
 
         if let Some(output) = response.output {
@@ -974,7 +975,7 @@ impl Provider for BedrockProvider {
         ProviderCapabilities {
             native_tool_calling: true,
             vision: true,
-            prompt_caching: false,
+            prompt_caching: true,
             responses_api: false,
         }
     }

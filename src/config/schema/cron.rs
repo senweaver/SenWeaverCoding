@@ -56,6 +56,12 @@ pub struct CronJobDecl {
     pub session_target: Option<String>,
 
     #[serde(default)]
+    pub folder_path: Option<String>,
+
+    #[serde(default)]
+    pub use_worktree: Option<bool>,
+
+    #[serde(default)]
     pub delivery: Option<DeliveryConfigDecl>,
 }
 

@@ -92,10 +92,6 @@ pub async fn apply_suggestion(
 ) -> Result<(crate::apply_model::BatchOutcome, crate::apply_model::FastPathTier), anyhow::Error> {
     use crate::apply_model::{EditOrigin, OpsApplier};
 
-    // Hard workspace-containment check: a hallucinated/absolute suggestion path
-    // must never escape the workspace. Do NOT add the file's own parent to
-    // allowed_roots (that made the containment guard a no-op and let the model
-    // write anywhere on disk).
     if !crate::util::path_is_within(&suggestion.file_path, workspace_root) {
         anyhow::bail!(
             "NEP suggestion path escapes workspace: {}",

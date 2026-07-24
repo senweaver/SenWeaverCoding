@@ -19,7 +19,6 @@ pub enum ContextTag {
 
     Codebase(String),
 
-    /// `@problems` — current workspace LSP diagnostics (errors/warnings).
     Problems,
 }
 
@@ -56,7 +55,7 @@ pub struct ContextItem {
 impl ContextItem {
     pub fn new(tag: impl Into<String>, title: impl Into<String>, body: impl Into<String>) -> Self {
         let body = body.into();
-        let approx = body.len() / 4;
+        let approx = crate::providers::traits::estimate_content_tokens(&body);
         Self {
             tag: tag.into(),
             title: title.into(),

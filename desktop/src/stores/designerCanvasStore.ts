@@ -216,7 +216,6 @@ function readStoredColumnWidth(workspaceKey: string): number {
     const value = Number.parseInt(raw, 10)
     if (Number.isFinite(value)) return clampCanvasWidth(value)
   } catch {
-    /* ignore */
   }
   return DESIGNER_CANVAS_WIDTH_BOUNDS.default
 }
@@ -229,7 +228,6 @@ function writeStoredColumnWidth(workspaceKey: string, value: number) {
       String(clampCanvasWidth(value)),
     )
   } catch {
-    /* ignore */
   }
 }
 
@@ -264,7 +262,6 @@ function writeStoredTweaks(sessionId: string, tweaks: CanvasTweaks) {
       JSON.stringify(tweaks),
     )
   } catch {
-    /* ignore */
   }
 }
 
@@ -303,7 +300,6 @@ function writeStoredLayout(sessionId: string, units: DesignUnit[]) {
       JSON.stringify(layout),
     )
   } catch {
-    /* ignore */
   }
 }
 

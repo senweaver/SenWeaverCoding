@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { api, getBaseUrl } from './client'
+import { api, getBaseUrl, withAuthToken } from './client'
 import type {
   LanConversation,
   LanIdentity,
@@ -61,7 +61,7 @@ export const lanApi = {
   },
 
   rawFileUrl(path: string) {
-    return `${getBaseUrl()}/api/lan/files/raw?path=${encodeURIComponent(path)}`
+    return withAuthToken(`${getBaseUrl()}/api/lan/files/raw?path=${encodeURIComponent(path)}`)
   },
 
   saveFile(path: string, dest: string) {
@@ -74,5 +74,5 @@ export const lanApi = {
 }
 
 export function lanWebSocketUrl(): string {
-  return `${getBaseUrl().replace(/^http/, 'ws')}/ws/lan`
+  return withAuthToken(`${getBaseUrl().replace(/^http/, 'ws')}/ws/lan`)
 }

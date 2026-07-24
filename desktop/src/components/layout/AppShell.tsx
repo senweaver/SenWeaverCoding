@@ -55,6 +55,9 @@ const GroupsPanel = lazy(() =>
 const SharePanel = lazy(() =>
   import('../lanShare/SharePanel').then((m) => ({ default: m.SharePanel })),
 )
+const ReviewPanel = lazy(() =>
+  import('../chat/ReviewPanel').then((m) => ({ default: m.ReviewPanel })),
+)
 import { EmbeddedBrowserPanel } from '../chat/EmbeddedBrowserPanel'
 const DesignerCanvasPanel = lazy(() =>
   import('../designer/DesignerCanvasPanel').then((m) => ({
@@ -105,6 +108,7 @@ import { useComputerUseStore } from '../../stores/computerUseStore'
 import { useComputerRecorderStore } from '../../stores/computerRecorderStore'
 import { useLanGroupStore } from '../../stores/lanGroupStore'
 import { useLanShareStore } from '../../stores/lanShareStore'
+import { useReviewPanelStore } from '../../stores/reviewPanelStore'
 import { CloseChoiceModal } from './CloseChoiceModal'
 import { SafeExitOverlay } from './SafeExitOverlay'
 import { ComputerUsePage } from '../../pages/ComputerUse'
@@ -120,6 +124,7 @@ export function AppShell() {
   const templateLibraryOpen = useUIStore((s) => s.templateLibraryOpen)
   const lanGroupPanelOpen = useLanGroupStore((s) => s.panelOpen)
   const lanSharePanelOpen = useLanShareStore((s) => s.panelOpen)
+  const reviewPanelOpen = useReviewPanelStore((s) => s.open)
   const appMode = useUIStore((s) => s.appMode)
   const activeChatTabId = useTabStore((s) => s.activeTabId)
   const activeChatTitle = useTabStore((s) =>
@@ -942,6 +947,13 @@ export function AppShell() {
               <div className="absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]">
                 <Suspense fallback={null}>
                   <SharePanel />
+                </Suspense>
+              </div>
+            )}
+            {reviewPanelOpen && (
+              <div className="absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]">
+                <Suspense fallback={null}>
+                  <ReviewPanel />
                 </Suspense>
               </div>
             )}

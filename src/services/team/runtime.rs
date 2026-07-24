@@ -96,8 +96,6 @@ pub fn send_message(
         timestamp: chrono::Utc::now().to_rfc3339(),
     };
     entry.log.push(record.clone());
-    // Bound the in-memory activity log so a long-lived team session cannot grow
-    // it without limit; keep the most recent window.
     const MAX_TEAM_LOG: usize = 2_000;
     if entry.log.len() > MAX_TEAM_LOG {
         let overflow = entry.log.len() - MAX_TEAM_LOG;

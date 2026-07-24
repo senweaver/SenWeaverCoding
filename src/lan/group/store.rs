@@ -853,10 +853,6 @@ fn member_role_in_tx(conn: &Connection, group_id: &str, user_id: &str) -> Option
     .flatten()
 }
 
-// A member-management op is authorized when the group is being created (no active
-// members yet = genesis/creator), when the author is an active owner, or when it
-// is a self-update that does not escalate the caller's own role. This blocks a LAN
-// peer from self-escalating to owner or removing/altering other members.
 fn membership_upsert_authorized(
     conn: &Connection,
     group_id: &str,
@@ -872,8 +868,6 @@ fn membership_upsert_authorized(
     }
     if author == target_user {
         let current = member_role_in_tx(conn, group_id, author);
-        // Allow self nickname/no-op updates, but never a self-escalation to owner
-        // or to a role the caller does not already hold.
         return requested_role != "owner" && current.as_deref() == Some(requested_role);
     }
     false

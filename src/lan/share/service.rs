@@ -67,7 +67,6 @@ impl ShareService {
             .unwrap_or_else(|| user_id.to_string())
     }
 
-    // ---- queries ----------------------------------------------------------
 
     pub fn my_shares(&self) -> Vec<super::types::MyShareView> {
         self.store.my_views()
@@ -105,7 +104,6 @@ impl ShareService {
         out
     }
 
-    // ---- mutations --------------------------------------------------------
 
     pub async fn add_share(self: &Arc<Self>, source: &str, note: &str) -> Result<String> {
         let source_path = PathBuf::from(shellexpand::tilde(source).to_string());
@@ -165,7 +163,6 @@ impl ShareService {
         Ok(())
     }
 
-    // ---- inbound handling -------------------------------------------------
 
     pub async fn handle_inbound(self: &Arc<Self>, peer_id: &str, msg: ShareInbound) {
         match msg {
@@ -240,7 +237,6 @@ impl ShareService {
             .await;
     }
 
-    // ---- broadcast / events ----------------------------------------------
 
     fn broadcast_my_shares(self: &Arc<Self>) {
         let Some(transport) = self.transport() else {

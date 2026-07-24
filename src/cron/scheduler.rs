@@ -140,6 +140,8 @@ pub async fn run(config: Config) -> Result<()> {
             model: None,
             allowed_tools: None,
             session_target: None,
+            folder_path: None,
+            use_worktree: None,
             delivery: None,
         };
         tracing::debug!(
@@ -528,7 +530,40 @@ async fn run_agent_job(
 
     let mut effective_config = config.clone();
     apply_cron_permission_mode(&mut effective_config.autonomy, job.permission_mode.as_deref());
-    effective_config.workspace_dir = resolved_cron_workspace_dir(config, job);
+    let base_workspace = resolved_cron_workspace_dir(config, job);
+    effective_config.workspace_dir = base_workspace.clone();
+
+    let mut worktree: Option<crate::workers::WorktreeInfo> = None;
+    let mut worktree_note: Option<String> = None;
+    if job.use_worktree == Some(true) {
+        let short_id: String = job
+            .id
+            .chars()
+            .filter(|c| c.is_ascii_alphanumeric())
+            .take(12)
+            .collect();
+        let stamp = Utc::now().timestamp();
+        let branch = format!("sen-cron/{short_id}-{stamp}");
+        let dir_name = format!("cron-{short_id}-{stamp}");
+        match crate::workers::worktree::create_named_worktree(&base_workspace, &branch, &dir_name)
+            .await
+        {
+            Ok(info) => {
+                effective_config.workspace_dir = info.path.clone();
+                worktree = Some(info);
+            }
+            Err(e) => {
+                worktree_note = Some(format!(
+                    "worktree unavailable ({e}); ran in shared workspace"
+                ));
+                tracing::warn!(
+                    job_id = %job.id,
+                    error = %e,
+                    "cron worktree creation failed; falling back to shared workspace"
+                );
+            }
+        }
+    }
 
     let coding_override = job
         .coding_mode
@@ -556,14 +591,16 @@ async fn run_agent_job(
         match time::timeout(Duration::from_millis(timeout_ms), Box::pin(run_future)).await {
             Ok(result) => result,
             Err(_) => {
-                return (
-                    false,
-                    format!("agent job timed out after {timeout_ms}ms"),
-                );
+                let mut output = format!("agent job timed out after {timeout_ms}ms");
+                if let Some(ref info) = worktree {
+                    let note = finalize_cron_worktree(info, false).await;
+                    output.push_str(&format!("\n--- worktree: {note} ---"));
+                }
+                return (false, output);
             }
         };
 
-    match run_result {
+    let (success, mut output) = match run_result {
         Ok(response) => (
             true,
             if response.trim().is_empty() {
@@ -573,6 +610,31 @@ async fn run_agent_job(
             },
         ),
         Err(e) => (false, format!("agent job failed: {e}")),
+    };
+
+    if let Some(ref info) = worktree {
+        let note = finalize_cron_worktree(info, success).await;
+        output.push_str(&format!("\n--- worktree: {note} ---"));
+    } else if let Some(note) = worktree_note {
+        output.push_str(&format!("\n--- worktree: {note} ---"));
+    }
+
+    (success, output)
+}
+
+async fn finalize_cron_worktree(info: &crate::workers::WorktreeInfo, merge: bool) -> String {
+    if merge && !crate::workers::worktree::parent_workspace_is_dirty(&info.base).await {
+        match crate::workers::worktree::commit_and_merge_worker(info).await {
+            Ok(msg) => format!("branch `{}`: {msg}", info.branch),
+            Err(err) => format!("branch `{}`: {err}", info.branch),
+        }
+    } else {
+        let _ = crate::workers::worktree::commit_worker_changes(info).await;
+        let note = crate::workers::worktree::remove_worktree_keep_branch(info).await;
+        format!(
+            "branch `{}` preserved{note} — merge with `git merge {}`",
+            info.branch, info.branch
+        )
     }
 }
 

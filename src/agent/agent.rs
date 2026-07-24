@@ -258,6 +258,8 @@ pub struct Agent {
 
     shared_config: crate::config::live::LiveConfig,
 
+    runtime_selection_override: Option<(String, String)>,
+
     cached_provider: String,
 
     cached_api_key: crate::security::secret_string::SecretString,
@@ -670,6 +672,7 @@ impl AgentBuilder {
             shared_config: self
                 .shared_config
                 .unwrap_or_else(crate::config::live::LiveConfig::default),
+            runtime_selection_override: None,
             cached_provider: self.cached_provider.unwrap_or_default(),
             cached_api_key: crate::security::secret_string::SecretString::new(
                 self.cached_api_key.unwrap_or_default(),
@@ -785,6 +788,17 @@ impl Agent {
         let user_message_for_turn = if let Some(ref runner) = self.hook_runner {
             match runner.run_before_prompt_build(user_message_owned.clone()).await {
                 crate::hooks::HookResult::Continue(rewritten) => rewritten,
+                crate::hooks::HookResult::RequireApproval(_, message) => {
+                    let reason = message
+                        .unwrap_or_else(|| "manual approval required".to_string());
+                    let banner = format!("[Cancelled by hook: {reason}]");
+                    let _ = event_tx
+                        .send(TurnEvent::Cancelling {
+                            reason: format!("hook:beforeSubmitPrompt:{reason}"),
+                        })
+                        .await;
+                    return Ok(banner);
+                }
                 crate::hooks::HookResult::Cancel(reason) => {
                     let banner = format!("[Cancelled by hook: {reason}]");
                     let _ = event_tx
@@ -1088,10 +1102,6 @@ impl Agent {
                         return Err(AgentError::StreamInterrupted(msg));
                     }
                     self.record_failed_turn_reinforcement(&msg);
-                    // Preserve the partial assistant/tool records that DID execute this turn
-                    // (like the interrupted paths) instead of discarding them, then mark the
-                    // turn as failed so the model treats the next message as authoritative and
-                    // never silently re-runs already-completed tool work.
                     self.commit_interrupted_turn_history(
                         full_history_for_merge.clone(),
                         history_chat.clone(),
@@ -1486,12 +1496,23 @@ impl Agent {
                 .map(|(seq, request, digest)| (*seq, request.as_str(), digest.as_str())),
         );
 
+        let summary_model = crate::services::try_get_services().and_then(|svc| {
+            svc.config()
+                .agent
+                .context_compression
+                .summary_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|m| !m.is_empty())
+                .map(str::to_string)
+        });
         let intent_model = self
             .intent_analysis_config
             .model
             .as_deref()
             .map(str::trim)
             .filter(|m| !m.is_empty())
+            .or(summary_model.as_deref())
             .unwrap_or(&self.model_name);
         let timeout = std::time::Duration::from_secs(5);
         let raw = match tokio::time::timeout(
@@ -1797,8 +1818,53 @@ impl Agent {
         self.mode_filter_dirty = false;
     }
 
+    fn effective_provider_config(&self) -> std::sync::Arc<crate::config::Config> {
+        let base = self.shared_config.load_ref();
+        let Some((provider_id, model)) = self.runtime_selection_override.as_ref() else {
+            return base;
+        };
+        if base.default_provider.as_deref() == Some(provider_id.as_str())
+            && base.default_model.as_deref() == Some(model.as_str())
+        {
+            return base;
+        }
+        let resolved_profile_id = if base.model_providers.contains_key(provider_id.as_str()) {
+            Some(provider_id.clone())
+        } else {
+            base.model_providers
+                .iter()
+                .find(|(pid, profile)| {
+                    pid.eq_ignore_ascii_case(provider_id)
+                        || profile
+                            .preset_id
+                            .as_deref()
+                            .map(|p| p.eq_ignore_ascii_case(provider_id))
+                            .unwrap_or(false)
+                })
+                .map(|(pid, _)| pid.clone())
+        };
+        let mut cfg = (*base).clone();
+        if let Some(pid) = resolved_profile_id {
+            if cfg.apply_model_provider_profile(&pid) {
+                cfg.default_model = Some(model.clone());
+                return std::sync::Arc::new(cfg);
+            }
+        }
+        if cfg.default_provider.as_deref() == Some(provider_id.as_str()) {
+            cfg.default_model = Some(model.clone());
+            return std::sync::Arc::new(cfg);
+        }
+        tracing::warn!(
+            target = "runtime_model_switch",
+            provider = %provider_id,
+            model = %model,
+            "session runtime selection points to an unknown provider profile; falling back to global defaults"
+        );
+        base
+    }
+
     fn sync_config_from_store(&mut self) -> ConfigChange {
-        let config = self.shared_config.load();
+        let config = self.effective_provider_config();
 
         self.temperature = config.default_temperature;
         let resolved_model = providers::resolve_default_model(&config);
@@ -1883,9 +1949,6 @@ impl Agent {
         }
     }
 
-    /// Resolves the optional dedicated evaluator provider for the independent
-    /// critic, mirroring the CLI path: only when `self_eval.evaluator_model` names
-    /// a model owned by a different provider than the main one.
     async fn build_critic_eval_provider(
         config: &Config,
         provider_name: &str,
@@ -1930,7 +1993,7 @@ impl Agent {
 
     pub async fn reload_provider(&mut self) -> Result<()> {
 
-        let config = self.shared_config.load_ref();
+        let config = self.effective_provider_config();
 
         let provider_name_raw = config
             .default_provider
@@ -1993,6 +2056,10 @@ impl Agent {
     pub fn signal_runtime_model_switch(&mut self, provider: String, model: String) {
         let trimmed_provider = provider.trim();
         let trimmed_model = model.trim();
+        if !trimmed_provider.is_empty() && !trimmed_model.is_empty() {
+            self.runtime_selection_override =
+                Some((trimmed_provider.to_string(), trimmed_model.to_string()));
+        }
         if !trimmed_provider.is_empty() {
             self.cached_provider = trimmed_provider.to_string();
         }
@@ -2010,7 +2077,7 @@ impl Agent {
     }
 
     pub async fn apply_runtime_config_now(&mut self) -> Result<()> {
-        let config = self.shared_config.load_ref();
+        let config = self.effective_provider_config();
         let new_provider = config
             .default_provider
             .clone()
@@ -2589,10 +2656,6 @@ impl Agent {
         }
         self.activate_deferred_tools_from_history(&expanded);
         self.history.extend(expanded);
-        // The unfinished-task marker is an in-memory cache, but the history it is
-        // derived from is durably persisted. Re-derive it here on restore so
-        // "continue" after an app restart still targets the most recent
-        // interrupted task instead of falling back to "no unfinished task".
         if tail_interrupted && !self.has_unfinished_task() {
             self.capture_unfinished_task_from(&self.history);
         }
@@ -2901,12 +2964,6 @@ impl Agent {
         }
         let recent_dropped = &dropped[slice_start..];
 
-        // First window shrink for this fingerprint: do NOT block the turn on a
-        // full summarization LLM call (up to 60s to first token). Return an
-        // instant degraded excerpt now and enqueue a background job that
-        // generates the real structured summary; the next turn swaps it in from
-        // cache. The placeholder is cached with covered=0 so it is always treated
-        // as stale until the background summary (covered=dropped_turns) lands.
         {
             let mut refresh = self
                 .rolling_summary_refresh
@@ -2925,9 +2982,6 @@ impl Agent {
                 .rolling_summary
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            // Only install the placeholder if nothing better is already cached
-            // for this fingerprint (avoid clobbering a real background summary
-            // that may have landed between the miss check and here).
             let keep_existing = guard
                 .as_ref()
                 .is_some_and(|(fp, covered, t)| *fp == fingerprint && *covered > 0 && !t.is_empty());
@@ -2942,9 +2996,6 @@ impl Agent {
         }
     }
 
-    // Instant, LLM-free stand-in for the rolling summary used on the first window
-    // shrink so the turn is not blocked while the real structured summary is
-    // generated in the background.
     fn degraded_rolling_summary_placeholder(
         recent_dropped: &[crate::providers::traits::ChatMessage],
         dropped_turns: usize,
@@ -3104,11 +3155,6 @@ impl Agent {
             }
         }
 
-        // Initialize the evolution engine for non-gateway paths too (CLI, daemon,
-        // headless). Previously it was only wired in the gateway, so experience
-        // injection / trajectory recording / reflection were silently no-ops in
-        // plain CLI sessions. `init_global` is idempotent (the gateway's richer
-        // setup, when present, just updates the config afterwards).
         if config.evolution.enabled && crate::evolution::try_global().is_none() {
             if let Err(err) = crate::evolution::init_global(
                 config.workspace_dir.clone(),
@@ -3305,11 +3351,6 @@ impl Agent {
         )
         .await?;
 
-        // Register the independent-critic context for the GUI/gateway path too.
-        // Previously only the CLI `run()` set this, so the desktop app's
-        // `self_eval` toggle silently did nothing (`global_critic_context()` was
-        // always None). Build a dedicated Arc provider for the critic since the
-        // agent's own `provider` is a Box.
         if config.self_eval.enabled {
             match providers::create_resilient_provider_with_options_async(
                 provider_name.clone(),
@@ -3459,14 +3500,6 @@ impl Agent {
 
         const MAX_CHARS: usize = 400_000;
 
-        // Preserve chronological order. Only the LEADING run of system messages
-        // (the stable system prefix) is pinned at the front; mid-conversation
-        // system reminders keep their temporal position. Hoisting every system
-        // message to the front used to strip the time anchor from mid-stream
-        // [Mode Switch] contracts (the model could treat a superseded mode as
-        // current) and rewrote the prefix each turn, defeating provider prompt
-        // caching — the exact opposite of replace_or_push_system_reminder's
-        // in-place update design.
         let lead_system_end = self
             .history
             .iter()
@@ -3696,10 +3729,6 @@ impl Agent {
     fn msg_char_len(msg: &ConversationMessage) -> usize {
         match msg {
             ConversationMessage::Chat(chat) => chat.content.len(),
-            // Tool results are the largest payloads in a transcript (a single
-            // batch can be tens of KB). Charging a flat 200 chars made the
-            // char-budget guard blind to them and let long sessions blow far
-            // past the intended cap; sum the real content instead.
             ConversationMessage::ToolResults(rows) => rows
                 .iter()
                 .map(|r| r.content.len() + r.tool_call_id.len())
@@ -4030,6 +4059,50 @@ impl Agent {
                     hook_call_name = n;
                     hook_call_args = a;
                 }
+                crate::hooks::HookResult::RequireApproval((n, a), message) => {
+                    hook_call_name = n;
+                    hook_call_args = a;
+                    let reason = message.unwrap_or_else(|| {
+                        "manual approval required by hooks.json".to_string()
+                    });
+                    let outcome = self
+                        .request_guardrail_approval(
+                            &hook_call_name,
+                            &hook_call_args,
+                            &format!("hooks.json requires approval: {reason}"),
+                        )
+                        .await;
+                    match outcome {
+                        GuardrailApprovalOutcome::Approved => {}
+                        GuardrailApprovalOutcome::Denied => {
+                            let denied = format!(
+                                "Denied by user (hooks.json requested approval: {reason})"
+                            );
+                            let result = crate::tools::ToolResult {
+                                success: false,
+                                output: denied.clone(),
+                                error: Some(denied.clone()),
+                            };
+                            runner
+                                .fire_after_tool_call(&call.name, &result, start.elapsed())
+                                .await;
+                            return ToolExecutionResult {
+                                name: call.name.clone(),
+                                output: denied,
+                                success: false,
+                                tool_call_id: call.tool_call_id.clone(),
+                            };
+                        }
+                        GuardrailApprovalOutcome::Cancelled => {
+                            return ToolExecutionResult {
+                                name: call.name.clone(),
+                                output: "[Cancelled by user]".to_string(),
+                                success: false,
+                                tool_call_id: call.tool_call_id.clone(),
+                            };
+                        }
+                    }
+                }
                 crate::hooks::HookResult::Cancel(reason) => {
                     let result = crate::tools::ToolResult {
                         success: false,
@@ -4358,9 +4431,6 @@ impl Agent {
         companion
     }
 
-    /// Resolves a `route:<hint>` pseudo-model (as produced by `classify_model`)
-    /// to the concrete model name so context-window lookups don't fall back to
-    /// the default window. Plain model names pass through unchanged.
     fn resolve_window_model(&self, model: &str) -> String {
         if let Some(hint) = model.strip_prefix("route:") {
             if let Some(real) = self.route_model_by_hint.get(hint) {
@@ -4782,7 +4852,20 @@ impl Agent {
             model
         );
         let old_model = self.model_name.clone();
+        self.runtime_selection_override = Some((provider.clone(), model.clone()));
         self.model_name = model.clone();
+        self.cached_provider = provider.clone();
+
+        tracing::info!("Model switch requires provider reload, reloading...");
+        if let Err(e) = self.reload_provider().await {
+            tracing::error!("Failed to reload provider during model switch: {}", e);
+            let _ = event_tx
+                .send(TurnEvent::Error {
+                    message: format!("Provider reload failed: {}", e),
+                })
+                .await;
+        }
+
         if old_model != self.model_name && !old_model.is_empty() && !self.model_name.is_empty() {
             let old_marker = format!("| Model: {old_model}");
             let new_marker = format!("| Model: {}", self.model_name);
@@ -4793,34 +4876,6 @@ impl Agent {
                         break;
                     }
                 }
-            }
-        }
-
-        let (new_api_key, new_api_url) = {
-            let config = self.shared_config.load();
-            (
-                config.api_key.clone().unwrap_or_default(),
-                config.api_url.clone().unwrap_or_default(),
-            )
-        };
-
-        let need_reload = provider != self.cached_provider
-            || !self.cached_api_key.constant_time_eq(&new_api_key)
-            || new_api_url != self.cached_api_url;
-
-        self.cached_provider = provider.clone();
-        self.cached_api_key = crate::security::secret_string::SecretString::new(new_api_key);
-        self.cached_api_url = new_api_url;
-
-        if need_reload {
-            tracing::info!("Model switch requires provider reload, reloading...");
-            if let Err(e) = self.reload_provider().await {
-                tracing::error!("Failed to reload provider during model switch: {}", e);
-                let _ = event_tx
-                    .send(TurnEvent::Error {
-                        message: format!("Provider reload failed: {}", e),
-                    })
-                    .await;
             }
         }
 
@@ -4846,9 +4901,6 @@ impl Agent {
         }
 
         let request_id = format!("guardrail_{}", uuid::Uuid::new_v4().simple());
-        // Register before emitting so the session-scoped bus forwarder (desktop
-        // ws turn loop) can attribute the prompt, and so an instant reply is
-        // never lost; the mailbox-aware wait survives lagged broadcasts.
         let mut rx = bus.subscribe();
         let request_payload = serde_json::json!({
             "kind": "guardrail_approval",
@@ -5028,10 +5080,6 @@ impl crate::agent::loop_::traits::ResponseCacheHook for GuiHooksFromAgent {
             return None;
         }
         self.response_cache.as_ref().map(|_| {
-            // Key on the ENTIRE non-system conversation, not just the last user
-            // message: otherwise a repeated short prompt (e.g. "continue") in
-            // different contexts within the same session collides and returns a
-            // stale answer.
             let system = messages
                 .iter()
                 .find(|m| m.role == "system")

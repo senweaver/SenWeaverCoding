@@ -16,6 +16,7 @@ pub mod computer;
 pub mod credential_routes;
 pub mod oauth_routes;
 pub mod desktop;
+pub mod editor_assist;
 pub mod evolution_routes;
 pub mod git_routes;
 #[cfg(feature = "lan-comms")]
@@ -30,6 +31,7 @@ pub mod cors;
 pub mod hardware_context;
 pub mod lifecycle;
 pub mod channel_supervisor;
+pub mod loopback_auth;
 pub mod rate_limit;
 
 pub use crate::gateway::lifecycle::{
@@ -640,7 +642,16 @@ async fn run_gateway_inner(
             config.workspace_dir.clone()
         };
         crate::workers::init_global_supervisor(workspace_root.clone());
-        crate::workers::scan_and_recover_at(&workspace_root);
+        crate::workers::scan_and_recover_with_resume(
+            &workspace_root,
+            Some(crate::workers::WorkerRunContext {
+                config: Arc::new(config.clone()),
+                live_config: Some(live_config_state.clone()),
+                parent_workspace_dir: None,
+                parent_permission_mode: None,
+                parent_cost_ctx: None,
+            }),
+        );
     }
     let svc_data_dir = config
         .config_path
@@ -742,6 +753,7 @@ async fn run_gateway_inner(
     let hooks_runner: std::sync::Arc<crate::hooks::HotHookRunner> =
         crate::hooks::HotHookRunner::empty();
     hooks_runner.rebuild(&config, &hooks_workspace_anchor);
+    crate::hooks::install_global_hooks(std::sync::Arc::clone(&hooks_runner));
     let hooks: std::sync::Arc<crate::hooks::HotHookRunner> = std::sync::Arc::clone(&hooks_runner);
 
     if let Err(err) =
@@ -1332,6 +1344,13 @@ async fn run_gateway_inner(
         .as_deref()
         .filter(|p| !p.is_empty());
 
+    if let Some(prefix) = path_prefix {
+        loopback_auth::set_path_prefix(prefix);
+    }
+    if let Some(config_dir) = config.config_path.parent() {
+        loopback_auth::persist_token_file(config_dir);
+    }
+
     let tunnel: Option<Arc<Box<dyn crate::tunnel::Tunnel>>> =
         match crate::tunnel::create_tunnel(&config.tunnel) {
             Ok(t) => t.map(Arc::new),
@@ -1849,6 +1868,18 @@ async fn run_gateway_inner(
             post(api::handle_api_session_revert_batches),
         )
         .route(
+            "/api/sessions/{id}/edit-review",
+            get(api::handle_api_session_edit_review),
+        )
+        .route(
+            "/api/sessions/{id}/edit-review/file",
+            get(api::handle_api_session_edit_review_file),
+        )
+        .route(
+            "/api/sessions/{id}/revert-files",
+            post(api::handle_api_session_revert_files),
+        )
+        .route(
             "/api/sessions/{id}/design-artifacts",
             get(desktop::routes::handle_session_design_artifacts),
         )
@@ -2253,6 +2284,22 @@ async fn run_gateway_inner(
         .route("/api/workspace/entry", delete(workspace_files::handle_workspace_delete))
         .route("/api/workspace/search", get(workspace_files::handle_workspace_search))
         .route("/api/workspace/watch", get(workspace_files::handle_workspace_watch))
+        .route(
+            "/api/editor/inline-completion",
+            post(editor_assist::handle_editor_inline_completion),
+        )
+        .route(
+            "/api/editor/inline-completion/feedback",
+            post(editor_assist::handle_editor_completion_feedback),
+        )
+        .route(
+            "/api/editor/inline-completion/stats",
+            get(editor_assist::handle_editor_completion_stats),
+        )
+        .route(
+            "/api/editor/inline-edit",
+            post(editor_assist::handle_editor_inline_edit),
+        )
         .route("/api/git/status", get(git_routes::handle_git_status))
         .route("/api/python/status", get(python_env_routes::handle_status))
         .route("/api/python/discover", get(python_env_routes::handle_discover))
@@ -2546,6 +2593,7 @@ async fn run_gateway_inner(
         ))
         .layer(desktop_cors_layer());
 
+    let state_for_loopback_auth = state.clone();
     let inner = inner
         .with_state(state)
 
@@ -2586,6 +2634,10 @@ async fn run_gateway_inner(
     } else {
         inner
     };
+    let app = app.layer(middleware::from_fn_with_state(
+        state_for_loopback_auth,
+        loopback_auth::enforce,
+    ));
 
     let tls_acceptor = match &config.gateway.tls {
         Some(tls_cfg) if tls_cfg.enabled => {
@@ -3226,8 +3278,6 @@ async fn handle_webhook(
                 });
 
             tracing::error!("Webhook provider error: {}", sanitized);
-            // Release the idempotency key so a client retry of this failed request
-            // is processed instead of being swallowed as a duplicate.
             if let Some(ref idempotency_key) = idempotency_key {
                 state.idempotency_store.forget(idempotency_key);
             }
@@ -3326,8 +3376,6 @@ async fn handle_whatsapp_message(
             }
         }
         None => {
-            // Fail closed: an unauthenticated webhook can inject arbitrary agent
-            // input, so refuse rather than process when no secret is configured.
             tracing::warn!(
                 "WhatsApp webhook rejected: no app secret configured (set the WhatsApp \
                  app secret to enable signature verification)"
@@ -4031,9 +4079,6 @@ async fn handle_pair_code(
     let require = state.pairing.require_pairing();
     let is_paired = state.pairing.is_paired();
 
-    // The pairing code is a bootstrap secret: only hand it out to loopback
-    // callers. A remote client on an exposed gateway must not be able to fetch
-    // the one-time code and pair itself, which would defeat pairing entirely.
     if !peer.ip().is_loopback() {
         return (
             StatusCode::FORBIDDEN,

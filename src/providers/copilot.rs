@@ -229,9 +229,6 @@ impl CopilotProvider {
     }
 
     fn stream_http_client(&self) -> Client {
-        // Streaming must use a read-idle timeout, not a total-request timeout:
-        // a 120s overall cap truncates long tool-heavy responses mid-stream even
-        // while tokens are still flowing.
         let mut headers = reqwest::header::HeaderMap::new();
         for (header, value) in &Self::COPILOT_HEADERS {
             if let (Ok(name), Ok(val)) = (
@@ -477,10 +474,6 @@ impl CopilotProvider {
             }
         }
 
-        // The GitHub access-token acquisition may run an interactive device-code
-        // login that polls for up to ~15 minutes. Do NOT hold `refresh_lock` across
-        // it, otherwise every concurrent Copilot request (including ones that could
-        // be served from cache) blocks on the lock for the whole login.
         let access_token = self.get_github_access_token().await?;
         let api_key_info = self.exchange_for_api_key(&access_token).await?;
         self.save_api_key_to_disk(&api_key_info).await;
@@ -492,8 +485,6 @@ impl CopilotProvider {
             .unwrap_or_else(|| DEFAULT_API.to_string());
 
         let mut cached = self.refresh_lock.lock().await;
-        // Another task may have refreshed while we were logging in; prefer its
-        // still-valid token to avoid churn.
         if let Some(existing) = cached.as_ref() {
             if chrono::Utc::now().timestamp() + 120 < existing.expires_at {
                 return Ok((existing.token.clone(), existing.api_endpoint.clone()));
@@ -516,8 +507,6 @@ impl CopilotProvider {
         let access_token_path = self.token_dir.join("access-token");
         let secrets = crate::security::secrets::SecretStore::new(&self.token_dir, true);
         if let Ok(cached) = tokio::fs::read_to_string(&access_token_path).await {
-            // decrypt() returns unprefixed values verbatim, so a pre-existing
-            // plaintext token still loads and is re-encrypted on next write.
             let decrypted = secrets.decrypt(cached.trim()).unwrap_or_else(|_| cached.clone());
             let token = decrypted.trim();
             if !token.is_empty() {
@@ -803,10 +792,6 @@ impl Provider for CopilotProvider {
     }
 
     fn supports_streaming_tool_events(&self) -> bool {
-        // stream_chat below emits native tool-call events via sse_bytes_to_events.
-        // Without declaring this, ReliableProvider drops Copilot from the streaming
-        // candidate set whenever the request carries tools, forcing non-streaming
-        // (or erroring with "No provider supports streaming tool events").
         true
     }
 

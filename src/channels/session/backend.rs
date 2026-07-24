@@ -124,12 +124,6 @@ pub trait SessionBackend: Send + Sync {
         self.load_with_tombstones(session_key).len()
     }
 
-    /// Atomically resolve one history page: total row count, the `[start, end)`
-    /// window before `before`, and the live-user-message count preceding the
-    /// window. Backends with real storage should override this to run all three
-    /// reads in ONE snapshot — composing the individual methods lets a
-    /// concurrent purge/delete between statements shift the OFFSET window and
-    /// mislabel every entry in the page.
     fn load_page_with_counts(
         &self,
         session_key: &str,

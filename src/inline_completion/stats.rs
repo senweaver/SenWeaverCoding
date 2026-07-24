@@ -34,7 +34,10 @@ impl CompletionStats {
     pub fn record(&self, ev: AcceptanceEvent) {
         let mut inner = self.inner.lock();
         match ev {
-            AcceptanceEvent::Shown => inner.shown += 1,
+            AcceptanceEvent::Shown => {
+                inner.shown += 1;
+                crate::observability::subsystem_metrics::incr_inline_completion_shown();
+            }
             AcceptanceEvent::Accepted => {
                 inner.accepted += 1;
                 crate::observability::subsystem_metrics::incr_inline_completion_accepted();
@@ -43,8 +46,14 @@ impl CompletionStats {
                 inner.accepted_partial += 1;
                 crate::observability::subsystem_metrics::incr_inline_completion_accepted();
             }
-            AcceptanceEvent::Rejected => inner.rejected += 1,
-            AcceptanceEvent::TimedOut => inner.timed_out += 1,
+            AcceptanceEvent::Rejected => {
+                inner.rejected += 1;
+                crate::observability::subsystem_metrics::incr_inline_completion_rejected();
+            }
+            AcceptanceEvent::TimedOut => {
+                inner.timed_out += 1;
+                crate::observability::subsystem_metrics::incr_inline_completion_timed_out();
+            }
         }
     }
 

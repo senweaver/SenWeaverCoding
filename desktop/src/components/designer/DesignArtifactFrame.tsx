@@ -530,7 +530,6 @@ export function DesignArtifactFrame({
         await revealInExplorer(absPath)
         return
       } catch {
-        /* fall through to download */
       }
     }
     const src = rawSrc ?? dataUrl
@@ -588,7 +587,6 @@ export function DesignArtifactFrame({
     try {
       window.getSelection()?.removeAllRanges()
     } catch {
-      /* ignore */
     }
     const startX = event.clientX
     const startY = event.clientY
@@ -607,7 +605,6 @@ export function DesignArtifactFrame({
         try {
           handle.setPointerCapture(pointerId)
         } catch {
-          /* ignore */
         }
       }
       if (moved) onLayoutDrag(unit.id, { x: originX + dx, y: originY + dy })
@@ -618,7 +615,6 @@ export function DesignArtifactFrame({
         try {
           handle.releasePointerCapture(pointerId)
         } catch {
-          /* ignore */
         }
       }
       window.removeEventListener('pointermove', onMove)

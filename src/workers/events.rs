@@ -50,8 +50,6 @@ pub struct WorkerSpec {
 
     pub model: Option<String>,
 
-    // Per-worker working directory override (e.g. an isolated git worktree).
-    // Falls back to the parent session's workspace when absent.
     #[serde(default)]
     pub workspace_dir: Option<String>,
 }
@@ -105,6 +103,12 @@ pub struct WorkerMeta {
     pub output: Option<String>,
 
     pub error: Option<String>,
+
+    #[serde(default)]
+    pub workspace_dir: Option<String>,
+
+    #[serde(default)]
+    pub resume_count: u32,
 }
 
 impl WorkerMeta {
@@ -125,6 +129,8 @@ impl WorkerMeta {
             finished_at: None,
             output: None,
             error: None,
+            workspace_dir: spec.workspace_dir.clone(),
+            resume_count: 0,
         }
     }
 

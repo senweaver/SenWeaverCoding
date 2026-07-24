@@ -218,6 +218,8 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
       totalBytes: null,
     }))
 
+    let gatewayStopped = false
+
     try {
       writeDismissedUpdateVersion(null)
       const { invoke } = await import('@tauri-apps/api/core')
@@ -256,6 +258,7 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
         }
       })
 
+      gatewayStopped = true
       await invoke('prepare_for_update_install')
       await update.install()
 
@@ -267,6 +270,14 @@ export const useUpdateStore = create<UpdateStore>((set, get) => ({
 
       await relaunch()
     } catch (error) {
+      if (gatewayStopped) {
+        try {
+          const { invoke } = await import('@tauri-apps/api/core')
+          await invoke('recover_from_failed_update')
+        } catch {
+
+        }
+      }
       set((state) => ({
         ...state,
         status: 'available',

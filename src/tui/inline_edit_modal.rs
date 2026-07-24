@@ -250,8 +250,6 @@ pub async fn run_through_runner(
         .map_err(|e| anyhow::anyhow!(e.to_string()))?;
     let (additions, deletions) = count_diff_lines(&outcome.diff);
 
-    // Record the pre-image (unstamped); OpsApplier will stamp it with the batch
-    // id + post-image below so a later revert can detect out-of-band changes.
     let history = crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace_dir);
     let snapshot_recorded = {
         let history = history.clone();
@@ -275,11 +273,6 @@ pub async fn run_through_runner(
         tokio::fs::create_dir_all(parent).await.ok();
     }
 
-    // Route the write through OpsApplier as a Replace over the whole file with
-    // `old_text = source`. This folds the conflict guard (old_text must still
-    // match on disk) and the region lock into a single atomic operation, closing
-    // the check-then-write race and giving journal + edit-history stamping for
-    // free.
     let batch = crate::apply_model::edit_op::EditBatch::new(
         crate::apply_model::edit_op::EditOrigin::InlineEdit,
     )

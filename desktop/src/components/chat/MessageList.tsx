@@ -203,12 +203,6 @@ export function buildRenderModel(
       if (isAskQuestionToolName(msg.toolName)) {
 
         flush()
-        // Answered questions render from their result; the LIVE pending one must
-        // also render — it is the only interactive surface for answering (the
-        // permission_request handler intentionally adds no separate bubble for
-        // question tools). Hiding it left the user stuck in permission_pending
-        // with no visible question. Stale unanswered questions from history
-        // (no result, not pending) stay hidden.
         if (
           toolResultMap.has(msg.toolUseId) ||
           (pendingAskToolUseId != null && msg.toolUseId === pendingAskToolUseId)
@@ -712,11 +706,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   useEffect(() => {
     if (!resolvedSessionId) return
     if (messages.length <= MAX_IN_MEMORY_MESSAGES) return
-    // Cap the in-memory window even while a turn is running (the core scenario:
-    // a multi-hour agent loop never returns to idle). Only requires the user to
-    // be pinned to the bottom (following), so trimming off-screen-top messages
-    // never disrupts what they are reading; when scrolled up to read history we
-    // skip capping. This bounds both memory and the O(n) buildRenderModel cost.
     if (!atBottomRef.current || !followRef.current) return
     if (historyLoadingOlder) return
     useChatStore.getState().capMessageWindow(resolvedSessionId)
@@ -883,11 +872,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       firstKey !== undefined &&
       firstKey !== prevFirstKey
     ) {
-      // Anchor on the FIRST key common to both lists, not just the two head
-      // keys: when a prepended page merges with the window's leading
-      // "explored" group, the group id changes on both sides and head-only
-      // comparison found no match, skipping compensation — the viewport then
-      // visibly jumped by the prepended amount.
       const prevIndexByKey = new Map<string, number>()
       for (let i = 0; i < prevKeys.length; i++) {
         const k = prevKeys[i]
@@ -935,11 +919,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
 
   const rewindIndexByMsgId = useMemo(() => {
     const map = new Map<string, number>()
-    // Backend userMessageIndex is absolute over all live user messages. History
-    // entries carry it; optimistic live messages don't. Live messages must
-    // CONTINUE from the last numbered history index — a counter that ignored
-    // numbered entries mapped the first live message of the run to index 0 and
-    // a rewind/edit on it truncated the whole conversation.
     let counter = -1
     for (const item of listRenderItems) {
       if (item.kind !== 'message') continue

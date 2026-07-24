@@ -41,8 +41,10 @@ impl SessionWriteLock {
                             lock = %lock_path.display(),
                             "stale session write lock detected; taking over"
                         );
-                        let _ = std::fs::remove_file(lock_path);
-                        continue;
+                        if let Some(lock) = Self::atomic_takeover(lock_path)? {
+                            return Ok(Some(lock));
+                        }
+                        return Ok(None);
                     }
                     return Ok(None);
                 }
@@ -50,6 +52,45 @@ impl SessionWriteLock {
             }
         }
         Ok(None)
+    }
+
+    fn atomic_takeover(lock_path: &Path) -> std::io::Result<Option<Self>> {
+        let contents = lock_contents();
+        let tmp = lock_path.with_extension(format!(
+            "take.{}.{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_nanos())
+                .unwrap_or(0)
+        ));
+        {
+            let mut f = OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .open(&tmp)?;
+            f.write_all(contents.as_bytes())?;
+            let _ = f.sync_all();
+        }
+        if let Err(e) = std::fs::rename(&tmp, lock_path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e);
+        }
+        let we_won = read_lock_pid(lock_path) == Some(std::process::id());
+        if we_won {
+            Ok(Some(Self {
+                path: lock_path.to_path_buf(),
+                touch_failures: AtomicU64::new(0),
+                degraded: AtomicBool::new(false),
+            }))
+        } else {
+            tracing::warn!(
+                lock = %lock_path.display(),
+                "lost stale-lock takeover race to another process; backing off"
+            );
+            Ok(None)
+        }
     }
 
     pub fn touch(&self) {

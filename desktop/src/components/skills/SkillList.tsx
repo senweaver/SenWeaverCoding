@@ -121,7 +121,6 @@ export function SkillList() {
           unlisten = off
         }
       } catch {
-        // noop: not running inside Tauri webview
       }
     })
     return () => {

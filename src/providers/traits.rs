@@ -303,7 +303,7 @@ impl StreamChunk {
     }
 
     pub fn with_token_estimate(mut self) -> Self {
-        self.token_count = self.delta.len().div_ceil(4);
+        self.token_count = estimate_content_tokens(&self.delta).max(1);
         self
     }
 }
@@ -492,10 +492,6 @@ pub trait Provider: Send + Sync {
         crate::providers::sanitize::ProviderKind::OpenAi
     }
 
-    /// Whether this provider's wire serializer natively destructures the
-    /// `{content, reasoning_content}` assistant envelope into structured fields.
-    /// Providers that don't (the default) get the envelope flattened to plain
-    /// content before send so the raw JSON never leaks into the transcript.
     fn consumes_reasoning_envelope(&self) -> bool {
         false
     }
@@ -737,12 +733,32 @@ pub fn estimate_message_tokens(message: &ChatMessage) -> usize {
     role_overhead.saturating_add(content_tokens)
 }
 
-/// Raw (uncalibrated) char-class token estimate. This is the single base
-/// formula shared by the wire-level estimators here and the budget layer's
-/// calibrated estimator (`agent::token::budget`); the online calibration factor
-/// is learned against THIS base, so any consumer that applies the factor must
-/// use this same base or the correction lands on the wrong scale.
 pub fn estimate_content_tokens(content: &str) -> usize {
+    const MEMO_MIN_LEN: usize = 2048;
+    const MEMO_CAP: usize = 4096;
+    if content.len() < MEMO_MIN_LEN {
+        return estimate_content_tokens_uncached(content);
+    }
+    use std::hash::{Hash, Hasher};
+    static MEMO: std::sync::LazyLock<
+        parking_lot::Mutex<std::collections::HashMap<u64, usize>>,
+    > = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    content.hash(&mut hasher);
+    let key = hasher.finish();
+    if let Some(cached) = MEMO.lock().get(&key) {
+        return *cached;
+    }
+    let estimate = estimate_content_tokens_uncached(content);
+    let mut memo = MEMO.lock();
+    if memo.len() >= MEMO_CAP {
+        memo.clear();
+    }
+    memo.insert(key, estimate);
+    estimate
+}
+
+fn estimate_content_tokens_uncached(content: &str) -> usize {
     let mut ascii_chars = 0_usize;
     let mut wide_chars = 0_usize;
     for ch in content.chars() {
@@ -758,6 +774,48 @@ pub fn estimate_content_tokens(content: &str) -> usize {
         .saturating_add(wide_chars)
 }
 
+pub fn hash_json_value<H: std::hash::Hasher>(
+    value: &serde_json::Value,
+    hasher: &mut H,
+    depth: usize,
+) {
+    use std::hash::Hash;
+    if depth >= 96 {
+        0xdeu8.hash(hasher);
+        return;
+    }
+    match value {
+        serde_json::Value::Null => 0u8.hash(hasher),
+        serde_json::Value::Bool(b) => {
+            1u8.hash(hasher);
+            b.hash(hasher);
+        }
+        serde_json::Value::Number(n) => {
+            2u8.hash(hasher);
+            n.to_string().hash(hasher);
+        }
+        serde_json::Value::String(s) => {
+            3u8.hash(hasher);
+            s.hash(hasher);
+        }
+        serde_json::Value::Array(arr) => {
+            4u8.hash(hasher);
+            arr.len().hash(hasher);
+            for v in arr {
+                hash_json_value(v, hasher, depth + 1);
+            }
+        }
+        serde_json::Value::Object(map) => {
+            5u8.hash(hasher);
+            map.len().hash(hasher);
+            for (k, v) in map {
+                k.hash(hasher);
+                hash_json_value(v, hasher, depth + 1);
+            }
+        }
+    }
+}
+
 pub fn estimate_tool_specs_tokens(tools: &[crate::tools::ToolSpec]) -> usize {
     use std::hash::{Hash, Hasher};
     const MAX_CACHED_TOOLSETS: usize = 32;
@@ -771,7 +829,8 @@ pub fn estimate_tool_specs_tokens(tools: &[crate::tools::ToolSpec]) -> usize {
     tools.len().hash(&mut hasher);
     for tool in tools {
         tool.name.hash(&mut hasher);
-        tool.description.len().hash(&mut hasher);
+        tool.description.hash(&mut hasher);
+        hash_json_value(&tool.parameters, &mut hasher, 0);
     }
     let key = hasher.finish();
     if let Some(cached_value) = CACHE.lock().get(&key) {
@@ -925,9 +984,6 @@ pub fn enforce_context_budget_native_with_window(
 
     let mut out: Vec<ChatMessage> = leading_system;
     if dropped_groups > 0 {
-        // Emit an explicit marker so the model knows older turns were elided to fit
-        // the context window, rather than silently presenting a truncated history as
-        // if it were complete.
         out.push(ChatMessage::system(format!(
             "[Context trimmed: {dropped_groups} older conversation turn(s) were dropped to fit \
              the model context window. Earlier history is incomplete; ask the user to restate \

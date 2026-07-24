@@ -103,7 +103,7 @@ impl<'a> PolicyBundle<'a> {
             provider_name,
             model,
             temperature: 0.7,
-            silent: matches!(origin, LoopOrigin::Delegated),
+            silent: matches!(origin, LoopOrigin::Delegated | LoopOrigin::Gui),
             approval: None,
             channel_name: match origin {
                 LoopOrigin::Gui => "gui",

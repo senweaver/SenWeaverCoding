@@ -35,9 +35,6 @@ export type TerminalTab = {
   status: TerminalTabStatus
   cwd?: string
   sessionId?: number
-  // True once the user has typed into this terminal. Auto-cwd sync only writes
-  // `cd` into pristine (never-typed) terminals so it can never inject keystrokes
-  // into a running vim/REPL/dev-server.
   interacted?: boolean
 }
 
@@ -268,10 +265,6 @@ export const useTerminalPanelStore = create<State>((set, get) => ({
   },
 
   removeAgentMirrorForSession: (sessionId) => {
-    // Mirror tabs were permanent (no close button, one per session ever
-    // activated) — each an xterm instance with a 4k-line scrollback that
-    // outlived its chat tab. Drop the tab and its buffers when the chat
-    // session closes.
     const tabId = mirrorTabIdForSession(sessionId)
     const key = bucketKey(sessionId)
     mirrorBuffersBySession.delete(key)

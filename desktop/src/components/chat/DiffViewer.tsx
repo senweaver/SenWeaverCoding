@@ -2,8 +2,9 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { memo } from 'react'
+import { memo, useMemo, useState } from 'react'
 import ReactDiffViewer, { DiffMethod } from 'react-diff-viewer-continued'
+import { diffLines } from 'diff'
 import { Highlight, type PrismTheme } from 'prism-react-renderer'
 import { CopyButton } from '../shared/CopyButton'
 
@@ -115,18 +116,37 @@ const diffStyles = {
   },
 }
 
+const HUGE_DIFF_LINES = 3000
+const HUGE_DIFF_PREVIEW_LINES = 400
+
 function DiffViewerImpl({ filePath, oldString, newString }: Props) {
   const language = inferLanguage(filePath)
+  const [showFull, setShowFull] = useState(false)
 
   const oldLines = oldString.split('\n')
   const newLines = newString.split('\n')
-  const additions = newLines.filter((l, i) => l !== (oldLines[i] ?? null)).length
-  const deletions = oldLines.filter((l, i) => l !== (newLines[i] ?? null)).length
+  const { additions, deletions } = useMemo(() => {
+    let added = 0
+    let removed = 0
+    for (const part of diffLines(oldString, newString)) {
+      if (part.added) added += part.count ?? 0
+      else if (part.removed) removed += part.count ?? 0
+    }
+    return { additions: added, deletions: removed }
+  }, [oldString, newString])
   const showCounts = additions > 0 || deletions > 0
 
+  const totalLines = oldLines.length + newLines.length
   const isLargeDiff =
-    oldString.length + newString.length > 20000 ||
-    oldLines.length + newLines.length > 600
+    oldString.length + newString.length > 20000 || totalLines > 600
+  const isHugeDiff = totalLines > HUGE_DIFF_LINES
+  const truncate = isHugeDiff && !showFull
+  const renderedOld = truncate
+    ? oldLines.slice(0, HUGE_DIFF_PREVIEW_LINES).join('\n')
+    : oldString
+  const renderedNew = truncate
+    ? newLines.slice(0, HUGE_DIFF_PREVIEW_LINES).join('\n')
+    : newString
 
   return (
     <div className="overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-outline-variant)]/50 bg-[var(--color-surface-container-low)]">
@@ -157,8 +177,8 @@ function DiffViewerImpl({ filePath, oldString, newString }: Props) {
       {}
       <div className="max-h-[400px] overflow-auto">
         <ReactDiffViewer
-          oldValue={oldString}
-          newValue={newString}
+          oldValue={renderedOld}
+          newValue={renderedNew}
           splitView={false}
           compareMethod={isLargeDiff ? DiffMethod.LINES : DiffMethod.WORDS}
           renderContent={isLargeDiff ? undefined : (str) => highlightSyntax(str, language)}
@@ -167,6 +187,15 @@ function DiffViewerImpl({ filePath, oldString, newString }: Props) {
           useDarkTheme={document.documentElement.getAttribute('data-theme') === 'dark'}
         />
       </div>
+      {truncate && (
+        <button
+          type="button"
+          onClick={() => setShowFull(true)}
+          className="w-full border-t border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container)] px-3 py-1.5 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:bg-[var(--color-surface-container-high)] hover:text-[var(--color-text-primary)]"
+        >
+          {`… ${totalLines - HUGE_DIFF_PREVIEW_LINES * 2} more lines — show full diff`}
+        </button>
+      )}
     </div>
   )
 }

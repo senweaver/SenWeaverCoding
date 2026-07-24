@@ -39,6 +39,8 @@ pub struct WorkerHandle {
     pub started_at: chrono::DateTime<chrono::Utc>,
 
     pub finished_at: Arc<ArcSwap<Option<chrono::DateTime<chrono::Utc>>>>,
+
+    resume_count: std::sync::atomic::AtomicU32,
 }
 
 impl WorkerHandle {
@@ -67,7 +69,17 @@ impl WorkerHandle {
             waiters: Arc::new(Mutex::new(Vec::new())),
             started_at: chrono::Utc::now(),
             finished_at: Arc::new(ArcSwap::from_pointee(None)),
+            resume_count: std::sync::atomic::AtomicU32::new(0),
         }
+    }
+
+    pub fn resume_count(&self) -> u32 {
+        self.resume_count.load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_resume_count(&self, count: u32) {
+        self.resume_count
+            .store(count, std::sync::atomic::Ordering::Relaxed);
     }
 
     pub fn status(&self) -> WorkerStatus {
@@ -171,7 +183,12 @@ impl WorkerHandle {
         }
     }
 
-    pub fn to_meta(&self, prompt: &str, context: Option<&str>) -> WorkerMeta {
+    pub fn to_meta(
+        &self,
+        prompt: &str,
+        context: Option<&str>,
+        workspace_dir: Option<&str>,
+    ) -> WorkerMeta {
         let result_snapshot = self.result_snapshot();
         WorkerMeta {
             worker_id: self.worker_id.clone(),
@@ -188,6 +205,8 @@ impl WorkerHandle {
             finished_at: self.finished_at(),
             output: result_snapshot.as_ref().map(|r| r.output.clone()),
             error: result_snapshot.as_ref().and_then(|r| r.error.clone()),
+            workspace_dir: workspace_dir.map(|s| s.to_string()),
+            resume_count: self.resume_count(),
         }
     }
 }

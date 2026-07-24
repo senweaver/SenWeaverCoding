@@ -9,6 +9,7 @@ pub struct SearchHit {
     pub path: PathBuf,
     pub line: u32,
     pub snippet: String,
+    pub end_line: Option<u32>,
 }
 
 pub trait IncrementalIndex: Send + Sync {
@@ -31,6 +32,54 @@ pub trait IncrementalIndex: Send + Sync {
     fn size_on_disk_bytes(&self) -> u64 {
         0
     }
+
+    fn mark_walk_fresh(&self) {}
+}
+
+pub fn build_gitignore_set(root: &Path) -> Option<globset::GlobSet> {
+    let body = std::fs::read_to_string(root.join(".gitignore")).ok()?;
+    let mut builder = globset::GlobSetBuilder::new();
+    let mut added = 0usize;
+    for raw in body.lines() {
+        let line = raw.trim();
+        if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+            continue;
+        }
+        let trimmed = line.trim_start_matches('/');
+        let base = trimmed.trim_end_matches('/');
+        if base.is_empty() {
+            continue;
+        }
+        let patterns = if line.ends_with('/') || !base.contains('.') {
+            vec![
+                base.to_string(),
+                format!("{base}/**"),
+                format!("**/{base}"),
+                format!("**/{base}/**"),
+            ]
+        } else {
+            vec![base.to_string(), format!("**/{base}")]
+        };
+        for p in patterns {
+            if let Ok(glob) = globset::GlobBuilder::new(&p)
+                .literal_separator(false)
+                .build()
+            {
+                builder.add(glob);
+                added += 1;
+            }
+        }
+        if added > 512 {
+            break;
+        }
+    }
+    builder.build().ok()
+}
+
+pub fn path_is_gitignored(set: &globset::GlobSet, root: &Path, path: &Path) -> bool {
+    let rel = path.strip_prefix(root).unwrap_or(path);
+    let rel_str = rel.to_string_lossy().replace('\\', "/");
+    set.is_match(rel_str.as_str())
 }
 
 pub mod heuristic {
@@ -93,7 +142,17 @@ pub mod heuristic {
         ids: HashMap<PathBuf, u32>,
         files: HashMap<u32, IndexedFile>,
         postings: HashMap<String, HashSet<u32>>,
+        trigram_postings: HashMap<[u8; 3], HashSet<u32>>,
         last_walk: Option<Instant>,
+    }
+
+    fn for_each_ascii_trigram(token: &str, mut f: impl FnMut([u8; 3])) {
+        if !token.is_ascii() || token.len() < 3 {
+            return;
+        }
+        for w in token.as_bytes().windows(3) {
+            f([w[0], w[1], w[2]]);
+        }
     }
 
     struct IndexedFile {
@@ -240,7 +299,7 @@ pub mod heuristic {
 
         fn ignore_set(&self) -> Option<&globset::GlobSet> {
             self.ignore_set
-                .get_or_init(|| build_gitignore_set(&self.root))
+                .get_or_init(|| super::build_gitignore_set(&self.root))
                 .as_ref()
         }
 
@@ -304,6 +363,14 @@ pub mod heuristic {
                             state.postings.remove(token);
                         }
                     }
+                    for_each_ascii_trigram(token, |key| {
+                        if let Some(set) = state.trigram_postings.get_mut(&key) {
+                            set.remove(&id);
+                            if set.is_empty() {
+                                state.trigram_postings.remove(&key);
+                            }
+                        }
+                    });
                 }
             }
         }
@@ -317,6 +384,13 @@ pub mod heuristic {
                     .entry(token.clone())
                     .or_default()
                     .insert(id);
+                for_each_ascii_trigram(token, |key| {
+                    state
+                        .trigram_postings
+                        .entry(key)
+                        .or_default()
+                        .insert(id);
+                });
             }
             state.files.insert(
                 id,
@@ -448,6 +522,33 @@ pub mod heuristic {
             let mut matched: HashMap<u32, u32> = HashMap::new();
             for term in terms {
                 let ids: HashSet<u32> = match term {
+                    QueryTerm::Ascii(t) if t.is_ascii() && t.len() >= 3 => {
+                        let mut acc: Option<HashSet<u32>> = None;
+                        let mut missing = false;
+                        for w in t.as_bytes().windows(3) {
+                            let key = [w[0], w[1], w[2]];
+                            match state.trigram_postings.get(&key) {
+                                Some(set) => match acc.as_mut() {
+                                    Some(cur) => {
+                                        cur.retain(|id| set.contains(id));
+                                        if cur.is_empty() {
+                                            break;
+                                        }
+                                    }
+                                    None => acc = Some(set.clone()),
+                                },
+                                None => {
+                                    missing = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if missing {
+                            HashSet::new()
+                        } else {
+                            acc.unwrap_or_default()
+                        }
+                    }
                     QueryTerm::Ascii(t) => {
                         let mut out: HashSet<u32> = HashSet::new();
                         for (token, posting) in state.postings.iter() {
@@ -510,46 +611,6 @@ pub mod heuristic {
             let entry = state.files.get(&id)?;
             Some((path, entry.mtime_secs, Arc::clone(&entry.lines)))
         }
-    }
-
-    fn build_gitignore_set(root: &Path) -> Option<globset::GlobSet> {
-        let body = std::fs::read_to_string(root.join(".gitignore")).ok()?;
-        let mut builder = globset::GlobSetBuilder::new();
-        let mut added = 0usize;
-        for raw in body.lines() {
-            let line = raw.trim();
-            if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
-                continue;
-            }
-            let trimmed = line.trim_start_matches('/');
-            let base = trimmed.trim_end_matches('/');
-            if base.is_empty() {
-                continue;
-            }
-            let patterns = if line.ends_with('/') || !base.contains('.') {
-                vec![
-                    base.to_string(),
-                    format!("{base}/**"),
-                    format!("**/{base}"),
-                    format!("**/{base}/**"),
-                ]
-            } else {
-                vec![base.to_string(), format!("**/{base}")]
-            };
-            for p in patterns {
-                if let Ok(glob) = globset::GlobBuilder::new(&p)
-                    .literal_separator(false)
-                    .build()
-                {
-                    builder.add(glob);
-                    added += 1;
-                }
-            }
-            if added > 512 {
-                break;
-            }
-        }
-        builder.build().ok()
     }
 
     impl Search {
@@ -640,6 +701,7 @@ pub mod heuristic {
                             path: path.clone(),
                             line: idx as u32 + 1,
                             snippet: raw.trim().to_string(),
+                            end_line: None,
                         },
                         score,
                     });
@@ -693,6 +755,13 @@ pub mod heuristic {
             focus: &[PathBuf],
         ) -> io::Result<Vec<SearchHit>> {
             self.search_inner(query, limit, focus)
+        }
+
+        fn mark_walk_fresh(&self) {
+            let mut state = self.state.lock();
+            if state.last_walk.is_some() {
+                state.last_walk = Some(Instant::now());
+            }
         }
     }
 

@@ -180,9 +180,6 @@ pub struct RpcServer {
     ctx: Arc<RpcCtx>,
 }
 
-/// True when the bind host resolves to loopback only. Treats the common textual
-/// forms as loopback and parses literal IPs; a hostname that isn't obviously
-/// loopback is treated as non-loopback (fail-closed).
 fn host_is_loopback(host: &str) -> bool {
     let h = host.trim();
     if h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1" || h == "::1" {
@@ -529,10 +526,6 @@ impl RpcServer {
         let token_present = crate::util::get_runtime_var("SEN_RPC_TOKEN")
             .map(|s| !s.trim().is_empty())
             .unwrap_or(false);
-        // Fail closed: binding a non-loopback host without a token would expose
-        // read methods (session/list leaks every workspace path, memory/recall,
-        // blackboard/get, system/info) to the network. Require a token to bind
-        // publicly.
         if !host_is_loopback(host) && !token_present {
             anyhow::bail!(
                 "RPC HTTP transport refused: host '{host}' is not loopback and SEN_RPC_TOKEN is \
@@ -555,10 +548,6 @@ impl RpcServer {
             headers: axum::http::HeaderMap,
             Json(body): Json<serde_json::Value>,
         ) -> impl IntoResponse {
-            // Bearer auth: when SEN_RPC_TOKEN is configured, every request must
-            // present it. The RPC HTTP transport exposes mutating methods
-            // (tool/exec, session/prompt), so it must not be open by default when
-            // a token is set.
             if let Some(expected) = crate::util::get_runtime_var("SEN_RPC_TOKEN")
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())

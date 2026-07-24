@@ -166,11 +166,6 @@ impl Tool for CronUpdateTool {
                         }
                     }
                 },
-                "approved": {
-                    "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk shell commands in supervised mode",
-                    "default": false
-                }
             },
             "required": ["job_id", "patch"]
         })
@@ -217,10 +212,7 @@ impl Tool for CronUpdateTool {
                 });
             }
         };
-        let approved = args
-            .get("approved")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        let approved = crate::agent::loop_::current_tool_runtime_approved();
 
         if let Some(blocked) = self.enforce_mutation_allowed("cron_update") {
             return Ok(blocked);

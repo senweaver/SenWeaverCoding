@@ -11,8 +11,6 @@ use serde::{Deserialize, Serialize};
 use super::backend::{CheckpointBackend, CheckpointMeta};
 use super::super::traits::{Artifact, TranscriptEntry};
 
-// Cap persisted transcript entries so a long flow can't bloat the checkpoint
-// JSON; the most recent entries are the ones a post-restart rewind needs.
 const MAX_PERSISTED_TRANSCRIPT_ENTRIES: usize = 200;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -21,8 +19,6 @@ pub struct Checkpoint {
     pub label: String,
     pub artifacts: Vec<Artifact>,
 
-    // Persisted (bounded) so restoring a checkpoint after a restart recovers
-    // the flow transcript, not just the artifacts.
     #[serde(default)]
     pub transcript: Vec<TranscriptEntry>,
 

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: MIT
 
-import { getBaseUrl } from './client'
+import { getBaseUrl, withAuthToken } from './client'
 import {
   useTerminalPanelStore,
   type AgentMirrorEvent,
@@ -24,7 +24,7 @@ export function startBackgroundShellMirror(): void {
 }
 
 function connect() {
-  const url = `${getBaseUrl()}/api/background-shell/stream`
+  const url = withAuthToken(`${getBaseUrl()}/api/background-shell/stream`)
   let source: EventSource
   try {
     source = new window.EventSource(url, { withCredentials: false })

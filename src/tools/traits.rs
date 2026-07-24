@@ -64,7 +64,13 @@ pub trait Tool: Send + Sync {
         let mut spec = self.spec();
         if let Some(descs) = descriptions {
             if let Some(d) = descs.get(self.name()) {
-                spec.description = d.to_string();
+                let localized = d.trim();
+                let builtin = spec.description.trim();
+                if !localized.is_empty()
+                    && (builtin.is_empty() || localized.chars().count() * 2 >= builtin.chars().count())
+                {
+                    spec.description = d.to_string();
+                }
             }
         }
         spec

@@ -365,9 +365,6 @@ pub fn flatten_reasoning_envelopes_for_wire(messages: Vec<ChatMessage>) -> Vec<C
             out.push(msg);
             continue;
         }
-        // Envelopes carrying tool_calls are already destructured by every wire
-        // (tool_calls parsed, plain content extracted, reasoning dropped), so they
-        // never leak. Only the reasoning-only envelope needs flattening here.
         let has_tool_calls = obj
             .get("tool_calls")
             .and_then(Value::as_array)

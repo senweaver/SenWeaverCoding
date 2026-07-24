@@ -16,6 +16,7 @@ pub mod translators;
 
 pub mod rpc;
 
+pub mod os_lock;
 pub mod resource_lock;
 pub mod run_state;
 pub mod turn_feed;
@@ -223,11 +224,11 @@ impl AgentSession {
             })
             .into_inner();
 
-        let turn_result = {
+        let (turn_result, tokens_used) = {
             use futures_util::FutureExt as _;
             let mut guard = agent.lock().await;
             guard.reset_cancel();
-            match std::panic::AssertUnwindSafe(guard.turn_streamed(input, tx))
+            let result = match std::panic::AssertUnwindSafe(guard.turn_streamed(input, tx))
                 .catch_unwind()
                 .await
             {
@@ -236,14 +237,8 @@ impl AgentSession {
                     "internal error recovered: {}",
                     crate::util::describe_panic(&*panic)
                 )),
-            }
-        };
-
-        let _ = bridge_task.await;
-
-        let tokens_used = if let Some(ref agent) = self.agent {
-            let guard = agent.lock().await;
-            guard
+            };
+            let tokens = guard
                 .last_usage()
                 .map(|usage| {
                     usage
@@ -251,10 +246,11 @@ impl AgentSession {
                         .unwrap_or(0)
                         .saturating_add(usage.output_tokens.unwrap_or(0))
                 })
-                .unwrap_or(0)
-        } else {
-            0
+                .unwrap_or(0);
+            (result, tokens)
         };
+
+        let _ = bridge_task.await;
 
         let turn_error = turn_result.as_ref().err().cloned();
         let final_output = match turn_result {
@@ -342,10 +338,6 @@ fn fallback_tool_call_id(name: &str) -> String {
     format!("{name}_{}", uuid::Uuid::new_v4())
 }
 
-/// Pairs a `ToolCall` with its `ToolResult` when the provider did not supply a
-/// `tool_call_id`. Without this, each side would independently mint a random id
-/// and the pairing would be permanently broken, producing orphaned tool
-/// records that trip API 400s on replay/wire conversion.
 #[derive(Default)]
 pub struct FallbackToolIdPairer {
     by_name: std::collections::HashMap<String, std::collections::VecDeque<String>>,

@@ -110,7 +110,16 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
             config.workspace_dir.clone()
         };
         crate::workers::init_global_supervisor(workspace_root.clone());
-        crate::workers::scan_and_recover_at(&workspace_root);
+        crate::workers::scan_and_recover_with_resume(
+            &workspace_root,
+            Some(crate::workers::WorkerRunContext {
+                config: std::sync::Arc::new(config.clone()),
+                live_config: None,
+                parent_workspace_dir: None,
+                parent_permission_mode: None,
+                parent_cost_ctx: None,
+            }),
+        );
     }
     crate::event_bus::integration::publish_system(
         "daemon",
@@ -533,9 +542,6 @@ async fn run_heartbeat_worker(config: Config) -> Result<()> {
                 None => task_prompt,
             };
             let temp = config.default_temperature;
-            // Bound each heartbeat task so a single hung provider call cannot
-            // freeze the whole periodic loop indefinitely (deadman only alerts, it
-            // does not unblock a stuck await).
             let heartbeat_task_timeout = std::time::Duration::from_secs(
                 u64::from(config.heartbeat.deadman_timeout_minutes)
                     .saturating_mul(60)

@@ -376,8 +376,6 @@ type ChatStore = {
   resetDebugPiiStats: (sessionId: string) => void
 }
 
-// Keep in sync with the backend's question-tool set (gateway ws desktop
-// treats ask_question | ask_user | AskQuestion | AskUserQuestion as questions).
 export const ASK_QUESTION_TOOL_NAMES = new Set([
   'ask_question',
   'ask_user',
@@ -1380,20 +1378,10 @@ const stuckReconcileDeferTimers = new Map<string, ReturnType<typeof setTimeout>>
 
 const resyncingSessions = new Set<string>()
 
-// Last time a broadcast `session_history_changed` triggered a history reload,
-// per session. The initiating client reloads on its own HTTP response AND
-// receives the broadcast; this debounce collapses the duplicate fetch.
 const historyChangedReloadAt = new Map<string, number>()
 
-// Sessions that reconnected while a turn was still running: stream frames sent
-// during the outage are gone from the live feed, so the locally accumulated
-// text has a hole. Resync from persisted history once the turn ends.
 const dirtyMidTurnSessions = new Set<string>()
 
-// Bumped whenever loadHistory/reloadHistory replaces a session's message
-// window. An in-flight loadOlderHistory captured against an older generation
-// must discard its result: prepending a stale page under a fresh window leaves
-// a permanent gap in the middle and rolls the pagination cursor backwards.
 const historyGenerationBySession = new Map<string, number>()
 const bumpHistoryGeneration = (sessionId: string) => {
   historyGenerationBySession.set(
@@ -1402,7 +1390,6 @@ const bumpHistoryGeneration = (sessionId: string) => {
   )
 }
 
-// Cap-triggered newest-page reloads currently in flight (all-live-id windows).
 const capReloadInFlight = new Set<string>()
 
 function drainQueuedForSession(sessionId: string): void {
@@ -1664,6 +1651,13 @@ function purgeSessionEphemera(sessionId: string): void {
   runtimeSyncRetrySessions.delete(sessionId)
   elapsedLastTickAtBySession.delete(sessionId)
   pendingDesignCanvasReveal.delete(sessionId)
+  historyChangedReloadAt.delete(sessionId)
+  historyGenerationBySession.delete(sessionId)
+  capReloadInFlight.delete(sessionId)
+  dirtyMidTurnSessions.delete(sessionId)
+  void import('./reviewPanelStore').then((m) => {
+    m.useReviewPanelStore.getState().purgeSession(sessionId)
+  })
 }
 
 function hasPendingThinking(sessionId: string): boolean {
@@ -1754,27 +1748,36 @@ function appendAssistantTextMessage(
   content: string,
   timestamp: number,
   model?: string,
+  options?: { dedupEcho?: boolean },
 ): UIMessage[] {
   if (!content.trim()) return messages
 
   const last = messages[messages.length - 1]
   if (last?.type === 'assistant_text') {
     const prevContent = last.content
-    if (prevContent === content) {
-      return messages
-    }
-    if (prevContent.endsWith(content) && content.length > 0) {
-      return messages
-    }
-    let mergedContent: string
-    if (content.startsWith(prevContent) && prevContent.length > 0) {
-      mergedContent = content
-    } else {
-      mergedContent = prevContent + content
+    if (options?.dedupEcho) {
+      if (prevContent === content) {
+        return messages
+      }
+      if (prevContent.endsWith(content) && content.length > 0) {
+        return messages
+      }
+      let mergedContent: string
+      if (content.startsWith(prevContent) && prevContent.length > 0) {
+        mergedContent = content
+      } else {
+        mergedContent = prevContent + content
+      }
+      const merged: UIMessage = {
+        ...last,
+        content: mergedContent,
+        ...(model ?? last.model ? { model: model ?? last.model } : {}),
+      }
+      return [...messages.slice(0, -1), merged]
     }
     const merged: UIMessage = {
       ...last,
-      content: mergedContent,
+      content: prevContent + content,
       ...(model ?? last.model ? { model: model ?? last.model } : {}),
     }
     return [...messages.slice(0, -1), merged]
@@ -1790,6 +1793,10 @@ function appendAssistantTextMessage(
       ...(model ? { model } : {}),
     },
   ]
+}
+
+function echoDedupOptions(sessionId: string): { dedupEcho: boolean } {
+  return { dedupEcho: dirtyMidTurnSessions.has(sessionId) }
 }
 
 function updateSessionIn(
@@ -2209,9 +2216,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               .getState()
               .running.has(sessionId)
             if (stillRunning) {
-              // Frames emitted during the outage were never received; the live
-              // feed only resumes from now. Mark for a history resync at turn
-              // end so the final message isn't silently stitched around a gap.
               dirtyMidTurnSessions.add(sessionId)
               get().reconcileStuckSession(sessionId)
             } else {
@@ -2254,11 +2258,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       mode: useSettingsStore.getState().permissionMode,
     })
 
-    // Re-assert the session's coding mode on (re)connect. Only permission mode was
-    // replayed before, so after a gateway restart the backend could fall back to
-    // the default agent mode while the UI still showed Plan/Ask (read-only) — a
-    // write could then execute despite the UI. Replaying the pinned mode keeps
-    // the two ends in sync.
     {
       const pinnedMode = get().sessionCodingMode[sessionId]
       if (pinnedMode) {
@@ -2342,6 +2341,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
     clearSessionStreamBuffers(sessionId)
     purgeSessionEphemera(sessionId)
+    void import('./workspaceQueueStore').then((m) =>
+      m.purgeQueueEphemeraForSession(sessionId),
+    )
     wsManager.disconnect(sessionId)
     set((s) => {
       const { [sessionId]: _, ...rest } = s.sessions
@@ -2430,10 +2432,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         .getState()
         .running.has(sessionId)
       const ownQueueLen = queueState.getQueueForSession(sessionId).length
-      // A pending approval implies the turn is still running even if the SSE
-      // run-state mirror is stale (outage / pre-snapshot): taking the direct
-      // path would silently discard pendingPermission without answering it,
-      // leaving the backend tool blocked until timeout.
       const approvalPending = !!get().sessions[sessionId]?.pendingPermission
       if (
         sameSessionRunning ||
@@ -2441,12 +2439,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ownQueueLen > 0 ||
         resyncingSessions.has(sessionId)
       ) {
-        // Queued messages live ONLY in the workspace queue (rendered by
-        // WorkspaceQueuePanel below the composer, Cursor-style). Do NOT append
-        // a transcript bubble here: doing so made the message look already
-        // sent while it was still waiting, and the later drain then "seamlessly"
-        // continued from a bubble that had appeared minutes earlier. The user
-        // bubble is appended when the message actually starts running.
         const passthroughOptions = options
           ? {
               displayContent: options.displayContent,
@@ -2490,7 +2482,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const pendingAssistantText = `${session.streamingText}${bufferedDelta}`
 
       const newMessages = pendingAssistantText.trim()
-        ? appendAssistantTextMessage(session.messages, pendingAssistantText, Date.now())
+        ? appendAssistantTextMessage(session.messages, pendingAssistantText, Date.now(), undefined, echoDedupOptions(sessionId))
         : [...session.messages]
       if (!isMemberSession && allTasksDone) {
         newMessages.push({
@@ -2509,9 +2501,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ...designRefFieldsFrom(options?.designGeneration),
         ...(isMemberSession ? { pending: true } : {}),
       }
-      // Queued messages are no longer mirrored into the transcript at enqueue
-      // time, so a drained send is just a fresh user bubble appearing at the
-      // moment its turn actually starts — a clearly delimited new exchange.
       newMessages.push(userMessage)
 
       return {
@@ -2793,7 +2782,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const merged = flushPendingDeltaIntoStreaming(sessionId, cur.streamingText)
       let baseMessages = sealThinkingForSession(sessionId, cur)
       if (merged.trim()) {
-        baseMessages = appendAssistantTextMessage(baseMessages, merged, Date.now())
+        baseMessages = appendAssistantTextMessage(baseMessages, merged, Date.now(), undefined, echoDedupOptions(sessionId))
       }
       return {
         sessions: updateSessionIn(s.sessions, sessionId, () => ({
@@ -2811,10 +2800,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   stopGeneration: (sessionId) => {
-    // Deny an outstanding approval before cancelling: leaving pendingPermission
-    // set resurrected `permission_pending` when the backend's terminal idle
-    // status arrived (keepPending), so Stop appeared to do nothing — a dead
-    // dialog stayed actionable and the tab badge kept "running".
     {
       const pending = get().sessions[sessionId]?.pendingPermission
       if (pending) {
@@ -2839,7 +2824,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const partialText = session.streamingText
       const committedMessages = resolveDanglingCuratorCards(
         partialText.trim()
-          ? appendAssistantTextMessage(sealedMessages, partialText, Date.now())
+          ? appendAssistantTextMessage(sealedMessages, partialText, Date.now(), undefined, echoDedupOptions(sessionId))
           : sealedMessages,
       )
       return {
@@ -2890,11 +2875,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         for (const m of taggedMessages) {
           if (m && m.id) knownIds.add(m.id)
         }
-        // An optimistic live user_text uses a local nextId() while the persisted
-        // history copy has the server id, so id-only dedup let the same message
-        // appear twice. Match live↔history user_text one-to-one (by content within
-        // a time window) so genuinely repeated user messages aren't collapsed, and
-        // never match a superseded/tombstoned history copy.
         const availableHistoryUserText = taggedMessages.filter(
           (m) => m.type === 'user_text' && !m.superseded,
         )
@@ -3044,11 +3024,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   capMessageWindow: (sessionId) => {
     {
-      // Window made only of live/optimistic ids (session driven entirely in
-      // this app run): trimming would strand the dropped messages behind an
-      // unusable cursor (`before=0`) while claiming hasMore. Reload the newest
-      // persisted page instead — that re-maps ids to backend-indexed ones and
-      // windows the list with a real cursor.
       const session = get().sessions[sessionId]
       if (!session || session.historyLoadingOlder === true) return
       if (session.messages.length > MAX_IN_MEMORY_MESSAGES) {
@@ -3080,13 +3055,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (dropCount <= 0) return state
       const dropped = session.messages.slice(0, dropCount)
       const trimmed = session.messages.slice(dropCount)
-      // historyFirstIndex is a RAW backend entry index (the `before` pagination
-      // cursor), while one raw entry maps to several UI messages. Derive the new
-      // cursor from the actual backend index embedded in message ids
-      // (`{session_id}-{NNNN}`, block ids add a `:{n}` suffix) rather than counting
-      // UI messages — counting undercounted plain-text sessions and left a
-      // permanent hole on scroll-up. New cursor = index of the oldest RETAINED
-      // history entry; if all history was trimmed, one past the newest dropped one.
       const prevFirst = session.historyFirstIndex ?? 0
       const minRetainedRawIndex = trimmed.reduce<number | null>((acc, m) => {
         const idx = rawIndexFromMessageId(m.id)
@@ -3132,9 +3100,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       set((state) => {
         const current = state.sessions[sessionId]
         if (!current) return state
-        // A reloadHistory replaced the window while this page was in flight;
-        // prepending it now would splice a stale range under a fresh window
-        // (middle gap + cursor rollback). Discard.
         if ((historyGenerationBySession.get(sessionId) ?? 0) !== generation) {
           return {
             sessions: updateSessionIn(state.sessions, sessionId, () => ({
@@ -3626,7 +3591,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               statusVerb: '',
             } : {}),
             ...(shouldFlush ? {
-              messages: appendAssistantTextMessage(baseMessages, pendingText, Date.now()),
+              messages: appendAssistantTextMessage(baseMessages, pendingText, Date.now(), undefined, echoDedupOptions(sessionId)),
               streamingText: '',
             } : msg.state === 'idle' && baseMessages !== session.messages ? {
               messages: baseMessages,
@@ -3643,10 +3608,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           syncTasksAfterTurnEnd(sessionId, turnWasStopped)
           revealDesignCanvasIfPending(sessionId)
           if (dirtyMidTurnSessions.delete(sessionId)) {
-            // Turn ended after a mid-turn reconnect: the locally stitched text
-            // is missing the frames sent during the outage. Replace it with the
-            // persisted transcript (backend waits for its persist queue before
-            // signalling completion, so history is current by now).
             void get().reloadHistory(sessionId)
           }
         }
@@ -3664,7 +3625,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
         if (msg.blockType !== 'text' && pendingText.trim()) {
           update((s) => ({
-            messages: appendAssistantTextMessage(s.messages, pendingText, Date.now()),
+            messages: appendAssistantTextMessage(s.messages, pendingText, Date.now(), undefined, echoDedupOptions(sessionId)),
             streamingText: '',
           }))
         }
@@ -3790,7 +3751,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             update((s) => {
               const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
               const baseMessages = pendingText.trim()
-                ? appendAssistantTextMessage(s.messages, pendingText, Date.now())
+                ? appendAssistantTextMessage(s.messages, pendingText, Date.now(), undefined, echoDedupOptions(sessionId))
                 : s.messages
               const hasActive = Boolean(s.activeThinkingId)
               const id = hasActive ? (s.activeThinkingId as string) : nextId()
@@ -4280,6 +4241,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               sealThinkingForSession(sessionId, s),
               text,
               Date.now(),
+              undefined,
+              echoDedupOptions(sessionId),
             ),
             streamingText: '',
             activeThinkingContent: '',
@@ -4329,7 +4292,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         update((s) => {
           const merged = flushPendingDeltaIntoStreaming(sessionId, s.streamingText)
           const baseMessages = merged.trim()
-            ? appendAssistantTextMessage(s.messages, merged, Date.now())
+            ? appendAssistantTextMessage(s.messages, merged, Date.now(), undefined, echoDedupOptions(sessionId))
             : s.messages
           return {
             messages: baseMessages,
@@ -4452,7 +4415,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
           let newMessages = sealThinkingForSession(sessionId, s)
           if (pendingText.trim()) {
-            newMessages = appendAssistantTextMessage(newMessages, pendingText, Date.now())
+            newMessages = appendAssistantTextMessage(newMessages, pendingText, Date.now(), undefined, echoDedupOptions(sessionId))
           }
           if (!isConfigError && !isCancelled) {
             newMessages = [...newMessages, {
@@ -4567,10 +4530,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         useTabStore.getState().updateTabTitle(msg.sessionId, msg.title)
         break
       case 'session_history_changed': {
-        // Another client (or our own HTTP call, echoed back) rewound/restored/
-        // committed this session's history. Resync so tombstoned messages don't
-        // linger as live in this window. Skip while a turn is active locally —
-        // the backend rejects history mutations for running sessions anyway.
         const now = Date.now()
         const last = historyChangedReloadAt.get(sessionId) ?? 0
         if (now - last < 1000) break
@@ -4640,7 +4599,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             const merged = flushPendingDeltaIntoStreaming(sessionId, s.streamingText)
             const baseMessages = resolveDanglingCuratorCards(
               merged.trim()
-                ? appendAssistantTextMessage(sealThinkingForSession(sessionId, s), merged, Date.now())
+                ? appendAssistantTextMessage(sealThinkingForSession(sessionId, s), merged, Date.now(), undefined, echoDedupOptions(sessionId))
                 : sealThinkingForSession(sessionId, s),
             )
             return {
@@ -4684,7 +4643,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 : 'Command failed.'
           update((s) => ({
             messages: success
-              ? appendAssistantTextMessage(s.messages, text, Date.now())
+              ? appendAssistantTextMessage(s.messages, text, Date.now(), undefined, echoDedupOptions(sessionId))
               : [
                   ...s.messages,
                   {
@@ -4980,6 +4939,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 : s.pendingEdits,
             }
           })
+          if (path) {
+            void import('./reviewPanelStore').then((m) => {
+              m.useReviewPanelStore.getState().notifyFileEdit(sessionId)
+            })
+          }
         }
 
         if (msg.subtype === 'command_preview' && msg.data && typeof msg.data === 'object') {
@@ -5137,10 +5101,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         update((session) => {
           let messages = session.messages
           if (requeuedContent) {
-            // The backend rejected the turn, so the optimistic bubble the direct
-            // send appended was never accepted. Remove it: the message is now
-            // represented solely by its queue entry (Cursor-style), and the
-            // bubble will reappear when the queued item actually runs.
             for (let i = messages.length - 1; i >= 0; i--) {
               const m = messages[i]
               if (
@@ -5419,23 +5379,12 @@ export function makePlanProgressCard(args: {
   }
 }
 
-/**
- * Extract the backend raw-entry index from a persisted message id. Ids are
- * `{session_id}-{index:04}` (block ids append `:{n}`); the index is the last
- * `-`-separated all-digits segment. Returns null for live/optimistic ids
- * (`msg-N-timestamp` from nextId), which are not backend-indexed.
- */
 export function rawIndexFromMessageId(id: string): number | null {
-  // Live/optimistic ids are `msg-<n>-<timestamp>` (nextId); both trailing
-  // segments are digits, so exclude them explicitly — otherwise the timestamp
-  // would be mistaken for a backend index.
   if (id.startsWith('msg-')) return null
   const base = id.includes(':') ? id.slice(0, id.indexOf(':')) : id
   const dash = base.lastIndexOf('-')
   if (dash < 0 || dash === base.length - 1) return null
   const tail = base.slice(dash + 1)
-  // Backend index is zero-padded to 4 digits (`{index:04}`); require a bounded
-  // digit run so a uuid-looking segment can't be misread.
   if (!/^\d{1,9}$/.test(tail)) return null
   const n = Number.parseInt(tail, 10)
   return Number.isFinite(n) ? n : null
@@ -5511,10 +5460,6 @@ export function mapHistoryMessagesToUiMessages(
       continue
     }
     if ((msg.type === 'assistant' || msg.type === 'tool_use') && Array.isArray(msg.content)) {
-      // Stable per-block id derived from the raw entry id, so re-mapping the same
-      // history page (pagination overlap) yields identical ids and the knownIds
-      // dedup actually drops duplicates instead of re-rendering tool/thinking
-      // blocks. Falls back to nextId() only when the raw entry has no id.
       let blockSeq = 0
       const blockId = (): string => (msg.id ? `${msg.id}:${blockSeq++}` : nextId())
       for (const block of msg.content as AssistantHistoryBlock[]) {
@@ -5693,8 +5638,6 @@ export function mapHistoryMessagesToUiMessages(
       continue
     }
     if ((msg.type === 'user' || msg.type === 'tool_result') && Array.isArray(msg.content)) {
-      // Stable per-block id (see the assistant branch) so pagination overlap
-      // dedups tool_result/user blocks instead of re-rendering them.
       let blockSeq = 0
       const blockId = (): string => (msg.id ? `${msg.id}:${blockSeq++}` : nextId())
       const textParts: string[] = []

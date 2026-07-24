@@ -1167,8 +1167,6 @@ impl App {
             approved,
         });
         if !sent {
-            // Channel full: the verdict never reached the agent. Re-queue the
-            // prompt instead of logging a decision that never took effect.
             self.chat_messages.push(ChatMessage::with_role_now(
                 "system",
                 "input channel busy; press again to respond to the approval".into(),
@@ -2410,10 +2408,6 @@ impl App {
                     }
                     self.reasoning_buffer.clear();
                     self.stream_finalized = true;
-                    // The turn is over: any prompt still queued was resolved by
-                    // timeout/denial on the agent side. Keeping it up blocked
-                    // chat keys and accepted answers nobody consumes (the chat
-                    // log then asserted a verdict that never took effect).
                     if !self.pending_approvals.is_empty() {
                         self.event_entries.push(format!(
                             "[{ts}] dismissed {} stale approval prompt(s) at turn end",
@@ -2501,10 +2495,6 @@ impl App {
                         }
                     }
                     if let Some(diff_text) = diff {
-                        // Build the whole (capped) diff as a SINGLE chat message.
-                        // Pushing one message per line previously bumped the render
-                        // content-version ~31 times per edit, forcing that many full
-                        // chat-line rebuilds on the next frame.
                         let max_lines = 30;
                         let total_lines = diff_text.lines().count();
                         let mut block = String::new();

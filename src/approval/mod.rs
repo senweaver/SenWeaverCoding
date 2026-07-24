@@ -95,10 +95,6 @@ impl PendingGatewayApprovals {
                 match (entry.session_id.as_deref(), session_id) {
                     (Some(expected), Some(actual)) => expected == actual,
                     (Some(_), None) => false,
-                    // Registered without a session (e.g. CLI single-turn): only a
-                    // responder that also carries no session may claim it. A
-                    // responder presenting a concrete session id is a mismatch and
-                    // is rejected so it cannot claim another context's approval.
                     (None, None) => true,
                     (None, Some(_)) => false,
                 }
@@ -135,10 +131,6 @@ pub fn register_pending_gateway_approval_for_session(id: String, session_id: Opt
     pending_gateway_approvals().lock().insert(id, session_id, None);
 }
 
-/// Register with a client-facing `permission_request` frame that can be
-/// replayed to a reconnecting client. Without this, a prompt emitted while the
-/// WebSocket was down is simply gone: the reconnected client shows a busy
-/// session with no dialog and the waiter blocks until timeout.
 pub fn register_pending_gateway_approval_with_replay(
     id: String,
     replay: serde_json::Value,
@@ -148,8 +140,6 @@ pub fn register_pending_gateway_approval_with_replay(
         .insert(id, approval_session_id(), Some(replay));
 }
 
-/// Replay frames for every approval still outstanding for `session_id`
-/// (oldest first). Non-consuming: entries stay pending until claimed/dropped.
 pub fn pending_replays_for_session(session_id: &str) -> Vec<serde_json::Value> {
     let guard = pending_gateway_approvals().lock();
     let mut hits: Vec<(&Instant, &serde_json::Value)> = guard
@@ -176,9 +166,6 @@ pub fn drop_pending_gateway_approval(id: &str) -> bool {
     pending_gateway_approvals().lock().drop_entry(id)
 }
 
-/// Peek the session a pending approval was registered under (outer `None` =
-/// unknown id, inner `None` = registered without a session). Lets per-session
-/// surfaces forward only their own bus prompts.
 pub fn pending_gateway_approval_session(id: &str) -> Option<Option<String>> {
     pending_gateway_approvals()
         .lock()
@@ -187,10 +174,6 @@ pub fn pending_gateway_approval_session(id: &str) -> Option<Option<String>> {
         .map(|entry| entry.session_id.clone())
 }
 
-// Reliable decision mailbox: every emit site records the decision here before
-// broadcasting, so a waiter can never lose its verdict to a lagged broadcast
-// channel under load (the old failure mode blocked turns for the full 5-minute
-// approval timeout).
 static DELIVERED_DECISIONS: OnceLock<Mutex<HashMap<String, (ApprovalResponse, Instant)>>> =
     OnceLock::new();
 
@@ -335,10 +318,9 @@ pub struct ApprovalManager {
 
     allow_shell_in_non_interactive: bool,
 
-    // Keyed by session id so an "Always" grant in one desktop tab never
-    // silently auto-approves the same tool in every other parallel session.
-    // Contexts without a session (plain CLI) fall back to a shared bucket.
     session_allowlist: Mutex<HashMap<String, HashSet<String>>>,
+
+    session_command_allowlist: Mutex<HashMap<String, HashSet<String>>>,
 
     audit_log: Mutex<Vec<ApprovalLogEntry>>,
 
@@ -363,6 +345,7 @@ impl ApprovalManager {
             non_interactive: false,
             allow_shell_in_non_interactive: config.allow_shell_in_non_interactive,
             session_allowlist: Mutex::new(HashMap::new()),
+            session_command_allowlist: Mutex::new(HashMap::new()),
             audit_log: Mutex::new(Vec::new()),
             audit_log_path: Mutex::new(None),
             session_sink: Mutex::new(None),
@@ -392,15 +375,13 @@ impl ApprovalManager {
             non_interactive: true,
             allow_shell_in_non_interactive: config.allow_shell_in_non_interactive,
             session_allowlist: Mutex::new(HashMap::new()),
+            session_command_allowlist: Mutex::new(HashMap::new()),
             audit_log: Mutex::new(Vec::new()),
             audit_log_path: Mutex::new(None),
             session_sink: Mutex::new(None),
         }
     }
 
-    // Single canonical constructor for every surface (interactive REPL,
-    // headless one-shot, channel daemons) so the three call sites cannot
-    // drift on interactivity semantics or audit-log wiring again.
     pub fn for_surface(
         config: &AutonomyConfig,
         interactive: bool,
@@ -460,11 +441,6 @@ impl ApprovalManager {
         self.non_interactive
     }
 
-    // Guardrail for coding modes whose policy is AutoApprove (Agent/Harness/
-    // Designer): the mode may skip routine confirmations, but it must never
-    // override an explicit user `always_ask` entry, and on non-interactive
-    // surfaces (channels/daemon/one-shot) it must not bypass the
-    // allow_shell_in_non_interactive opt-out for shell execution.
     pub fn mode_auto_approve_allows(&self, tool_name: &str) -> bool {
         if self.autonomy_level == AutonomyLevel::Full {
             return true;
@@ -476,6 +452,73 @@ impl ApprovalManager {
             return false;
         }
         true
+    }
+
+    pub fn needs_approval_with_args(&self, tool_name: &str, args: &serde_json::Value) -> bool {
+        if tool_name == "shell" {
+            if self.autonomy_level == AutonomyLevel::Full
+                || self.autonomy_level == AutonomyLevel::ReadOnly
+            {
+                return false;
+            }
+            if self.always_ask.contains("*") || self.always_ask.contains("shell") {
+                return true;
+            }
+            if let Some(cmd) = args.get("command").and_then(|v| v.as_str()) {
+                if let Some(prefix) = command_prefix(cmd) {
+                    let scope = allowlist_scope_key();
+                    let allowlist = self.session_command_allowlist.lock();
+                    if allowlist
+                        .get(&scope)
+                        .map(|set| set.contains(&prefix))
+                        .unwrap_or(false)
+                    {
+                        return false;
+                    }
+                }
+            }
+        }
+        self.needs_approval(tool_name)
+    }
+
+    pub fn is_explicitly_granted(&self, tool_name: &str, args: &serde_json::Value) -> bool {
+        if self.autonomy_level == AutonomyLevel::Full {
+            return true;
+        }
+        if self.always_ask.contains("*") || self.always_ask.contains(tool_name) {
+            return false;
+        }
+        if self.auto_approve.contains("*") || self.auto_approve.contains(tool_name) {
+            return true;
+        }
+        let scope = allowlist_scope_key();
+        if self
+            .session_allowlist
+            .lock()
+            .get(&scope)
+            .map(|set| set.contains(tool_name))
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if tool_name == "shell" {
+            if let Some(prefix) = args
+                .get("command")
+                .and_then(|v| v.as_str())
+                .and_then(command_prefix)
+            {
+                if self
+                    .session_command_allowlist
+                    .lock()
+                    .get(&scope)
+                    .map(|set| set.contains(&prefix))
+                    .unwrap_or(false)
+                {
+                    return true;
+                }
+            }
+        }
+        false
     }
 
     pub fn needs_approval(&self, tool_name: &str) -> bool {
@@ -527,11 +570,29 @@ impl ApprovalManager {
 
         if decision == ApprovalResponse::Always {
             let scope = allowlist_scope_key();
-            let mut allowlist = self.session_allowlist.lock();
-            allowlist
-                .entry(scope)
-                .or_default()
-                .insert(tool_name.to_string());
+            if tool_name == "shell" {
+                if let Some(prefix) =
+                    args.get("command").and_then(|v| v.as_str()).and_then(command_prefix)
+                {
+                    self.session_command_allowlist
+                        .lock()
+                        .entry(scope)
+                        .or_default()
+                        .insert(prefix);
+                } else {
+                    self.session_allowlist
+                        .lock()
+                        .entry(scope)
+                        .or_default()
+                        .insert(tool_name.to_string());
+                }
+            } else {
+                self.session_allowlist
+                    .lock()
+                    .entry(scope)
+                    .or_default()
+                    .insert(tool_name.to_string());
+            }
         }
 
         let summary = summarize_args(args);
@@ -658,6 +719,43 @@ fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
         "a" | "always" => ApprovalResponse::Always,
         _ => ApprovalResponse::No,
     }
+}
+
+fn command_prefix(command: &str) -> Option<String> {
+    let cmd = command.trim();
+    if cmd.is_empty() {
+        return None;
+    }
+    if cmd.contains("&&")
+        || cmd.contains("||")
+        || cmd.contains(';')
+        || cmd.contains('|')
+        || cmd.contains('`')
+        || cmd.contains("$(")
+        || cmd.contains('>')
+        || cmd.contains('<')
+        || cmd.contains('\n')
+    {
+        return None;
+    }
+    let mut tokens = cmd.split_whitespace();
+    let program = tokens.next()?;
+    const SUBCOMMAND_TOOLS: &[&str] = &[
+        "npm", "pnpm", "yarn", "bun", "cargo", "git", "go", "docker", "kubectl",
+        "pip", "pip3", "python", "python3", "node", "make", "dotnet", "gradle",
+        "mvn", "terraform", "gh",
+    ];
+    let prog_base = program
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(program)
+        .to_string();
+    if SUBCOMMAND_TOOLS.contains(&prog_base.as_str()) {
+        if let Some(sub) = tokens.next().filter(|s| !s.starts_with('-')) {
+            return Some(format!("{prog_base} {sub}"));
+        }
+    }
+    Some(prog_base)
 }
 
 fn summarize_args(args: &serde_json::Value) -> String {

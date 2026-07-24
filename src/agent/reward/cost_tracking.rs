@@ -71,6 +71,14 @@ pub(crate) fn lookup_model_pricing<'a>(
     crate::cost::pricing::lookup_model_pricing(prices, provider_name, model)
 }
 
+pub(crate) fn provider_uses_separate_cache_fields(provider_name: &str) -> bool {
+    let name = provider_name.to_ascii_lowercase();
+    let base = name.split(':').next().unwrap_or(&name);
+    matches!(base, "anthropic" | "bedrock" | "claude" | "claude_code")
+        || base.starts_with("anthropic")
+        || base.starts_with("claude")
+}
+
 pub(crate) fn record_tool_loop_cost_usage(
     provider_name: &str,
     model: &str,
@@ -108,22 +116,21 @@ pub(crate) fn record_tool_loop_cost_usage(
 
     let cached_input = usage.cached_input_tokens.unwrap_or(0);
     let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
-    // Provider convention split: OpenAI-style usage reports prompt_tokens that
-    // ALREADY include the cached-read subset, so the fresh (full-rate) portion is
-    // input - cached. Anthropic/Bedrock report cache-read as a SEPARATE field, so
-    // input is already the fresh portion and must not be reduced.
-    let cache_is_separate = matches!(
-        provider_name.to_ascii_lowercase().as_str(),
-        "anthropic" | "bedrock" | "claude" | "claude_code"
-    );
-    let fresh_input = if cache_is_separate {
+    let anthropic_family = provider_uses_separate_cache_fields(provider_name);
+    let fresh_input = if anthropic_family {
         input_tokens
     } else {
         input_tokens.saturating_sub(cached_input)
     };
 
+    let cache_write_rate = if anthropic_family {
+        CostTokenUsage::CACHE_WRITE_RATE_1H
+    } else {
+        1.25
+    };
+
     let pricing = lookup_model_pricing(&prices, provider_name, model);
-    let cost_usage = CostTokenUsage::new_with_cache(
+    let cost_usage = CostTokenUsage::new_with_cache_rates(
         model,
         fresh_input,
         output_tokens,
@@ -131,6 +138,7 @@ pub(crate) fn record_tool_loop_cost_usage(
         cache_creation,
         pricing.map_or(0.0, |entry| entry.input),
         pricing.map_or(0.0, |entry| entry.output),
+        cache_write_rate,
     );
 
     if pricing.is_none() {
@@ -164,6 +172,12 @@ pub(crate) fn check_tool_loop_budget(estimated_cost_usd: Option<f64>) -> Option<
         .flatten()
         .map(|ctx| {
             let cost = estimated_cost_usd.unwrap_or(0.01);
+            if let Some(session_id) = ctx.chat_session_id.as_deref() {
+                match ctx.tracker.check_session_budget(session_id, cost) {
+                    BudgetCheck::Allowed => {}
+                    exceeded_or_warning => return exceeded_or_warning,
+                }
+            }
             ctx.tracker
                 .check_budget(cost)
                 .unwrap_or(BudgetCheck::Allowed)

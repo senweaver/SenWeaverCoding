@@ -3077,6 +3077,13 @@ fn admin_token_header(config: &senweavercoding::config::Config) -> Option<String
     senweavercoding::gateway::read_admin_token(config)
 }
 
+fn loopback_token_header(config: &senweavercoding::config::Config) -> Option<String> {
+    config
+        .config_path
+        .parent()
+        .and_then(senweavercoding::gateway::loopback_auth::read_token_file)
+}
+
 async fn shutdown_gateway(
     host: &str,
     port: u16,
@@ -3090,6 +3097,12 @@ async fn shutdown_gateway(
         .timeout(std::time::Duration::from_secs(5));
     if let Some(token) = admin_token_header(config) {
         req = req.header(senweavercoding::gateway::ADMIN_TOKEN_HEADER, token);
+    }
+    if let Some(token) = loopback_token_header(config) {
+        req = req.header(
+            senweavercoding::gateway::loopback_auth::TOKEN_HEADER,
+            token,
+        );
     }
     match req.send().await {
         Ok(response) if response.status().is_success() => Ok(()),
@@ -3119,6 +3132,12 @@ async fn fetch_paircode(
         if let Some(ref token) = admin_token {
             req = req.header(senweavercoding::gateway::ADMIN_TOKEN_HEADER, token.clone());
         }
+        if let Some(token) = loopback_token_header(config) {
+            req = req.header(
+                senweavercoding::gateway::loopback_auth::TOKEN_HEADER,
+                token,
+            );
+        }
         req.send().await
     } else {
 
@@ -3128,6 +3147,12 @@ async fn fetch_paircode(
             .timeout(std::time::Duration::from_secs(5));
         if let Some(ref token) = admin_token {
             req = req.header(senweavercoding::gateway::ADMIN_TOKEN_HEADER, token.clone());
+        }
+        if let Some(token) = loopback_token_header(config) {
+            req = req.header(
+                senweavercoding::gateway::loopback_auth::TOKEN_HEADER,
+                token,
+            );
         }
         req.send().await
     };
@@ -4290,9 +4315,6 @@ async fn run_inline_edit_command(
         {
             tokio::fs::create_dir_all(parent).await.ok();
         }
-        // Route through OpsApplier as a whole-file Replace with old_text = source:
-        // the old_text check + region lock replace the previous check-then-write
-        // race and give journal/edit-history bookkeeping.
         let workspace_root = file
             .parent()
             .filter(|p| !p.as_os_str().is_empty())

@@ -3,23 +3,30 @@
 // Licensed under the MIT License.
 use async_trait::async_trait;
 use parking_lot::Mutex;
+use std::collections::VecDeque;
 use std::sync::Arc;
 use std::time::Duration;
 
 use crate::hooks::traits::HookHandler;
 use crate::tools::traits::ToolResult;
 
+const MAX_RETAINED_ENTRIES: usize = 500;
+
 pub struct CommandLoggerHook {
-    log: Arc<Mutex<Vec<String>>>,
+    log: Arc<Mutex<VecDeque<String>>>,
 }
 
 impl CommandLoggerHook {
     pub fn new() -> Self {
         Self {
-            log: Arc::new(Mutex::new(Vec::new())),
+            log: Arc::new(Mutex::new(VecDeque::new())),
         }
     }
 
+    #[must_use]
+    pub fn recent(&self) -> Vec<String> {
+        self.log.lock().iter().cloned().collect()
+    }
 }
 
 #[async_trait]
@@ -41,6 +48,10 @@ impl HookHandler for CommandLoggerHook {
             result.success,
         );
         tracing::info!(hook = "command-logger", "{}", entry);
-        self.log.lock().push(entry);
+        let mut log = self.log.lock();
+        log.push_back(entry);
+        while log.len() > MAX_RETAINED_ENTRIES {
+            log.pop_front();
+        }
     }
 }

@@ -39,16 +39,19 @@ pub struct WorkerSupervisor {
 
     workspace_root: PathBuf,
 
-    // Serializes admission (cap check + spawn/register) so concurrent
-    // spawn_workers calls cannot both pass the check and blow past the caps.
+    known_roots: dashmap::DashSet<PathBuf>,
+
     admission_lock: parking_lot::Mutex<()>,
 }
 
 impl WorkerSupervisor {
     pub fn new(workspace_root: PathBuf) -> Self {
+        let known_roots = dashmap::DashSet::new();
+        known_roots.insert(workspace_root.clone());
         Self {
             workers: DashMap::new(),
             workspace_root,
+            known_roots,
             admission_lock: parking_lot::Mutex::new(()),
         }
     }
@@ -57,7 +60,16 @@ impl WorkerSupervisor {
         &self.workspace_root
     }
 
+    pub fn known_roots(&self) -> Vec<PathBuf> {
+        self.known_roots.iter().map(|r| r.key().clone()).collect()
+    }
+
+    pub fn note_known_root(&self, root: &std::path::Path) {
+        self.known_roots.insert(root.to_path_buf());
+    }
+
     pub fn register(&self, handle: Arc<WorkerHandle>) {
+        self.known_roots.insert(handle.workspace_root.clone());
         self.workers.insert(handle.worker_id.clone(), handle);
     }
 
@@ -132,10 +144,6 @@ impl WorkerSupervisor {
             .count()
     }
 
-    /// Atomically admits a batch of workers against the per-parent and global
-    /// concurrency caps, then spawns them. Because `spawn` registers each handle
-    /// synchronously while the admission lock is held, the counts observed here
-    /// stay accurate across concurrent callers (no TOCTOU).
     pub fn admit_and_spawn_batch(
         self: &Arc<Self>,
         specs: Vec<WorkerSpec>,
@@ -187,7 +195,28 @@ impl WorkerSupervisor {
         parent_draft_tx: Option<mpsc::Sender<DraftEvent>>,
         ctx: WorkerRunContext,
     ) -> Arc<WorkerHandle> {
-        let worker_id = generate_worker_id();
+        self.spawn_with_id(generate_worker_id(), 0, spec, parent_draft_tx, ctx)
+    }
+
+    pub fn spawn_resumed(
+        self: &Arc<Self>,
+        worker_id: String,
+        resume_count: u32,
+        spec: WorkerSpec,
+        ctx: WorkerRunContext,
+    ) -> Arc<WorkerHandle> {
+        let _guard = self.admission_lock.lock();
+        self.spawn_with_id(worker_id, resume_count, spec, None, ctx)
+    }
+
+    fn spawn_with_id(
+        self: &Arc<Self>,
+        worker_id: String,
+        resume_count: u32,
+        spec: WorkerSpec,
+        parent_draft_tx: Option<mpsc::Sender<DraftEvent>>,
+        ctx: WorkerRunContext,
+    ) -> Arc<WorkerHandle> {
         let model = spec
             .model
             .clone()
@@ -213,6 +242,7 @@ impl WorkerSupervisor {
             model,
             effective_workspace_root,
         ));
+        handle.set_resume_count(resume_count);
 
         self.register(Arc::clone(&handle));
 
@@ -269,15 +299,233 @@ pub fn ensure_supervisor() -> anyhow::Result<Arc<WorkerSupervisor>> {
 }
 
 pub fn scan_and_recover_at(workspace_root: &std::path::Path) {
-    match crate::workers::persistence::scan_and_recover(workspace_root) {
-        Ok(0) => {}
-        Ok(n) => tracing::info!(
-            recovered = n,
-            "WorkerSupervisor: marked {n} stale workers as failed during startup recovery"
-        ),
-        Err(err) => tracing::warn!(
-            error = %err,
-            "WorkerSupervisor: scan_and_recover failed"
-        ),
+    scan_and_recover_with_resume(workspace_root, None);
+}
+
+const MAX_WORKER_RESUME_ATTEMPTS: u32 = 2;
+
+const WORKER_RESUME_BANNER: &str = "[resumed] This task was interrupted by a host restart. \
+The workspace may already contain partial changes from the previous attempt; inspect the \
+current state first, then finish the task idempotently.";
+
+fn resume_prompt(original: &str) -> String {
+    if original.starts_with("[resumed]") {
+        original.to_string()
+    } else {
+        format!("{WORKER_RESUME_BANNER}\n\n{original}")
+    }
+}
+
+pub fn scan_and_recover_with_resume(
+    workspace_root: &std::path::Path,
+    resume_ctx: Option<crate::workers::runner::WorkerRunContext>,
+) {
+    let interrupted =
+        match crate::workers::persistence::scan_interrupted(workspace_root) {
+            Ok(v) => v,
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "WorkerSupervisor: startup worker scan failed"
+                );
+                Vec::new()
+            }
+        };
+    let has_runtime = tokio::runtime::Handle::try_current().is_ok();
+    let supervisor = global_supervisor();
+    let mut failed = 0_usize;
+    let mut resumed = 0_usize;
+    for mut meta in interrupted {
+        let over_limit = meta.resume_count >= MAX_WORKER_RESUME_ATTEMPTS;
+        let worktree_gone = meta
+            .workspace_dir
+            .as_deref()
+            .map(|d| !std::path::Path::new(d).is_dir())
+            .unwrap_or(false);
+        let quota_full = supervisor
+            .as_ref()
+            .map(|s| s.active_count_total() >= max_global_workers())
+            .unwrap_or(true);
+        let resumable = resume_ctx.is_some()
+            && has_runtime
+            && supervisor.is_some()
+            && !meta.prompt.trim().is_empty()
+            && !over_limit
+            && !worktree_gone
+            && !quota_full;
+        if !resumable {
+            let reason = if over_limit {
+                "Worker was interrupted by repeated host restarts; giving up after the resume limit."
+            } else if worktree_gone {
+                "Worker was interrupted by a host restart and its worktree no longer exists; marked as failed."
+            } else {
+                "Worker did not finish before the host process restarted; marked as failed."
+            };
+            if let Err(err) = crate::workers::persistence::mark_worker_failed(
+                workspace_root,
+                &mut meta,
+                reason,
+            ) {
+                tracing::warn!(
+                    worker_id = %meta.worker_id,
+                    error = %err,
+                    "failed to persist recovered worker meta"
+                );
+            } else {
+                failed += 1;
+            }
+            continue;
+        }
+        let (Some(sup), Some(ctx)) = (supervisor.as_ref(), resume_ctx.clone()) else {
+            continue;
+        };
+        meta.resume_count += 1;
+        meta.status = crate::workers::events::WorkerStatus::Pending;
+        meta.error = None;
+        meta.finished_at = None;
+        if let Err(err) = crate::workers::persistence::write_meta(workspace_root, &meta) {
+            tracing::warn!(
+                worker_id = %meta.worker_id,
+                error = %err,
+                "failed to persist resumed worker meta"
+            );
+        }
+        let spec = WorkerSpec {
+            parent_session_id: meta.parent_session_id.clone(),
+            parent_tool_use_id: meta.parent_tool_use_id.clone(),
+            title: meta.title.clone(),
+            prompt: resume_prompt(&meta.prompt),
+            context: meta.context.clone(),
+            model: Some(meta.model.clone()),
+            workspace_dir: meta.workspace_dir.clone(),
+        };
+        sup.spawn_resumed(meta.worker_id.clone(), meta.resume_count, spec, ctx);
+        resumed += 1;
+    }
+    if failed > 0 || resumed > 0 {
+        tracing::info!(
+            failed,
+            resumed,
+            "WorkerSupervisor: startup recovery finished (resumed interrupted workers where possible)"
+        );
+    }
+    let root = workspace_root.to_path_buf();
+    if has_runtime {
+        crate::runtime::spawn_supervised("workers.worktree_gc", async move {
+            gc_stale_worker_worktrees(&root).await;
+        });
+    }
+}
+
+pub fn candidate_worker_roots() -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(sup) = global_supervisor() {
+        out.extend(sup.known_roots());
+    }
+    if let Some(state) = crate::bootstrap::try_get_state() {
+        let cwd = state.read(|s| s.cwd.clone());
+        if !cwd.as_os_str().is_empty() {
+            out.push(cwd);
+        }
+    }
+    if out.is_empty() {
+        out.push(PathBuf::from("."));
+    }
+    out.sort();
+    out.dedup();
+    out
+}
+
+const WORKTREE_GC_MIN_AGE_SECS: u64 = 3 * 60 * 60;
+
+pub async fn gc_stale_worker_worktrees(workspace_root: &std::path::Path) {
+    let dir = workspace_root.join(".sen").join("worktrees");
+    let Ok(mut rd) = tokio::fs::read_dir(&dir).await else {
+        return;
+    };
+    let protected: std::collections::HashSet<PathBuf> = {
+        let root = workspace_root.to_path_buf();
+        tokio::task::spawn_blocking(move || {
+            crate::workers::persistence::list_meta(&root)
+                .unwrap_or_default()
+                .into_iter()
+                .filter(|m| !m.status.is_terminal())
+                .filter_map(|m| m.workspace_dir.map(PathBuf::from))
+                .map(|p| p.canonicalize().unwrap_or(p))
+                .collect()
+        })
+        .await
+        .unwrap_or_default()
+    };
+    let root_str = workspace_root.to_string_lossy().to_string();
+    let mut reclaimed = 0usize;
+    while let Ok(Some(entry)) = rd.next_entry().await {
+        let path = entry.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let canonical = path.canonicalize().unwrap_or_else(|_| path.clone());
+        if protected.contains(&canonical) || protected.contains(&path) {
+            continue;
+        }
+        if !worktree_is_stale(&path).await {
+            continue;
+        }
+        let path_str = path.to_string_lossy().to_string();
+        let _ = crate::util::hidden_async_command("git")
+            .args(["-C", &path_str, "add", "-A"])
+            .output()
+            .await;
+        let staged = crate::util::hidden_async_command("git")
+            .args(["-C", &path_str, "diff", "--cached", "--quiet"])
+            .output()
+            .await;
+        if matches!(staged, Ok(ref o) if !o.status.success()) {
+            let _ = crate::util::hidden_async_command("git")
+                .args([
+                    "-C",
+                    &path_str,
+                    "commit",
+                    "-m",
+                    "sen-worker: salvaged from stale worktree during startup GC",
+                    "--no-verify",
+                ])
+                .output()
+                .await;
+        }
+        let removed = crate::util::hidden_async_command("git")
+            .args(["-C", &root_str, "worktree", "remove", "--force", &path_str])
+            .output()
+            .await
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if !removed {
+            let _ = tokio::fs::remove_dir_all(&path).await;
+        }
+        reclaimed += 1;
+    }
+    if reclaimed > 0 {
+        let _ = crate::util::hidden_async_command("git")
+            .args(["-C", &root_str, "worktree", "prune"])
+            .output()
+            .await;
+        tracing::info!(
+            reclaimed,
+            "worker worktree GC reclaimed stale worktree directories (branches kept)"
+        );
+    }
+}
+
+async fn worktree_is_stale(path: &std::path::Path) -> bool {
+    let meta_time = tokio::fs::metadata(path.join(".git"))
+        .await
+        .ok()
+        .and_then(|m| m.modified().ok().or_else(|| m.created().ok()));
+    let Some(t) = meta_time else {
+        return true;
+    };
+    match t.elapsed() {
+        Ok(age) => age.as_secs() >= WORKTREE_GC_MIN_AGE_SECS,
+        Err(_) => false,
     }
 }

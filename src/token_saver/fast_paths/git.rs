@@ -21,9 +21,6 @@ pub fn status(
     let mut unstaged = 0u32;
     let mut untracked = 0u32;
     let mut branch: Option<String> = None;
-    // Track the current long-format section so `\t modified:` lines are attributed
-    // to staged vs unstaged correctly. Without this, every entry was counted as
-    // unstaged and staged was always 0 (misleading the agent into re-`git add`).
     #[derive(Clone, Copy, PartialEq)]
     enum Section {
         None,

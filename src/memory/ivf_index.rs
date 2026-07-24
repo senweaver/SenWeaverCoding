@@ -3,88 +3,12 @@
 // Licensed under the MIT License.
 
 use std::cmp::Ordering;
-use std::collections::VecDeque;
 use std::io::{Read, Write};
 use std::path::Path;
 
 use super::vector::index::VectorIndex;
 
 pub const IVF_FILE_MAGIC: &[u8; 8] = b"SENIVF01";
-
-#[derive(Debug, Clone)]
-pub struct AdaptiveNprobe {
-
-    pub recall_floor: f32,
-
-    pub recall_ceiling: f32,
-
-    pub max_nprobe: usize,
-
-    pub min_nprobe: usize,
-
-    window: VecDeque<f32>,
-
-    pub window_size: usize,
-}
-
-impl Default for AdaptiveNprobe {
-    fn default() -> Self {
-        Self {
-            recall_floor: 0.85,
-            recall_ceiling: 0.95,
-            max_nprobe: 64,
-            min_nprobe: 1,
-            window: VecDeque::with_capacity(100),
-            window_size: 100,
-        }
-    }
-}
-
-impl AdaptiveNprobe {
-
-    pub fn record_recall(&mut self, recall: f32) {
-        if self.window.len() >= self.window_size {
-            self.window.pop_front();
-        }
-        self.window.push_back(recall.clamp(0.0, 1.0));
-    }
-
-    pub fn mean_recall(&self) -> Option<f32> {
-        if self.window.is_empty() {
-            return None;
-        }
-        let sum: f32 = self.window.iter().sum();
-        Some(sum / self.window.len() as f32)
-    }
-
-    pub fn propose_delta(&self, current_nprobe: usize) -> i32 {
-        let Some(mean) = self.mean_recall() else {
-            return 0;
-        };
-        if mean < self.recall_floor && current_nprobe < self.max_nprobe {
-            1
-        } else if mean > self.recall_ceiling && current_nprobe > self.min_nprobe {
-            -1
-        } else {
-            0
-        }
-    }
-
-    pub fn next_nprobe(&self, current_nprobe: usize) -> usize {
-        let delta = self.propose_delta(current_nprobe);
-        let proposed =
-            (current_nprobe as i32 + delta).clamp(self.min_nprobe as i32, self.max_nprobe as i32);
-        proposed as usize
-    }
-
-    pub fn window_len(&self) -> usize {
-        self.window.len()
-    }
-
-    pub fn clear(&mut self) {
-        self.window.clear();
-    }
-}
 
 #[derive(Clone, Debug)]
 struct IvfEntry {
@@ -112,6 +36,8 @@ pub struct IvfVectorIndex {
     kmeans_iters: usize,
 
     upserts_since_train: usize,
+
+    id_to_cluster: std::collections::HashMap<String, usize>,
 }
 
 impl IvfVectorIndex {
@@ -129,6 +55,7 @@ impl IvfVectorIndex {
             total: 0,
             kmeans_iters: 12,
             upserts_since_train: 0,
+            id_to_cluster: std::collections::HashMap::new(),
         }
     }
 
@@ -256,19 +183,10 @@ impl IvfVectorIndex {
             self.dim = Some(sample.len());
         }
 
-        // Seed with a SINGLE real centroid. Previously this padded with N-1 zero
-        // centroids, which `nearest_centroid` skips, so every vector collapsed
-        // into cluster 0 until the first full retrain at 256 upserts. Real
-        // multi-cluster structure now forms via `maybe_seed_retrain` as soon as
-        // enough vectors accumulate.
         self.centroids.push(sample.to_vec());
         self.centroid_norms.push(compute_norm(sample));
     }
 
-    /// During the seed period the index has a single centroid. Once enough
-    /// vectors have accumulated to form real clusters, run one k-means pass so
-    /// searches stop scanning a single giant list. Cheap no-op after the index
-    /// has grown past the seed threshold.
     fn maybe_seed_retrain(&mut self) {
         let seed_threshold = self.num_clusters.max(8);
         if self.centroids.len() < self.num_clusters && self.total >= seed_threshold {
@@ -327,12 +245,23 @@ impl IvfVectorIndex {
     }
 
     fn find_cluster(&self, id: &str) -> Option<(usize, usize)> {
+        let cid = *self.id_to_cluster.get(id)?;
+        let pos = self
+            .inverted_lists
+            .get(cid)?
+            .iter()
+            .position(|e| e.id == id)?;
+        Some((cid, pos))
+    }
+
+    fn rebuild_id_map(&mut self) {
+        self.id_to_cluster.clear();
+        self.id_to_cluster.reserve(self.total);
         for (cid, list) in self.inverted_lists.iter().enumerate() {
-            if let Some(pos) = list.iter().position(|e| e.id == id) {
-                return Some((cid, pos));
+            for e in list {
+                self.id_to_cluster.insert(e.id.clone(), cid);
             }
         }
-        None
     }
 
     pub fn needs_retraining(&self) -> bool {
@@ -359,8 +288,10 @@ impl IvfVectorIndex {
         self.train(&data);
         self.inverted_lists = (0..self.num_clusters).map(|_| Vec::new()).collect();
         self.total = 0;
+        self.id_to_cluster.clear();
         for entry in entries {
             let (cid, _) = self.nearest_centroid(&entry.embedding);
+            self.id_to_cluster.insert(entry.id.clone(), cid);
             self.inverted_lists[cid].push(entry);
             self.total += 1;
         }
@@ -508,6 +439,7 @@ impl IvfVectorIndex {
                 });
             }
         }
+        index.rebuild_id_map();
         Ok(index)
     }
 
@@ -527,6 +459,12 @@ impl IvfVectorIndex {
             .iter()
             .flat_map(|list| list.iter().map(|e| e.id.clone()))
             .collect()
+    }
+
+    pub fn iter_entries(&self) -> impl Iterator<Item = (&str, &[f32])> {
+        self.inverted_lists
+            .iter()
+            .flat_map(|list| list.iter().map(|e| (e.id.as_str(), e.embedding.as_slice())))
     }
 }
 
@@ -614,6 +552,7 @@ impl VectorIndex for IvfVectorIndex {
 
         if let Some((cid, pos)) = self.find_cluster(id) {
             self.inverted_lists[cid].swap_remove(pos);
+            self.id_to_cluster.remove(id);
             self.total = self.total.saturating_sub(1);
         }
 
@@ -623,11 +562,10 @@ impl VectorIndex for IvfVectorIndex {
             embedding: embedding.to_vec(),
             norm: compute_norm(embedding),
         };
+        self.id_to_cluster.insert(id.to_string(), cid);
         self.inverted_lists[cid].push(entry);
         self.total += 1;
 
-        // Promote from the single-centroid seed state to real clusters early,
-        // instead of waiting for the 256-upsert retrain check.
         self.maybe_seed_retrain();
 
         self.upserts_since_train += 1;
@@ -642,6 +580,7 @@ impl VectorIndex for IvfVectorIndex {
     fn remove(&mut self, id: &str) {
         if let Some((cid, pos)) = self.find_cluster(id) {
             self.inverted_lists[cid].swap_remove(pos);
+            self.id_to_cluster.remove(id);
             self.total = self.total.saturating_sub(1);
         }
     }

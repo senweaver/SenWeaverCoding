@@ -60,8 +60,6 @@ impl VecIndexCache {
     }
 }
 
-const VEC_INDEX_REBUILD_THRESHOLD: i64 = 64;
-
 const READ_POOL_SIZE: usize = 4;
 
 impl SqliteMemory {
@@ -161,10 +159,6 @@ impl SqliteMemory {
                 |row| row.get(0),
             )
             .unwrap_or(0);
-        // Track MAX(rowid) too: a delete + insert nets a zero count change but
-        // still advances the max rowid, so relying on the count alone left the
-        // index serving stale/removed candidates. Any rowid advance forces a
-        // rebuild regardless of the count-diff threshold.
         let current_max_rowid: i64 = conn
             .query_row(
                 "SELECT COALESCE(MAX(rowid), 0) FROM memories WHERE embedding IS NOT NULL",
@@ -185,7 +179,7 @@ impl SqliteMemory {
             if cache.index.is_some()
                 && current_max_rowid == cache.indexed_max_rowid
                 && current_max_updated == cache.indexed_max_updated
-                && (current_rows - cache.indexed_rows).abs() < VEC_INDEX_REBUILD_THRESHOLD
+                && current_rows == cache.indexed_rows
             {
                 return Ok(());
             }
@@ -200,11 +194,6 @@ impl SqliteMemory {
             )
         };
 
-        // Prefer an incremental upsert (only rows added or updated since the last
-        // index pass) over rebuilding the whole index from every row each turn.
-        // Falls back to a full rebuild when the index does not yet exist or when a
-        // deletion is detected (a shrinking row count means an id must be evicted,
-        // which the incremental path cannot resolve without the full id set).
         let has_index = vec_index.read().index.is_some();
         let new_rows_since: i64 = conn
             .query_row(
@@ -238,7 +227,6 @@ impl SqliteMemory {
                         cache.indexed_max_updated = current_max_updated;
                         return Ok(());
                     }
-                    // The index vanished between checks; fall through to full rebuild below.
                 }
                 Err(err) => {
                     vec_index.write().rebuilding = false;
@@ -352,7 +340,7 @@ impl SqliteMemory {
                 match Connection::open_with_flags(db_path, flags) {
                     Ok(c) => {
                         let _ = c.execute_batch(
-                            "PRAGMA mmap_size = 8388608; PRAGMA cache_size = -1000;",
+                            "PRAGMA busy_timeout = 5000; PRAGMA mmap_size = 8388608; PRAGMA cache_size = -1000;",
                         );
                         Some(Arc::new(Mutex::new(c)))
                     }
@@ -878,9 +866,6 @@ impl SqliteMemory {
         limit: usize,
     ) -> anyhow::Result<Vec<(String, f32)>> {
 
-        // Strip embedded double quotes from each term before wrapping it in
-        // quotes; otherwise a query containing `"` produced invalid FTS5 syntax
-        // and the whole search silently returned nothing (degrading hybrid recall).
         let fts_query: String = query
             .split_whitespace()
             .map(|w| w.replace('"', ""))
@@ -962,11 +947,24 @@ impl SqliteMemory {
         let mut heap: BinaryHeap<Reverse<(ordered_float::OrderedFloat<f32>, String)>> =
             BinaryHeap::with_capacity(limit + 1);
 
-        let mut min_sim: f32 = 0.0;
+        let mut min_sim: f32 = f32::MIN;
+        let query_dim = query_embedding.len();
 
         for row in rows {
             let (id, blob, cached_norm) = row?;
             let emb = vector::bytes_to_vec(&blob);
+
+            if emb.len() != query_dim {
+                tracing::warn!(
+                    target: "memory.vector",
+                    id = %id,
+                    query_dim,
+                    row_dim = emb.len(),
+                    "skipping vector row with mismatched embedding dimension (model changed?); \
+                     re-embed the corpus to restore this row"
+                );
+                continue;
+            }
 
             let dot: f32 = query_embedding
                 .iter()
@@ -1208,10 +1206,6 @@ impl Memory for SqliteMemory {
                     let now = chrono::Utc::now().to_rfc3339();
                     let cat = Self::category_to_str(&category);
                     let id = Uuid::new_v4().to_string();
-                    // Score importance from category + content keywords instead of a
-                    // constant 0.5, so the rerank importance weight is actually
-                    // meaningful for agent-stored memories (previously compute_importance
-                    // was dead code and every row got 0.5).
                     let importance =
                         crate::memory::importance::compute_importance(&content, &category);
 
@@ -1314,10 +1308,6 @@ impl Memory for SqliteMemory {
             };
 
             let merged = if vector_results.is_empty() {
-                // Normalize raw BM25 magnitudes to [0,1] (max-scaled per batch, matching
-                // hybrid_merge) so the downstream min_relevance_score / early-return /
-                // decay thresholds — all calibrated for [0,1] cosine — actually bite in
-                // BM25-only mode instead of every unbounded score sailing past them.
                 let max_kw = keyword_results
                     .iter()
                     .map(|(_, s)| *s)
@@ -1394,15 +1384,18 @@ impl Memory for SqliteMemory {
                     entry_map.insert(id, (key, content, cat, ts, sid, ns, imp, sup));
                 }
 
+                let since_norm = since_ref.map(|s| Self::normalize_time_bound(s));
+                let until_norm = until_ref.map(|u| Self::normalize_time_bound(u));
                 for scored in &merged {
                     if let Some((key, content, cat, ts, sid, ns, imp, sup)) = entry_map.remove(&scored.id) {
-                        if let Some(s) = since_ref {
-                            if ts.as_str() < s {
+                        let ts_norm = Self::normalize_time_bound(&ts);
+                        if let Some(ref s) = since_norm {
+                            if ts_norm.as_str() < s.as_str() {
                                 continue;
                             }
                         }
-                        if let Some(u) = until_ref {
-                            if ts.as_str() > u {
+                        if let Some(ref u) = until_norm {
+                            if ts_norm.as_str() > u.as_str() {
                                 continue;
                             }
                         }
@@ -1517,9 +1510,6 @@ impl Memory for SqliteMemory {
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
         let conn = self.conn.clone();
         let key = key.to_string();
-        // Scope reads to the current session plus global (session_id IS NULL)
-        // entries, preferring the session-specific row, so one session never reads
-        // another session's memory under the same key. Skip superseded rows.
         let current_session = crate::session::current_session_context()
             .map(|c| c.session_id)
             .filter(|s| !s.is_empty());
@@ -1640,8 +1630,6 @@ impl Memory for SqliteMemory {
     async fn forget(&self, key: &str) -> anyhow::Result<bool> {
         let conn = self.conn.clone();
         let key = key.to_string();
-        // Only delete within the current session's scope (plus global entries),
-        // never other sessions' memories under the same key.
         let current_session = crate::session::current_session_context()
             .map(|c| c.session_id)
             .filter(|s| !s.is_empty());
@@ -1649,16 +1637,11 @@ impl Memory for SqliteMemory {
         tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             let conn = conn.lock();
             let affected = if let Some(sid) = current_session {
-                // In-session delete stays isolated: only this session's entry (plus
-                // shared global entries), never another session's same-key memory.
                 conn.execute(
                     "DELETE FROM memories WHERE key = ?1 AND (session_id = ?2 OR session_id IS NULL)",
                     params![key, sid],
                 )?
             } else {
-                // No ambient session (e.g. the explicit DELETE /api/memory/{key}
-                // admin endpoint): keep the original "delete this key everywhere"
-                // semantics.
                 conn.execute("DELETE FROM memories WHERE key = ?1", params![key])?
             };
             Ok(affected > 0)

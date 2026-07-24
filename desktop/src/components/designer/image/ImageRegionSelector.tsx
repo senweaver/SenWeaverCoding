@@ -233,7 +233,6 @@ export function ImageRegionSelector({
     try {
       ;(e.currentTarget as HTMLElement).setPointerCapture(e.pointerId)
     } catch {
-      /* ignore */
     }
   }
 
@@ -254,7 +253,6 @@ export function ImageRegionSelector({
     try {
       ;(e.currentTarget as HTMLElement).releasePointerCapture(e.pointerId)
     } catch {
-      /* ignore */
     }
     const points = pointsRef.current
     pointsRef.current = []

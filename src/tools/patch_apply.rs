@@ -134,8 +134,6 @@ impl PatchApplyTool {
 }
 
 fn git_path_from_marker(raw: &str) -> Option<String> {
-    // Markers look like `a/foo.rs`, `b/foo.rs`, `foo.rs`, or `/dev/null`, and may
-    // carry a trailing tab-separated timestamp.
     let t = raw.split('\t').next().unwrap_or(raw).trim();
     if t == "/dev/null" || t.is_empty() {
         return None;
@@ -148,7 +146,6 @@ fn git_path_from_marker(raw: &str) -> Option<String> {
 }
 
 fn parse_diff_git_target(line: &str) -> Option<String> {
-    // `diff --git a/path b/path` -> prefer the `b/` (destination) token.
     let rest = line.strip_prefix("diff --git ")?;
     let b_token = rest.rsplit(' ').next()?;
     git_path_from_marker(b_token)
@@ -175,7 +172,6 @@ fn extract_new_file_contents(diff_lines: &[String]) -> String {
             out.push('\n');
             trailing_newline = true;
         } else if line.starts_with('\\') {
-            // "\ No newline at end of file"
             trailing_newline = false;
         }
     }
@@ -205,8 +201,6 @@ fn parse_patch_with(
     let finalize = |pending: PendingFile,
                     files: &mut Vec<PatchFile>|
      -> anyhow::Result<()> {
-        // Prefer the destination path (`+++ b/...`); for a deletion (`+++
-        // /dev/null`) fall back to the source; then the `diff --git` hint.
         let chosen = pending
             .to_hint
             .clone()
@@ -255,8 +249,6 @@ fn parse_patch_with(
                 _ => true,
             };
 
-        // A `--- ` line starts a new file only when we are not inside an open hunk
-        // body; inside a body it is content (e.g. deleting a `-- comment` line).
         let is_plain_old_marker = line.starts_with("--- ")
             && pending
                 .as_ref()

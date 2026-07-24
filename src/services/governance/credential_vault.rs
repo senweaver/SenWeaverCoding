@@ -116,14 +116,6 @@ fn derive_key_legacy(salt: &[u8]) -> [u8; 32] {
     key
 }
 
-/// High-entropy secret input for the vault KDF. Prefers a user-supplied
-/// passphrase (env var), otherwise falls back to the machine hostname hint.
-///
-/// The hostname alone is low-entropy and often known, so an attacker who copies
-/// `credentials.bin` + `credentials.salt` could brute-force the Argon2 key. Set
-/// SENAGENTOS_VAULT_PASSPHRASE (or SEN_VAULT_PASSPHRASE) to a strong secret to
-/// make the KDF meaningful; the hostname is retained as an additional input so
-/// existing vaults still open when no passphrase is configured.
 fn vault_kdf_secret() -> Vec<u8> {
     let mut secret = Vec::with_capacity(96);
     secret.extend_from_slice(b"senweavercoding.credential_vault.v2");

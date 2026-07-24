@@ -1287,6 +1287,34 @@ impl ModelProviderConfig {
         }
         Some(sanitized.iter().any(|t| t == "image-understanding"))
     }
+
+    pub fn effective_model_names(&self) -> Vec<String> {
+        if !self.model_names.is_empty() {
+            return self
+                .model_names
+                .iter()
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .collect();
+        }
+        let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        let mut out: Vec<String> = Vec::new();
+        for slot in ["main", "haiku", "sonnet", "opus"] {
+            if let Some(value) = self.models.get(slot) {
+                let trimmed = value.trim();
+                if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                    out.push(trimmed.to_string());
+                }
+            }
+        }
+        for (_, value) in self.models.iter() {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
+                out.push(trimmed.to_string());
+            }
+        }
+        out
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2122,11 +2150,6 @@ pub struct CodeRagConfig {
     #[serde(default = "default_code_rag_top_k")]
     pub top_k: usize,
 
-    // On by default so semantic code retrieval works out of the box whenever an
-    // embedder is reachable (local Ollama, or the openai backend inheriting the
-    // configured provider key). When no embedder is reachable the vector seed
-    // simply produces nothing and retrieval degrades gracefully to the lexical
-    // index — never an error.
     #[serde(default = "default_true")]
     pub dense_enabled: bool,
 
@@ -3854,10 +3877,6 @@ pub struct AutonomyConfig {
     #[serde(default = "default_true")]
     pub enable_command_policy: bool,
 
-    // Default false: on channel/daemon/one-shot surfaces there is no human to
-    // approve, so auto-running shell (incl. medium-risk) there is unsafe,
-    // especially stacked on top of untrusted content ingestion. Opt in
-    // explicitly for trusted automation surfaces.
     #[serde(default)]
     pub allow_shell_in_non_interactive: bool,
 }
@@ -3867,10 +3886,6 @@ fn default_auto_approve() -> Vec<String> {
         "file_read".into(),
         "memory_recall".into(),
         "web_search_tool".into(),
-        // web_fetch is intentionally NOT auto-approved: it ingests arbitrary
-        // remote page text that can carry prompt-injection payloads which then
-        // drive tool calls. Require an explicit approval (or an opt-in Always)
-        // before fetching untrusted URLs.
         "calculator".into(),
         "glob_search".into(),
         "content_search".into(),
@@ -5848,7 +5863,6 @@ impl ConfigWriteLock {
                     };
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // Steal a stale lock left behind by a crashed writer.
                     let stale = std::fs::metadata(&lock_path)
                         .and_then(|m| m.modified())
                         .map(|t| t.elapsed().unwrap_or_default() > Self::STALE_AFTER)
@@ -6009,27 +6023,18 @@ async fn persist_active_workspace_config_dir_in(
     Ok(())
 }
 
-// Stamp file sen writes into every config dir it owns. Its presence is the
-// authoritative signal that a directory is a sen config home, so we never adopt
-// or overwrite an unrelated project's `config.toml`.
 pub(crate) const SEN_CONFIG_DIR_MARKER: &str = ".sen-config-dir";
 
-// A directory is a sen config home only if it carries a sen marker — never
-// merely because it contains a `config.toml`. Many code projects ship their own
-// unrelated `config.toml`; adopting one silently clobbers the user's file.
 pub(crate) fn is_sen_config_dir(dir: &Path) -> bool {
     if dir.join(SEN_CONFIG_DIR_MARKER).exists() {
         return true;
     }
-    // The default `~/.senweavercoding` home is sen-owned by name.
     if dir
         .file_name()
         .is_some_and(|n| n == std::ffi::OsStr::new(".senweavercoding"))
     {
         return dir.join("config.toml").exists();
     }
-    // Backward-compat for portable homes created before the stamp existed: a
-    // `config.toml` sitting next to an unambiguously sen-created artifact.
     if dir.join("config.toml").exists() {
         const SEN_ARTIFACTS: &[&str] =
             &[".secret_key", "sessions", "workspace", ACTIVE_WORKSPACE_STATE_FILE];
@@ -6063,10 +6068,6 @@ pub(crate) fn resolve_config_dir_for_workspace(workspace_dir: &Path) -> (PathBuf
         }
     }
 
-    // The target holds a foreign (non-sen) `config.toml`. Do NOT claim it: keep
-    // the directory as the workspace and namespace sen's own config into a
-    // clearly sen-owned `.senweavercoding` subdir so the user's file is never
-    // read as ours, renamed, or overwritten.
     if workspace_config_dir.join("config.toml").exists() {
         return (
             workspace_config_dir.join(".senweavercoding"),
@@ -6464,6 +6465,47 @@ async fn ensure_bootstrap_files(workspace_dir: &Path) -> Result<()> {
 }
 
 impl Config {
+    pub fn apply_model_provider_profile(&mut self, id: &str) -> bool {
+        let Some(profile) = self.model_providers.get(id).cloned() else {
+            return false;
+        };
+        self.default_provider = Some(id.to_string());
+        self.api_key = profile
+            .api_key
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        self.api_url = profile
+            .base_url
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        self.api_path = profile
+            .api_path
+            .as_deref()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string);
+        self.provider_max_tokens = profile.max_tokens;
+        self.model_context_windows = profile.model_context_windows.clone();
+        let models = profile.effective_model_names();
+        let current_model_belongs = self
+            .default_model
+            .as_deref()
+            .map(|m| models.iter().any(|x| x == m))
+            .unwrap_or(false);
+        if !current_model_belongs {
+            if let Some(first) = models.into_iter().next() {
+                self.default_model = Some(first);
+            } else {
+                self.default_model = None;
+            }
+        }
+        true
+    }
+
     pub async fn load_or_init() -> Result<Self> {
         let (default_sen_dir, default_workspace_dir) =
             default_config_and_workspace_dirs().unwrap_or_else(|err| {
@@ -6590,11 +6632,6 @@ impl Config {
             let mut config: Config = match toml::from_str(&contents) {
                 Ok(cfg) => cfg,
                 Err(err) => {
-                    // Only rename/overwrite a config.toml that sen actually owns.
-                    // If this directory is not a sen config home (e.g. a project
-                    // dir with an unrelated config.toml resolution landed on),
-                    // degrade read-only: boot with in-memory defaults and never
-                    // touch the user's file.
                     let owned = is_sen_config_dir(&sen_dir);
                     let backup_suffix = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
@@ -8744,9 +8781,6 @@ impl Config {
             )
         })?;
 
-        // Serialize concurrent writers (CLI + desktop + gateway may all persist
-        // config.toml) with a cross-process advisory lock file so they cannot
-        // clobber each other's read-modify-write with a last-writer-wins overwrite.
         let _config_write_lock = ConfigWriteLock::acquire(&config_path).await;
 
         let file_name = config_path
@@ -8812,8 +8846,6 @@ impl Config {
             }
         }
 
-        // Stamp the dir as sen-owned so future resolution never mistakes a
-        // neighbouring project's config.toml for ours (and vice versa).
         let marker_path = parent_dir.join(SEN_CONFIG_DIR_MARKER);
         if !marker_path.exists() {
             if let Err(err) = fs::write(

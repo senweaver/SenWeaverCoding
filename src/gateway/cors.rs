@@ -45,8 +45,6 @@ pub(crate) fn ws_origin_allowed(headers: &axum::http::HeaderMap) -> bool {
         .get(axum::http::header::ORIGIN)
         .map(|v| v.to_str().map(str::trim))
     {
-        // No Origin header (native client) is allowed; a present but disallowed
-        // browser Origin is rejected. An empty Origin string is treated as absent.
         None => true,
         Some(Ok(value)) => value.is_empty() || origin_value_allowed(value),
         Some(Err(_)) => false,

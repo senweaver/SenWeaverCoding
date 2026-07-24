@@ -63,8 +63,31 @@ enum MessageContent {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 enum MessagePart {
-    Text { text: String },
-    ImageUrl { image_url: ImageUrlPart },
+    Text {
+        text: String,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        cache_control: Option<CacheControlMarker>,
+    },
+    ImageUrl {
+        image_url: ImageUrlPart,
+    },
+}
+
+#[derive(Debug, Serialize)]
+struct CacheControlMarker {
+    #[serde(rename = "type")]
+    kind: &'static str,
+}
+
+impl CacheControlMarker {
+    fn ephemeral() -> Self {
+        Self { kind: "ephemeral" }
+    }
+}
+
+fn is_anthropic_family_model(model: &str) -> bool {
+    let id = model.to_ascii_lowercase();
+    id.starts_with("anthropic/") || id.contains("claude")
 }
 
 #[derive(Debug, Serialize)]
@@ -75,6 +98,8 @@ struct ImageUrlPart {
 #[derive(Debug, Deserialize)]
 struct ApiChatResponse {
     choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<UsageInfo>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -171,10 +196,6 @@ struct UsageInfo {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
-    // OpenRouter mirrors OpenAI's prompt_tokens_details.cached_tokens for
-    // providers that support caching (e.g. Claude/DeepSeek routed through it);
-    // capture it so cost accounting applies the cache discount instead of
-    // billing every cache hit at full price.
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
 }
@@ -573,6 +594,7 @@ impl OpenRouterProvider {
         if !trimmed_text.is_empty() {
             parts.push(MessagePart::Text {
                 text: trimmed_text.to_string(),
+                cache_control: None,
             });
         }
 
@@ -583,6 +605,88 @@ impl OpenRouterProvider {
         }
 
         MessageContent::Parts(parts)
+    }
+
+    fn mark_content_cacheable(content: &mut Option<MessageContent>) -> bool {
+        match content.take() {
+            Some(MessageContent::Text(text)) => {
+                if text.is_empty() {
+                    *content = Some(MessageContent::Text(text));
+                    return false;
+                }
+                *content = Some(MessageContent::Parts(vec![MessagePart::Text {
+                    text,
+                    cache_control: Some(CacheControlMarker::ephemeral()),
+                }]));
+                true
+            }
+            Some(MessageContent::Parts(mut parts)) => {
+                let mut marked = false;
+                for part in parts.iter_mut().rev() {
+                    if let MessagePart::Text { cache_control, .. } = part {
+                        *cache_control = Some(CacheControlMarker::ephemeral());
+                        marked = true;
+                        break;
+                    }
+                }
+                *content = Some(MessageContent::Parts(parts));
+                marked
+            }
+            None => false,
+        }
+    }
+
+    fn apply_anthropic_cache_breakpoints(messages: &mut [NativeMessage]) {
+        if let Some(sys) = messages.iter_mut().find(|m| m.role == "system") {
+            Self::mark_content_cacheable(&mut sys.content);
+        }
+        let mut marked_last: Option<usize> = None;
+        for i in (0..messages.len()).rev() {
+            if messages[i].role == "system" || messages[i].role == "tool" {
+                continue;
+            }
+            if Self::mark_content_cacheable(&mut messages[i].content) {
+                marked_last = Some(i);
+                break;
+            }
+        }
+        if messages.len() > 6 {
+            let anchor_target = messages.len().saturating_sub(5);
+            for i in (0..=anchor_target).rev() {
+                if marked_last == Some(i) {
+                    break;
+                }
+                if messages[i].role == "system" || messages[i].role == "tool" {
+                    continue;
+                }
+                if Self::mark_content_cacheable(&mut messages[i].content) {
+                    break;
+                }
+            }
+        }
+    }
+
+    fn apply_anthropic_cache_breakpoints_simple(messages: &mut [Message]) {
+        if let Some(sys) = messages.iter_mut().find(|m| m.role == "system") {
+            let mut slot = Some(std::mem::replace(
+                &mut sys.content,
+                MessageContent::Text(String::new()),
+            ));
+            Self::mark_content_cacheable(&mut slot);
+            if let Some(content) = slot {
+                sys.content = content;
+            }
+        }
+        if let Some(last) = messages.iter_mut().rev().find(|m| m.role != "system") {
+            let mut slot = Some(std::mem::replace(
+                &mut last.content,
+                MessageContent::Text(String::new()),
+            ));
+            Self::mark_content_cacheable(&mut slot);
+            if let Some(content) = slot {
+                last.content = content;
+            }
+        }
     }
 
     fn parse_native_response(message: NativeResponseMessage) -> ProviderChatResponse {
@@ -692,7 +796,7 @@ impl Provider for OpenRouterProvider {
         ProviderCapabilities {
             native_tool_calling: true,
             vision: true,
-            prompt_caching: false,
+            prompt_caching: true,
             responses_api: false,
         }
     }
@@ -746,6 +850,10 @@ impl Provider for OpenRouterProvider {
             content: Self::to_message_content("user", message),
         });
 
+        if is_anthropic_family_model(model) {
+            Self::apply_anthropic_cache_breakpoints_simple(&mut messages);
+        }
+
         let request = ChatRequest {
             model: model.to_string(),
             messages,
@@ -791,6 +899,17 @@ impl Provider for OpenRouterProvider {
         let body = Self::read_response_body("OpenRouter", response).await?;
         let chat_response =
             Self::parse_response_body::<ApiChatResponse>("OpenRouter", &body, "chat-completions")?;
+        if let Some(u) = chat_response.usage.as_ref() {
+            crate::providers::record_text_path_usage(
+                "openrouter",
+                model,
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.prompt_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens),
+            );
+        }
 
         chat_response
             .choices
@@ -820,13 +939,16 @@ impl Provider for OpenRouterProvider {
             self.reserved_output_tokens(model),
             Some(self.context_window_for(model)),
         );
-        let api_messages: Vec<Message> = budgeted
+        let mut api_messages: Vec<Message> = budgeted
             .iter()
             .map(|m| Message {
                 role: m.role.clone(),
                 content: Self::to_message_content(&m.role, &m.content),
             })
             .collect();
+        if is_anthropic_family_model(model) {
+            Self::apply_anthropic_cache_breakpoints_simple(&mut api_messages);
+        }
 
         let request = ChatRequest {
             model: model.to_string(),
@@ -872,6 +994,17 @@ impl Provider for OpenRouterProvider {
         let body = Self::read_response_body("OpenRouter", response).await?;
         let chat_response =
             Self::parse_response_body::<ApiChatResponse>("OpenRouter", &body, "chat-completions")?;
+        if let Some(u) = chat_response.usage.as_ref() {
+            crate::providers::record_text_path_usage(
+                "openrouter",
+                model,
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.prompt_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens),
+            );
+        }
 
         chat_response
             .choices
@@ -927,9 +1060,13 @@ impl Provider for OpenRouterProvider {
             self.reserved_output_tokens(model),
             Some(self.context_window_for(model)),
         );
+        let mut native_messages = Self::convert_messages(&budgeted_messages);
+        if is_anthropic_family_model(model) {
+            Self::apply_anthropic_cache_breakpoints(&mut native_messages);
+        }
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(&budgeted_messages),
+            messages: native_messages,
             temperature: Self::adjust_temperature_for_model(model, temperature),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
@@ -1078,7 +1215,10 @@ impl Provider for OpenRouterProvider {
             self.reserved_output_tokens(model),
             Some(self.context_window_for(model)),
         );
-        let native_messages = Self::convert_messages(&budgeted_messages);
+        let mut native_messages = Self::convert_messages(&budgeted_messages);
+        if is_anthropic_family_model(model) {
+            Self::apply_anthropic_cache_breakpoints(&mut native_messages);
+        }
 
         let native_request = NativeChatRequest {
             model: model.to_string(),
@@ -1291,9 +1431,13 @@ impl Provider for OpenRouterProvider {
             self.reserved_output_tokens(model),
             Some(self.context_window_for(model)),
         );
+        let mut native_stream_messages = Self::convert_messages(&sanitized_messages);
+        if is_anthropic_family_model(model) {
+            Self::apply_anthropic_cache_breakpoints(&mut native_stream_messages);
+        }
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(&sanitized_messages),
+            messages: native_stream_messages,
             temperature: Self::adjust_temperature_for_model(model, temperature),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
@@ -1346,11 +1490,8 @@ impl Provider for OpenRouterProvider {
                 };
 
                 if !response.status().is_success() {
-                    let status = response.status();
-                    let error = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| format!("HTTP error: {status}"));
+                    let (status, error) =
+                        super::stream_error_body_with_retry_after(response).await;
                     let sanitized = super::sanitize_api_error(&error);
 
                     if !Self::is_reasoning_blacklisted(&model_owned)
@@ -1434,6 +1575,9 @@ impl Provider for OpenRouterProvider {
             role: "user".to_string(),
             content: Self::to_message_content("user", message),
         });
+        if is_anthropic_family_model(model) {
+            Self::apply_anthropic_cache_breakpoints_simple(&mut messages);
+        }
 
         let request = ChatRequest {
             model: model.to_string(),
@@ -1481,11 +1625,8 @@ impl Provider for OpenRouterProvider {
                 };
 
                 if !response.status().is_success() {
-                    let status = response.status();
-                    let error = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| format!("HTTP error: {status}"));
+                    let (status, error) =
+                        super::stream_error_body_with_retry_after(response).await;
                     let sanitized = super::sanitize_api_error(&error);
 
                     if !Self::is_reasoning_blacklisted(&model_owned)
@@ -1562,13 +1703,16 @@ impl Provider for OpenRouterProvider {
             self.reserved_output_tokens(model),
             Some(self.context_window_for(model)),
         );
-        let api_messages: Vec<Message> = budgeted
+        let mut api_messages: Vec<Message> = budgeted
             .iter()
             .map(|m| Message {
                 role: m.role.clone(),
                 content: Self::to_message_content(&m.role, &m.content),
             })
             .collect();
+        if is_anthropic_family_model(model) {
+            Self::apply_anthropic_cache_breakpoints_simple(&mut api_messages);
+        }
 
         let request = ChatRequest {
             model: model.to_string(),
@@ -1615,11 +1759,8 @@ impl Provider for OpenRouterProvider {
                 };
 
                 if !response.status().is_success() {
-                    let status = response.status();
-                    let error = response
-                        .text()
-                        .await
-                        .unwrap_or_else(|_| format!("HTTP error: {status}"));
+                    let (status, error) =
+                        super::stream_error_body_with_retry_after(response).await;
                     let sanitized = super::sanitize_api_error(&error);
 
                     if !Self::is_reasoning_blacklisted(&model_owned)

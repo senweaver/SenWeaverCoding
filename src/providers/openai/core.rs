@@ -51,6 +51,24 @@ struct Message {
 #[derive(Debug, Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<TextPathUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TextPathUsage {
+    #[serde(default)]
+    prompt_tokens: Option<u64>,
+    #[serde(default)]
+    completion_tokens: Option<u64>,
+    #[serde(default)]
+    prompt_tokens_details: Option<TextPathPromptDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct TextPathPromptDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -97,6 +115,14 @@ struct NativeChatRequest {
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptionsField>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    prediction: Option<serde_json::Value>,
+}
+
+fn current_prediction_param() -> Option<serde_json::Value> {
+    crate::providers::core::prediction::current_predicted_output().map(|content| {
+        serde_json::json!({ "type": "content", "content": content })
+    })
 }
 
 #[derive(Debug, Serialize)]
@@ -241,8 +267,6 @@ impl OpenAiProvider {
         self
     }
 
-    // OpenAI reasoning-family models (o1/o3/o4/gpt-5*) reject `max_tokens` and
-    // require `max_completion_tokens` instead.
     fn uses_max_completion_tokens(model: &str) -> bool {
         let id = model.rsplit('/').next().unwrap_or(model);
         id.starts_with("o1")
@@ -387,9 +411,6 @@ impl OpenAiProvider {
                                 value.get("tool_use_id").and_then(serde_json::Value::as_str)
                             })
                             .map(ToString::to_string);
-                        // OpenAI rejects a tool message with no content string. If
-                        // the envelope carries a non-string content (object/array),
-                        // stringify it rather than dropping the field.
                         let content = value.get("content").map(|c| match c.as_str() {
                             Some(s) => s.to_string(),
                             None => c.to_string(),
@@ -655,11 +676,8 @@ impl OpenAiProvider {
             };
 
             if !response.status().is_success() {
-                let status = response.status();
-                let error_body = match response.text().await {
-                    Ok(text) => text,
-                    Err(_) => format!("HTTP error: {status}"),
-                };
+                let (status, error_body) =
+                    super::super::stream_error_body_with_retry_after(response).await;
                 let sanitized = super::super::sanitize_api_error(&error_body);
                 let _ = tx
                     .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
@@ -735,6 +753,17 @@ impl Provider for OpenAiProvider {
         }
 
         let chat_response: ChatResponse = response.json().await?;
+        if let Some(u) = chat_response.usage.as_ref() {
+            crate::providers::record_text_path_usage(
+                "openai",
+                model,
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.prompt_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens),
+            );
+        }
 
         chat_response
             .choices
@@ -777,6 +806,7 @@ impl Provider for OpenAiProvider {
             prompt_cache_key: self.session_cache_key(),
             stream: None,
             stream_options: None,
+            prediction: current_prediction_param(),
         };
 
         let response = self
@@ -867,6 +897,7 @@ impl Provider for OpenAiProvider {
             prompt_cache_key: self.session_cache_key(),
             stream: None,
             stream_options: None,
+            prediction: current_prediction_param(),
         };
 
         let response = self
@@ -1039,6 +1070,7 @@ impl Provider for OpenAiProvider {
             stream_options: options
                 .enabled
                 .then_some(StreamOptionsField { include_usage: true }),
+            prediction: current_prediction_param(),
         };
 
         let url = format!("{}/chat/completions", self.base_url);
@@ -1064,11 +1096,8 @@ impl Provider for OpenAiProvider {
             };
 
             if !response.status().is_success() {
-                let status = response.status();
-                let error_body = match response.text().await {
-                    Ok(text) => text,
-                    Err(_) => format!("HTTP error: {status}"),
-                };
+                let (status, error_body) =
+                    super::super::stream_error_body_with_retry_after(response).await;
                 let sanitized = super::super::sanitize_api_error(&error_body);
                 let _ = tx
                     .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))

@@ -29,8 +29,6 @@ const ENHANCE_CACHE = new Map<string, string>()
 const ENHANCE_CACHE_MAX = 200
 
 function enhanceMarkdownHtml(html: string): string {
-  // Sanitizing + DOM table-wrapping + link-hardening is pure in `html`; cache the result so
-  // re-renders (e.g. during streaming, where finalized blocks are stable) don't redo the DOM work.
   const cached = ENHANCE_CACHE.get(html)
   if (cached !== undefined) return cached
 
@@ -173,7 +171,7 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
     }
   }, [content])
 
-  const active = parsed && parsed.source === content ? parsed.result : null
+  const active = parsed ? parsed.result : null
   const html = active?.html ?? ''
   const codeBlocks = useMemo(() => active?.codeBlocks ?? [], [active])
   const proseClasses = useMemo(

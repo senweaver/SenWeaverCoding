@@ -39,13 +39,12 @@ pub struct ImpactResult {
 
 #[must_use]
 pub fn seeds_for_files(graph: &SymbolGraph, files: &[PathBuf]) -> Vec<SymbolId> {
-    let file_set: HashSet<&PathBuf> = files.iter().collect();
-    let mut seeds: Vec<SymbolId> = graph
-        .symbols
-        .iter()
-        .filter(|s| file_set.contains(&s.id.file))
-        .map(|s| s.id.clone())
-        .collect();
+    let mut seeds: Vec<SymbolId> = Vec::new();
+    for f in files {
+        for entry in graph.symbols_in_file(f) {
+            seeds.push(entry.id.clone());
+        }
+    }
     for f in files {
         seeds.push(SymbolId::file_anchor(f.clone()));
     }

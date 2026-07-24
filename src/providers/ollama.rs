@@ -59,9 +59,6 @@ struct OutgoingFunction {
 #[derive(Debug, Serialize)]
 struct Options {
     temperature: f64,
-    // Without num_ctx Ollama silently truncates the prompt at the server's tiny
-    // default context (2k/4k) while the client budgets for the model's real
-    // window, so long prompts lose their tail. Send an explicit window.
     #[serde(skip_serializing_if = "Option::is_none")]
     num_ctx: Option<u32>,
 }
@@ -283,8 +280,6 @@ impl OllamaProvider {
     }
 
     fn empty_content_error(model: &str, thinking: Option<&str>) -> anyhow::Error {
-        // Return a real error (not fabricated first-person text): a fake reply
-        // would suppress the reliable layer's retry/failover and pollute history.
         if let Some(thinking) = thinking.map(str::trim).filter(|value| !value.is_empty()) {
             let thinking_log_excerpt: String = thinking.chars().take(100).collect();
             tracing::warn!(
@@ -306,6 +301,15 @@ impl OllamaProvider {
         )
     }
 
+    const NUM_CTX_MIN: u32 = 8_192;
+    const NUM_CTX_MAX: u32 = 32_768;
+    const RESERVE_OUTPUT_TOKENS: usize = 2_048;
+
+    fn effective_num_ctx(model: &str) -> u32 {
+        crate::constants::api_limits::context_window_for_model(model)
+            .clamp(Self::NUM_CTX_MIN, Self::NUM_CTX_MAX)
+    }
+
     fn build_chat_request_with_think(
         &self,
         messages: Vec<Message>,
@@ -314,11 +318,7 @@ impl OllamaProvider {
         tools: Option<&[serde_json::Value]>,
         think: Option<bool>,
     ) -> ChatRequest {
-        // Clamp to a range that is useful (well above the 2k/4k server default)
-        // yet not so large it forces a huge KV-cache allocation that OOMs a
-        // local model.
-        let num_ctx = crate::constants::api_limits::context_window_for_model(model)
-            .clamp(8_192, 32_768);
+        let num_ctx = Self::effective_num_ctx(model);
         ChatRequest {
             model: model.to_string(),
             messages,
@@ -333,9 +333,6 @@ impl OllamaProvider {
     }
 
     fn stream_http_client(&self) -> Client {
-        // Streaming needs a read-idle timeout, not a total-request timeout, so a
-        // long streamed response is not truncated mid-flight (the previous total
-        // timeout cut long local generations and looked like a dropped stream).
         let read_timeout_secs = self.timeout_secs.max(300);
         let mut headers = reqwest::header::HeaderMap::new();
         for (key, value) in &self.extra_headers {
@@ -726,12 +723,13 @@ impl Provider for OllamaProvider {
     ) -> anyhow::Result<String> {
         let (normalized_model, should_auth) = self.resolve_request_details(model)?;
 
+        let num_ctx = Self::effective_num_ctx(model) as usize;
         let sanitized_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
             self,
             messages.to_vec(),
             model,
-            0,
-            None,
+            Self::RESERVE_OUTPUT_TOKENS,
+            Some(num_ctx),
         );
         let api_messages = self.convert_messages(&sanitized_messages);
 
@@ -775,12 +773,13 @@ impl Provider for OllamaProvider {
     ) -> anyhow::Result<ChatResponse> {
         let (normalized_model, should_auth) = self.resolve_request_details(model)?;
 
+        let num_ctx = Self::effective_num_ctx(model) as usize;
         let sanitized_messages = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
             self,
             messages.to_vec(),
             model,
-            0,
-            None,
+            Self::RESERVE_OUTPUT_TOKENS,
+            Some(num_ctx),
         );
         let api_messages = self.convert_messages(&sanitized_messages);
 
@@ -899,6 +898,10 @@ impl Provider for OllamaProvider {
         true
     }
 
+    fn supports_streaming_tool_events(&self) -> bool {
+        true
+    }
+
     fn stream_chat(
         &self,
         request: crate::providers::traits::ChatRequest<'_>,
@@ -925,12 +928,13 @@ impl Provider for OllamaProvider {
             }
         };
 
+        let num_ctx = Self::effective_num_ctx(model) as usize;
         let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
             self,
             request.messages.to_vec(),
             model,
-            0,
-            None,
+            Self::RESERVE_OUTPUT_TOKENS,
+            Some(num_ctx),
         );
         let api_messages = self.convert_messages(&sanitized);
         let tools_json: Option<Vec<serde_json::Value>> = request.tools.and_then(|specs| {

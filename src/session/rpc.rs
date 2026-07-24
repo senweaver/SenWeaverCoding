@@ -10,27 +10,18 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use crate::observability::session_write_mode_metrics;
 use crate::session::state::{RemoteDelta, SessionActor, SessionDelta};
 
-/// Authenticated envelope for cross-process session deltas. The listener applies
-/// nothing without a matching `auth` token, so a co-resident process cannot inject
-/// forged ToolResult/ApprovalResponded/TurnFinished events (or a malicious pipe
-/// client on Windows, where the default named-pipe ACL allows any local user).
 #[derive(serde::Serialize, serde::Deserialize)]
 struct AuthEnvelope {
     auth: String,
     remote: RemoteDelta,
 }
 
-/// Path of the 0600 secret file that sits next to the socket/pipe key and holds
-/// the shared token both the listener and peers use.
 fn secret_path_for(socket_path: &Path) -> PathBuf {
     let mut s = socket_path.as_os_str().to_os_string();
     s.push(".secret");
     PathBuf::from(s)
 }
 
-/// Read the shared secret, creating it (owner-only) if missing. Both the listener
-/// (on startup) and peers (before send) call this; whoever wins the race writes a
-/// random token and the other reads it.
 fn ensure_session_rpc_secret(socket_path: &Path) -> std::io::Result<String> {
     let path = secret_path_for(socket_path);
     if let Ok(existing) = std::fs::read_to_string(&path) {
@@ -49,8 +40,6 @@ fn ensure_session_rpc_secret(socket_path: &Path) -> std::io::Result<String> {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
     }
-    // Re-read in case another process wrote first (atomic_write + rename means the
-    // last writer wins; converge on the on-disk value).
     match std::fs::read_to_string(&path) {
         Ok(s) if !s.trim().is_empty() => Ok(s.trim().to_string()),
         _ => Ok(token),
@@ -242,9 +231,6 @@ pub async fn send_delta_to_peer(
     send_remote_delta_to_peer(socket_path, &remote).await
 }
 
-/// Validate and apply a delta received over the local IPC channel. Anything that
-/// isn't a correctly-authenticated `AuthEnvelope` is dropped (and logged), which
-/// is what closes the unauthenticated-injection hole.
 fn apply_authenticated_delta(actor: &Arc<SessionActor>, buf: &[u8], expected: &str) {
     match serde_json::from_slice::<AuthEnvelope>(buf) {
         Ok(env) if !expected.is_empty() && secrets_match(&env.auth, expected) => {

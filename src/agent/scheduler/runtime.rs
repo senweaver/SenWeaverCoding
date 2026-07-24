@@ -14,10 +14,6 @@ use tokio::sync::broadcast::error::RecvError;
 use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info_span, warn};
 
-/// Absolute ceiling for a single scheduler run. The per-subagent timeout is the
-/// primary guard; this is a defensive backstop so a wedged executor future (one
-/// that neither completes, fails, nor observes cancellation) can never hang the
-/// caller indefinitely.
 const SCHEDULER_RUN_MAX_SECS: u64 = 3 * 60 * 60;
 
 use super::core::{SchedulableTask, SchedulerEvent, TaskOutcome, TaskScheduler};
@@ -322,10 +318,6 @@ async fn execute_claimed(
             },
         );
 
-        // A panicking executor must not leave the task stuck in `Running`: that
-        // would keep `is_finished()` false forever, block every other worker on
-        // `rx.recv()`, and hang the whole `delegate_parallel` call. Convert the
-        // panic into a normal task failure so the graph still converges.
         let result = match std::panic::AssertUnwindSafe(executor(&task, cancellation.clone()))
             .catch_unwind()
             .await

@@ -13,9 +13,6 @@ struct FsConfinement {
     enabled: bool,
     workspace: Option<PathBuf>,
     allowed_roots: Vec<PathBuf>,
-    // Session-scoped workspace roots: parallel sessions each register their
-    // own root here so confinement checks the caller's workspace instead of
-    // whichever session registered last (the old global last-writer-wins).
     session_workspaces: std::collections::HashMap<String, PathBuf>,
 }
 
@@ -43,13 +40,13 @@ pub fn configure_fs_confinement(
     guard.enabled = enabled;
     if let Some(ws) = workspace {
         if !ws.as_os_str().is_empty() {
-            guard.workspace = Some(normalize_abs(&ws));
+            guard.workspace = Some(resolve_real_path(&ws));
         }
     }
     guard.allowed_roots = allowed_roots
         .into_iter()
         .filter(|p| !p.as_os_str().is_empty())
-        .map(|p| normalize_abs(&p))
+        .map(|p| resolve_real_path(&p))
         .collect();
 }
 
@@ -57,7 +54,7 @@ pub fn register_workspace_root(path: &Path) {
     if path.as_os_str().is_empty() {
         return;
     }
-    let normalized = normalize_abs(path);
+    let normalized = resolve_real_path(path);
     let session_id = crate::session::current_session_context().map(|c| c.session_id);
     let mut guard = confinement().write();
     match session_id {
@@ -68,9 +65,6 @@ pub fn register_workspace_root(path: &Path) {
             }
         }
         None => {
-            // Only retarget the global root when no per-session roots exist
-            // (single-workspace CLI). With live sessions, a session-less call
-            // must not clobber every other session's confinement root.
             if guard.session_workspaces.is_empty() || guard.workspace.is_none() {
                 guard.workspace = Some(normalized);
             }
@@ -93,7 +87,7 @@ pub fn register_workspace_root_for_session(session_id: &str, path: &Path) {
     if path.as_os_str().is_empty() || session_id.is_empty() {
         return;
     }
-    let normalized = normalize_abs(path);
+    let normalized = resolve_real_path(path);
     let mut guard = confinement().write();
     insert_session_workspace(&mut guard, session_id.to_string(), normalized.clone());
     if guard.workspace.is_none() {
@@ -136,6 +130,51 @@ fn normalize_abs(path: &Path) -> PathBuf {
         }
     }
     strip_verbatim_prefix(out)
+}
+
+fn resolve_real_path(path: &Path) -> PathBuf {
+    let abs = normalize_abs(path);
+    if let Ok(real) = std::fs::canonicalize(&abs) {
+        return strip_verbatim_prefix(real);
+    }
+    let mut existing = abs.clone();
+    let mut tail: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        if std::fs::symlink_metadata(&existing).is_ok() {
+            break;
+        }
+        match existing.file_name() {
+            Some(name) => {
+                tail.push(name.to_os_string());
+                if !existing.pop() {
+                    return abs;
+                }
+            }
+            None => return abs,
+        }
+    }
+    let resolved = std::fs::canonicalize(&existing)
+        .map(strip_verbatim_prefix)
+        .or_else(|_| {
+            std::fs::read_link(&existing).map(|target| {
+                let base = existing
+                    .parent()
+                    .map(Path::to_path_buf)
+                    .unwrap_or_default();
+                let joined = if target.is_absolute() {
+                    target
+                } else {
+                    base.join(target)
+                };
+                normalize_abs(&joined)
+            })
+        })
+        .unwrap_or(existing);
+    let mut out = resolved;
+    for comp in tail.iter().rev() {
+        out.push(comp);
+    }
+    out
 }
 
 fn path_within(target: &Path, root: &Path) -> bool {
@@ -239,6 +278,8 @@ pub fn is_sandbox_active() -> bool {
 }
 
 pub fn sandbox_allows_path(path: &Path) -> bool {
+    let resolved = resolve_real_path(path);
+    let path = resolved.as_path();
     if is_sensitive_write_target(path) {
         tracing::warn!(
             path = %path.display(),
@@ -271,11 +312,11 @@ pub fn sandbox_allows_path(path: &Path) -> bool {
                 }
                 if !session_scoped {
                     if let Ok(cwd) = std::env::current_dir() {
-                        if path_within(path, &cwd) {
+                        if path_within(path, &resolve_real_path(&cwd)) {
                             return true;
                         }
                     }
-                    if path_within(path, &std::env::temp_dir()) {
+                    if path_within(path, &resolve_real_path(&std::env::temp_dir())) {
                         return true;
                     }
                 }

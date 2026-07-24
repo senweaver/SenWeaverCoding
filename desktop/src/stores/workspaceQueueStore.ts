@@ -267,6 +267,10 @@ export function takeLastDrainedItem(sessionId: string): QueuedItem | null {
   return entry.item
 }
 
+export function purgeQueueEphemeraForSession(sessionId: string): void {
+  lastDrainedBySession.delete(sessionId)
+}
+
 export function requeueRejectedItem(item: QueuedItem): void {
   useWorkspaceQueueStore.getState().unshift(item)
 }

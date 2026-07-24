@@ -199,16 +199,21 @@ impl TaskScheduler {
         }
 
         let batch_len = tasks.len();
+        let mut dead_on_arrival: Vec<TaskId> = Vec::new();
         for task in tasks {
+            let mut dep_already_dead = false;
             let remaining_deps: HashSet<TaskId> = task
                 .depends_on
                 .iter()
                 .filter(|d| {
-
-                    !matches!(
-                        self.nodes.get(d.as_str()).map(|n| &n.status),
-                        Some(TaskStatus::Completed)
-                    )
+                    match self.nodes.get(d.as_str()).map(|n| &n.status) {
+                        Some(TaskStatus::Completed) => false,
+                        Some(TaskStatus::Failed) | Some(TaskStatus::Cancelled) => {
+                            dep_already_dead = true;
+                            true
+                        }
+                        _ => true,
+                    }
                 })
                 .cloned()
                 .collect();
@@ -232,8 +237,28 @@ impl TaskScheduler {
                 },
             );
 
-            if is_ready {
+            if dep_already_dead {
+                dead_on_arrival.push(id);
+            } else if is_ready {
                 self.push_ready(id, priority);
+            }
+        }
+
+        for id in dead_on_arrival {
+            if let Some(node) = self.nodes.get_mut(&id)
+                && node.status == TaskStatus::Queued
+            {
+                node.status = TaskStatus::Cancelled;
+                self.outcomes.lock().push(TaskOutcome {
+                    task_id: id.clone(),
+                    success: false,
+                    result: "cancelled: dependency already failed or was cancelled".into(),
+                    assigned_agent: None,
+                });
+                let _ = self
+                    .events
+                    .send(SchedulerEvent::TaskCancelled { id: id.clone() });
+                self.cancel_dependents(&id);
             }
         }
 
@@ -373,6 +398,14 @@ impl TaskScheduler {
                 if node.status == TaskStatus::Queued {
                     node.status = TaskStatus::Cancelled;
                     self.remove_from_heap(&id);
+                    self.outcomes.lock().push(TaskOutcome {
+                        task_id: id.clone(),
+                        success: false,
+                        result: format!(
+                            "cancelled: upstream task '{task_id}' failed or was cancelled"
+                        ),
+                        assigned_agent: None,
+                    });
                     let _ = self
                         .events
                         .send(SchedulerEvent::TaskCancelled { id: id.clone() });

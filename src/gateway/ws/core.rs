@@ -735,6 +735,24 @@ async fn process_chat_message(
 ) {
     use crate::agent::TurnEvent;
 
+    let _run_guard = {
+        let guard = state.session_run_state.guard(session_key.to_string());
+        if !guard.was_inserted() {
+            tracing::warn!(
+                session = %session_key,
+                "gateway ws: rejecting message; a turn is already running for this session"
+            );
+            let err = serde_json::json!({
+                "type": "error",
+                "message": "A turn is already running for this session; wait for it to finish.",
+                "code": "SESSION_BUSY",
+            });
+            let _ = sender.send(Message::Text(err.to_string().into())).await;
+            return;
+        }
+        guard
+    };
+
     let provider_label = state
         .config
         .lock()
@@ -762,9 +780,6 @@ async fn process_chat_message(
     let workspace_dir = agent.current_workspace_dir();
     let session_ctx = crate::session::SessionContext {
         session_id: session_key.to_string(),
-        // Key by the real workspace directory (not the session id) so this WS
-        // chat path shares the same-workDir serial queue / file-write locks
-        // with desktop sessions targeting the same directory.
         workspace_key: crate::session::workspace_key_from_path(&workspace_dir, session_key),
         title: session_key.to_string(),
         workspace_dir: workspace_dir.to_string_lossy().into_owned(),

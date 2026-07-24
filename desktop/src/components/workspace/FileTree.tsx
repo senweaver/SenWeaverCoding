@@ -2,7 +2,8 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Virtuoso, type VirtuosoHandle } from 'react-virtuoso'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
@@ -43,6 +44,27 @@ type CreateTarget = {
   parentRelPath: string
   kind: 'file' | 'folder'
 }
+
+type TreeRow =
+  | { kind: 'node'; node: FileTreeNode; depth: number }
+  | { kind: 'create'; parentRelPath: string; depth: number }
+  | { kind: 'dirError'; relPath: string; message: string; depth: number }
+  | { kind: 'dirEmpty'; relPath: string; depth: number }
+
+function treeRowKey(row: TreeRow): string {
+  switch (row.kind) {
+    case 'node':
+      return row.node.relPath
+    case 'create':
+      return `create:${row.parentRelPath}`
+    case 'dirError':
+      return `error:${row.relPath}`
+    case 'dirEmpty':
+      return `empty:${row.relPath}`
+  }
+}
+
+const VIRTUALIZE_ROW_THRESHOLD = 300
 
 const DRAG_MIME = 'application/x-sen-workspace-rel-path'
 
@@ -180,7 +202,6 @@ export function FileTree({ workDir, onSelect }: Props) {
           inFlight += 1
           loadDirectory(target)
             .catch(() => {
-              /* ignore */
             })
             .finally(() => {
               inFlight -= 1
@@ -521,33 +542,67 @@ export function FileTree({ workDir, onSelect }: Props) {
   const canOpenTerminal = useMemo(() => isTauriRuntime(), [])
 
   const dirsForFlat = useWorkspaceFilesStore((s) => s.dirs)
-  const visibleNodes = useMemo(() => {
-    if (!root) return [] as FileTreeNode[]
-    const out: FileTreeNode[] = []
-    const visit = (entries: FileTreeNode[]) => {
+  const treeRows = useMemo<TreeRow[]>(() => {
+    if (!root) return []
+    const rows: TreeRow[] = []
+    const visit = (entries: FileTreeNode[], depth: number) => {
       for (const entry of entries) {
         if (filterState?.active) {
           const isMatch = filterState.matches.has(entry.relPath)
           const isAncestor = filterState.ancestors.has(entry.relPath)
           if (!isMatch && !isAncestor) continue
         }
-        out.push(entry)
-        if (entry.isDir) {
-          const key = `${root}::${entry.relPath}`
-          const dir = dirsForFlat[key]
-          if (dir?.expanded) {
-            if (dir.children?.length) {
-              visit(dir.children)
-            } else if (entry.children?.length) {
-              visit(entry.children)
-            }
-          }
+        rows.push({ kind: 'node', node: entry, depth })
+        if (!entry.isDir) continue
+        const key = `${root}::${entry.relPath}`
+        const dir = dirsForFlat[key]
+        const forcedOpen = filterState?.active
+          ? filterState.ancestors.has(entry.relPath)
+          : false
+        const expanded = forcedOpen ? true : (dir?.expanded ?? false)
+        if (!expanded) continue
+        if (createTarget && createTarget.parentRelPath === entry.relPath) {
+          rows.push({
+            kind: 'create',
+            parentRelPath: entry.relPath,
+            depth: depth + 1,
+          })
         }
+        if (dir?.error) {
+          rows.push({
+            kind: 'dirError',
+            relPath: entry.relPath,
+            message: dir.error,
+            depth: depth + 1,
+          })
+          continue
+        }
+        const children = dir?.loaded ? (dir.children ?? []) : (entry.children ?? [])
+        const visibleChildren = filterState?.active
+          ? children.filter(
+              (c) =>
+                filterState.matches.has(c.relPath) ||
+                filterState.ancestors.has(c.relPath),
+            )
+          : children
+        if (visibleChildren.length === 0 && dir?.loaded) {
+          rows.push({ kind: 'dirEmpty', relPath: entry.relPath, depth: depth + 1 })
+          continue
+        }
+        visit(visibleChildren, depth + 1)
       }
     }
-    visit(rootEntries)
+    visit(rootEntries, 0)
+    return rows
+  }, [createTarget, dirsForFlat, filterState, root, rootEntries])
+
+  const visibleNodes = useMemo(() => {
+    const out: FileTreeNode[] = []
+    for (const row of treeRows) {
+      if (row.kind === 'node') out.push(row.node)
+    }
     return out
-  }, [dirsForFlat, filterState, root, rootEntries])
+  }, [treeRows])
 
   const visibleByPath = useMemo(() => {
     const map = new Map<string, FileTreeNode>()
@@ -723,6 +778,100 @@ export function FileTree({ workDir, onSelect }: Props) {
     }
   }, [focusedRelPath, visibleByPath])
 
+  const [scrollParent, setScrollParent] = useState<HTMLDivElement | null>(null)
+  const setTreeEl = useCallback((el: HTMLDivElement | null) => {
+    treeRef.current = el
+    setScrollParent(el)
+  }, [])
+  const virtuosoRef = useRef<VirtuosoHandle>(null)
+  const virtualize =
+    treeRows.length > VIRTUALIZE_ROW_THRESHOLD &&
+    !renameTarget &&
+    !createTarget &&
+    scrollParent !== null
+
+  useEffect(() => {
+    if (!virtualize || !focusedRelPath) return
+    const idx = treeRows.findIndex(
+      (r) => r.kind === 'node' && r.node.relPath === focusedRelPath,
+    )
+    if (idx >= 0) {
+      virtuosoRef.current?.scrollIntoView({ index: idx })
+    }
+  }, [virtualize, focusedRelPath, treeRows])
+
+  const renderTreeRow = useCallback(
+    (row: TreeRow) => {
+      switch (row.kind) {
+        case 'node':
+          return (
+            <FileTreeNodeView
+              node={row.node}
+              depth={row.depth}
+              selectedRelPath={selectedRelPath}
+              focusedRelPath={focusedRelPath}
+              renameTarget={renameTarget}
+              filter={filterState}
+              onSelect={handleSelect}
+              onFocus={setFocusedRelPath}
+              onContextMenu={handleContextMenu}
+              onDrop={handleDrop}
+              onRenameSubmit={handleRenameSubmit}
+              onRenameCancel={() => setRenameTarget(null)}
+            />
+          )
+        case 'create':
+          return (
+            <div
+              className="px-1 py-0.5"
+              style={{ paddingLeft: `${row.depth * 12 + 4}px` }}
+            >
+              <InlineNamePrompt
+                placeholder={
+                  createTarget?.kind === 'file'
+                    ? t('files.newFile')
+                    : t('files.newFolder')
+                }
+                onCancel={() => setCreateTarget(null)}
+                onSubmit={handleCreateSubmit}
+              />
+            </div>
+          )
+        case 'dirError':
+          return (
+            <div
+              className="px-2 py-1 text-[11px] text-[var(--color-text-tertiary)]"
+              style={{ paddingLeft: `${row.depth * 12 + 4}px` }}
+            >
+              {row.message}
+            </div>
+          )
+        case 'dirEmpty':
+          return (
+            <div
+              className="px-2 py-1 text-[11px] text-[var(--color-text-tertiary)] italic"
+              style={{ paddingLeft: `${row.depth * 12 + 4}px` }}
+            >
+              ·
+            </div>
+          )
+      }
+    },
+    [
+      createTarget,
+      filterState,
+      focusedRelPath,
+      handleContextMenu,
+      handleCreateSubmit,
+      handleDrop,
+      handleRenameSubmit,
+      handleSelect,
+      renameTarget,
+      selectedRelPath,
+      t,
+    ],
+  )
+
   const containerProps = useMemo(
     () => ({
       onDragOver: (event: React.DragEvent) => {
@@ -744,7 +893,7 @@ export function FileTree({ workDir, onSelect }: Props) {
 
   return (
     <div
-      ref={treeRef}
+      ref={setTreeEl}
       role="tree"
       tabIndex={0}
       onKeyDown={handleTreeKeyDown}
@@ -927,26 +1076,20 @@ export function FileTree({ workDir, onSelect }: Props) {
         </div>
       )}
 
-      {rootEntries.map((entry) => (
-        <FileTreeNodeView
-          key={entry.relPath}
-          node={entry}
-          depth={0}
-          selectedRelPath={selectedRelPath}
-          focusedRelPath={focusedRelPath}
-          renameTarget={renameTarget}
-          createTarget={createTarget}
-          filter={filterState}
-          onSelect={handleSelect}
-          onFocus={setFocusedRelPath}
-          onContextMenu={handleContextMenu}
-          onDrop={handleDrop}
-          onRenameSubmit={handleRenameSubmit}
-          onRenameCancel={() => setRenameTarget(null)}
-          onCreateSubmit={handleCreateSubmit}
-          onCreateCancel={() => setCreateTarget(null)}
+      {virtualize ? (
+        <Virtuoso<TreeRow>
+          ref={virtuosoRef}
+          data={treeRows}
+          customScrollParent={scrollParent ?? undefined}
+          computeItemKey={(_, row) => treeRowKey(row)}
+          itemContent={(_, row) => renderTreeRow(row)}
+          increaseViewportBy={{ top: 200, bottom: 400 }}
         />
-      ))}
+      ) : (
+        treeRows.map((row) => (
+          <Fragment key={treeRowKey(row)}>{renderTreeRow(row)}</Fragment>
+        ))
+      )}
 
       {!rootLoading && rootEntries.length === 0 && rootLoaded && (
         <div className="px-3 py-3 text-center text-[11px] text-[var(--color-text-tertiary)] italic">

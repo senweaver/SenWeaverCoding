@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { getDefaultBaseUrl, setBaseUrl } from '../api/client'
+import { getDefaultBaseUrl, setAuthToken, setBaseUrl } from '../api/client'
 
 function sleep(ms: number) {
   return new Promise<void>((resolve) => setTimeout(resolve, ms))
@@ -327,6 +327,13 @@ export async function initializeDesktopServerUrl(options?: {
     urlPollDelay = HEALTH_BACKOFF_INITIAL_MS
     notify('gateway-acquired', serverUrl)
     setBaseUrl(serverUrl)
+    try {
+      const token = await invoke<string>('get_server_token')
+      if (token) {
+        setAuthToken(token)
+      }
+    } catch {
+    }
     try {
       await waitForHealth(serverUrl, BROWSER_HEALTH_ATTEMPTS, options?.signal)
       notify('health-ok')

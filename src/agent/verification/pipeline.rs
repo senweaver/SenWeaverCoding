@@ -100,9 +100,11 @@ impl VerificationPipeline {
             }
             let stage_name = stage.name();
             let span = tracing::info_span!("verify", stage = stage_name);
-            let _enter = span.enter();
             let started = Instant::now();
-            let result = stage.verify(art).await;
+            let result = {
+                use tracing::Instrument as _;
+                stage.verify(art).instrument(span).await
+            };
             let elapsed_ms = started.elapsed().as_millis() as u64;
             match result {
                 Ok(report) => {

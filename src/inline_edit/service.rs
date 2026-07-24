@@ -109,20 +109,20 @@ pub fn default_fast_refiner(config: &Config) -> Option<Arc<FastApplyRefiner>> {
     );
     let fast_runtime = &config.agent_runtime;
     let fast_refiner: Option<Arc<dyn LlmRefiner>> =
-        match fast_runtime.fast_apply_model.as_deref() {
-            Some(fast_model) if !fast_model.trim().is_empty() => {
+        match providers::resolve_fast_apply_model(config) {
+            Some(fast_model) => {
                 let timeout = Duration::from_secs(
                     fast_runtime.fast_apply_timeout_secs.max(1),
                 );
                 let r: Arc<dyn LlmRefiner> = Arc::new(
-                    HttpLlmRefiner::new(provider.clone(), fast_model.to_string())
+                    HttpLlmRefiner::new(provider.clone(), fast_model)
                         .with_temperature(fast_runtime.fast_apply_temperature)
                         .with_timeout(timeout)
                         .with_max_recursive_attempts(1),
                 );
                 Some(r)
             }
-            _ => None,
+            None => None,
         };
     let tiered = Arc::new(FastApplyRefiner::new(fast_refiner, full_refiner));
     if let Ok(mut guard) = fast_refiner_cache().write() {

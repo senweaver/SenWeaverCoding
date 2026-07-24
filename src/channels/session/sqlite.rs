@@ -618,9 +618,6 @@ impl SessionBackend for SqliteSessionBackend {
         limit: usize,
     ) -> (Vec<LoadedMessage>, usize, usize, usize) {
         let conn = self.read_conn();
-        // One deferred transaction = one WAL snapshot for all three reads, so a
-        // purge/delete committing mid-page can't shift the OFFSET window and
-        // mislabel the served indexes.
         if conn.execute_batch("BEGIN DEFERRED").is_err() {
             drop(conn);
             let total = self.count_messages(session_key);

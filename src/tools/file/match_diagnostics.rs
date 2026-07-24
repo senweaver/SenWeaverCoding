@@ -206,6 +206,98 @@ pub fn diagnose(content: &str, old_string: &str) -> Option<MatchDiagnosis> {
     })
 }
 
+pub fn find_whitespace_insensitive_unique(
+    content: &str,
+    old_string: &str,
+    new_string: &str,
+) -> Option<(usize, usize, String)> {
+    if old_string.trim().is_empty() {
+        return None;
+    }
+    let source_lines: Vec<&str> = content.split_inclusive('\n').collect();
+    let old_lf = old_string.replace("\r\n", "\n");
+    let mut old_lines: Vec<&str> = old_lf.split('\n').collect();
+    if old_lf.ends_with('\n') && old_lines.last() == Some(&"") {
+        old_lines.pop();
+    }
+    if old_lines.is_empty() {
+        return None;
+    }
+    let win_len = old_lines.len();
+    if source_lines.len() < win_len {
+        return None;
+    }
+
+    const SCAN_BUDGET: usize = 4_000_000;
+    let positions = source_lines.len() - win_len + 1;
+    if positions.saturating_mul(win_len) > SCAN_BUDGET {
+        return None;
+    }
+
+    let mut found: Option<usize> = None;
+    for start in 0..positions {
+        if is_trimmed_equal(&source_lines[start..start + win_len], &old_lines) {
+            if found.is_some() {
+                return None;
+            }
+            found = Some(start);
+        }
+    }
+    let start_line = found?;
+
+    let byte_start: usize = source_lines[..start_line].iter().map(|l| l.len()).sum();
+    let matched_len: usize = source_lines[start_line..start_line + win_len]
+        .iter()
+        .map(|l| l.len())
+        .sum();
+    let last_line = source_lines[start_line + win_len - 1];
+    let trailing_nl = if last_line.ends_with("\r\n") {
+        2
+    } else if last_line.ends_with('\n') {
+        1
+    } else {
+        0
+    };
+    let byte_end = byte_start + matched_len - trailing_nl;
+
+    let file_indent = leading_ws(source_lines[start_line]);
+    let old_indent = leading_ws(old_lines[0]);
+    let adjusted_new = if file_indent == old_indent {
+        new_string.to_string()
+    } else {
+        reindent_block(new_string, old_indent, file_indent)
+    };
+    Some((byte_start, byte_end, adjusted_new))
+}
+
+fn leading_ws(line: &str) -> &str {
+    let end = line
+        .char_indices()
+        .find(|(_, c)| *c != ' ' && *c != '\t')
+        .map(|(i, _)| i)
+        .unwrap_or(line.len());
+    &line[..end]
+}
+
+fn reindent_block(text: &str, from_indent: &str, to_indent: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 64);
+    for line in text.split_inclusive('\n') {
+        out.push_str(&reindent_line(line, from_indent, to_indent));
+    }
+    out
+}
+
+fn reindent_line(line: &str, from_indent: &str, to_indent: &str) -> String {
+    if line.trim().is_empty() {
+        return line.to_string();
+    }
+    if let Some(rest) = line.strip_prefix(from_indent) {
+        format!("{to_indent}{rest}")
+    } else {
+        line.to_string()
+    }
+}
+
 pub fn failure_message(content: &str, old_string: &str, path_display: &str, had_read: bool) -> String {
     let mut msg = format!("old_string not found in '{path_display}'.");
     let kind = match diagnose(content, old_string) {

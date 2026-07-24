@@ -80,9 +80,6 @@ pub(crate) fn kill_gateway_child_pid(pid: u32) {
         if *slot == Some(pid) {
             *slot = None;
         } else {
-            // The global slot points at a different (newer) child spawned by a
-            // concurrent bootstrap; only terminate the pid we own, never the
-            // newer one, and leave the slot intact.
             tracing::warn!(
                 "[sen-desktop] kill_gateway_child_pid({pid}) but global slot holds {:?}; terminating only our own pid",
                 *slot
@@ -145,6 +142,10 @@ fn try_start_isolated_gateway(
         .env(
             senweavercoding::gateway::desktop::bridge::BRIDGE_TOKEN_ENV,
             &token,
+        )
+        .env(
+            senweavercoding::gateway::loopback_auth::TOKEN_ENV,
+            senweavercoding::gateway::loopback_auth::loopback_token(),
         );
     if let Some(ref path) = log_path {
         match std::fs::OpenOptions::new().create(true).append(true).open(path) {
@@ -671,6 +672,11 @@ fn get_server_url(state: State<'_, ServerState>) -> Result<String, String> {
 }
 
 #[tauri::command]
+fn get_server_token() -> String {
+    senweavercoding::gateway::loopback_auth::loopback_token().to_string()
+}
+
+#[tauri::command]
 fn get_server_status(state: State<'_, ServerState>) -> BootstrapStatusPayload {
     let guard = state.0.lock();
     snapshot_status_locked(&guard)
@@ -688,6 +694,10 @@ async fn restart_adapters_sidecar(state: State<'_, ServerState>) -> Result<(), S
     let resp = adapters_restart_client()
         .post(format!("{url}/api/channels/restart"))
         .header(HEALTH_PROBE_HEADER, HEALTH_PROBE_HEADER_VALUE)
+        .header(
+            senweavercoding::gateway::loopback_auth::TOKEN_HEADER,
+            senweavercoding::gateway::loopback_auth::loopback_token(),
+        )
         .send()
         .await
         .map_err(|e| format!("channels restart request failed: {e}"))?;
@@ -842,6 +852,28 @@ async fn prepare_for_update_install(handle: AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+async fn recover_from_failed_update(
+    handle: AppHandle,
+    state: State<'_, ServerState>,
+) -> Result<(), String> {
+    tracing::warn!(
+        "[sen-desktop] update install did not complete; recovering the embedded gateway"
+    );
+    process_lifetime::reset_shutdown_latch();
+    {
+        let mut guard = state.0.lock();
+        guard.bootstrap_in_progress = false;
+        guard.bootstrap_generation = guard.bootstrap_generation.saturating_add(1);
+        guard.auto_restart_attempts = 0;
+        guard.url = None;
+        guard.last_error = None;
+    }
+    emit_backend_state(&handle, state.inner());
+    stop_running_gateway_instance().await;
+    spawn_gateway_bootstrap_thread(handle, state.inner().clone())
+}
+
 static FRONTEND_READY_SIGNALED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
@@ -934,10 +966,6 @@ fn hide_minimal_window(app: &AppHandle) {
     }
 }
 
-// Rebuilds the "main" window from scratch, mirroring the config in
-// tauri.conf.json. This is the recovery path for the case where the config
-// window failed to register (or was destroyed) and is therefore absent from
-// the runtime window map. MUST be called on the main thread.
 fn build_main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     use tauri::{WebviewUrl, WebviewWindowBuilder};
 
@@ -978,17 +1006,6 @@ fn build_main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
     }
 }
 
-// Returns the live "main" window, recreating it only if it is truly gone.
-//
-// Crucially this uses the *window* registry (`get_window`) rather than
-// `get_webview_window`: once the embedded-browser dock attaches a child webview
-// to the main window (`browser_dock::add_child`), the window is no longer a
-// simple 1:1 `WebviewWindow`, so `get_webview_window("main")` returns `None`
-// even though the window is alive and well. `get_window("main")` keeps working,
-// and every method used for revealing (`show`/`set_focus`/`unminimize`/`hwnd`)
-// is available on `Window`.
-//
-// MUST be called on the main thread because window creation is main-thread-only.
 fn ensure_main_window(app: &AppHandle) -> Option<tauri::Window> {
     if let Some(win) = app.get_window("main") {
         return Some(win);
@@ -1242,10 +1259,6 @@ fn schedule_frontend_ready_watchdog(window: tauri::WebviewWindow) {
         }
         let win = window.clone();
         if let Err(err) = window.run_on_main_thread(move || {
-            // The window may have been revealed through any path (including the
-            // frontend's direct show() fallback) without the explicit signal.
-            // If it is already visible the app started fine; never show the
-            // failure screen in that case.
             if win.is_visible().unwrap_or(false) {
                 return;
             }
@@ -1909,11 +1922,13 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .invoke_handler(tauri::generate_handler![
             get_server_url,
+            get_server_token,
             get_server_status,
             restart_embedded_gateway,
             restart_adapters_sidecar,
             open_log_dir,
             prepare_for_update_install,
+            recover_from_failed_update,
             signal_frontend_ready,
             quit_app,
             set_tray_labels,
@@ -2187,7 +2202,15 @@ fn run_bootstrap_until_success(server_state: ServerState, generation: u64, handl
     }
 }
 
+static LAST_GATEWAY_PORT: std::sync::atomic::AtomicU16 = std::sync::atomic::AtomicU16::new(0);
+
 fn reserve_local_port() -> Result<(u16, TcpListener), String> {
+    let previous = LAST_GATEWAY_PORT.load(std::sync::atomic::Ordering::SeqCst);
+    if previous != 0 {
+        if let Ok(listener) = TcpListener::bind(("127.0.0.1", previous)) {
+            return Ok((previous, listener));
+        }
+    }
     let mut last_err: Option<String> = None;
     for _ in 0..5 {
         match TcpListener::bind("127.0.0.1:0") {
@@ -2203,6 +2226,10 @@ fn reserve_local_port() -> Result<(u16, TcpListener), String> {
         }
     }
     Err(last_err.unwrap_or_else(|| "could not reserve a local port".to_string()))
+}
+
+fn remember_gateway_port(port: u16) {
+    LAST_GATEWAY_PORT.store(port, std::sync::atomic::Ordering::SeqCst);
 }
 
 fn probe_health_once(addr: SocketAddr, timeout_ms: u64) -> bool {
@@ -2478,6 +2505,7 @@ fn start_isolated_gateway_with_port_retry(
             &gateway_exit,
         ) {
             Some(Ok(ready_url)) => {
+                remember_gateway_port(port);
                 return Ok(Some(GatewayLaunch {
                     url: ready_url,
                     exit_channel: gateway_exit,
@@ -2490,6 +2518,7 @@ fn start_isolated_gateway_with_port_retry(
                         "[sen-desktop] isolated gateway attempt {} failed with a bind-class error on {host}:{port} ({err}); retrying on a fresh port",
                         attempt + 1
                     );
+                    remember_gateway_port(0);
                     let (next_port, next_listener) = reserve_local_port().map_err(|e| {
                         format!("re-reserve local port for isolated gateway retry: {e}")
                     })?;
@@ -2559,6 +2588,7 @@ fn start_in_process_gateway(
     port: u16,
     std_listener: TcpListener,
 ) -> Result<GatewayLaunch, String> {
+    remember_gateway_port(port);
     let gateway_exit: GatewayExitChannel = Arc::new(Mutex::new(None));
     let exit_for_thread = Arc::clone(&gateway_exit);
     let url = format!("http://{host}:{port}");

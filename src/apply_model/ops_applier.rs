@@ -328,8 +328,6 @@ pub trait LspNotifier: Send + Sync {
     async fn notify_changed(&self, path: &Path, contents: &str) -> anyhow::Result<()>;
 }
 
-// Resolves the LSP service at call time so every OpsApplier constructed before
-// the service registry is up still forwards didChange once services exist.
 struct LazyServiceLspNotifier;
 
 #[async_trait::async_trait]
@@ -365,15 +363,6 @@ impl OpsApplier {
         Self::default_for_shared_workspace(Arc::new(RwLock::new(canon)))
     }
 
-    /// Build an applier wired to the real concurrency guards: the region lock
-    /// provider from the global multi-agent runtime (so two agents / a user and
-    /// an agent editing the same file serialize instead of clobbering each
-    /// other) plus the workspace's shared edit-history (for journal + revert).
-    ///
-    /// This is the correct constructor for every edit path outside the main tool
-    /// surface (inline-edit, CodeEditFlow, NEP apply, write_mode, diff_session,
-    /// TUI hunk revert). Prefer it over `default_for_workspace`, which installs a
-    /// `NoopLockProvider` and therefore offers no cross-writer protection.
     #[must_use]
     pub fn locked_for_workspace(workspace_root: impl Into<PathBuf>) -> Self {
         let raw = workspace_root.into();
@@ -383,9 +372,6 @@ impl OpsApplier {
         } else {
             canon.clone()
         };
-        // Resolve the runtime lazily on every acquire: an applier built before
-        // the multi-agent runtime comes up would otherwise be pinned to a no-op
-        // provider forever and never serialize with other writers.
         let lock_provider: Arc<dyn LockProvider> = Arc::new(
             crate::apply_model::lock_manager_provider::LazyRuntimeLockProvider::new("edit_path"),
         );
@@ -480,12 +466,6 @@ impl OpsApplier {
     ) -> Result<BatchOutcome, ApplyBatchError> {
         let ws = self.workspace_snapshot();
 
-        // Reject a batch that carries more than one byte-offset mutation
-        // (Replace/Insert/Delete) against the same file: their offsets are all
-        // computed against the original text, so applying the second against the
-        // already-mutated file corrupts it (or trips the old_text guard and
-        // rolls the whole batch back). Callers that need multiple edits per file
-        // must pre-merge them into one op (as multi_edit already does).
         if let Some(dup) = first_conflicting_multi_op_path(&batch) {
             return Err(ApplyBatchError::Apply {
                 op_index: 0,
@@ -506,10 +486,6 @@ impl OpsApplier {
             .await?;
 
         {
-            // Precondition checks read files from disk; run them on the blocking pool so the
-            // async worker thread (and the agent loop sharing it) is never stalled per edit.
-            // Crucially this runs AFTER the region lock is held, so a concurrent
-            // writer cannot slip in between the check and the apply.
             let batch_for_validate = batch.clone();
             let allowed_roots = self.allowed_roots.clone();
             let validate = tokio::task::spawn_blocking(move || -> Result<(), ApplyBatchError> {
@@ -693,11 +669,6 @@ impl OpsApplier {
             }
         }
 
-        // Build path -> exact post-image sha from the values apply_one already
-        // computed (last op on a file wins). Passing these to the history stamp
-        // avoids a racy re-read of disk, so the revert freshness guard is keyed to
-        // what THIS batch actually wrote, not whatever a concurrent external write
-        // left behind between apply and stamp.
         let post_hashes_by_path: std::collections::HashMap<PathBuf, String> = post_images
             .iter()
             .filter_map(|(idx, sha)| {
@@ -768,9 +739,9 @@ impl OpsApplier {
         hint: Option<&str>,
         origin: super::edit_op::EditOrigin,
     ) -> Result<(BatchOutcome, super::fast_apply::FastPathTier), ApplyBatchError> {
-        let source = {
+        let (source, encoding_label) = {
             let path_for_read = path.clone();
-            tokio::task::spawn_blocking(move || std::fs::read_to_string(&path_for_read))
+            let raw_bytes = tokio::task::spawn_blocking(move || std::fs::read(&path_for_read))
                 .await
                 .map_err(|e| ApplyBatchError::Io {
                     op_index: 0,
@@ -781,7 +752,9 @@ impl OpsApplier {
                     op_index: 0,
                     path: path.clone(),
                     source,
-                })?
+                })?;
+            let (text, label) = crate::tools::file::encoding::decode_best_effort(&raw_bytes);
+            (text, label)
         };
         let mut options = options.clone();
         if options.path.is_none() {
@@ -798,13 +771,22 @@ impl OpsApplier {
                 source: e,
             })?;
         let new_text = outcome.applied;
-        let len_before = source.len();
-        let op = super::edit_op::EditOp::Replace {
-            path: path.clone(),
-            byte_range: 0..len_before,
-            old_text: source,
-            new_text,
-            anchor: None,
+        let op = if crate::tools::file::encoding::is_utf8_label(encoding_label) {
+            let len_before = source.len();
+            super::edit_op::EditOp::Replace {
+                path: path.clone(),
+                byte_range: 0..len_before,
+                old_text: source,
+                new_text,
+                anchor: None,
+            }
+        } else {
+            super::edit_op::EditOp::CreateFile {
+                path: path.clone(),
+                contents: new_text,
+                overwrite: true,
+                encoding: Some(encoding_label.to_string()),
+            }
         };
         let batch = super::edit_op::EditBatch::new(origin)
             .with_op(op)
@@ -871,15 +853,11 @@ impl OpsApplier {
                         );
                         continue;
                     }
-                    // restore_one now fully undoes renames (restores `from`, and
-                    // restores/removes `to`), so no extra remove_file is needed.
                     restore_one(pre).map_err(|source| RollbackError::Io {
                         path: pre.path.clone(),
                         source,
                     })?;
                 } else if let EditOp::RenameFile { from, to, .. } = &record.op {
-                    // Legacy journals without a captured pre-image: best-effort undo
-                    // by moving `to` back to `from`.
                     let _ = std::fs::rename(to, from);
                 }
             }
@@ -1024,9 +1002,6 @@ impl OpsApplier {
                 })?;
                 let before = bytes.len();
                 validate_byte_range_for_apply(op_index, path, byte_range, before)?;
-                // Re-verify old_text at apply time (mirrors Replace): guards against
-                // an earlier op in the same batch or an external write shifting the
-                // range between precheck and apply, so we never delete wrong bytes.
                 if let Some(expected) = old_text.as_ref() {
                     if &bytes[byte_range.clone()] != expected.as_bytes() {
                         return Err(ApplyBatchError::Apply {
@@ -1068,9 +1043,6 @@ impl OpsApplier {
                         source,
                     })?;
                 }
-                // Preserve the file's original on-disk encoding (e.g. GBK) instead
-                // of silently rewriting it as UTF-8 and corrupting every non-ASCII
-                // byte. Falls back to UTF-8 when re-encoding is impossible.
                 let out_bytes: Vec<u8> = match encoding.as_deref() {
                     Some(label)
                         if !crate::tools::file::encoding::is_utf8_label(label) =>
@@ -1137,31 +1109,11 @@ impl OpsApplier {
                 fuzz,
                 scope_anchor,
             } => {
-                // Read bytes and decode best-effort so GBK/Latin-1/etc. files can be
-                // patched (previously read_to_string hard-failed with InvalidData on
-                // any non-UTF-8 file, unlike CreateFile which preserves encoding).
                 let raw_bytes = std::fs::read(path).map_err(|source| ApplyBatchError::Io {
                     op_index,
                     path: path.clone(),
                     source,
                 })?;
-                // UTF-16 cannot be re-encoded by encoding_rs (its encoder emits
-                // UTF-8), so patching would silently transcode + drop the BOM.
-                // Refuse rather than corrupt — matches the pre-change safety of
-                // hard-failing on non-UTF-8.
-                if raw_bytes.starts_with(&[0xFF, 0xFE]) || raw_bytes.starts_with(&[0xFE, 0xFF]) {
-                    return Err(ApplyBatchError::Apply {
-                        op_index,
-                        path: path.clone(),
-                        source: anyhow::anyhow!(
-                            "refusing to patch UTF-16 file {} (re-encoding would corrupt it); \
-                             convert to UTF-8 first",
-                            path.display()
-                        ),
-                    });
-                }
-                // Preserve a leading UTF-8 BOM across the round-trip (decode strips it).
-                let had_utf8_bom = raw_bytes.starts_with(&[0xEF, 0xBB, 0xBF]);
                 let (source, encoding_label) =
                     crate::tools::file::encoding::decode_best_effort(&raw_bytes);
                 let before = source.len();
@@ -1190,19 +1142,11 @@ impl OpsApplier {
                     path: path.clone(),
                     source,
                 })?;
-                // Re-encode in the file's original encoding so a non-UTF-8 file
-                // stays in its encoding after patching, restoring a stripped BOM.
-                let mut out_bytes = crate::tools::file::encoding::encode_with_label(
+                let out_bytes = crate::tools::file::encoding::encode_with_label(
                     encoding_label,
                     &outcome.applied,
                 )
                 .unwrap_or_else(|| outcome.applied.as_bytes().to_vec());
-                if had_utf8_bom && !out_bytes.starts_with(&[0xEF, 0xBB, 0xBF]) {
-                    let mut with_bom = Vec::with_capacity(out_bytes.len() + 3);
-                    with_bom.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
-                    with_bom.append(&mut out_bytes);
-                    out_bytes = with_bom;
-                }
                 atomic_write(path, &out_bytes).map_err(|source| ApplyBatchError::Io {
                     op_index,
                     path: path.clone(),
@@ -1378,7 +1322,8 @@ impl OpsApplier {
                     fuzz,
                     scope_anchor,
                 } => {
-                    let source = std::fs::read_to_string(path).unwrap_or_default();
+                    let raw = std::fs::read(path).unwrap_or_default();
+                    let (source, _) = crate::tools::file::encoding::decode_best_effort(&raw);
                     let mut opts = apply_opts.clone();
                     opts.max_fuzz = *fuzz as usize;
                     opts.dry_run = true;
@@ -1404,7 +1349,11 @@ impl OpsApplier {
                     diffs.push(UnifiedDiffPreview {
                         op_index: idx,
                         path: path.clone(),
-                        unified_diff: diff.clone(),
+                        unified_diff: render_minimal_unified_diff(
+                            path,
+                            &source,
+                            &outcome.applied,
+                        ),
                         before_bytes: Some(source.len()),
                         after_bytes: Some(outcome.applied.len()),
                     });
@@ -1505,8 +1454,6 @@ impl OpsApplier {
         }
     }
 
-    /// Write the journal footer (when present) and rotate old journals entirely on the blocking
-    /// pool, keeping the async worker thread free on the per-edit success path.
     async fn finalize_journal_async(
         &self,
         journal_path: Option<PathBuf>,
@@ -1524,9 +1471,6 @@ impl OpsApplier {
         .await;
     }
 
-    /// Commit the journal: stamp each record with the post-image SHA-256 captured
-    /// during apply (so rollback can detect files that changed after our edit),
-    /// then append the committed footer and rotate old journals.
     async fn finalize_journal_committed(
         &self,
         journal_path: Option<PathBuf>,
@@ -1772,10 +1716,6 @@ fn unique_touched_paths(batch: &EditBatch) -> Vec<PathBuf> {
     set.into_iter().collect()
 }
 
-/// Returns a path if the batch has 2+ byte-offset mutations (Replace/Insert/
-/// Delete) against it. Those ops all address the *original* file layout, so a
-/// second one applied after the first shifts everything and corrupts the file;
-/// callers must coalesce them into one op first.
 fn first_conflicting_multi_op_path(batch: &EditBatch) -> Option<PathBuf> {
     let mut seen: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
     for op in &batch.ops {
@@ -1796,12 +1736,6 @@ fn region_requests_for_batch(batch: &EditBatch) -> Vec<RegionLockRequest> {
     let mut out: Vec<RegionLockRequest> = Vec::with_capacity(batch.ops.len());
     for op in &batch.ops {
         match op {
-            // Byte ops apply as a whole-file read-modify-write (read → splice →
-            // atomic_write), so a byte-range lock would let two batches touching
-            // disjoint ranges of the SAME file run concurrently and clobber each
-            // other on write-back. Lock the whole file (like ApplyHunk/CreateFile)
-            // to actually serialize same-file batches — this is what
-            // `locked_for_workspace` promises for multi-agent same-file edits.
             EditOp::Replace { path, .. }
             | EditOp::Insert { path, .. }
             | EditOp::Delete { path, .. } => out.push(RegionLockRequest {
@@ -1857,9 +1791,6 @@ fn capture_pre_images(
                 format!("{:x}", hasher.finalize())
             });
 
-            // For a rename, `path` is the destination (`to`). To be able to fully
-            // undo it we must also capture the SOURCE (`from`) content, otherwise a
-            // rollback deletes `to` and loses the file entirely.
             let (rename_from, rename_from_bytes) = if let EditOp::RenameFile { from, .. } = op {
                 (Some(from.clone()), std::fs::read(from).ok())
             } else {
@@ -1970,15 +1901,11 @@ fn post_image_is_fresh(path: &Path, expected_sha256: Option<&str>) -> bool {
     };
     match std::fs::read(path) {
         Ok(bytes) => sha256_hex(&bytes) == expected,
-        // The file is gone (e.g. our op created it and it was later deleted, or it
-        // was removed out from under us): there is nothing newer to protect.
         Err(_) => true,
     }
 }
 
 fn restore_one(pre: &PreImage) -> Result<(), std::io::Error> {
-    // Undo a rename by first restoring the source file's captured content, then
-    // restoring (or removing) the destination to its pre-rename state.
     if let Some(from) = &pre.rename_from {
         restore_path_bytes(from, &pre.rename_from_bytes)?;
     }
@@ -1986,25 +1913,23 @@ fn restore_one(pre: &PreImage) -> Result<(), std::io::Error> {
 }
 
 fn render_minimal_unified_diff(path: &Path, before: &str, after: &str) -> String {
-    let mut out = format!("--- a/{}\n+++ b/{}\n", path.display(), path.display());
-    let before_lines: Vec<&str> = before.lines().collect();
-    let after_lines: Vec<&str> = after.lines().collect();
-    out.push_str(&format!(
-        "@@ -1,{} +1,{} @@\n",
-        before_lines.len().max(1),
-        after_lines.len().max(1)
-    ));
-    for line in &before_lines {
-        out.push('-');
-        out.push_str(line);
-        out.push('\n');
+    const MAX_DIFF_INPUT_BYTES: usize = 2 * 1024 * 1024;
+    if before.len() + after.len() > MAX_DIFF_INPUT_BYTES {
+        return format!(
+            "--- a/{p}\n+++ b/{p}\n@@ diff omitted: content too large for preview ({} -> {} bytes) @@\n",
+            before.len(),
+            after.len(),
+            p = path.display()
+        );
     }
-    for line in &after_lines {
-        out.push('+');
-        out.push_str(line);
-        out.push('\n');
-    }
-    out
+    let diff = similar::TextDiff::from_lines(before, after);
+    diff.unified_diff()
+        .context_radius(3)
+        .header(
+            &format!("a/{}", path.display()),
+            &format!("b/{}", path.display()),
+        )
+        .to_string()
 }
 
 fn cell_op_label(op: &NotebookCellOp) -> &'static str {

@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { ApiError, getBaseUrl } from './client'
+import { ApiError, getAuthToken, getBaseUrl } from './client'
 
 export type GitStatusEntry = {
   relPath: string
@@ -54,6 +54,10 @@ export const gitApi = {
       forceRefresh: opts.forceRefresh,
     })}`
     const headers: Record<string, string> = {}
+    const token = getAuthToken()
+    if (token) {
+      headers['X-Sen-Gateway-Token'] = token
+    }
     if (opts.etag && !opts.forceRefresh) {
       headers['If-None-Match'] = `"${stripQuotes(opts.etag)}"`
     }

@@ -86,6 +86,7 @@ struct BgOutputBuf {
     dropped_lines: usize,
     started_at: std::time::Instant,
     finished: Option<BgFinished>,
+    detached: bool,
 }
 
 struct RegistryInner {
@@ -126,18 +127,26 @@ fn record_signal_in_outputs(signal: &BackgroundShellSignal) {
             command,
             session_id,
         } => {
-            guard.insert(
-                id.clone(),
-                BgOutputBuf {
-                    command: command.clone(),
-                    session_id: session_id.clone(),
-                    lines: std::collections::VecDeque::new(),
-                    bytes: 0,
-                    dropped_lines: 0,
-                    started_at: std::time::Instant::now(),
-                    finished: None,
-                },
-            );
+            match guard.entry(id.clone()) {
+                std::collections::hash_map::Entry::Occupied(mut existing) => {
+                    let buf = existing.get_mut();
+                    if buf.command.is_empty() && !command.is_empty() {
+                        buf.command = command.clone();
+                    }
+                }
+                std::collections::hash_map::Entry::Vacant(slot) => {
+                    slot.insert(BgOutputBuf {
+                        command: command.clone(),
+                        session_id: session_id.clone(),
+                        lines: std::collections::VecDeque::new(),
+                        bytes: 0,
+                        dropped_lines: 0,
+                        started_at: std::time::Instant::now(),
+                        finished: None,
+                        detached: false,
+                    });
+                }
+            }
         }
         BackgroundShellSignal::Chunk {
             id, stream, line, ..
@@ -208,10 +217,17 @@ pub(crate) fn register(
     );
     drop(guard);
     publish(BackgroundShellSignal::Spawned {
-        id,
+        id: id.clone(),
         command,
         session_id,
     });
+    let mut outputs = registry()
+        .outputs
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(buf) = outputs.get_mut(&id) {
+        buf.detached = true;
+    }
 }
 
 pub(crate) fn unregister(id: &str) {
@@ -318,8 +334,6 @@ pub fn snapshot() -> Vec<(String, String)> {
         .filter(|(_, v)| match (&scope, &v.session_id) {
             (Some(want), Some(have)) => want == have,
             (Some(_), None) => false,
-            // An unscoped caller must not see other sessions' background
-            // processes; only truly session-less (legacy/global) entries.
             (None, Some(_)) => false,
             (None, None) => true,
         })
@@ -359,13 +373,22 @@ pub fn status_snapshot() -> Vec<BgOutputSnapshot> {
     let scope = crate::session::current_session_context()
         .map(|ctx| ctx.session_id)
         .filter(|s| !s.is_empty());
+    let tracked: std::collections::HashSet<String> = registry()
+        .children
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .keys()
+        .cloned()
+        .collect();
     let guard = registry()
         .outputs
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let mut out: Vec<BgOutputSnapshot> = guard
         .iter()
-        .filter(|(id, _)| id.starts_with("bg-"))
+        .filter(|(id, buf)| {
+            id.starts_with("bg-") || buf.detached || tracked.contains(id.as_str())
+        })
         .filter(|(_, buf)| session_scope_allows(&scope, &buf.session_id))
         .map(|(id, buf)| snapshot_of(id, buf))
         .collect();

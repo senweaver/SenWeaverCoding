@@ -16,7 +16,7 @@ use crate::tools::mcp::protocol::{INTERNAL_ERROR, JsonRpcError, JsonRpcRequest, 
 
 const MAX_LINE_BYTES: usize = 4 * 1024 * 1024;
 
-const RECV_TIMEOUT_SECS: u64 = 30;
+const RECV_BACKSTOP_SECS: u64 = 600;
 
 const MCP_STREAMABLE_ACCEPT: &str = "application/json, text/event-stream";
 
@@ -80,9 +80,35 @@ impl StdioTransport {
         Ok(())
     }
 
+    async fn answer_server_request(&mut self, incoming: &serde_json::Value) {
+        let Some(id) = incoming.get("id") else {
+            return;
+        };
+        let method = incoming.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        let reply = if method == "ping" {
+            serde_json::json!({
+                "jsonrpc": crate::tools::mcp::protocol::JSONRPC_VERSION,
+                "id": id,
+                "result": {}
+            })
+        } else {
+            serde_json::json!({
+                "jsonrpc": crate::tools::mcp::protocol::JSONRPC_VERSION,
+                "id": id,
+                "error": {
+                    "code": crate::tools::mcp::protocol::METHOD_NOT_FOUND,
+                    "message": format!("method '{method}' not supported by this client")
+                }
+            })
+        };
+        if let Ok(line) = serde_json::to_string(&reply)
+            && let Err(e) = self.send_raw(&line).await
+        {
+            tracing::debug!("MCP stdio: failed to answer server request '{method}': {e}");
+        }
+    }
+
     async fn recv_raw(&mut self) -> Result<String> {
-        // Read a line while enforcing the size cap incrementally, so a server that
-        // streams bytes without a newline cannot grow the buffer without bound.
         let mut buf: Vec<u8> = Vec::new();
         loop {
             let available = self.stdout.fill_buf().await?;
@@ -129,7 +155,7 @@ impl McpTransportConn for StdioTransport {
             });
         }
         let expected_id = request.id.clone();
-        let deadline = std::time::Instant::now() + Duration::from_secs(RECV_TIMEOUT_SECS);
+        let deadline = std::time::Instant::now() + Duration::from_secs(RECV_BACKSTOP_SECS);
         loop {
             let remaining = deadline.saturating_duration_since(std::time::Instant::now());
             if remaining.is_zero() {
@@ -138,6 +164,15 @@ impl McpTransportConn for StdioTransport {
             let resp_line = timeout(remaining, self.recv_raw())
                 .await
                 .context("timeout waiting for MCP response")??;
+
+            if let Ok(incoming) =
+                serde_json::from_str::<serde_json::Value>(&resp_line)
+                && incoming.get("method").is_some()
+            {
+                self.answer_server_request(&incoming).await;
+                continue;
+            }
+
             let resp: JsonRpcResponse = serde_json::from_str(&resp_line)
                 .with_context(|| format!("invalid JSON-RPC response: {}", resp_line))?;
             if resp.id.is_none() {
@@ -183,8 +218,12 @@ impl HttpTransport {
             .ok_or_else(|| anyhow!("URL required for HTTP transport"))?
             .clone();
 
+        let http_timeout = config
+            .tool_timeout_secs
+            .unwrap_or(RECV_BACKSTOP_SECS)
+            .clamp(30, RECV_BACKSTOP_SECS);
         let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(120))
+            .timeout(Duration::from_secs(http_timeout))
             .build()
             .context("failed to build HTTP client")?;
 
@@ -269,7 +308,7 @@ impl McpTransportConn for HttpTransport {
             .is_some_and(|v| v.to_ascii_lowercase().contains("text/event-stream"));
         if is_sse {
             let maybe_resp = timeout(
-                Duration::from_secs(RECV_TIMEOUT_SECS),
+                Duration::from_secs(RECV_BACKSTOP_SECS),
                 read_first_jsonrpc_from_sse_response(resp),
             )
             .await

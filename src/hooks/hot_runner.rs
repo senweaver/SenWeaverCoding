@@ -4,12 +4,12 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use arc_swap::ArcSwapOption;
 use serde_json::Value;
 
-use crate::channels::traits::ChannelMessage;
 use crate::config::Config;
 use crate::providers::traits::{ChatMessage, ChatResponse};
 use crate::tools::traits::ToolResult;
@@ -51,12 +51,6 @@ impl HotHookRunner {
         }
     }
 
-    pub async fn fire_gateway_stop(&self) {
-        if let Some(r) = self.current() {
-            r.fire_gateway_stop().await;
-        }
-    }
-
     pub async fn fire_session_start(&self, session_id: &str, channel: &str) {
         if let Some(r) = self.current() {
             r.fire_session_start(session_id, channel).await;
@@ -87,27 +81,27 @@ impl HotHookRunner {
         }
     }
 
-    pub async fn fire_message_sent(&self, channel: &str, recipient: &str, content: &str) {
+    pub async fn fire_turn_end(&self, channel: &str, final_text: &str, tools_used: &[String]) {
         if let Some(r) = self.current() {
-            r.fire_message_sent(channel, recipient, content).await;
+            r.fire_turn_end(channel, final_text, tools_used).await;
         }
     }
 
-    pub async fn fire_heartbeat_tick(&self) {
+    pub async fn fire_subagent_stop(&self, worker_id: &str, status: &str, summary: &str) {
         if let Some(r) = self.current() {
-            r.fire_heartbeat_tick().await;
+            r.fire_subagent_stop(worker_id, status, summary).await;
         }
     }
 
-    pub async fn run_before_model_resolve(
-        &self,
-        provider: String,
-        model: String,
-    ) -> HookResult<(String, String)> {
+    pub async fn fire_pre_compact(&self, trigger: &str, estimated_tokens: usize) {
         if let Some(r) = self.current() {
-            r.run_before_model_resolve(provider, model).await
-        } else {
-            HookResult::Continue((provider, model))
+            r.fire_pre_compact(trigger, estimated_tokens).await;
+        }
+    }
+
+    pub async fn fire_notification(&self, kind: &str, message: &str) {
+        if let Some(r) = self.current() {
+            r.fire_notification(kind, message).await;
         }
     }
 
@@ -116,18 +110,6 @@ impl HotHookRunner {
             r.run_before_prompt_build(prompt).await
         } else {
             HookResult::Continue(prompt)
-        }
-    }
-
-    pub async fn run_before_llm_call(
-        &self,
-        messages: Vec<ChatMessage>,
-        model: String,
-    ) -> HookResult<(Vec<ChatMessage>, String)> {
-        if let Some(r) = self.current() {
-            r.run_before_llm_call(messages, model).await
-        } else {
-            HookResult::Continue((messages, model))
         }
     }
 
@@ -142,30 +124,17 @@ impl HotHookRunner {
             HookResult::Continue((name, args))
         }
     }
+}
 
-    pub async fn run_on_message_received(
-        &self,
-        message: ChannelMessage,
-    ) -> HookResult<ChannelMessage> {
-        if let Some(r) = self.current() {
-            r.run_on_message_received(message).await
-        } else {
-            HookResult::Continue(message)
-        }
-    }
+static GLOBAL_HOOKS: OnceLock<Arc<HotHookRunner>> = OnceLock::new();
 
-    pub async fn run_on_message_sending(
-        &self,
-        channel: String,
-        recipient: String,
-        content: String,
-    ) -> HookResult<(String, String, String)> {
-        if let Some(r) = self.current() {
-            r.run_on_message_sending(channel, recipient, content).await
-        } else {
-            HookResult::Continue((channel, recipient, content))
-        }
-    }
+pub fn install_global_hooks(runner: Arc<HotHookRunner>) {
+    let _ = GLOBAL_HOOKS.set(runner);
+}
+
+#[must_use]
+pub fn global_hooks() -> Option<Arc<HotHookRunner>> {
+    GLOBAL_HOOKS.get().cloned()
 }
 
 #[must_use]

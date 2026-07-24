@@ -57,12 +57,33 @@ pub fn strip_verbatim_prefix(path: PathBuf) -> PathBuf {
     path
 }
 
+pub fn is_index_skip_dir(name: &str) -> bool {
+    if name.starts_with('.') {
+        return true;
+    }
+    matches!(
+        name,
+        "target"
+            | "node_modules"
+            | "__pycache__"
+            | "dist"
+            | "build"
+            | "vendor"
+            | "venv"
+            | "env"
+            | "coverage"
+            | "out"
+            | "bin"
+            | "obj"
+            | "Pods"
+            | "DerivedData"
+            | "bower_components"
+    )
+}
+
 pub fn normalize_path_for_containment(path: &Path) -> PathBuf {
     let mut existing = path.to_path_buf();
     let mut tail: Vec<std::ffi::OsString> = Vec::new();
-    // Canonicalize the deepest ancestor that exists, then re-attach the
-    // remaining (not-yet-created) components. This gives a stable absolute
-    // path even for new files, which plain canonicalize() cannot do.
     loop {
         if let Ok(c) = existing.canonicalize() {
             let mut base = strip_verbatim_prefix(c);
@@ -407,6 +428,19 @@ pub async fn kill_child_process_tree(child: &mut tokio::process::Child) {
                 Err(_) => {
                     tracing::debug!(pid, "taskkill timed out; falling back to direct kill");
                 }
+            }
+        }
+    }
+    #[cfg(unix)]
+    {
+        if let Some(pid) = child.id() {
+            let pgid = pid as libc::pid_t;
+            unsafe {
+                libc::killpg(pgid, libc::SIGTERM);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+            unsafe {
+                libc::killpg(pgid, libc::SIGKILL);
             }
         }
     }

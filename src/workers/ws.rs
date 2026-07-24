@@ -50,18 +50,25 @@ async fn run_worker_socket(socket: WebSocket, worker_id: String) {
     let supervisor = global_supervisor();
     let workspace_root = supervisor
         .as_ref()
-        .map(|s| s.workspace_root().to_path_buf())
+        .and_then(|s| s.get(&worker_id))
+        .map(|h| h.workspace_root.clone())
+        .or_else(|| {
+            crate::workers::persistence::find_worker_root(
+                &crate::workers::supervisor::candidate_worker_roots(),
+                &worker_id,
+            )
+        })
+        .or_else(|| {
+            supervisor
+                .as_ref()
+                .map(|s| s.workspace_root().to_path_buf())
+        })
         .or_else(|| crate::bootstrap::try_get_state().map(|st| st.read(|s| s.cwd.clone())))
         .unwrap_or_else(|| std::path::PathBuf::from("."));
 
-    // Subscribe to the live stream BEFORE replaying history so events emitted
-    // during replay land in the broadcast buffer and are delivered afterwards
-    // instead of being lost in the replay→subscribe gap. The wire_tracker dedups
-    // any overlap between replayed and live frames.
     let handle = match supervisor.as_ref().and_then(|s| s.get(&worker_id)) {
         Some(h) => h,
         None => {
-            // No live worker: replay-only, then done.
             if let Ok(log) = WorkerEventLog::open(&workspace_root, &worker_id) {
                 if let Ok(events) = log.replay() {
                     for event in events {

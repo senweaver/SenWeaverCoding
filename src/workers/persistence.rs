@@ -15,9 +15,11 @@ use crate::workers::events::{WorkerMeta, WorkerStatus};
 const EVENTS_FILE: &str = "events.jsonl";
 const META_FILE: &str = "meta.json";
 
+const EVENT_CHANNEL_CAPACITY: usize = 8192;
+
 pub struct WorkerEventLog {
     root: PathBuf,
-    writer: Mutex<Option<mpsc::Sender<SessionEvent>>>,
+    writer: Mutex<Option<mpsc::SyncSender<SessionEvent>>>,
     handle: Mutex<Option<std::thread::JoinHandle<()>>>,
     seq: AtomicU64,
 }
@@ -42,7 +44,7 @@ impl WorkerEventLog {
             start_seq = reader.lines().map_while(Result::ok).count() as u64;
         }
 
-        let (tx, rx) = mpsc::channel::<SessionEvent>();
+        let (tx, rx) = mpsc::sync_channel::<SessionEvent>(EVENT_CHANNEL_CAPACITY);
         let handle = std::thread::Builder::new()
             .name("worker-event-log".to_string())
             .spawn(move || worker_writer_loop(file, rx))
@@ -66,7 +68,11 @@ impl WorkerEventLog {
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
         let needs_rebuild = match guard.as_ref() {
-            Some(tx) => tx.send(evt.clone()).is_err(),
+            Some(tx) => match tx.try_send(evt.clone()) {
+                Ok(()) => false,
+                Err(mpsc::TrySendError::Full(pending)) => tx.send(pending).is_err(),
+                Err(mpsc::TrySendError::Disconnected(_)) => true,
+            },
             None => true,
         };
         if needs_rebuild {
@@ -105,13 +111,13 @@ impl WorkerEventLog {
 
     fn rebuild_writer(
         &self,
-    ) -> std::io::Result<(mpsc::Sender<SessionEvent>, std::thread::JoinHandle<()>)> {
+    ) -> std::io::Result<(mpsc::SyncSender<SessionEvent>, std::thread::JoinHandle<()>)> {
         let events_path = self.root.join(EVENTS_FILE);
         let file = OpenOptions::new()
             .create(true)
             .append(true)
             .open(&events_path)?;
-        let (tx, rx) = mpsc::channel::<SessionEvent>();
+        let (tx, rx) = mpsc::sync_channel::<SessionEvent>(EVENT_CHANNEL_CAPACITY);
         let handle = std::thread::Builder::new()
             .name("worker-event-log".to_string())
             .spawn(move || worker_writer_loop(file, rx))?;
@@ -159,14 +165,12 @@ impl Drop for WorkerEventLog {
 }
 
 fn worker_writer_loop(file: File, rx: mpsc::Receiver<SessionEvent>) {
-    let mut writer = BufWriter::new(file);
-    while let Ok(evt) = rx.recv() {
-        match serde_json::to_string(&evt) {
+    fn write_event(writer: &mut BufWriter<File>, evt: &SessionEvent) {
+        match serde_json::to_string(evt) {
             Ok(line) => {
                 let result = writer
                     .write_all(line.as_bytes())
-                    .and_then(|()| writer.write_all(b"\n"))
-                    .and_then(|()| writer.flush());
+                    .and_then(|()| writer.write_all(b"\n"));
                 if let Err(e) = result {
                     tracing::warn!(error = %e, "worker event log append failed");
                 }
@@ -176,6 +180,18 @@ fn worker_writer_loop(file: File, rx: mpsc::Receiver<SessionEvent>) {
             }
         }
     }
+
+    let mut writer = BufWriter::new(file);
+    while let Ok(evt) = rx.recv() {
+        write_event(&mut writer, &evt);
+        while let Ok(more) = rx.try_recv() {
+            write_event(&mut writer, &more);
+        }
+        if let Err(e) = writer.flush() {
+            tracing::warn!(error = %e, "worker event log flush failed");
+        }
+    }
+    let _ = writer.flush();
 }
 
 pub fn workers_root<P: AsRef<Path>>(workspace_root: P) -> PathBuf {
@@ -263,21 +279,32 @@ pub fn list_meta<P: AsRef<Path>>(workspace_root: P) -> std::io::Result<Vec<Worke
     Ok(out)
 }
 
+pub fn scan_interrupted<P: AsRef<Path>>(workspace_root: P) -> std::io::Result<Vec<WorkerMeta>> {
+    let metas = list_meta(workspace_root)?;
+    Ok(metas.into_iter().filter(|m| !m.status.is_terminal()).collect())
+}
+
+pub fn mark_worker_failed(
+    workspace_root: &Path,
+    meta: &mut WorkerMeta,
+    reason: &str,
+) -> std::io::Result<()> {
+    meta.status = WorkerStatus::Failed;
+    meta.error = Some(reason.to_string());
+    meta.finished_at = Some(chrono::Utc::now());
+    write_meta(workspace_root, meta)
+}
+
 pub fn scan_and_recover<P: AsRef<Path>>(workspace_root: P) -> std::io::Result<usize> {
     let root = workspace_root.as_ref().to_path_buf();
-    let metas = list_meta(&root)?;
+    let metas = scan_interrupted(&root)?;
     let mut recovered = 0_usize;
     for mut meta in metas {
-        if meta.status.is_terminal() {
-            continue;
-        }
-        meta.status = WorkerStatus::Failed;
-        meta.error = Some(
-            "Worker did not finish before the host process restarted; marked as failed."
-                .to_string(),
-        );
-        meta.finished_at = Some(chrono::Utc::now());
-        if let Err(err) = write_meta(&root, &meta) {
+        if let Err(err) = mark_worker_failed(
+            &root,
+            &mut meta,
+            "Worker did not finish before the host process restarted; marked as failed.",
+        ) {
             tracing::warn!(
                 worker_id = %meta.worker_id,
                 error = %err,
@@ -288,4 +315,11 @@ pub fn scan_and_recover<P: AsRef<Path>>(workspace_root: P) -> std::io::Result<us
         }
     }
     Ok(recovered)
+}
+
+pub fn find_worker_root(candidates: &[PathBuf], worker_id: &str) -> Option<PathBuf> {
+    candidates
+        .iter()
+        .find(|root| worker_dir(root, worker_id).join(META_FILE).exists())
+        .cloned()
 }

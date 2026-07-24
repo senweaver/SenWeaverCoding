@@ -85,30 +85,37 @@ impl SseParser {
     }
 
     fn parse_buffer(&mut self) {
-
-        while let Some(pos) = memchr::memchr(b'\n', &self.buf) {
-
-            let line_bytes: Vec<u8> = self.buf.drain(..=pos).collect();
+        let mut cursor = 0usize;
+        loop {
+            let Some(rel) = memchr::memchr(b'\n', &self.buf[cursor..]) else {
+                break;
+            };
+            let nl = cursor + rel;
             if self.skip_until_newline {
                 self.skip_until_newline = false;
+                cursor = nl + 1;
                 continue;
             }
-            let line_len = line_bytes.len().saturating_sub(1);
-            let mut line_slice = &line_bytes[..line_len];
-            if line_slice.last().copied() == Some(b'\r') {
-                line_slice = &line_slice[..line_slice.len() - 1];
+            let mut end = nl;
+            if end > cursor && self.buf[end - 1] == b'\r' {
+                end -= 1;
             }
-            let line = match std::str::from_utf8(line_slice) {
-                Ok(s) => std::borrow::Cow::Borrowed(s),
+            let line_slice = &self.buf[cursor..end];
+            let line: String = match std::str::from_utf8(line_slice) {
+                Ok(s) => s.to_string(),
                 Err(_) => {
                     tracing::debug!(
                         target: "providers.sse",
                         "SSE line was not valid UTF-8; decoding lossily to avoid dropping content"
                     );
-                    String::from_utf8_lossy(line_slice)
+                    String::from_utf8_lossy(line_slice).into_owned()
                 }
             };
-            self.process_line(line.as_ref());
+            cursor = nl + 1;
+            self.process_line(&line);
+        }
+        if cursor > 0 {
+            self.buf.drain(..cursor);
         }
     }
 

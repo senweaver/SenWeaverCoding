@@ -116,8 +116,6 @@ impl Tool for WorktreeEnterTool {
 
         match output {
             Ok(out) if out.status.success() => {
-                // Register the worktree as this session's confinement root so
-                // subsequent file edits inside it pass the sandbox allow-list.
                 if let Some(ctx) = crate::session::current_session_context() {
                     crate::security::sandbox::register_workspace_root_for_session(
                         &ctx.session_id,

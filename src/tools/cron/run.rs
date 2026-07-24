@@ -35,12 +35,7 @@ impl Tool for CronRunTool {
         json!({
             "type": "object",
             "properties": {
-                "job_id": { "type": "string" },
-                "approved": {
-                    "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk shell commands in supervised mode",
-                    "default": false
-                }
+                "job_id": { "type": "string" }
             },
             "required": ["job_id"]
         })
@@ -65,10 +60,7 @@ impl Tool for CronRunTool {
                 });
             }
         };
-        let approved = args
-            .get("approved")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        let approved = crate::agent::loop_::current_tool_runtime_approved();
 
         if !self.security.can_act() {
             return Ok(ToolResult {

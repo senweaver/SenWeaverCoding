@@ -163,8 +163,6 @@ impl Document {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(CrdtError::Io(e)),
         };
-        // Seed the lamport clock from wall time so a restarted process never
-        // reuses (site, clock) pairs that peers may still hold in history.
         let seed = chrono::Utc::now().timestamp_millis().max(0) as u64;
         Ok(Self {
             path: path.to_path_buf(),
@@ -321,8 +319,6 @@ impl Document {
             EditOp::Insert {
                 path, at_byte, text, ..
             } => {
-                // Post-write text: the pre-image context around the insertion
-                // point is [at-W..at] ++ [at+len(text)..at+len(text)+W].
                 let after_start = at_byte.saturating_add(text.len());
                 let pre_hash = Some(context_pair_hash(&self.text, *at_byte, after_start));
                 let clock = self.next_clock();
@@ -338,8 +334,6 @@ impl Document {
             EditOp::Delete {
                 path, byte_range, ..
             } => {
-                // Post-write text: both sides of the excision are adjacent at
-                // byte_range.start.
                 let pre_hash = Some(context_pair_hash(
                     &self.text,
                     byte_range.start,

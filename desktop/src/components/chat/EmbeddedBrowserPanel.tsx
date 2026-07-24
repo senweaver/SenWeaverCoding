@@ -152,9 +152,6 @@ export function EmbeddedBrowserPanel() {
     void useBrowserPanelStore.getState().refreshTabs(sessionId)
     const store = useBrowserPanelStore.getState()
     const newPanel = store.panels[sessionId]
-    // A background session that requested the browser earlier set pendingShow +
-    // toasted "switch to it to view". Now that it IS the foreground tab, honor
-    // that request by presenting the dock instead of hiding it.
     if (newPanel?.pendingShow) {
       void store.openForTool(sessionId, {
         source: newPanel.lastSource ?? 'tool',

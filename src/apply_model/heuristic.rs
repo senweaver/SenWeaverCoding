@@ -140,17 +140,12 @@ pub fn apply_unified_diff_with_ctx(
         .collect::<Result<Vec<_>, _>>()?;
     parsed.sort_by_key(|h| h.old_start);
 
-    // A leading UTF-8 BOM never appears in the model's diff context lines, so
-    // strip it before matching and restore it verbatim on the way out; without
-    // this the very first hunk line can never match a BOM-prefixed file.
     let (bom_prefix, source): (&str, &str) = match source.strip_prefix('\u{feff}') {
         Some(rest) => ("\u{feff}", rest),
         None => ("", source),
     };
 
     let source_lines: Vec<&str> = source.split_inclusive('\n').collect();
-    // Match the file's existing newline style for inserted lines so we never turn
-    // a CRLF file into a mixed LF/CRLF file.
     let newline: &str = if source.contains("\r\n") { "\r\n" } else { "\n" };
     let source_had_trailing_newline = source.ends_with('\n');
     let mut cursor = 0usize;
@@ -278,7 +273,6 @@ pub fn apply_unified_diff_with_ctx(
     }
 
     let mut applied: String = output.concat();
-    // Respect the original file's lack of a trailing newline instead of forcing one.
     if !source_had_trailing_newline {
         if applied.ends_with("\r\n") {
             applied.truncate(applied.len() - 2);
@@ -566,10 +560,6 @@ fn locate_hunk_detailed(
         return Some(LocatedHunk::exact(start, 0));
     }
 
-    // max_fuzz == 0 is an explicit "exact context only" contract (patch_apply
-    // exposes it as such). Never drift to a nearby line or a whitespace-relaxed
-    // copy of the block, which is what silently applies a hunk to the wrong
-    // duplicate.
     if max_fuzz == 0 {
         return None;
     }
@@ -608,10 +598,6 @@ fn locate_hunk_detailed(
         ) {
             return Some(hit);
         }
-        // Whitespace-insensitive matching auto-reindents to whatever it lands on,
-        // so it can rewrite a visually-similar but wrong block. Only permit it
-        // when the search is already confined to an anchored scope; an unbounded
-        // full-file scan must fail here and defer to the refiner instead.
         if allow_ws_insensitive {
             return scan_window_for_match(
                 source_lines,
@@ -696,9 +682,6 @@ fn diagnose_hunk_failure(
         .find(|l| !l.trim().is_empty())
         .map(|s| s.trim())
         .unwrap_or("");
-    // Locate the nearest line whose trimmed content matches the hunk's first
-    // context line, so the error can point the model at the real drift instead of
-    // a bare "N hunks failed".
     let nearest = source_lines
         .iter()
         .enumerate()

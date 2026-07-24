@@ -251,14 +251,12 @@ fn bracket_balance_validate(s: &str) -> ValidationReport {
             i += 1;
             continue;
         }
-        // Line comments: `//` and `#` (covers C/Rust/JS/TS and shell/Python).
         if c == '#' || (c == '/' && i + 1 < n && chars[i + 1] == '/') {
             while i < n && chars[i] != '\n' {
                 i += 1;
             }
             continue;
         }
-        // Block comments: `/* ... */`.
         if c == '/' && i + 1 < n && chars[i + 1] == '*' {
             i += 2;
             while i + 1 < n && !(chars[i] == '*' && chars[i + 1] == '/') {
@@ -270,7 +268,6 @@ fn bracket_balance_validate(s: &str) -> ValidationReport {
             i += 2;
             continue;
         }
-        // Double-quoted string (with escapes); brackets inside are ignored.
         if c == '"' {
             i += 1;
             while i < n {
@@ -289,8 +286,6 @@ fn bracket_balance_validate(s: &str) -> ValidationReport {
             }
             continue;
         }
-        // Char literal `'x'` / `'\n'`. A bare `'` (Rust lifetime, apostrophe) that
-        // is not a valid char literal is ignored rather than toggling string state.
         if c == '\'' {
             let is_char_lit = if i + 1 < n && chars[i + 1] == '\\' {
                 i + 3 < n && chars[i + 3] == '\''

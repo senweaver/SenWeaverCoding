@@ -30,11 +30,10 @@ fn is_zero_u64(v: &u64) -> bool {
 }
 
 impl TokenUsage {
-    // Cache-read tokens bill far below fresh input (OpenAI/Anthropic ~0.1-0.25x);
-    // cache-write bills above it (Anthropic ~1.25x). Use conservative
-    // industry-standard multipliers since ModelPricing has no cache-specific rate.
     const CACHE_READ_RATE: f64 = 0.25;
     const CACHE_WRITE_RATE: f64 = 1.25;
+
+    pub const CACHE_WRITE_RATE_1H: f64 = 2.0;
 
     fn sanitize_price(value: f64) -> f64 {
         if value.is_finite() && value > 0.0 {
@@ -72,16 +71,38 @@ impl TokenUsage {
         input_price_per_million: f64,
         output_price_per_million: f64,
     ) -> Self {
+        Self::new_with_cache_rates(
+            model,
+            input_tokens,
+            output_tokens,
+            cached_input_tokens,
+            cache_creation_input_tokens,
+            input_price_per_million,
+            output_price_per_million,
+            Self::CACHE_WRITE_RATE,
+        )
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub fn new_with_cache_rates(
+        model: impl Into<String>,
+        input_tokens: u64,
+        output_tokens: u64,
+        cached_input_tokens: u64,
+        cache_creation_input_tokens: u64,
+        input_price_per_million: f64,
+        output_price_per_million: f64,
+        cache_write_rate: f64,
+    ) -> Self {
         let model = model.into();
         let input_price_per_million = Self::sanitize_price(input_price_per_million);
         let output_price_per_million = Self::sanitize_price(output_price_per_million);
+        let cache_write_rate = if cache_write_rate.is_finite() && cache_write_rate > 0.0 {
+            cache_write_rate
+        } else {
+            Self::CACHE_WRITE_RATE
+        };
 
-        // `input_tokens` here is the FRESH (full-rate) input count only; the
-        // caller has already split out any cached-read subset per its provider's
-        // convention (OpenAI-style prompt_tokens include the cache read, so the
-        // caller subtracts it; Anthropic reports cache-read separately). Cache
-        // reads bill at a discount, cache writes at a premium. total_tokens is
-        // the real prompt+completion sum so reporting stays accurate.
         let total_tokens = input_tokens
             .saturating_add(cached_input_tokens)
             .saturating_add(cache_creation_input_tokens)
@@ -95,7 +116,7 @@ impl TokenUsage {
             )
             + per_million(
                 cache_creation_input_tokens,
-                input_price_per_million * Self::CACHE_WRITE_RATE,
+                input_price_per_million * cache_write_rate,
             );
         let output_cost = per_million(output_tokens, output_price_per_million);
         let cost_usd = input_cost + output_cost;

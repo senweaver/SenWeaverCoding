@@ -153,9 +153,6 @@ impl Tool for PowerShellTool {
             cmd.current_dir(resolved);
         }
 
-        // Match the shell tool's secret hygiene: either clear the environment to a
-        // vetted allowlist, or strip variables whose names look secret-bearing so a
-        // PowerShell command cannot exfiltrate API keys/tokens from the parent env.
         if self.security.should_filter_shell_env() {
             cmd.env_clear();
             for var in crate::tools::shell::core::collect_allowed_shell_env_vars(&self.security) {
@@ -247,6 +244,13 @@ impl Tool for PowerShellTool {
         use crate::tools::shell::foreground::ForegroundOutcome;
 
         match outcome {
+            ForegroundOutcome::Backgrounded { partial_stdout, partial_stderr } => {
+                Ok(ToolResult {
+                    success: true,
+                    output: format!("{partial_stdout}{partial_stderr}"),
+                    error: None,
+                })
+            }
             ForegroundOutcome::Cancelled(part_stdout, part_stderr) => {
                 crate::tools::background::registry::publish(
                     crate::tools::background::registry::BackgroundShellSignal::Exited {

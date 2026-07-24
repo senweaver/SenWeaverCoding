@@ -2,10 +2,11 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useMemo } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useTranslation, useCodingModeText } from '../i18n'
 import type { TranslationKey } from '../i18n'
 import { Button } from '../components/shared/Button'
+import { editorAssistApi, type CompletionStats } from '../api/editorAssist'
 import { useUsageStore } from '../stores/usageStore'
 import { useSessionStore } from '../stores/sessionStore'
 import { useRuntimeStore } from '../stores/runtimeStore'
@@ -144,24 +145,35 @@ export function UsageSettings() {
   const runtimeError = useRuntimeStore((s) => s.error)
   const runtimeLoading = useRuntimeStore((s) => s.isLoading)
   const fetchRuntime = useRuntimeStore((s) => s.fetch)
+  const [completionStats, setCompletionStats] = useState<CompletionStats | null>(null)
+
+  const fetchCompletionStats = useCallback(() => {
+    editorAssistApi
+      .completionStats()
+      .then(setCompletionStats)
+      .catch(() => {})
+  }, [])
 
   useEffect(() => {
     void fetchUsage()
     void fetchRuntime()
+    fetchCompletionStats()
     subscribeRealtime()
     const pollId = window.setInterval(() => {
       void fetchUsage()
       void fetchRuntime()
+      fetchCompletionStats()
     }, 30_000)
     return () => {
       window.clearInterval(pollId)
       unsubscribeRealtime()
     }
-  }, [fetchUsage, fetchRuntime, subscribeRealtime, unsubscribeRealtime])
+  }, [fetchUsage, fetchRuntime, fetchCompletionStats, subscribeRealtime, unsubscribeRealtime])
 
   const handleRefresh = () => {
     void fetchUsage()
     void fetchRuntime()
+    fetchCompletionStats()
   }
 
   const lifetimeRows = useMemo<UsageLifetimeStats[]>(() => {
@@ -674,7 +686,69 @@ export function UsageSettings() {
       </section>
 
       <BackgroundTasksSection snapshot={runtimeSnapshot} t={t} />
+
+      <CompletionStatsCard stats={completionStats} t={t} />
     </div>
+  )
+}
+
+function CompletionStatsCard({
+  stats,
+  t,
+}: {
+  stats: CompletionStats | null
+  t: (key: TranslationKey) => string
+}) {
+  const hasData = !!stats && (stats.shown > 0 || stats.accepted > 0 || stats.rejected > 0)
+  const items: Array<{ label: string; value: string }> = hasData && stats
+    ? [
+        { label: t('settings.usage.completionShown'), value: formatNumber(stats.shown) },
+        { label: t('settings.usage.completionAccepted'), value: formatNumber(stats.accepted) },
+        {
+          label: t('settings.usage.completionAcceptedPartial'),
+          value: formatNumber(stats.acceptedPartial),
+        },
+        { label: t('settings.usage.completionRejected'), value: formatNumber(stats.rejected) },
+        {
+          label: t('settings.usage.completionAcceptanceRate'),
+          value: `${(stats.acceptanceRate * 100).toFixed(1)}%`,
+        },
+        {
+          label: t('settings.usage.completionAvgLatency'),
+          value: `${Math.round(stats.averageLatencyMs)}ms`,
+        },
+      ]
+    : []
+
+  return (
+    <section className="rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container)] p-3 space-y-3">
+      <header className="flex items-baseline justify-between">
+        <h3 className="text-xs font-semibold text-[var(--color-text-primary)]">
+          {t('settings.usage.completionSection')}
+        </h3>
+        <span className="text-xs text-[var(--color-text-tertiary)]">
+          {t('settings.usage.completionHint')}
+        </span>
+      </header>
+      {hasData ? (
+        <dl className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-x-4 gap-y-2">
+          {items.map((item) => (
+            <div key={item.label} className="flex flex-col gap-0.5">
+              <dt className="text-xs uppercase tracking-wide text-[var(--color-text-tertiary)]">
+                {item.label}
+              </dt>
+              <dd className="text-sm tabular-nums text-[var(--color-text-primary)]">
+                {item.value}
+              </dd>
+            </div>
+          ))}
+        </dl>
+      ) : (
+        <p className="text-xs text-[var(--color-text-secondary)] py-2 text-center">
+          {t('settings.usage.completionEmpty')}
+        </p>
+      )}
+    </section>
   )
 }
 

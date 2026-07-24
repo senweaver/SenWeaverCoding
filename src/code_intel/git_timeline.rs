@@ -31,15 +31,8 @@ pub fn build_timeline(root: &Path, graph: &SymbolGraph) -> HashMap<SymbolId, Tim
     build_timeline_scoped(root, graph, DEFAULT_MAX_BLAME_FILES)
 }
 
-/// Upper bound on how many files `recent_changes` will blame in one call. A blame
-/// is one git subprocess per file; blaming an entire large repo (tens of
-/// thousands of files) previously spawned tens of thousands of processes and took
-/// minutes. We restrict to the files touched by recent commits, capped here.
 const DEFAULT_MAX_BLAME_FILES: usize = 400;
 
-/// Build the timeline but only blame files that appear in recent git history,
-/// capped at `max_files`. Symbols in unblamed files get an empty entry (they are
-/// not "recently changed", which is exactly what this query asks for).
 pub fn build_timeline_scoped(
     root: &Path,
     graph: &SymbolGraph,
@@ -64,8 +57,6 @@ pub fn build_timeline_scoped(
     }
 
     for (file, syms) in by_file {
-        // Only blame files git says changed recently; everything else gets an
-        // empty entry without spawning a subprocess.
         let should_blame = recent.is_empty()
             || recent.contains(&normalize_rel(file));
         let blame = if should_blame {
@@ -89,9 +80,6 @@ fn normalize_rel(p: &Path) -> String {
     p.to_string_lossy().replace('\\', "/")
 }
 
-/// Returns the set of files (workspace-relative, `/`-separated) touched by recent
-/// commits, capped at `max_files`. Uses a single `git log --name-only` instead of
-/// per-file blame so the caller can prune the blame set up front.
 fn recently_changed_files(root: &Path, max_files: usize) -> std::collections::HashSet<String> {
     let mut set = std::collections::HashSet::new();
     let out = crate::util::hidden_sync_command("git")

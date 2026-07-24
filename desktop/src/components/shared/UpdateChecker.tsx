@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect } from 'react'
+import { Component, useEffect, type ReactNode } from 'react'
 import { useTranslation } from '../../i18n'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
@@ -13,7 +13,39 @@ import { formatBytes } from '../../lib/formatBytes'
 const UP_TO_DATE_AUTO_DISMISS_MS = 4000
 const ERROR_AUTO_DISMISS_MS = 6000
 
+type SilentBoundaryProps = {
+  fallback?: ReactNode
+  children: ReactNode
+}
+
+class UpdateCheckerBoundary extends Component<SilentBoundaryProps, { failed: boolean }> {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  componentDidCatch(error: unknown) {
+    console.error('[update-checker] render failed; hiding update UI', error)
+  }
+
+  render() {
+    if (this.state.failed) {
+      return this.props.fallback ?? null
+    }
+    return this.props.children
+  }
+}
+
 export function UpdateChecker() {
+  return (
+    <UpdateCheckerBoundary>
+      <UpdateCheckerInner />
+    </UpdateCheckerBoundary>
+  )
+}
+
+function UpdateCheckerInner() {
   const t = useTranslation()
   const status = useUpdateStore((s) => s.status)
   const availableVersion = useUpdateStore((s) => s.availableVersion)
@@ -146,10 +178,18 @@ export function UpdateChecker() {
 
         {releaseNotes && (
           <div className="mt-2 max-h-40 overflow-y-auto rounded-lg border border-[var(--color-border)]/60 bg-[var(--color-surface)]/70 px-3 py-2">
-            <MarkdownRenderer
-              content={releaseNotes}
-              className="text-xs leading-5 text-[var(--color-text-secondary)] [&_h1]:mb-2 [&_h1]:text-sm [&_h1]:font-semibold [&_h2]:mb-1.5 [&_h2]:text-xs [&_h2]:font-semibold [&_p]:my-1.5 [&_p]:text-xs [&_p]:leading-5 [&_ul]:my-1.5 [&_ol]:my-1.5"
-            />
+            <UpdateCheckerBoundary
+              fallback={
+                <pre className="whitespace-pre-wrap break-words text-xs leading-5 text-[var(--color-text-secondary)]">
+                  {releaseNotes}
+                </pre>
+              }
+            >
+              <MarkdownRenderer
+                content={releaseNotes}
+                className="text-xs leading-5 text-[var(--color-text-secondary)] [&_h1]:mb-2 [&_h1]:text-sm [&_h1]:font-semibold [&_h2]:mb-1.5 [&_h2]:text-xs [&_h2]:font-semibold [&_p]:my-1.5 [&_p]:text-xs [&_p]:leading-5 [&_ul]:my-1.5 [&_ol]:my-1.5"
+              />
+            </UpdateCheckerBoundary>
           </div>
         )}
 

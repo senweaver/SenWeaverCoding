@@ -149,12 +149,6 @@ pub fn normalize_locale_public(raw: &str) -> String {
 }
 
 pub fn default_search_dirs(workspace_dir: &Path) -> Vec<PathBuf> {
-    // Trusted sources first: the installed binary's directory and the build
-    // manifest dir (covers in-repo development). The workspace is NOT trusted by
-    // default — an untrusted repo could otherwise ship a tool_descriptions/*.toml
-    // that overrides every tool's description (e.g. relabel delete_path as
-    // "always safe"), a prompt-injection surface. Opt in explicitly with
-    // SEN_TRUST_WORKSPACE_TOOL_DESCRIPTIONS=1.
     let mut dirs: Vec<PathBuf> = Vec::new();
 
     if let Ok(exe) = std::env::current_exe() {

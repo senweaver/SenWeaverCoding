@@ -425,10 +425,6 @@ fn boxed_registry_from_arcs(tools: Vec<Arc<dyn Tool>>) -> Vec<Box<dyn Tool>> {
     tools.into_iter().map(ArcDelegatingTool::boxed).collect()
 }
 
-// One TaskManager per workspace, shared across every agent (parent, delegate
-// subagents, coordinator) that builds a tool set against that workspace, so
-// task_create/task_get/... actually track shared state cross-agent. Different
-// workspaces remain fully isolated.
 fn shared_task_manager_for(workspace_root: &std::path::Path) -> TaskManagerHandle {
     static REGISTRY: std::sync::LazyLock<
         parking_lot::Mutex<std::collections::HashMap<std::path::PathBuf, TaskManagerHandle>>,
@@ -453,8 +449,6 @@ pub fn default_tools_with_runtime(
     runtime: Arc<dyn RuntimeAdapter>,
 ) -> Vec<Box<dyn Tool>> {
 
-    // Lazy: resolves the multi-agent runtime at each acquire, so a tool surface
-    // built before init_global_runtime() still serializes with later writers.
     let lock_provider: Arc<dyn crate::apply_model::LockProvider> = Arc::new(
         crate::apply_model::lock_manager_provider::LazyRuntimeLockProvider::new("tool_runtime"),
     );
@@ -660,11 +654,6 @@ pub fn all_tools_with_runtime(
         },
     );
     let plan_mode_flag: PlanModeFlag = PlanModeFlag::new();
-    // Share one TaskManager per workspace so a parent agent and its
-    // delegate/coordinator subagents (which build their own tool set against the
-    // same workspace) observe the SAME task list. Previously each agent got a
-    // private in-memory manager, so cross-agent task tracking silently did
-    // nothing. Different workspaces stay isolated.
     let task_manager: TaskManagerHandle = shared_task_manager_for(&workspace_root_pb);
     #[cfg(not(feature = "tool-utility-misc"))]
     let _ = canvas_store;

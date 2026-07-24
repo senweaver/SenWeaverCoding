@@ -51,40 +51,64 @@ struct ToolCallRecord {
 }
 
 fn hash_value(value: &serde_json::Value) -> u64 {
+    hash_canonical_str(&canonicalise_args_string(value))
+}
+
+pub(crate) fn hash_canonical_str(canonical: &str) -> u64 {
     let mut hasher = DefaultHasher::new();
-    let canonical = serde_json::to_string(&canonicalise(value)).unwrap_or_default();
     canonical.hash(&mut hasher);
     hasher.finish()
 }
 
 pub(crate) fn canonicalise_args_string(value: &serde_json::Value) -> String {
-    serde_json::to_string(&canonicalise(value)).unwrap_or_default()
+    let mut out = String::with_capacity(128);
+    write_canonical(value, 0, &mut out);
+    out
 }
 
 const MAX_CANON_DEPTH: usize = 96;
 
-fn canonicalise(value: &serde_json::Value) -> serde_json::Value {
-    canonicalise_depth(value, 0)
-}
-
-fn canonicalise_depth(value: &serde_json::Value, depth: usize) -> serde_json::Value {
+fn write_canonical(value: &serde_json::Value, depth: usize, out: &mut String) {
     if depth >= MAX_CANON_DEPTH {
-        return serde_json::Value::String("__sen_depth_capped__".to_string());
+        out.push_str("\"__sen_depth_capped__\"");
+        return;
     }
     match value {
         serde_json::Value::Object(map) => {
-            let mut sorted: Vec<(&String, &serde_json::Value)> = map.iter().collect();
-            sorted.sort_by_key(|(k, _)| *k);
-            let new_map: serde_json::Map<String, serde_json::Value> = sorted
-                .into_iter()
-                .map(|(k, v)| (k.clone(), canonicalise_depth(v, depth + 1)))
-                .collect();
-            serde_json::Value::Object(new_map)
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort_unstable();
+            out.push('{');
+            for (i, key) in keys.into_iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                match serde_json::to_string(key) {
+                    Ok(k) => out.push_str(&k),
+                    Err(_) => out.push_str("\"\""),
+                }
+                out.push(':');
+                if let Some(child) = map.get(key) {
+                    write_canonical(child, depth + 1, out);
+                } else {
+                    out.push_str("null");
+                }
+            }
+            out.push('}');
         }
-        serde_json::Value::Array(arr) => serde_json::Value::Array(
-            arr.iter().map(|v| canonicalise_depth(v, depth + 1)).collect(),
-        ),
-        other => other.clone(),
+        serde_json::Value::Array(arr) => {
+            out.push('[');
+            for (i, v) in arr.iter().enumerate() {
+                if i > 0 {
+                    out.push(',');
+                }
+                write_canonical(v, depth + 1, out);
+            }
+            out.push(']');
+        }
+        other => match serde_json::to_string(other) {
+            Ok(s) => out.push_str(&s),
+            Err(_) => out.push_str("null"),
+        },
     }
 }
 
@@ -126,10 +150,23 @@ impl LoopDetector {
         if !self.config.enabled {
             return LoopDetectionResult::Ok;
         }
+        self.record_with_failure_hashed(name, hash_value(args), result, was_failure)
+    }
+
+    pub fn record_with_failure_hashed(
+        &mut self,
+        name: &str,
+        args_hash: u64,
+        result: &str,
+        was_failure: bool,
+    ) -> LoopDetectionResult {
+        if !self.config.enabled {
+            return LoopDetectionResult::Ok;
+        }
 
         let record = ToolCallRecord {
             name: name.to_string(),
-            args_hash: hash_value(args),
+            args_hash,
             result_hash: hash_str(result),
             was_failure,
         };
@@ -152,16 +189,17 @@ impl LoopDetector {
         LoopDetectionResult::Ok
     }
 
-    /// How many consecutive identical (name, args, was_failure=true) records
-    /// are at the tail of the window. Returns 0 if the most recent matching
-    /// call succeeded (because a successful call is not a failure to repeat).
-    /// Used by the agent loop to refuse executing a tool that has been failing
-    /// the exact same way back-to-back.
     pub fn peek_consecutive_failures(&self, name: &str, args: &serde_json::Value) -> usize {
         if !self.config.enabled || self.window.is_empty() {
             return 0;
         }
-        let args_hash = hash_value(args);
+        self.peek_consecutive_failures_hashed(name, hash_value(args))
+    }
+
+    pub fn peek_consecutive_failures_hashed(&self, name: &str, args_hash: u64) -> usize {
+        if !self.config.enabled || self.window.is_empty() {
+            return 0;
+        }
         self.window
             .iter()
             .rev()

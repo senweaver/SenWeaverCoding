@@ -473,10 +473,6 @@ impl SessionActor {
     }
 
     fn apply_event(&self, evt: &SessionEvent, forward_transport: bool) -> SessionDelta {
-        // Serialize the whole (mutate in-memory state -> append to log) critical
-        // section so a concurrent apply (local bridge vs. RPC apply_remote) cannot
-        // interleave and land events in the log in a different order than memory,
-        // which would make replay reconstruct a different state.
         let _apply_guard = self.apply_serialize.lock();
         let version;
         {

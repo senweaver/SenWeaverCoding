@@ -391,15 +391,10 @@ static GLOBAL_MCP_REGISTRY: once_cell::sync::Lazy<
     parking_lot::RwLock<Option<Arc<McpRegistry>>>,
 > = once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(None));
 
-/// Publishes the live MCP registry so tools that were constructed before the
-/// connection existed (e.g. `mcp_resources_read`, built with `None` in the tool
-/// factory) can still reach a connected registry. The most recently connected
-/// registry wins.
 pub fn register_global_registry(registry: Arc<McpRegistry>) {
     *GLOBAL_MCP_REGISTRY.write() = Some(registry);
 }
 
-/// Returns the live MCP registry if one has been connected this process.
 pub fn global_registry() -> Option<Arc<McpRegistry>> {
     GLOBAL_MCP_REGISTRY.read().clone()
 }

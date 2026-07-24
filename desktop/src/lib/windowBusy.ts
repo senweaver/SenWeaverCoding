@@ -40,7 +40,6 @@ export function markWindowBusy(): void {
       try {
         listener()
       } catch {
-        // listener failures must not break the idle transition
       }
     }
   }, IDLE_MS)

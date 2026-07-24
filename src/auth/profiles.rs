@@ -506,9 +506,6 @@ impl AuthProfilesStore {
                     });
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                    // A crashed holder used to brick auth for the full timeout on
-                    // every call. Steal the lock when it is clearly stale (older
-                    // than STALE_LOCK_MS by mtime) so recovery is automatic.
                     const STALE_LOCK_MS: u64 = 30_000;
                     let stale = fs::metadata(&self.lock_path)
                         .await

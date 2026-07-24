@@ -66,7 +66,7 @@ fn backend(ctx: &CommandContext) -> CommandResult {
             ));
         }
         out.push_str(
-            "\nSwitch with: /vector backend <linear|sharded|ivf>\n\
+            "\nSwitch with: /vector backend <linear|sharded|ivf|hnsw>\n\
              To persist, set `memory.vector_backend = \"ivf\"` in config.toml.",
         );
         return CommandResult::ok(out);
@@ -81,7 +81,7 @@ fn backend(ctx: &CommandContext) -> CommandResult {
         Some(k) => k,
         None => {
             return CommandResult::err(format!(
-                "Unknown backend '{name}'. Valid: linear | sharded | ivf"
+                "Unknown backend '{name}'. Valid: linear | sharded | ivf | hnsw"
             ));
         }
     };

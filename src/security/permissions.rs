@@ -425,9 +425,6 @@ impl ToolActivationGate for SessionActivationGate {
             "tool_name": tool_name,
             "workspace_key": workspace_key,
         });
-        // Order matters: subscribe and register BEFORE emitting, otherwise an
-        // instant reply can land in the gap and be lost; the mailbox-aware wait
-        // below then also survives a lagged broadcast.
         let mut rx = self.bus.subscribe();
         crate::approval::register_pending_gateway_approval_with_replay(
             request_id.clone(),

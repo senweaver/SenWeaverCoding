@@ -934,6 +934,26 @@ pub fn scrub_secret_patterns(input: &str) -> String {
     scrubbed
 }
 
+pub(crate) fn record_text_path_usage(
+    provider_name: &str,
+    model: &str,
+    input_tokens: Option<u64>,
+    output_tokens: Option<u64>,
+    cached_input_tokens: Option<u64>,
+) {
+    let usage = crate::providers::traits::TokenUsage {
+        input_tokens,
+        output_tokens,
+        cached_input_tokens,
+        cache_creation_input_tokens: None,
+    };
+    let _ = crate::agent::reward::cost_tracking::record_tool_loop_cost_usage(
+        provider_name,
+        model,
+        &usage,
+    );
+}
+
 pub fn sanitize_api_error(input: &str) -> String {
     let scrubbed = scrub_secret_patterns(input);
 
@@ -1030,14 +1050,31 @@ impl ProviderError {
     }
 }
 
+pub async fn stream_error_body_with_retry_after(
+    response: reqwest::Response,
+) -> (reqwest::StatusCode, String) {
+    let status = response.status();
+    let retry_after = response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string());
+    let body = response
+        .text()
+        .await
+        .unwrap_or_else(|_| format!("HTTP error: {status}"));
+    let body = match retry_after {
+        Some(value) if !value.is_empty() => format!("Retry-After: {value}\n{body}"),
+        _ => body,
+    };
+    (status, body)
+}
+
 pub async fn api_error_structured(
     provider: &str,
     response: reqwest::Response,
 ) -> ProviderError {
     let status = response.status();
-    // Preserve the server-provided Retry-After hint (seconds or HTTP date) so
-    // the reliability layer can honour it instead of always falling back to the
-    // local backoff schedule. reqwest drops headers once the body is consumed.
     let retry_after = response
         .headers()
         .get(reqwest::header::RETRY_AFTER)
@@ -2275,6 +2312,24 @@ pub fn resolve_default_model(config: &crate::config::Config) -> anyhow::Result<S
     Err(anyhow::anyhow!(
         "no_model_configured: no model configured; please add at least one model in Provider settings"
     ))
+}
+
+pub fn resolve_fast_apply_model(config: &crate::config::Config) -> Option<String> {
+    if let Some(m) = config
+        .agent_runtime
+        .fast_apply_model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        return Some(m.to_string());
+    }
+    config
+        .model_routes
+        .iter()
+        .find(|r| r.hint.eq_ignore_ascii_case("fast"))
+        .map(|r| r.model.clone())
+        .filter(|m| !m.trim().is_empty())
 }
 
 pub fn create_resilient_provider(

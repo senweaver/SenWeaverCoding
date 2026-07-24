@@ -129,14 +129,9 @@ pub fn detect_completion_claim(text: &str) -> bool {
     false
 }
 
-// Negation markers that, when they appear near a completion phrase, flip its
-// meaning ("所有任务中仍有 2 个被阻塞，无法完成" contains "所有任务" but is NOT a
-// completion claim). Checked in a small window around the matched phrase.
 const NEGATION_MARKERS: &[&str] = &[
-    // English (checked against a lowercased window)
     "not ", "n't", "cannot", "can not", "unable", "fail", "still ", "remaining",
     "remain ", "blocked", "pending", "except", " yet", "couldn", "won't", "without",
-    // Chinese
     "未", "没", "无法", "还没", "尚未", "仍", "不能", "失败", "还需", "还要", "剩余",
     "阻塞", "不通过", "除了", "但", "however",
 ];
@@ -242,10 +237,6 @@ impl PlanExecutionNudgeState {
             "set" => {
                 if let Some(steps) = arguments.get("steps").and_then(|v| v.as_array()) {
                     self.total_steps = steps.len();
-                    // A `set` is the authoritative full plan snapshot and its steps
-                    // carry ids, so rebuild the terminal-id set directly from it.
-                    // This keeps the count exact even if the model later re-sends an
-                    // update for a step that was already terminal in this snapshot.
                     let mut ids = std::collections::HashSet::new();
                     let mut terminal_without_id = 0usize;
                     for s in steps {
@@ -280,10 +271,6 @@ impl PlanExecutionNudgeState {
                 let is_terminal = matches!(status, "completed" | "skipped");
                 match step_id {
                     Some(id) => {
-                        // Track distinct terminal step ids so flipping the same
-                        // step completed -> in_progress -> completed (or re-sending
-                        // update on an already-completed step) can't inflate the
-                        // count past the real number of finished steps.
                         if is_terminal {
                             if self.terminal_ids.insert(id) {
                                 self.terminal_count = self.terminal_count.saturating_add(1);
@@ -293,8 +280,6 @@ impl PlanExecutionNudgeState {
                         }
                     }
                     None => {
-                        // No step id to dedupe against: keep the legacy behavior but
-                        // never let it exceed the known step total.
                         if is_terminal && self.terminal_count < self.total_steps.max(1) {
                             self.terminal_count = self.terminal_count.saturating_add(1);
                         }
@@ -327,10 +312,6 @@ impl PlanExecutionNudgeState {
                 }
                 if total > 0 {
                     self.total_steps = total;
-                    // `get` renders markdown checkboxes without step ids, so we can
-                    // only recover a terminal COUNT, not the id set. Preserve the
-                    // id-dedupe history and use the rendered count as a floor so a
-                    // later re-flip of an already-terminal id still can't inflate.
                     self.terminal_count = terminal.max(self.terminal_ids.len()).min(total);
                 }
             }

@@ -7,10 +7,10 @@ mod runner;
 pub mod script_runner;
 mod traits;
 
-pub use hot_runner::{HotHookRunner, build_runner};
+pub use hot_runner::{HotHookRunner, build_runner, global_hooks, install_global_hooks};
 pub use runner::HookRunner;
 pub use script_runner::{
     HookCommand, HookDecision, HookEvent, HookMatchers, HookPayload, HooksConfig,
-    ScriptHookRunner, event_for_tool_post, event_for_tool_pre,
+    ScriptHookRunner, event_for_tool_post, events_for_tool_pre,
 };
 pub use traits::{HookHandler, HookResult};

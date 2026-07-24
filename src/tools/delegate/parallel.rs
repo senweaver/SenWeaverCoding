@@ -14,7 +14,7 @@ use super::super::traits::{Tool, ToolResult};
 use crate::agent::multi_agent_runtime::{MultiAgentRuntime, global_runtime};
 use crate::agent::scheduler::SchedulableTask;
 use crate::agent::scheduler::runtime::TaskExecutor;
-use crate::agent::subagent_limiter::{PermitResult, SubagentLimiter};
+use crate::agent::subagent_limiter::SubagentLimiter;
 use crate::coordinator::delegation::{
     DelegationPlan, MergeStrategy, MergedOutput, SubTask, SubTaskResult,
     merge_results_structured, merge_results_with_judge_structured,
@@ -187,7 +187,8 @@ impl Tool for DelegateParallelTool {
                     "type": "integer",
                     "default": 4,
                     "minimum": 1,
-                    "maximum": 32
+                    "maximum": crate::constants::system::MAX_CONCURRENT_SUBAGENTS,
+                    "description": "Upper bound on concurrently running sub-tasks. Values above the runtime subagent concurrency ceiling are clamped."
                 },
                 "allow_single_agent_fallback": {
                     "type": "boolean",
@@ -294,10 +295,6 @@ impl Tool for DelegateParallelTool {
                 self.workspace_root.read().to_string_lossy().into_owned()
             });
 
-        // Resolve a single runtime the executor and the submit path both share.
-        // Without this the executor re-queried `global_runtime()` and, in embedded
-        // library builds where no global runtime exists, always fell through to the
-        // fallback even though the submit path had just built a local runtime.
         let effective_runtime: Arc<MultiAgentRuntime> =
             global_runtime().unwrap_or_else(|| Arc::new(MultiAgentRuntime::new()));
         let runtime_exec = Arc::clone(&effective_runtime);
@@ -329,46 +326,37 @@ impl Tool for DelegateParallelTool {
                     cancel.clone(),
                 );
 
-                let _permit = match limiter.try_acquire() {
-                    PermitResult::Granted(p) => p,
-                    PermitResult::Queued => {
-
-                        let deadline = std::time::Instant::now()
-                            + std::time::Duration::from_secs(60);
-                        let mut wait = std::time::Duration::from_millis(25);
-                        loop {
-                            if cancel.is_cancelled() {
-                                return Err(format!(
-                                    "subagent '{id}' cancelled while waiting for permit"
-                                ));
-                            }
-                            tokio::time::sleep(wait).await;
-                            wait = (wait * 2).min(std::time::Duration::from_millis(500));
-                            if let PermitResult::Granted(p) = limiter.try_acquire() {
-                                break p;
-                            }
-                            if std::time::Instant::now() > deadline {
-                                return Err(format!(
-                                    "subagent '{id}' timed out waiting for limiter permit (active={}/{})",
-                                    limiter.active_count(),
-                                    limiter.max_concurrent()
-                                ));
-                            }
-                        }
+                let permit_deadline = call_timeout
+                    .map(|t| std::time::Instant::now() + t.saturating_mul(2));
+                let _permit = match limiter
+                    .acquire_queued(&cancel, permit_deadline)
+                    .await
+                {
+                    Ok(p) => p,
+                    Err(crate::agent::subagent_limiter::QueuedAcquireError::Cancelled) => {
+                        return Err(format!(
+                            "subagent '{id}' cancelled while waiting for permit"
+                        ));
                     }
-                    PermitResult::Rejected { active, max } => {
+                    Err(crate::agent::subagent_limiter::QueuedAcquireError::Rejected {
+                        active,
+                        max,
+                    }) => {
                         return Err(format!(
                             "subagent '{id}' rejected: limiter at capacity ({active}/{max})"
+                        ));
+                    }
+                    Err(crate::agent::subagent_limiter::QueuedAcquireError::DeadlineExceeded {
+                        active,
+                        max,
+                    }) => {
+                        return Err(format!(
+                            "subagent '{id}' timed out waiting for limiter permit (active={active}/{max})"
                         ));
                     }
                 };
                 let rt = rt.as_ref();
 
-                // Pick an agent AND reserve its capacity together. `find_best_available`
-                // scores by current load, so if the reservation loses a race (the agent
-                // went busy/unavailable in between) we re-pick the next-best instead of
-                // silently proceeding without counting the load (which would let the
-                // scorer keep over-subscribing the same agent).
                 let (agent_info, reserved) = {
                     let mut chosen: Option<(
                         crate::agent::registry::AgentInfo,
@@ -652,8 +640,19 @@ impl Tool for DelegateParallelTool {
             }))
         });
 
+        let effective_parallel = args
+            .max_parallel
+            .min(effective_runtime.subagent_limiter.max_concurrent())
+            .max(1);
+        if effective_parallel != args.max_parallel {
+            tracing::debug!(
+                requested = args.max_parallel,
+                effective = effective_parallel,
+                "delegate_parallel: max_parallel clamped to subagent concurrency ceiling"
+            );
+        }
         let outcomes = match effective_runtime
-            .submit_task_graph(schedulable, args.max_parallel, exec)
+            .submit_task_graph(schedulable, effective_parallel, exec)
             .await
         {
             Ok(o) => o,
@@ -1003,6 +1002,7 @@ async fn run_role_agentic(ctx: RoleAgenticCtx<'_>) -> Result<String, String> {
         None
     };
 
+    let delegate_hooks = crate::hooks::global_hooks().and_then(|h| h.current());
     let delegated_policy = crate::agent::loop_::policy::PolicyBundle::delegated(
         ctx.provider,
         &sub_tools,
@@ -1018,6 +1018,7 @@ async fn run_role_agentic(ctx: RoleAgenticCtx<'_>) -> Result<String, String> {
     .with_temperature(ctx.temperature)
     .with_max_iterations(ctx.max_iterations)
     .with_cancellation(Some(ctx.cancel.clone()))
+    .with_hooks(delegate_hooks.as_deref())
     .with_on_delta(on_delta_for_loop);
     let loop_fut =
         crate::agent::loop_::unified::UnifiedLoop::new(delegated_policy).run(&mut history);

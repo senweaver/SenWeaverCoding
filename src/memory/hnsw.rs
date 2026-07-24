@@ -28,8 +28,6 @@ struct Node {
     vector: Vec<f32>,
     norm: f32,
 
-    level: usize,
-
     neighbors: Vec<Vec<usize>>,
 
     deleted: bool,
@@ -318,7 +316,6 @@ impl VectorIndex for HnswMemIndex {
             id: id.to_string(),
             vector: embedding.to_vec(),
             norm,
-            level,
             neighbors,
             deleted: false,
         });

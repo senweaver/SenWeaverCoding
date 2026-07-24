@@ -7,7 +7,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use super::cache::{CacheKey, CompletionCache};
-use super::stats::{AcceptanceEvent, global_stats};
+use super::stats::global_stats;
 use super::throttle::{Throttler, ThrottlerDecision};
 use super::traits::{
     InlineCompletionError, InlineCompletionProvider, InlineCompletionRequest,
@@ -94,7 +94,6 @@ impl InlineCompletionRegistry {
                     }
                     resp.latency_ms = start.elapsed().as_millis() as u64;
                     global_stats().record_latency_ms(resp.latency_ms);
-                    global_stats().record(AcceptanceEvent::Shown);
                     crate::observability::subsystem_metrics::observe_inline_completion_latency_ms(
                         resp.latency_ms,
                     );
@@ -137,9 +136,6 @@ pub fn default_provider(config: &crate::config::Config) -> Option<RegistryHandle
     let api_path = config.api_path.clone();
     let provider_max_tokens = config.provider_max_tokens;
     let model_context_windows = config.model_context_windows.clone();
-    // Code completion must be deterministic and fast: force temperature 0
-    // regardless of the chat default (which is tuned for creative dialogue and
-    // makes tab completions non-reproducible and slower to converge).
     let temperature = 0.0;
 
     let runtime_options = crate::providers::ProviderRuntimeOptions {

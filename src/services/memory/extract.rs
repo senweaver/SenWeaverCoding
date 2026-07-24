@@ -47,6 +47,18 @@ impl Default for ExtractionConfig {
     }
 }
 
+fn find_ignore_ascii_case(haystack: &str, needle: &str) -> Option<usize> {
+    let nlen = needle.len();
+    if nlen == 0 || nlen > haystack.len() {
+        return None;
+    }
+    haystack
+        .as_bytes()
+        .windows(nlen)
+        .position(|w| w.eq_ignore_ascii_case(needle.as_bytes()))
+        .filter(|&i| haystack.is_char_boundary(i))
+}
+
 pub fn extract_from_turn(
     user_message: &str,
     assistant_response: &str,
@@ -70,8 +82,7 @@ pub fn extract_from_turn(
         "my preferred",
     ];
     for pattern in &preference_patterns {
-        if let Some(pos) = user_message.to_lowercase().find(&pattern.to_lowercase()) {
-            let start = pos;
+        if let Some(start) = find_ignore_ascii_case(user_message, pattern) {
             let end = user_message[start..]
                 .find(['.', '!', '\n'])
                 .map(|p| start + p + 1)
@@ -98,32 +109,24 @@ pub fn extract_from_turn(
         "repo uses",
     ];
     for pattern in &convention_patterns {
-        if assistant_response
-            .to_lowercase()
-            .contains(&pattern.to_lowercase())
-        {
-            if let Some(pos) = assistant_response
-                .to_lowercase()
-                .find(&pattern.to_lowercase())
-            {
-                let start = assistant_response[..pos]
-                    .rfind(['.', '\n'])
-                    .map(|p| p + 1)
-                    .unwrap_or(0);
-                let end = assistant_response[pos..]
-                    .find(['.', '\n'])
-                    .map(|p| pos + p + 1)
-                    .unwrap_or(assistant_response.len());
-                let content = assistant_response[start..end].trim().to_string();
-                if !content.is_empty() && content.len() < 500 {
-                    memories.push(ExtractedMemory {
-                        content,
-                        category: MemoryCategory::Convention,
-                        confidence: 0.75,
-                        source_turn: 0,
-                        tags: vec!["auto-extracted".to_string()],
-                    });
-                }
+        if let Some(pos) = find_ignore_ascii_case(assistant_response, pattern) {
+            let start = assistant_response[..pos]
+                .rfind(['.', '\n'])
+                .map(|p| p + 1)
+                .unwrap_or(0);
+            let end = assistant_response[pos..]
+                .find(['.', '\n'])
+                .map(|p| pos + p + 1)
+                .unwrap_or(assistant_response.len());
+            let content = assistant_response[start..end].trim().to_string();
+            if !content.is_empty() && content.len() < 500 {
+                memories.push(ExtractedMemory {
+                    content,
+                    category: MemoryCategory::Convention,
+                    confidence: 0.75,
+                    source_turn: 0,
+                    tags: vec!["auto-extracted".to_string()],
+                });
             }
         }
     }

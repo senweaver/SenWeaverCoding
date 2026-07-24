@@ -4,6 +4,8 @@
 
 import { useEffect, useState } from 'react'
 
+import { getAuthToken } from '../../api/client'
+
 type Props = {
   src: string
   alt: string
@@ -33,7 +35,11 @@ export function LanImage({
     setObjectUrl(null)
     void (async () => {
       try {
-        const res = await fetch(src, { cache: 'no-store' })
+        const token = getAuthToken()
+        const res = await fetch(src, {
+          cache: 'no-store',
+          headers: token ? { 'X-Sen-Gateway-Token': token } : undefined,
+        })
         if (!res.ok) throw new Error(`status ${res.status}`)
         const blob = await res.blob()
         if (cancelled) return

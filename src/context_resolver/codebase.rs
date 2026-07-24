@@ -61,13 +61,7 @@ pub(crate) fn finish_codebase_item(
     body: String,
     budget: &ContextBudget,
 ) -> ContextItem {
-    let want = body.len() / 4;
-    let granted = budget.reserve_at_most(want);
-    let final_body = if granted < want {
-        super::handlers::take_prefix_by_chars_public(&body, granted * 4)
-    } else {
-        body
-    };
+    let final_body = super::handlers::budget_clip_body(body, budget);
 
     ContextItem::new(
         format!("codebase:{query}"),
@@ -106,10 +100,12 @@ fn rank_by_path(root: &Path, query_lc: &str) -> Vec<(PathBuf, usize)> {
 }
 
 fn rank_by_symbols(root: &Path, query_lc: &str) -> Vec<(PathBuf, usize)> {
-    let Some(graph) = crate::code_intel::symbol_graph::core::SymbolGraph::load_cached(root)
-    else {
-        return Vec::new();
+    let writer = match crate::code_intel::symbol_graph::incremental::get_writer_nonblocking(root) {
+        crate::code_intel::symbol_graph::incremental::WriterAvailability::Ready(w) => w,
+        _ => return Vec::new(),
     };
+    let graph_lock = writer.graph();
+    let graph = graph_lock.read();
     let mut symbol_hits: Vec<(PathBuf, usize)> = Vec::new();
     for s in &graph.symbols {
         let name_lc = s.id.name.to_ascii_lowercase();
@@ -164,8 +160,8 @@ fn rrf_fuse(path_hits: &[(PathBuf, usize)], symbol_hits: &[(PathBuf, usize)]) ->
 
 fn render_body(root: &Path, hits: &[&CodebaseHit]) -> String {
     if hits.is_empty() {
-        return "(no codebase matches  -  try a broader query or \
-re-run `sen rag reindex` to rebuild the SymbolGraph)"
+        return "(no codebase matches  -  try a broader query; if the symbol index was missing \
+it is being built in the background, so retry shortly)"
             .to_string();
     }
     let mut out = String::new();

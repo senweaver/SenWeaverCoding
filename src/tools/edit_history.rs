@@ -26,6 +26,9 @@ pub struct FileSnapshot {
     pub tool_name: String,
     pub description: String,
     pub byte_size: usize,
+
+    #[serde(default)]
+    pub absent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -39,21 +42,22 @@ pub struct EditEvent {
     #[serde(default)]
     pub edit_batch_id: Option<String>,
 
-    /// SHA-256 of the file *after* the batch landed on disk, captured when the
-    /// batch id is stamped. `revert_batch` compares this against the current disk
-    /// content and refuses to clobber a file that changed after the batch (e.g.
-    /// a concurrent agent edit while a review panel is open).
     #[serde(default)]
     pub post_sha256: Option<String>,
 }
 
-/// Result of reverting an edit batch: which files were restored, and which were
-/// left untouched because they changed after the batch (and reverting would have
-/// silently discarded newer work).
 #[derive(Debug, Clone, Default)]
 pub struct RevertOutcome {
     pub reverted: Vec<String>,
     pub skipped_stale: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SessionEditedFile {
+    pub rel_path: String,
+    pub first_snapshot_index: usize,
+    pub pre_image: FileSnapshot,
+    pub batch_ids: Vec<String>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -77,6 +81,8 @@ struct EditHistoryState {
     timeline: Vec<EditEvent>,
     session_id: String,
     loaded: bool,
+
+    session_first_index: HashMap<String, usize>,
 }
 
 impl EditHistory {
@@ -177,32 +183,47 @@ impl EditHistory {
         description: &str,
         edit_batch_id: Option<String>,
     ) -> anyhow::Result<()> {
-        if !path.exists() {
-            return Ok(());
-        }
-
         self.ensure_loaded();
 
-        let content = std::fs::read(path)?;
-        let hash = Self::sha256(&content);
         let now = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .unwrap_or_default()
             .as_secs();
 
-        let content_path = self.storage_dir.join(&hash);
-        if !content_path.exists() {
-            std::fs::write(&content_path, &content)?;
-        }
+        let (snapshot, is_creation) = if path.exists() {
+            let content = std::fs::read(path)?;
+            let hash = Self::sha256(&content);
+            let content_path = self.storage_dir.join(&hash);
+            if !content_path.exists() {
+                std::fs::write(&content_path, &content)?;
+            }
+            (
+                FileSnapshot {
+                    sha256: hash,
+                    timestamp: now,
+                    tool_name: tool_name.to_string(),
+                    description: description.to_string(),
+                    byte_size: content.len(),
+                    absent: false,
+                },
+                false,
+            )
+        } else {
+            (
+                FileSnapshot {
+                    sha256: String::new(),
+                    timestamp: now,
+                    tool_name: tool_name.to_string(),
+                    description: description.to_string(),
+                    byte_size: 0,
+                    absent: true,
+                },
+                true,
+            )
+        };
+        let _ = is_creation;
 
         let key = self.relative_key(path);
-        let snapshot = FileSnapshot {
-            sha256: hash,
-            timestamp: now,
-            tool_name: tool_name.to_string(),
-            description: description.to_string(),
-            byte_size: content.len(),
-        };
 
         let event = EditEvent {
             path: key.clone(),
@@ -219,7 +240,7 @@ impl EditHistory {
             let chain = state.index.files.entry(key.clone()).or_default();
 
             if let Some(last) = chain.last() {
-                if last.sha256 == snapshot.sha256 {
+                if last.absent == snapshot.absent && last.sha256 == snapshot.sha256 {
                     return Ok(());
                 }
             }
@@ -245,7 +266,25 @@ impl EditHistory {
                     ev.snapshot_index -= evicted;
                     true
                 });
+                match state.session_first_index.get_mut(&key) {
+                    Some(first) if *first >= evicted => *first -= evicted,
+                    Some(_) => {
+                        state.session_first_index.remove(&key);
+                        tracing::debug!(
+                            target: "rewind",
+                            path = %key,
+                            "session-start pre-image evicted by snapshot cap; \
+                             revert_all_session will skip this path"
+                        );
+                    }
+                    None => {}
+                }
             }
+
+            state
+                .session_first_index
+                .entry(key.clone())
+                .or_insert(idx);
 
             let mut ev = event;
             ev.snapshot_index = idx;
@@ -278,7 +317,7 @@ impl EditHistory {
         self.ensure_loaded();
         let key = self.relative_key(path);
 
-        let hash = {
+        let (hash, absent) = {
             let state = self.state.read();
             let chain = state
                 .index
@@ -288,18 +327,64 @@ impl EditHistory {
             let snap = chain
                 .get(snapshot_index)
                 .ok_or_else(|| anyhow::anyhow!("Snapshot index {snapshot_index} out of range"))?;
-            snap.sha256.clone()
+            (snap.sha256.clone(), snap.absent)
         };
 
-        let content_path = self.storage_dir.join(&hash);
-        let content = std::fs::read(&content_path)
-            .map_err(|e| anyhow::anyhow!("Snapshot content missing ({hash}): {e}"))?;
+        self.apply_pre_image(path, &hash, absent)
+    }
 
+    pub fn revert_to_session_start(&self, path: &Path) -> anyhow::Result<()> {
+        self.ensure_loaded();
+        let key = self.relative_key(path);
+
+        let (hash, absent) = {
+            let state = self.state.read();
+            let idx = *state
+                .session_first_index
+                .get(&key)
+                .ok_or_else(|| anyhow::anyhow!("No session edit history for: {key}"))?;
+            let snap = state
+                .index
+                .files
+                .get(&key)
+                .and_then(|chain| chain.get(idx))
+                .ok_or_else(|| {
+                    anyhow::anyhow!("Session pre-image snapshot missing for: {key}")
+                })?;
+            (snap.sha256.clone(), snap.absent)
+        };
+
+        self.apply_pre_image(path, &hash, absent)
+    }
+
+    fn apply_pre_image(&self, path: &Path, hash: &str, absent: bool) -> anyhow::Result<()> {
         let abs_path = if path.is_absolute() {
             path.to_path_buf()
         } else {
             self.workspace_dir.join(path)
         };
+
+        if absent {
+            match std::fs::remove_file(&abs_path) {
+                Ok(()) => {}
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                Err(e) => {
+                    return Err(anyhow::anyhow!(
+                        "failed to delete created file during revert ({}): {e}",
+                        abs_path.display()
+                    ));
+                }
+            }
+            return Ok(());
+        }
+
+        let content_path = self.storage_dir.join(hash);
+        let content = std::fs::read(&content_path)
+            .map_err(|e| anyhow::anyhow!("Snapshot content missing ({hash}): {e}"))?;
+
+        if let Some(parent) = abs_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
         crate::util::atomic_write(&abs_path, &content)?;
 
         Ok(())
@@ -329,35 +414,22 @@ impl EditHistory {
         self.ensure_loaded();
         let mut reverted = Vec::new();
 
-        let paths_to_revert: Vec<(String, String)> = {
+        let targets: Vec<String> = {
             let state = self.state.read();
-            let session_paths: Vec<String> = state
-                .timeline
-                .iter()
-                .map(|e| e.path.clone())
-                .collect::<std::collections::HashSet<_>>()
-                .into_iter()
-                .collect();
-
-            session_paths
-                .into_iter()
-                .filter_map(|key| {
-                    state
-                        .index
-                        .files
-                        .get(&key)
-                        .and_then(|chain| chain.first())
-                        .map(|snap| (key, snap.sha256.clone()))
-                })
-                .collect()
+            state.session_first_index.keys().cloned().collect()
         };
 
-        for (key, hash) in paths_to_revert {
-            let content_path = self.storage_dir.join(&hash);
-            if let Ok(content) = std::fs::read(&content_path) {
-                let abs_path = self.workspace_dir.join(&key);
-                if crate::util::atomic_write(&abs_path, &content).is_ok() {
-                    reverted.push(key);
+        for key in targets {
+            let abs_path = self.workspace_dir.join(&key);
+            match self.revert_to_session_start(&abs_path) {
+                Ok(()) => reverted.push(key),
+                Err(e) => {
+                    tracing::warn!(
+                        target: "rewind",
+                        path = %abs_path.display(),
+                        error = %e,
+                        "revert_all_session: failed to revert file"
+                    );
                 }
             }
         }
@@ -370,6 +442,49 @@ impl EditHistory {
         let key = self.relative_key(path);
         let state = self.state.read();
         state.index.files.get(&key).cloned().unwrap_or_default()
+    }
+
+    pub fn session_edited_files(&self) -> Vec<SessionEditedFile> {
+        self.ensure_loaded();
+        let state = self.state.read();
+        let mut out: Vec<SessionEditedFile> = Vec::new();
+        for (key, first_idx) in state.session_first_index.iter() {
+            let Some(chain) = state.index.files.get(key) else {
+                continue;
+            };
+            let Some(snap) = chain.get(*first_idx) else {
+                continue;
+            };
+            let mut batch_ids: Vec<String> = Vec::new();
+            for ev in state
+                .timeline
+                .iter()
+                .filter(|ev| &ev.path == key && ev.snapshot_index >= *first_idx)
+            {
+                if let Some(id) = ev.edit_batch_id.as_deref() {
+                    if !batch_ids.iter().any(|b| b == id) {
+                        batch_ids.push(id.to_string());
+                    }
+                }
+            }
+            out.push(SessionEditedFile {
+                rel_path: key.clone(),
+                first_snapshot_index: *first_idx,
+                pre_image: snap.clone(),
+                batch_ids,
+            });
+        }
+        out.sort_by(|a, b| a.rel_path.cmp(&b.rel_path));
+        out
+    }
+
+    pub fn session_first_index_for(&self, path: &Path) -> Option<(usize, FileSnapshot)> {
+        self.ensure_loaded();
+        let key = self.relative_key(path);
+        let state = self.state.read();
+        let idx = *state.session_first_index.get(&key)?;
+        let snap = state.index.files.get(&key)?.get(idx)?.clone();
+        Some((idx, snap))
     }
 
     pub fn get_session_timeline(&self) -> Vec<EditEvent> {
@@ -392,10 +507,6 @@ impl EditHistory {
         if keys.is_empty() {
             return;
         }
-        // Prefer the exact post-image sha the applier already computed (keyed to
-        // this batch's own write); only re-read from disk as a fallback, which
-        // avoids a TOCTOU where a concurrent external write would poison the
-        // revert freshness guard.
         let post_hashes: HashMap<String, String> = paths
             .iter()
             .zip(keys.iter())
@@ -467,10 +578,6 @@ impl EditHistory {
         out
     }
 
-    /// Revert a batch, refusing any file whose current on-disk content no longer
-    /// matches the post-image captured when the batch was stamped (i.e. it was
-    /// changed after the batch). This prevents a review-panel revert from
-    /// silently clobbering a concurrent agent/user edit.
     pub fn revert_batch(&self, edit_batch_id: &str) -> anyhow::Result<Vec<String>> {
         let outcome = self.revert_batch_guarded(edit_batch_id, false)?;
         if !outcome.skipped_stale.is_empty() {
@@ -483,8 +590,6 @@ impl EditHistory {
         Ok(outcome.reverted)
     }
 
-    /// Revert a batch unconditionally, ignoring the freshness guard. Only for
-    /// explicit user-confirmed force-revert flows.
     pub fn revert_batch_force(&self, edit_batch_id: &str) -> anyhow::Result<RevertOutcome> {
         self.revert_batch_guarded(edit_batch_id, true)
     }
@@ -509,6 +614,24 @@ impl EditHistory {
                         _ => {}
                     }
                 }
+            }
+
+            if snap.absent {
+                match std::fs::remove_file(&abs) {
+                    Ok(()) => outcome.reverted.push(rel_path),
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                        outcome.reverted.push(rel_path)
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "rewind",
+                            path = %abs.display(),
+                            error = %e,
+                            "failed to delete created file during batch revert"
+                        );
+                    }
+                }
+                continue;
             }
 
             let content_path = self.storage_dir.join(&snap.sha256);

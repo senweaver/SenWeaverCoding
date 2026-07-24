@@ -27,10 +27,14 @@ fn warn_experimental_once() {
     if !EXPERIMENTAL_WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
         tracing::warn!(
             target: "crdt.coordination",
-            "crdt-coordination is EXPERIMENTAL: it provides last-writer-wins convergence with a \
-             pre-image guard plus a re-read-and-retry conflict path, NOT full operational-transform \
-             conflict resolution. Remote ops whose pre-image no longer matches the local text are \
-             rejected (never blindly applied) and surface as re-read-and-retry errors."
+            "crdt-coordination is EXPERIMENTAL and PROCESS-LOCAL: it coordinates sessions and \
+             workers inside this one process via the in-process blackboard, providing \
+             last-writer-wins convergence with a pre-image guard plus a re-read-and-retry \
+             conflict path. It is NOT operational-transform conflict resolution and does NOT \
+             synchronize across processes or devices; cross-process write safety comes from the \
+             OS advisory file locks in the workspace resource manager. Remote ops whose \
+             pre-image no longer matches the local text are rejected (never blindly applied) \
+             and surface as re-read-and-retry errors."
         );
     }
 }
@@ -166,7 +170,6 @@ pub fn pull_remote_before_edit(path: &Path) -> bool {
         return false;
     };
     let Ok(log) = serde_json::from_value::<CrdtLog>(entry.value.clone()) else {
-        // Legacy or foreign payload shape: fall back to the raw batch decoder.
         let Ok(bytes) = serde_json::to_vec(&entry.value) else {
             return false;
         };
@@ -183,19 +186,12 @@ pub fn pull_remote_before_edit(path: &Path) -> bool {
         return false;
     }
 
-    // First pull for this Document: the disk copy it was opened from already
-    // reflects everything published so far, so fast-forward the cursor instead
-    // of replaying history against fresh text (which would only trip the
-    // pre-image guard and produce false "stale" reports).
     if consumed == 0 {
         let _ = doc.resync_from_disk();
         doc.set_consumed_seq(log.next_seq.saturating_sub(1));
         return false;
     }
 
-    // Gap: ops between our cursor and the start of the retained window were
-    // evicted before we saw them. Degrade safely: resync from disk, skip the
-    // cursor forward, and report "stale" so byte-offset edits get re-read.
     let gap = log.first_seq > consumed + 1;
     if gap {
         tracing::warn!(
@@ -261,9 +257,6 @@ fn blackboard_key(path: &Path) -> String {
                 .map(|p| p.to_path_buf())
         })
         .unwrap_or_else(|| path.to_path_buf());
-    // Scope by workspace (not session) so every session/worker editing the same
-    // working tree publishes and pulls the SAME key for a given file; a
-    // session-scoped key made "remote merge" a self-referential no-op.
     crate::agent::multi_agent_runtime::workspace_scoped_key(&format!(
         "crdt/{}",
         rel.to_string_lossy().replace('\\', "/")
@@ -299,12 +292,6 @@ fn publish_pending_locked(doc: &mut Document) {
             .compare_and_swap(key.clone(), value, agent.clone(), "crdt", expected_version)
         {
             Ok(_) => {
-                // Do NOT fast-forward the consume cursor to next_seq-1 here: the
-                // freshly-read log may contain external ops appended between our
-                // pull and this publish, and skipping them would silently diverge.
-                // Leave the cursor; the next pull re-scans and `apply_remote_update`
-                // classifies our own ops as OwnOp (deduped, clock advanced), so we
-                // never re-apply what we published while still catching externals.
                 doc.mark_exported(pending.len());
                 return;
             }

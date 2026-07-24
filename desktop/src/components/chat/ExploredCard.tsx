@@ -36,6 +36,8 @@ type Props = {
   onLiveThinkingGrow?: () => void
 }
 
+const EXPANDED_TAIL_ITEMS = 30
+
 const COUNTERS: Array<{
   key: keyof ExploredSummary
   one: TranslationKey
@@ -80,10 +82,17 @@ function ExploredCardImpl({
 }: Props) {
   const t = useTranslation()
   const [expanded, setExpanded] = useState(false)
+  const [showEarlier, setShowEarlier] = useState(false)
 
   useEffect(() => {
     if (isStreaming) setExpanded(true)
   }, [isStreaming])
+
+  const hiddenCount =
+    !showEarlier && items.length > EXPANDED_TAIL_ITEMS
+      ? items.length - EXPANDED_TAIL_ITEMS
+      : 0
+  const visibleItems = hiddenCount > 0 ? items.slice(hiddenCount) : items
 
   const summaryParts = COUNTERS.flatMap(({ key, one, many }) => {
     const n = summary[key]
@@ -120,7 +129,16 @@ function ExploredCardImpl({
 
       {expanded && (
         <div className="mt-1.5 ml-2 space-y-1.5 border-l border-[var(--color-border)]/40 pl-3">
-          {items.map((item) => {
+          {hiddenCount > 0 && (
+            <button
+              type="button"
+              onClick={() => setShowEarlier(true)}
+              className="rounded border border-[var(--color-border)]/40 bg-[var(--color-surface-container-low)] px-2 py-0.5 text-[11px] text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-container-high)]"
+            >
+              {t('explored.showEarlier', { count: hiddenCount })}
+            </button>
+          )}
+          {visibleItems.map((item) => {
             if (item.type === 'thinking') {
               const thinking = item as Thinking
               if (thinking.id === activeThinkingId) {

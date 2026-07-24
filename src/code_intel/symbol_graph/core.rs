@@ -93,6 +93,12 @@ pub struct SymbolGraph {
     symbols_by_file_name: HashMap<String, Vec<usize>>,
 
     #[serde(skip)]
+    symbols_by_file: HashMap<PathBuf, Vec<usize>>,
+
+    #[serde(skip)]
+    edges_by_target_name: HashMap<String, Vec<usize>>,
+
+    #[serde(skip)]
     recent_edits: VecDeque<(SymbolId, Instant)>,
 }
 
@@ -167,12 +173,20 @@ impl SymbolGraph {
     }
 
     pub fn persist(&self, root: &Path) -> io::Result<PathBuf> {
+        let body = self.serialize_for_persist()?;
+        Self::persist_bytes(root, &body)
+    }
+
+    pub fn serialize_for_persist(&self) -> io::Result<Vec<u8>> {
+        serde_json::to_vec(self).map_err(io::Error::other)
+    }
+
+    pub fn persist_bytes(root: &Path, body: &[u8]) -> io::Result<PathBuf> {
         let dir = root.join(".sen");
         fs::create_dir_all(&dir)?;
         let target = dir.join("symbol_graph.json");
         let tmp = dir.join("symbol_graph.json.tmp");
-        let body = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
-        fs::write(&tmp, &body)?;
+        fs::write(&tmp, body)?;
         fs::rename(&tmp, &target)?;
         Ok(target)
     }
@@ -230,25 +244,36 @@ impl SymbolGraph {
     }
 
     pub fn callers_of(&self, name: &str) -> Vec<&SymbolId> {
-        self.edges
-            .iter()
-            .filter(|e| matches!(e.kind, EdgeKind::Calls) && e.to.name == name)
-            .map(|e| &e.from)
-            .collect()
+        self.edges_by_target(name, EdgeKind::Calls)
     }
 
     pub fn implementors_of(&self, name: &str) -> Vec<&SymbolId> {
-        self.edges
-            .iter()
-            .filter(|e| matches!(e.kind, EdgeKind::Implements) && e.to.name == name)
-            .map(|e| &e.from)
-            .collect()
+        self.edges_by_target(name, EdgeKind::Implements)
+    }
+
+    fn edges_by_target(&self, name: &str, kind: EdgeKind) -> Vec<&SymbolId> {
+        match self.edges_by_target_name.get(name) {
+            Some(indices) => indices
+                .iter()
+                .filter_map(|&i| self.edges.get(i))
+                .filter(|e| e.kind == kind)
+                .map(|e| &e.from)
+                .collect(),
+            None if self.edges_by_target_name.is_empty() => self
+                .edges
+                .iter()
+                .filter(|e| e.kind == kind && e.to.name == name)
+                .map(|e| &e.from)
+                .collect(),
+            None => Vec::new(),
+        }
     }
 
     pub fn rebuild_name_index(&mut self) {
         self.name_index.clear();
         self.symbol_index.clear();
         self.symbols_by_file_name.clear();
+        self.symbols_by_file.clear();
         for (idx, sym) in self.symbols.iter().enumerate() {
             self.name_index
                 .entry(sym.id.name.clone())
@@ -265,8 +290,20 @@ impl SymbolGraph {
                 .entry(file_key)
                 .or_default()
                 .push(idx);
+            self.symbols_by_file
+                .entry(sym.id.file.clone())
+                .or_default()
+                .push(idx);
         }
         self.rebuild_edge_index();
+    }
+
+    #[must_use]
+    pub fn symbol_indices_for_file(&self, file: &Path) -> &[usize] {
+        self.symbols_by_file
+            .get(file)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     #[must_use]
@@ -280,9 +317,14 @@ impl SymbolGraph {
     fn rebuild_edge_index(&mut self) {
         self.out_index.clear();
         self.in_index.clear();
+        self.edges_by_target_name.clear();
         for (idx, e) in self.edges.iter().enumerate() {
             self.out_index.entry(e.from.clone()).or_default().push(idx);
             self.in_index.entry(e.to.clone()).or_default().push(idx);
+            self.edges_by_target_name
+                .entry(e.to.name.clone())
+                .or_default()
+                .push(idx);
         }
     }
 
@@ -320,6 +362,18 @@ impl SymbolGraph {
 
     #[must_use]
     pub fn symbols_in_file(&self, file: &Path) -> Vec<&SymbolEntry> {
+        if !self.symbols_by_file.is_empty() {
+            return self
+                .symbols_by_file
+                .get(file)
+                .map(|indices| {
+                    indices
+                        .iter()
+                        .filter_map(|&i| self.symbols.get(i))
+                        .collect()
+                })
+                .unwrap_or_default();
+        }
         self.symbols.iter().filter(|s| s.id.file == file).collect()
     }
 
@@ -338,7 +392,12 @@ impl SymbolGraph {
             return match kind {
                 Some(k) => ids
                     .iter()
-                    .filter(|id| self.symbols.iter().any(|s| s.id == **id && s.kind == k))
+                    .filter(|id| {
+                        self.symbol_index
+                            .get(*id)
+                            .and_then(|&idx| self.symbols.get(idx))
+                            .is_some_and(|s| s.kind == k)
+                    })
                     .cloned()
                     .collect(),
                 None => ids.clone(),
@@ -354,18 +413,18 @@ impl SymbolGraph {
 
     #[must_use]
     pub fn find_callers(&self, sym: &SymbolId) -> Vec<&SymbolId> {
-        self.edges
-            .iter()
-            .filter(|e| matches!(e.kind, EdgeKind::Calls) && &e.to == sym)
+        self.in_edges(sym)
+            .into_iter()
+            .filter(|e| matches!(e.kind, EdgeKind::Calls))
             .map(|e| &e.from)
             .collect()
     }
 
     #[must_use]
     pub fn find_implementors(&self, sym: &SymbolId) -> Vec<&SymbolId> {
-        self.edges
-            .iter()
-            .filter(|e| matches!(e.kind, EdgeKind::Implements) && &e.to == sym)
+        self.in_edges(sym)
+            .into_iter()
+            .filter(|e| matches!(e.kind, EdgeKind::Implements))
             .map(|e| &e.from)
             .collect()
     }
@@ -411,10 +470,6 @@ impl SymbolGraph {
             .cloned()
             .collect();
 
-        // Files that reference a symbol in (or import) a dirty file are the "callers".
-        // Their outgoing edges (the reverse/caller edges into the changed symbols) must
-        // be recomputed against the changed file's new symbol positions; otherwise every
-        // edit silently strips caller information the moment a target file is touched.
         const MAX_CALLER_RESCAN: usize = 512;
         let mut caller_rel: HashSet<PathBuf> = HashSet::new();
         for e in &self.edges {
@@ -434,15 +489,11 @@ impl SymbolGraph {
             caller_rel = capped;
         }
 
-        // Recompute set = changed files (whose symbols are re-added) plus caller files
-        // (bodies re-scanned for edges only; their symbols stay as-is).
         let mut rescan_rel: HashSet<PathBuf> = dirty_rel.clone();
         rescan_rel.extend(caller_rel.iter().cloned());
 
         self.symbols.retain(|s| !dirty_rel.contains(&s.id.file));
 
-        // Drop only edges that ORIGINATE from a file we are about to re-scan (or from a
-        // removed file). Incoming edges from clean, non-caller files are preserved.
         self.edges
             .retain(|e| !rescan_rel.contains(&e.from.file) && !removed_rel.contains(&e.to.file));
 
@@ -479,7 +530,6 @@ impl SymbolGraph {
             per_file.push((rel, src, entries));
         }
 
-        // Re-scan caller bodies for edges without touching their symbols.
         for rel in &caller_rel {
             let abs_path = root.join(rel);
             let Ok(src) = fs::read_to_string(&abs_path) else {
@@ -520,10 +570,6 @@ fn collect_edges(
 ) -> Vec<Edge> {
     let mut edge_set: BTreeSet<(SymbolId, SymbolId, EdgeKind)> = BTreeSet::new();
 
-    // Build the name lookup and a single Aho-Corasick automaton once for the
-    // whole graph so call/use detection is one linear scan per body instead of
-    // O(symbols x body). Same-name symbols keep every candidate so resolution
-    // can prefer the one in (or nearest) the calling file.
     let mut name_to: HashMap<&str, Vec<&SymbolId>> = HashMap::new();
     for entry in &view.symbols {
         if entry.id.name.is_empty() {
@@ -602,17 +648,7 @@ fn walk_source_files(root: &Path) -> io::Result<Vec<PathBuf>> {
             if ft.is_dir() {
                 let name = entry.file_name();
                 let name_str = name.to_string_lossy();
-                if matches!(
-                    name_str.as_ref(),
-                    ".git"
-                        | ".sen"
-                        | "target"
-                        | "node_modules"
-                        | "dist"
-                        | "build"
-                        | ".venv"
-                        | "__pycache__"
-                ) {
+                if crate::util::is_index_skip_dir(name_str.as_ref()) {
                     continue;
                 }
                 recurse(&path, out)?;
@@ -744,9 +780,6 @@ fn detect_implements(
     from_file: &Path,
     name_to: &HashMap<&str, Vec<&SymbolId>>,
 ) -> Vec<SymbolId> {
-    // O(1) name lookup via the prebuilt index instead of scanning every symbol in
-    // the graph per matched line (previously O(lines * symbols), which on large
-    // repos dominated the whole build).
     let resolve = |name: &str, out: &mut Vec<SymbolId>| {
         if name.is_empty() {
             return;

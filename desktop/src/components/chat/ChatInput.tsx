@@ -5,7 +5,7 @@
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from '../../i18n'
-import { useChatStore } from '../../stores/chatStore'
+import { useChatStore, isAskQuestionToolName } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useSessionStore } from '../../stores/sessionStore'
@@ -71,9 +71,6 @@ type Attachment = {
 
 type ChatInputProps = {
   variant?: 'default' | 'hero'
-  // When provided, message dispatch is delegated to this callback instead of the
-  // local chat store (used by the minimal floating window to forward the send to
-  // the main window, which owns the authoritative session/WebSocket).
   onSubmit?: ReturnType<typeof useChatStore.getState>['sendMessage']
 }
 
@@ -488,10 +485,6 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
   }, [isHeroComposer, isWorkspaceMissing, resolvedWorkDir])
 
   useEffect(() => {
-    // Only claim focus when nothing else holds it. This effect fires on every
-    // idle<->active flip (turn start/end, permission arrival); force-focusing
-    // unconditionally yanked the caret out of Monaco or a PTY terminal while
-    // the user was typing.
     const activeEl = document.activeElement
     const composerHasFocus =
       activeEl instanceof HTMLElement &&
@@ -563,9 +556,6 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
     setAtCursorPos(-1)
     setAtStartPos(-1)
     setSlashSelectedIndex(0)
-    // Design references are anchored to a session's artifact; carrying them
-    // across a switch made the next send in another session generate against
-    // the previous session's artifact/element.
     setDesignRef(null)
     setDesignRefElement(null)
     prevDraftSessionRef.current = next
@@ -726,7 +716,6 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
           unlisten = off
         }
       } catch {
-        // not running inside a Tauri webview
       }
     })
     return () => {
@@ -1212,7 +1201,6 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
           return
         }
       } catch {
-        /* ignore malformed payload */
       }
     }
     const files = event.dataTransfer.files
@@ -1228,8 +1216,7 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
 
   const isPendingQuestion =
     !!sessionView.pendingPermission &&
-    (sessionView.pendingPermission.toolName === 'ask_question' ||
-      sessionView.pendingPermission.toolName === 'AskUserQuestion')
+    isAskQuestionToolName(sessionView.pendingPermission.toolName)
 
   const designRefUnit = useDesignerCanvasStore((s) => {
     if (!designRef || !activeTabId) return null

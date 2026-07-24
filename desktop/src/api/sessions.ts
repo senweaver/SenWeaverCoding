@@ -152,4 +152,47 @@ export const sessionsApi = {
       { timeout: 60_000 },
     )
   },
+
+  getEditReview(sessionId: string) {
+    return api.get<{ files: EditReviewFile[] }>(
+      `/api/sessions/${sessionId}/edit-review`,
+    )
+  },
+
+  getEditReviewFile(sessionId: string, path: string) {
+    const qs = new URLSearchParams({ path }).toString()
+    return api.get<EditReviewFileDiff>(
+      `/api/sessions/${sessionId}/edit-review/file?${qs}`,
+    )
+  },
+
+  revertFiles(sessionId: string, paths: string[]) {
+    return api.post<{
+      ok: boolean
+      revertedPaths: string[]
+      failed: Array<{ path: string; error: string }>
+    }>(
+      `/api/sessions/${sessionId}/revert-files`,
+      { paths },
+      { timeout: 60_000 },
+    )
+  },
+}
+
+export type EditReviewFile = {
+  path: string
+  status: 'created' | 'modified' | 'deleted'
+  additions: number | null
+  deletions: number | null
+  batchIds: string[]
+  firstSnapshotIndex: number
+}
+
+export type EditReviewFileDiff = {
+  path: string
+  before: string
+  after: string
+  beforeTruncated: boolean
+  afterTruncated: boolean
+  createdInSession: boolean
 }

@@ -9,7 +9,6 @@ pub mod cli;
 pub mod decay;
 pub mod embeddings;
 pub mod gc;
-#[cfg(feature = "vector-index-hnsw")]
 pub mod hnsw;
 pub mod hygiene;
 pub mod importance;
@@ -175,9 +174,6 @@ fn resolve_embedding_config(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    // Auto-enable local Ollama embeddings (dense retrieval) when the user has an
-    // Ollama host configured but left the embedding provider off, so the default
-    // build gets real semantic search instead of BM25-only without extra setup.
     let configured_provider = config.embedding_provider.trim();
     let ollama_host_present = crate::util::get_runtime_var("OLLAMA_HOST")
         .or_else(|| crate::util::get_runtime_var("SEN_OLLAMA_HOST"))

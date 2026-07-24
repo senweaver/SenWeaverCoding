@@ -4,7 +4,7 @@
 
 import { create } from 'zustand'
 import { usageApi } from '../api/usage'
-import { getBaseUrl } from '../api/client'
+import { getBaseUrl, withAuthToken } from '../api/client'
 import type { UsageSummary } from '../types/usage'
 
 type UsageStore = {
@@ -82,11 +82,10 @@ function connectUsageStream(fetchFn: () => Promise<void>): void {
   }
   try {
     const baseUrl = getBaseUrl()
-    const url = `${baseUrl}/api/gateway/events`
+    const url = withAuthToken(`${baseUrl}/api/gateway/events`)
     const es = new EventSource(url)
     eventSource = es
     es.onopen = () => {
-      // Reset backoff and resync after a (re)connect; we may have missed events.
       reconnectDelayMs = 1000
       void fetchFn().catch(() => {})
     }
@@ -98,13 +97,9 @@ function connectUsageStream(fetchFn: () => Promise<void>): void {
           scheduleRefetch(fetchFn)
         }
       } catch {
-        // ignore malformed frames
       }
     }
     es.onerror = () => {
-      // The browser only auto-retries transient network errors; a CLOSED state
-      // (e.g. gateway restart / port change) is terminal, so reconnect ourselves
-      // with capped backoff as long as there are subscribers.
       if (es.readyState !== EventSource.CLOSED) return
       es.close()
       if (eventSource === es) eventSource = null

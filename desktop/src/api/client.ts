@@ -11,7 +11,15 @@ const ENV_BASE_URL =
 
 const DEFAULT_BASE_URL = ENV_BASE_URL || 'http://127.0.0.1:42617'
 
+const ENV_AUTH_TOKEN =
+  typeof import.meta !== 'undefined' &&
+  typeof import.meta.env?.VITE_DESKTOP_SERVER_TOKEN === 'string' &&
+  import.meta.env.VITE_DESKTOP_SERVER_TOKEN.length > 0
+    ? import.meta.env.VITE_DESKTOP_SERVER_TOKEN
+    : undefined
+
 let baseUrl = DEFAULT_BASE_URL
+let authToken: string | undefined = ENV_AUTH_TOKEN
 
 function getErrorMessage(status: number, body: unknown) {
   if (body && typeof body === 'object') {
@@ -55,6 +63,22 @@ export function getDefaultBaseUrl() {
   return DEFAULT_BASE_URL
 }
 
+export function setAuthToken(token: string) {
+  if (token && token.length > 0) {
+    authToken = token
+  }
+}
+
+export function getAuthToken() {
+  return authToken
+}
+
+export function withAuthToken(url: string) {
+  if (!authToken) return url
+  const sep = url.includes('?') ? '&' : '?'
+  return `${url}${sep}token=${encodeURIComponent(authToken)}`
+}
+
 export class ApiError extends Error {
   constructor(
     public status: number,
@@ -76,6 +100,9 @@ async function request<T>(
   const url = `${baseUrl}${path}`
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
+  }
+  if (authToken) {
+    headers['X-Sen-Gateway-Token'] = authToken
   }
 
   const controller = new AbortController()

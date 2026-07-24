@@ -39,7 +39,6 @@ function uriToRel(uri: string, workDir: string): string | null {
   try {
     p = decodeURI(p)
   } catch {
-    /* ignore */
   }
   let abs = p
   if (/^\/[A-Za-z]:\//.test(abs)) abs = abs.slice(1)

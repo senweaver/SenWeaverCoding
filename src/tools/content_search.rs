@@ -175,7 +175,7 @@ impl Tool for ContentSearchTool {
             .unwrap_or(false);
 
         #[allow(clippy::cast_possible_truncation)]
-        let max_results = args
+        let page_size = args
             .get("max_results")
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
@@ -188,6 +188,8 @@ impl Tool for ContentSearchTool {
             .and_then(|v| v.as_u64())
             .map(|v| v as usize)
             .unwrap_or(0);
+
+        let max_results = offset.saturating_add(page_size).min(MAX_RESULTS);
 
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
@@ -407,7 +409,7 @@ impl Tool for ContentSearchTool {
                                 return finalise_search_result(
                                     formatted,
                                     offset,
-                                    max_results,
+                                    page_size,
                                     output_mode,
                                 );
                             }
@@ -457,7 +459,37 @@ impl Tool for ContentSearchTool {
             }
         };
 
-        finalise_search_result(formatted, offset, max_results, output_mode)
+        finalise_search_result(formatted, offset, page_size, output_mode)
+    }
+}
+
+fn split_result_blocks(text: &str) -> Vec<&str> {
+    if text.lines().any(|l| l.trim_end() == "--") {
+        let mut blocks: Vec<&str> = Vec::new();
+        let bytes = text.as_bytes();
+        let mut block_start = 0usize;
+        let mut line_start = 0usize;
+        for (i, &b) in bytes.iter().enumerate() {
+            if b == b'\n' {
+                let line = &text[line_start..i];
+                if line.trim_end() == "--" {
+                    if block_start < line_start {
+                        blocks.push(text[block_start..line_start].trim_end_matches('\n'));
+                    }
+                    block_start = i + 1;
+                }
+                line_start = i + 1;
+            }
+        }
+        if block_start < text.len() {
+            let tail = text[block_start..].trim_end_matches('\n');
+            if !tail.is_empty() {
+                blocks.push(tail);
+            }
+        }
+        blocks
+    } else {
+        text.lines().filter(|l| !l.is_empty()).collect()
     }
 }
 
@@ -470,19 +502,20 @@ fn finalise_search_result(
     let saver_applied = apply_token_saver(&formatted, output_mode);
     let pre_pagination = saver_applied.unwrap_or(formatted);
     let paginated = if offset > 0 {
-        let lines: Vec<&str> = pre_pagination.lines().collect();
-        let total = lines.len();
+        let blocks: Vec<&str> = split_result_blocks(&pre_pagination);
+        let total = blocks.len();
         if offset >= total {
-            format!("[No more results: offset {offset} >= total {total} lines]")
+            format!("[No more results: offset {offset} >= total {total} results]")
         } else {
-            let page = &lines[offset..total.min(offset + max_results * 3)];
+            let end = total.min(offset + max_results);
+            let page = &blocks[offset..end];
             let mut out = page.join("\n");
-            if total > offset + max_results * 3 {
+            if total > end {
                 out.push_str(&format!(
-                    "\n\n[Showing lines {}-{} of {total}. Use offset={} for next page]",
+                    "\n\n[Showing results {}-{} of {total}. Use offset={} for next page]",
                     offset,
-                    offset + page.len(),
-                    offset + page.len()
+                    end,
+                    end
                 ));
             }
             out

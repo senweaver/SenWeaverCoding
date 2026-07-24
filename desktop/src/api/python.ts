@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { api, getBaseUrl } from './client'
+import { api, getBaseUrl, withAuthToken } from './client'
 
 export type PythonInterpreterTool = 'uv' | 'venv' | 'system' | 'unknown'
 
@@ -134,7 +134,7 @@ export const pythonApi = {
     )
   },
   streamEvents(workspace: string, onEvent: (ev: PythonEnvEvent) => void): EventSource {
-    const url = `${getBaseUrl()}/api/python/events?workspace=${encodeWorkspace(workspace)}`
+    const url = withAuthToken(`${getBaseUrl()}/api/python/events?workspace=${encodeWorkspace(workspace)}`)
     const source = new EventSource(url)
     source.addEventListener('python-env', (msg) => {
       try {

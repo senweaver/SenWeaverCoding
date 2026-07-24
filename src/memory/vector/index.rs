@@ -89,9 +89,13 @@ impl VectorIndex for LinearIndex {
 
         let mut heap: BinaryHeap<Reverse<(ordered_float::OrderedFloat<f32>, usize)>> =
             BinaryHeap::with_capacity(limit + 1);
-        let mut min_sim: f32 = 0.0;
+        let mut min_sim: f32 = f32::MIN;
+        let query_dim = query.len();
 
         for (idx, emb) in self.embeddings.iter().enumerate() {
+            if emb.len() != query_dim {
+                continue;
+            }
             let dot: f32 = query.iter().zip(emb.iter()).map(|(a, b)| a * b).sum();
             let emb_norm = self.norms[idx];
             if emb_norm < f32::EPSILON {
@@ -135,6 +139,7 @@ pub enum VectorBackend {
     Linear,
     Sharded,
     Ivf,
+    Hnsw,
 }
 
 impl Default for VectorBackend {
@@ -150,6 +155,7 @@ impl VectorBackend {
             "linear" | "brute" | "bruteforce" => Some(Self::Linear),
             "sharded" | "shard" | "parallel" => Some(Self::Sharded),
             "ivf" | "inverted" | "clustered" | "default" => Some(Self::Ivf),
+            "hnsw" | "graph" => Some(Self::Hnsw),
             _ => None,
         }
     }
@@ -159,6 +165,7 @@ impl VectorBackend {
             Self::Linear => "linear",
             Self::Sharded => "sharded",
             Self::Ivf => "ivf",
+            Self::Hnsw => "hnsw",
         }
     }
 
@@ -167,11 +174,12 @@ impl VectorBackend {
             Self::Linear => "brute-force cosine (best for < 1k vectors)",
             Self::Sharded => "parallel fan-out across CPU shards (~10k sweet spot)",
             Self::Ivf => "inverted-file clustering, sqrt(N) probe (default, ~100k+)",
+            Self::Hnsw => "hierarchical navigable small world graph (log(N) search, high recall)",
         }
     }
 
     pub const fn all() -> &'static [Self] {
-        &[Self::Linear, Self::Sharded, Self::Ivf]
+        &[Self::Linear, Self::Sharded, Self::Ivf, Self::Hnsw]
     }
 }
 
@@ -182,6 +190,7 @@ pub fn build_backend(kind: VectorBackend) -> Box<dyn VectorIndex> {
             Box::new(crate::memory::sharded::index::ShardedVectorIndex::with_cpu_count())
         }
         VectorBackend::Ivf => Box::new(crate::memory::ivf_index::IvfVectorIndex::for_size(10_000)),
+        VectorBackend::Hnsw => Box::new(crate::memory::hnsw::HnswMemIndex::new()),
     }
 }
 

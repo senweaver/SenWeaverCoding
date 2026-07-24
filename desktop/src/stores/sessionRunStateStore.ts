@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 import { create } from 'zustand'
-import { getBaseUrl } from '../api/client'
+import { getBaseUrl, withAuthToken } from '../api/client'
 
 const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 30000]
 
@@ -63,7 +63,7 @@ function scheduleReconnect() {
 function openStream() {
   closeEventSource()
   const base = getBaseUrl().replace(/\/$/, '')
-  const url = `${base}/api/sessions/events`
+  const url = withAuthToken(`${base}/api/sessions/events`)
   let es: EventSource
   try {
     es = new EventSource(url)

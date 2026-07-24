@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 import type { ClientMessage, ServerMessage } from '../types/chat'
-import { getBaseUrl } from './client'
+import { getBaseUrl, withAuthToken } from './client'
 
 type MessageHandler = (msg: ServerMessage) => void
 type ConnectListener = (sessionId: string) => void
@@ -27,8 +27,6 @@ const CRITICAL_MESSAGE_TYPES = new Set<string>([
   'start_design_generation',
   'start_plan_execution',
   'set_debug_submode',
-  // Mode/config toggles must survive a reconnect: dropping them lets the backend
-  // diverge from the UI (e.g. plan mode silently lost -> write ops execute).
   'set_permission_mode',
   'set_coding_mode',
   'set_pii_config',
@@ -83,6 +81,7 @@ class WebSocketManager {
   private connections = new Map<string, Connection>()
   private connectListeners = new Set<ConnectListener>()
   private runtimeConfigResolvers = new Map<string, Array<() => void>>()
+  private preRegisteredHandlers = new Map<string, Set<MessageHandler>>()
 
   notifyRuntimeConfigUpdated(sessionId: string) {
     const resolvers = this.runtimeConfigResolvers.get(sessionId)
@@ -230,7 +229,7 @@ class WebSocketManager {
     const pathPrefix = options?.pathPrefix ?? existing?.pathPrefix ?? '/ws'
     let ws: WebSocket
     try {
-      ws = new WebSocket(`${wsUrl}${pathPrefix}/${sessionId}`)
+      ws = new WebSocket(withAuthToken(`${wsUrl}${pathPrefix}/${sessionId}`))
     } catch (err) {
       console.warn('[wsManager] WebSocket constructor threw', err)
       const placeholder = existing ?? this.createEmptyConnection()
@@ -240,9 +239,17 @@ class WebSocketManager {
       return
     }
 
+    const handlers = existing?.handlers ?? new Set<MessageHandler>()
+    {
+      const pre = this.preRegisteredHandlers.get(sessionId)
+      if (pre) {
+        for (const h of pre) handlers.add(h)
+        this.preRegisteredHandlers.delete(sessionId)
+      }
+    }
     const conn: Connection = {
       ws,
-      handlers: existing?.handlers ?? new Set(),
+      handlers,
       reconnectTimer: null,
       connectTimer: null,
       reconnectAttempt: existing?.reconnectAttempt ?? 0,
@@ -514,7 +521,22 @@ class WebSocketManager {
 
   onMessage(sessionId: string, handler: MessageHandler): () => void {
     const conn = this.connections.get(sessionId)
-    if (!conn) return () => {}
+    if (!conn) {
+      let pre = this.preRegisteredHandlers.get(sessionId)
+      if (!pre) {
+        pre = new Set()
+        this.preRegisteredHandlers.set(sessionId, pre)
+      }
+      pre.add(handler)
+      return () => {
+        const set = this.preRegisteredHandlers.get(sessionId)
+        if (set) {
+          set.delete(handler)
+          if (set.size === 0) this.preRegisteredHandlers.delete(sessionId)
+        }
+        this.connections.get(sessionId)?.handlers.delete(handler)
+      }
+    }
     conn.handlers.add(handler)
     return () => { conn.handlers.delete(handler) }
   }
@@ -522,6 +544,7 @@ class WebSocketManager {
   clearHandlers(sessionId: string) {
     const conn = this.connections.get(sessionId)
     if (conn) conn.handlers.clear()
+    this.preRegisteredHandlers.delete(sessionId)
   }
 
   private startPingLoop(sessionId: string) {

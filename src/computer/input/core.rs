@@ -22,18 +22,12 @@ mod winmouse {
         SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, WS_EX_TRANSPARENT,
     };
 
-    /// While alive, makes any of the assistant's own top-level windows that cover the given
-    /// screen points transparent to hit-testing, so injected clicks reach the app underneath.
-    /// Restores the original styles on drop. No-op for windows owned by other processes.
     pub struct OwnTransparency {
         restore: Vec<(HWND, isize)>,
     }
 
     impl OwnTransparency {
         pub fn for_points(points: &[(i32, i32)]) -> Self {
-            // WS_EX_TRANSPARENT makes a window click-through for injected input, so the click
-            // routes to whatever sits below. Only the assistant's own top-level window at a
-            // target point needs this; the main window is hidden while runs execute.
             let mut restore: Vec<(HWND, isize)> = Vec::new();
             let own_pid = unsafe { GetCurrentProcessId() };
             for &(x, y) in points {

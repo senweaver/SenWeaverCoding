@@ -16,10 +16,6 @@ const EVENT_CHANNEL_CAP: usize = 512;
 const WAIT_ANNOUNCE_DELAY: Duration = Duration::from_millis(50);
 const ACQUIRE_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_SNAPSHOTS_PER_SESSION: usize = 1024;
-// A promoted waiter must build its ResourceGuard (confirm) within this window.
-// If it does not — because it was cancelled/timed out at the exact instant it
-// was promoted, or its task was hard-aborted — the next acquirer reclaims the
-// lock instead of wedging on an orphaned holder for the process lifetime.
 const CLAIM_GRACE: Duration = Duration::from_secs(10);
 
 #[derive(Clone, Debug, Eq, PartialEq, Hash)]
@@ -27,9 +23,6 @@ pub enum ResourceKind {
     FileWrite { path: PathBuf },
     Browser,
     Shell,
-    // Coarse workspace-wide exclusive lock. Unlike Shell (per-session), this is
-    // keyed only by workspace so two parallel sessions in the same directory
-    // cannot run mutating build/VCS commands concurrently and clobber each other.
     WorkspaceExclusive,
 }
 
@@ -67,10 +60,6 @@ struct Holder {
     session_id: String,
     title: String,
     ref_count: usize,
-    // A holder installed by promotion starts unconfirmed: the waiter must build
-    // its ResourceGuard (confirm) before `claim_deadline`, otherwise a later
-    // acquirer reclaims the lock. Immediate (uncontended) acquisitions are
-    // confirmed on creation and have no deadline.
     confirmed: bool,
     claim_deadline: Option<Instant>,
 }
@@ -111,6 +100,8 @@ struct Inner {
     holders: HashMap<(String, ResourceKind), Holder>,
     waiters: HashMap<(String, ResourceKind), VecDeque<Pending>>,
     read_snapshots: HashMap<(String, String, PathBuf), SystemTime>,
+    snapshot_counts: HashMap<(String, String), usize>,
+    os_locks: HashMap<(String, ResourceKind), crate::session::os_lock::OsAdvisoryLock>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -152,10 +143,6 @@ impl WorkspaceResourceManager {
 
         let (acquired_immediately, rx_opt) = {
             let mut inner = self.inner.lock();
-            // Reclaim a promoted-but-never-confirmed holder whose acquirer was
-            // cancelled/aborted at the instant of promotion; without this the
-            // resource wedges for the process lifetime. Hand priority to the
-            // queue head, not the newcomer, to preserve FIFO fairness.
             let stale = inner.holders.get(&key).is_some_and(|h| {
                 !h.confirmed && h.claim_deadline.is_some_and(|d| Instant::now() > d)
             });
@@ -203,12 +190,15 @@ impl WorkspaceResourceManager {
         };
 
         if acquired_immediately {
-            return Ok(ResourceGuard {
+            let guard = ResourceGuard {
                 manager: Arc::clone(self),
-                workspace_key: effective_workspace,
-                kind,
+                workspace_key: effective_workspace.clone(),
+                kind: kind.clone(),
                 session_id: session_id.to_string(),
-            });
+            };
+            self.ensure_cross_process_lock(&effective_workspace, &kind)
+                .await?;
+            return Ok(guard);
         }
 
         let Some(rx) = rx_opt else {
@@ -245,12 +235,15 @@ impl WorkspaceResourceManager {
         match wait_result {
             Ok(Ok(())) => {
                 self.confirm_claim(&effective_workspace, &kind, session_id);
-                Ok(ResourceGuard {
+                let guard = ResourceGuard {
                     manager: Arc::clone(self),
-                    workspace_key: effective_workspace,
-                    kind,
+                    workspace_key: effective_workspace.clone(),
+                    kind: kind.clone(),
                     session_id: session_id.to_string(),
-                })
+                };
+                self.ensure_cross_process_lock(&effective_workspace, &kind)
+                    .await?;
+                Ok(guard)
             }
             Ok(Err(_)) => {
                 self.cancel_waiter(&effective_workspace, &kind, session_id);
@@ -298,7 +291,12 @@ impl WorkspaceResourceManager {
             snapshot_path_key(path),
         );
         let mut inner = self.inner.lock();
-        inner.read_snapshots.insert(key, mtime);
+        if inner.read_snapshots.insert(key, mtime).is_none() {
+            *inner
+                .snapshot_counts
+                .entry((workspace_key.to_string(), session_id.to_string()))
+                .or_insert(0) += 1;
+        }
         enforce_snapshot_cap(&mut inner, workspace_key, session_id);
     }
 
@@ -310,8 +308,21 @@ impl WorkspaceResourceManager {
             snapshot_path_key(path),
         );
         let mut inner = self.inner.lock();
-        inner.read_snapshots.insert(snap_key, mtime);
+        if inner.read_snapshots.insert(snap_key, mtime).is_none() {
+            *inner
+                .snapshot_counts
+                .entry((workspace_key.to_string(), session_id.to_string()))
+                .or_insert(0) += 1;
+        }
         enforce_snapshot_cap(&mut inner, workspace_key, session_id);
+    }
+
+    pub fn clear_session_snapshots(&self, session_id: &str) {
+        let mut inner = self.inner.lock();
+        inner
+            .read_snapshots
+            .retain(|(_, sid, _), _| sid != session_id);
+        inner.snapshot_counts.retain(|(_, sid), _| sid != session_id);
     }
 
     pub fn waiters_snapshot_for_session(
@@ -399,6 +410,55 @@ impl WorkspaceResourceManager {
         }
     }
 
+    async fn ensure_cross_process_lock(
+        self: &Arc<Self>,
+        workspace_key: &str,
+        kind: &ResourceKind,
+    ) -> Result<(), AcquireError> {
+        if !matches!(
+            kind,
+            ResourceKind::FileWrite { .. } | ResourceKind::WorkspaceExclusive
+        ) {
+            return Ok(());
+        }
+        let map_key = (workspace_key.to_string(), kind.clone());
+        if self.inner.lock().os_locks.contains_key(&map_key) {
+            return Ok(());
+        }
+        let os_key = format!("{}|{}", kind.kind_str(), workspace_key);
+        let deadline = Instant::now() + ACQUIRE_TIMEOUT;
+        loop {
+            let key_for_task = os_key.clone();
+            let attempt = tokio::task::spawn_blocking(move || {
+                crate::session::os_lock::OsAdvisoryLock::try_acquire_key(&key_for_task)
+            })
+            .await;
+            match attempt {
+                Ok(Ok(Some(lock))) => {
+                    self.inner.lock().os_locks.insert(map_key, lock);
+                    return Ok(());
+                }
+                Ok(Ok(None)) => {}
+                Ok(Err(err)) => {
+                    tracing::warn!(
+                        error = %err,
+                        key = %os_key,
+                        "cross-process advisory lock unavailable; continuing with in-process lock only"
+                    );
+                    return Ok(());
+                }
+                Err(_) => return Ok(()),
+            }
+            if Instant::now() >= deadline {
+                return Err(AcquireError::Timeout {
+                    kind: kind.kind_str(),
+                    target: kind.target_str(),
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    }
+
     fn confirm_claim(&self, workspace_key: &str, kind: &ResourceKind, session_id: &str) {
         let key = (workspace_key.to_string(), kind.clone());
         let mut inner = self.inner.lock();
@@ -428,6 +488,13 @@ impl WorkspaceResourceManager {
         }
         inner.holders.remove(&key);
         promote_next_waiter_locked(&mut inner, &key);
+        let released_os = if inner.holders.contains_key(&key) {
+            None
+        } else {
+            inner.os_locks.remove(&key)
+        };
+        drop(inner);
+        drop(released_os);
     }
 
     fn emit_wait_started(
@@ -497,10 +564,6 @@ impl Drop for ResourceGuard {
     }
 }
 
-// Promote the head of the wait queue: send its waker and install an
-// unconfirmed holder that must be confirmed (guard built) before CLAIM_GRACE.
-// If the promoted acquirer never confirms (cancelled at the promotion instant),
-// a later acquirer reclaims the stale holder instead of wedging forever.
 fn promote_next_waiter_locked(inner: &mut Inner, key: &(String, ResourceKind)) {
     let mut promoted: Option<(String, String)> = None;
     let mut queue_empty = false;
@@ -568,11 +631,12 @@ fn scope_key_for(workspace_key: &str, kind: &ResourceKind, session_id: &str) -> 
 }
 
 fn enforce_snapshot_cap(inner: &mut Inner, workspace_key: &str, session_id: &str) {
+    let counter_key = (workspace_key.to_string(), session_id.to_string());
     let count = inner
-        .read_snapshots
-        .keys()
-        .filter(|(ws, sid, _)| ws == workspace_key && sid == session_id)
-        .count();
+        .snapshot_counts
+        .get(&counter_key)
+        .copied()
+        .unwrap_or(0);
     if count <= MAX_SNAPSHOTS_PER_SESSION {
         return;
     }
@@ -583,12 +647,18 @@ fn enforce_snapshot_cap(inner: &mut Inner, workspace_key: &str, session_id: &str
         .map(|((_, _, path), mtime)| (path.clone(), *mtime))
         .collect();
     session_entries.sort_by_key(|(_, mtime)| *mtime);
-    let evict = count - MAX_SNAPSHOTS_PER_SESSION / 2;
+    let evict = session_entries.len().saturating_sub(MAX_SNAPSHOTS_PER_SESSION / 2);
     for (path, _) in session_entries.into_iter().take(evict) {
         inner
             .read_snapshots
             .remove(&(workspace_key.to_string(), session_id.to_string(), path));
     }
+    let remaining = inner
+        .read_snapshots
+        .keys()
+        .filter(|(ws, sid, _)| ws == workspace_key && sid == session_id)
+        .count();
+    inner.snapshot_counts.insert(counter_key, remaining);
 }
 
 static GLOBAL_MANAGER: OnceLock<Arc<WorkspaceResourceManager>> = OnceLock::new();
@@ -787,9 +857,6 @@ pub fn is_stale_for_current_session(path: &Path) -> bool {
     manager.is_stale_for(&ctx.workspace_key, &ctx.session_id, path)
 }
 
-// Whether the current session has read this file at least once. Used to warn
-// (not block) when an edit is attempted against a file the agent has not
-// inspected in this session, encouraging read-before-edit like Cursor.
 pub fn has_read_in_current_session(path: &Path) -> bool {
     let Some(ctx) = current_session_context() else {
         return true;

@@ -666,9 +666,6 @@ struct Choice {
 const REASONING_PLACEHOLDER: &str =
     "(chain-of-thought unavailable for this turn  - placeholder injected to satisfy thinking-mode round-trip requirements)";
 
-/// Convert a raw OpenAI-style function tool JSON (`{type:function, function:{name,
-/// description, parameters}}`, or a bare `{name, description, parameters}`) into a
-/// `ToolSpec` so the prompt-guided text protocol can describe it.
 fn tool_spec_from_openai_json(value: &serde_json::Value) -> Option<crate::tools::ToolSpec> {
     let func = value.get("function").unwrap_or(value);
     let name = func.get("name").and_then(|v| v.as_str())?.to_string();
@@ -941,6 +938,16 @@ struct ResponsesResponse {
     output: Vec<ResponsesOutput>,
     #[serde(default)]
     output_text: Option<String>,
+    #[serde(default)]
+    usage: Option<ResponsesUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesUsage {
+    #[serde(default)]
+    input_tokens: Option<u64>,
+    #[serde(default)]
+    output_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1060,6 +1067,10 @@ impl OpenAiCompatibleProvider {
         req: reqwest::RequestBuilder,
         credential: &str,
     ) -> reqwest::RequestBuilder {
+        let req = match crate::providers::core::idempotency::current_idempotency_key() {
+            Some(key) if !key.is_empty() => req.header("Idempotency-Key", key),
+            _ => req,
+        };
         match &self.auth_header {
             AuthStyle::Bearer => req.header("Authorization", format!("Bearer {credential}")),
             AuthStyle::XApiKey => req.header("x-api-key", credential),
@@ -1119,6 +1130,15 @@ impl OpenAiCompatibleProvider {
 
         let body = response.text().await?;
         let responses = parse_responses_response_body(&self.name, &body)?;
+        if let Some(u) = responses.usage.as_ref() {
+            crate::providers::record_text_path_usage(
+                &self.name,
+                model,
+                u.input_tokens,
+                u.output_tokens,
+                None,
+            );
+        }
 
         extract_responses_text(responses)
             .ok_or_else(|| anyhow::anyhow!("No response from {} Responses API", self.name))
@@ -1616,6 +1636,86 @@ impl OpenAiCompatibleProvider {
         .iter()
         .any(|hint| lower.contains(hint))
     }
+
+    fn structured_blacklist_key(&self, model: &str) -> String {
+        format!("{}::{}::json_schema", self.name, model)
+    }
+
+    fn is_structured_output_blacklisted(&self, model: &str) -> bool {
+        structured_output_blacklist()
+            .read()
+            .map(|set| set.contains(&self.structured_blacklist_key(model)))
+            .unwrap_or(false)
+    }
+
+    fn blacklist_structured_output(&self, model: &str) {
+        if let Ok(mut set) = structured_output_blacklist().write() {
+            set.insert(self.structured_blacklist_key(model));
+        }
+    }
+
+    fn is_response_format_unsupported(status: reqwest::StatusCode, error: &str) -> bool {
+        if !matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            return false;
+        }
+        let lower = error.to_ascii_lowercase();
+        [
+            "response_format",
+            "json_schema",
+            "json schema",
+            "structured output",
+            "structured_output",
+        ]
+        .iter()
+        .any(|hint| lower.contains(hint))
+    }
+
+    async fn chat_structured_prompt_fallback(
+        &self,
+        messages: &[ChatMessage],
+        schema: &serde_json::Value,
+        model: &str,
+        temperature: f64,
+    ) -> anyhow::Result<crate::providers::traits::StructuredResponse> {
+        let mut augmented: Vec<ChatMessage> = messages.to_vec();
+        let schema_text =
+            serde_json::to_string_pretty(schema).unwrap_or_else(|_| schema.to_string());
+        let instruction = format!(
+            "Reply with a single JSON object that conforms to the schema below. \
+             Do not include explanations, prose, or Markdown fences -- only the raw JSON.\n\n\
+             [JSON Schema]\n{schema_text}"
+        );
+        if let Some(system) = augmented.iter_mut().find(|m| m.role == "system") {
+            if !system.content.is_empty() {
+                system.content.push_str("\n\n");
+            }
+            system.content.push_str(&instruction);
+        } else {
+            augmented.insert(0, ChatMessage::system(instruction));
+        }
+        let raw = self.chat_with_history(&augmented, model, temperature).await?;
+        let parsed =
+            crate::providers::traits::parse_first_json_object(&raw).ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Provider returned no JSON object after schema-constrained chat: {raw}"
+                )
+            })?;
+        Ok(crate::providers::traits::StructuredResponse {
+            data: parsed,
+            raw_text: raw,
+            usage: None,
+        })
+    }
+}
+
+fn structured_output_blacklist() -> &'static std::sync::RwLock<std::collections::HashSet<String>>
+{
+    static STORE: std::sync::OnceLock<std::sync::RwLock<std::collections::HashSet<String>>> =
+        std::sync::OnceLock::new();
+    STORE.get_or_init(|| std::sync::RwLock::new(std::collections::HashSet::new()))
 }
 
 #[async_trait]
@@ -1775,6 +1875,17 @@ impl Provider for OpenAiCompatibleProvider {
 
         let body = response.text().await?;
         let chat_response = parse_chat_response_body(&self.name, &body)?;
+        if let Some(u) = chat_response.usage.as_ref() {
+            crate::providers::record_text_path_usage(
+                &self.name,
+                model,
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.prompt_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens),
+            );
+        }
 
         chat_response
             .choices
@@ -1925,6 +2036,17 @@ impl Provider for OpenAiCompatibleProvider {
 
         let body = response.text().await?;
         let chat_response = parse_chat_response_body(&self.name, &body)?;
+        if let Some(u) = chat_response.usage.as_ref() {
+            crate::providers::record_text_path_usage(
+                &self.name,
+                model,
+                u.prompt_tokens,
+                u.completion_tokens,
+                u.prompt_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.cached_tokens),
+            );
+        }
 
         chat_response
             .choices
@@ -2003,9 +2125,6 @@ impl Provider for OpenAiCompatibleProvider {
                 has_tools,
                 "model is on the legacy/no-tools allowlist; routing through chat_with_history with prompt-guided tools"
             );
-            // Inject the prompt-guided tool protocol so a no-native-tools model
-            // still learns the tools exist (previously this public entry dropped
-            // the tool contract entirely, unlike chat()).
             let guided = if has_tools {
                 let specs: Vec<crate::tools::ToolSpec> = tools
                     .iter()
@@ -2216,7 +2335,11 @@ impl Provider for OpenAiCompatibleProvider {
         {
             Ok(response) => response,
             Err(chat_error) => {
-                if self.supports_responses_fallback && !self.responses_endpoint_marked_missing() {
+                let request_has_tools = request.tools.map(|t| !t.is_empty()).unwrap_or(false);
+                if self.supports_responses_fallback
+                    && !self.responses_endpoint_marked_missing()
+                    && !request_has_tools
+                {
                     let sanitized = super::sanitize_api_error(&chat_error.to_string());
                     let provider_name = self.name.clone();
                     return self
@@ -2268,9 +2391,11 @@ impl Provider for OpenAiCompatibleProvider {
                 return Ok(ProviderChatResponse::text_only(Some(text), None));
             }
 
+            let request_has_tools = request.tools.map(|t| !t.is_empty()).unwrap_or(false);
             if status == reqwest::StatusCode::NOT_FOUND
                 && self.supports_responses_fallback
                 && !self.responses_endpoint_marked_missing()
+                && !request_has_tools
             {
                 let provider_name = self.name.clone();
                 return self
@@ -2322,6 +2447,117 @@ impl Provider for OpenAiCompatibleProvider {
 
     fn consumes_reasoning_envelope(&self) -> bool {
         true
+    }
+
+    async fn chat_structured(
+        &self,
+        messages: &[ChatMessage],
+        schema: &serde_json::Value,
+        model: &str,
+        temperature: f64,
+    ) -> anyhow::Result<crate::providers::traits::StructuredResponse> {
+        if self.is_structured_output_blacklisted(model) {
+            return self
+                .chat_structured_prompt_fallback(messages, schema, model, temperature)
+                .await;
+        }
+        let credential = self.credential.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} API key not set. Run `sen onboard` or set the appropriate env var.",
+                self.name
+            )
+        })?;
+
+        let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            messages.to_vec(),
+            model,
+            self.reserved_output_tokens(model),
+            None,
+        );
+        let api_messages =
+            Self::convert_messages_for_native(&sanitized, self.supports_vision);
+        let body = serde_json::json!({
+            "model": model,
+            "messages": api_messages,
+            "temperature": Self::adjust_temperature_for_model(model, temperature),
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {
+                    "name": "structured_output",
+                    "schema": schema,
+                    "strict": true
+                }
+            },
+        });
+
+        let url = self.chat_completions_url();
+        let response = match self
+            .apply_auth_header(self.http_client().post(&url).json(&body), credential)
+            .send()
+            .await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                tracing::debug!(
+                    target: "providers.compatible.structured",
+                    provider = %self.name,
+                    error = %e,
+                    "structured chat transport error; falling back to prompt-injected schema"
+                );
+                return self
+                    .chat_structured_prompt_fallback(messages, schema, model, temperature)
+                    .await;
+            }
+        };
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let error_body = response.text().await.unwrap_or_default();
+            let sanitized_err = super::sanitize_api_error(&error_body);
+            if Self::is_response_format_unsupported(status, &sanitized_err) {
+                tracing::info!(
+                    target: "providers.compatible.structured",
+                    provider = %self.name,
+                    model,
+                    status = %status,
+                    "vendor rejected response_format json_schema; blacklisting and using prompt-injected fallback"
+                );
+                self.blacklist_structured_output(model);
+                return self
+                    .chat_structured_prompt_fallback(messages, schema, model, temperature)
+                    .await;
+            }
+            anyhow::bail!("{} structured chat error ({status}): {sanitized_err}", self.name);
+        }
+
+        let native: ApiChatResponse = response.json().await?;
+        let usage = native.usage.map(|u| crate::providers::traits::TokenUsage {
+            input_tokens: u.prompt_tokens,
+            output_tokens: u.completion_tokens,
+            cached_input_tokens: u.cached_input_tokens(),
+            cache_creation_input_tokens: None,
+        });
+        let raw = native
+            .choices
+            .into_iter()
+            .next()
+            .map(|c| c.message.effective_content())
+            .unwrap_or_default();
+        let parsed = serde_json::from_str::<serde_json::Value>(&raw)
+            .ok()
+            .or_else(|| crate::providers::traits::parse_first_json_object(&raw))
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "{} structured chat returned non-JSON payload: {raw}",
+                    self.name
+                )
+            })?;
+        Ok(crate::providers::traits::StructuredResponse {
+            data: parsed,
+            raw_text: raw,
+            usage,
+        })
     }
 
     fn supports_streaming(&self) -> bool {
@@ -2460,9 +2696,6 @@ impl Provider for OpenAiCompatibleProvider {
                 temperature: Self::adjust_temperature_for_model(model, temperature),
                 reasoning_effort: self.reasoning_effort_for_model(model),
                 thinking: self.thinking_param_for_model(model),
-                // No tools on this branch, so tool_stream should never be forced
-                // on. Only vendors that require it (z.ai) opt in via
-                // tool_stream_for_tools, and even then only with tools present.
                 tool_stream: None,
                 stream: Some(options.enabled),
                 stream_options: if options.enabled {
@@ -2522,11 +2755,8 @@ impl Provider for OpenAiCompatibleProvider {
                 };
 
                 if !response.status().is_success() {
-                    let status = response.status();
-                    let error_body = match response.text().await {
-                        Ok(text) => text,
-                        Err(_) => format!("HTTP error: {}", status),
-                    };
+                    let (status, error_body) =
+                        super::stream_error_body_with_retry_after(response).await;
                     let sanitized = super::sanitize_api_error(&error_body);
 
                     if !provider_clone.is_thinking_blacklisted(&model_owned)
@@ -2716,11 +2946,8 @@ impl Provider for OpenAiCompatibleProvider {
             };
 
             if !response.status().is_success() {
-                let status = response.status();
-                let error = match response.text().await {
-                    Ok(e) => e,
-                    Err(_) => format!("HTTP error: {}", status),
-                };
+                let (status, error) =
+                    super::stream_error_body_with_retry_after(response).await;
                 let sanitized = super::sanitize_api_error(&error);
 
                 if !provider_clone.is_thinking_blacklisted(&model_owned)

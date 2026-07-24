@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::providers::traits::{ChatMessage, Provider};
 use crate::agent::history::compaction::{
-    build_compaction_transcript, estimate_tokens_filtered, replace_history_range_with_assistant,
+    build_compaction_transcript_full, estimate_tokens_filtered,
+    replace_history_range_with_assistant, split_transcript_chunks,
 };
 
 const SUMMARY_BANNER_PREFIX: &str = "[CONTEXT SUMMARY \u{2014}";
@@ -20,7 +21,7 @@ fn default_enabled() -> bool {
     true
 }
 fn default_threshold_ratio() -> f64 {
-    0.50
+    0.85
 }
 fn default_protect_first_n() -> usize {
     3
@@ -149,9 +150,6 @@ pub fn parse_context_limit_from_error(msg: &str) -> Option<usize> {
     None
 }
 
-// Delegates to the shared ASCII/CJK-aware estimator so compaction, focus
-// windows and provider budgets all agree on one token model. A small envelope
-// factor still covers tool-call JSON overhead not visible in plain content.
 pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     let raw: usize = messages
         .iter()
@@ -162,6 +160,10 @@ pub fn estimate_tokens(messages: &[ChatMessage]) -> usize {
     {
         (raw as f64 * 1.05) as usize
     }
+}
+
+fn estimate_tokens_for(messages: &[ChatMessage], model: &str) -> usize {
+    crate::agent::token::budget::estimate_history_tokens_calibrated(messages, model)
 }
 
 const SUMMARIZER_SYSTEM: &str = "\
@@ -257,7 +259,7 @@ impl ContextCompressor {
         progress: Option<&CompressionProgressFn>,
     ) -> Result<CompressionResult> {
         if !self.config.enabled {
-            let tokens = estimate_tokens(history);
+            let tokens = estimate_tokens_for(history, model);
             return Ok(CompressionResult {
                 compressed: false,
                 tokens_before: tokens,
@@ -266,7 +268,7 @@ impl ContextCompressor {
             });
         }
 
-        let tokens_before = estimate_tokens(history);
+        let tokens_before = estimate_tokens_for(history, model);
         let system_tokens = estimate_tokens_filtered(history, true);
         let non_system_tokens = estimate_tokens_filtered(history, false);
         tracing::debug!(
@@ -288,13 +290,38 @@ impl ContextCompressor {
         }
 
         let started_at = std::time::Instant::now();
+
+        {
+            let preserved: Vec<usize> = preserved_fn.map(|f| f(history)).unwrap_or_default();
+            let evicted = self.microcompact_tool_outputs(history, model, threshold, &preserved);
+            if evicted > 0 {
+                let tokens_now = estimate_tokens_for(history, model);
+                tracing::info!(
+                    target: "agent.context.compress",
+                    evicted,
+                    tokens_before,
+                    tokens_now,
+                    threshold,
+                    "microcompact evicted stale tool outputs before summarization"
+                );
+                if tokens_now <= threshold {
+                    return Ok(CompressionResult {
+                        compressed: true,
+                        tokens_before,
+                        tokens_after: tokens_now,
+                        passes_used: 0,
+                    });
+                }
+            }
+        }
+
         let mut passes_used = 0;
         for pass in 0..self.config.max_passes {
             if let Some(cb) = progress {
                 cb(CompressionProgress {
                     pass: (pass + 1) as usize,
                     max_passes: self.config.max_passes as usize,
-                    tokens_current: estimate_tokens(history),
+                    tokens_current: estimate_tokens_for(history, model),
                     tokens_target: threshold,
                 });
             }
@@ -306,12 +333,12 @@ impl ContextCompressor {
             if did_compress {
                 passes_used += 1;
             }
-            if estimate_tokens(history) <= threshold || !did_compress {
+            if estimate_tokens_for(history, model) <= threshold || !did_compress {
                 break;
             }
         }
 
-        let tokens_after = estimate_tokens(history);
+        let tokens_after = estimate_tokens_for(history, model);
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
         crate::observability::runtime_trace::record_event(
             "context_compress",
@@ -372,9 +399,21 @@ impl ContextCompressor {
         provider: &dyn Provider,
         model: &str,
     ) -> Result<String> {
-        let transcript = build_compaction_transcript(messages, self.config.source_max_chars);
-        if transcript.trim().is_empty() {
-            return Ok(String::new());
+        let (summary, _degraded) = self.summarize_transcript(messages, provider, model).await;
+        Ok(summary)
+    }
+
+    async fn summarize_transcript(
+        &self,
+        messages: &[ChatMessage],
+        provider: &dyn Provider,
+        model: &str,
+    ) -> (String, bool) {
+        const MAX_MAP_CHUNKS: usize = 6;
+
+        let full = build_compaction_transcript_full(messages);
+        if full.trim().is_empty() {
+            return (String::new(), false);
         }
         let message_count = messages.len();
         let summary_model = self.config.summary_model.as_deref().unwrap_or(model);
@@ -383,31 +422,166 @@ impl ContextCompressor {
         } else {
             ""
         };
-        let user_prompt = format!(
-            "Summarize the following conversation history ({message_count} messages) for context preservation. \
-             Keep it concise (max 20 bullet points).{identifier_note}\n\n{transcript}"
-        );
         let timeout = Duration::from_secs(self.config.timeout_secs);
-        let summary_raw = match tokio::time::timeout(
+
+        if full.len() <= self.config.source_max_chars {
+            let user_prompt = format!(
+                "Summarize the following conversation history ({message_count} messages) for context preservation. \
+                 Keep it concise (max 20 bullet points).{identifier_note}\n\n{full}"
+            );
+            return match tokio::time::timeout(
+                timeout,
+                provider.chat_with_system(
+                    Some(SUMMARIZER_SYSTEM),
+                    &user_prompt,
+                    summary_model,
+                    0.1,
+                ),
+            )
+            .await
+            {
+                Ok(Ok(s)) if !s.trim().is_empty() => {
+                    (truncate_chars(&s, self.config.summary_max_chars), false)
+                }
+                other => {
+                    if let Ok(Err(e)) = other {
+                        tracing::warn!(error = %e, "summarization LLM call failed, using transcript truncation");
+                    } else {
+                        tracing::warn!(
+                            "summarization timed out after {}s, using transcript truncation",
+                            self.config.timeout_secs
+                        );
+                    }
+                    let clipped = crate::util::truncate_head_tail(
+                        &full,
+                        self.config.summary_max_chars,
+                        30,
+                    )
+                    .unwrap_or(full);
+                    (truncate_chars(&clipped, self.config.summary_max_chars), true)
+                }
+            };
+        }
+
+        let chunks =
+            split_transcript_chunks(&full, self.config.source_max_chars, MAX_MAP_CHUNKS);
+        let total = chunks.len();
+        tracing::info!(
+            chunks = total,
+            transcript_bytes = full.len(),
+            "compaction range exceeds single-call budget; map-reduce summarizing"
+        );
+        let map_futures = chunks.iter().enumerate().map(|(i, chunk)| {
+            let prompt = format!(
+                "This is segment {}/{} of one longer conversation ({} messages total). \
+                 Summarize THIS SEGMENT for context preservation. Keep it concise (max 20 \
+                 bullet points).{}\n\n{}",
+                i + 1,
+                total,
+                message_count,
+                identifier_note,
+                chunk
+            );
+            async move {
+                match tokio::time::timeout(
+                    timeout,
+                    provider.chat_with_system(
+                        Some(SUMMARIZER_SYSTEM),
+                        &prompt,
+                        summary_model,
+                        0.1,
+                    ),
+                )
+                .await
+                {
+                    Ok(Ok(s)) if !s.trim().is_empty() => (s, false),
+                    _ => {
+                        let clipped = crate::util::truncate_head_tail(chunk, 4_000, 30)
+                            .unwrap_or_else(|| chunk.clone());
+                        (
+                            format!("[segment summarizer unavailable; raw excerpt]\n{clipped}"),
+                            true,
+                        )
+                    }
+                }
+            }
+        });
+        let mapped = futures_util::future::join_all(map_futures).await;
+        let degraded = mapped.iter().any(|(_, d)| *d);
+        let combined = mapped
+            .iter()
+            .enumerate()
+            .map(|(i, (s, _))| format!("### Segment {}/{}\n{}", i + 1, total, s))
+            .collect::<Vec<_>>()
+            .join("\n\n");
+
+        let reduce_prompt = format!(
+            "Below are structured summaries of {total} consecutive segments of ONE conversation \
+             ({message_count} messages). Merge them into a SINGLE summary with EXACTLY the same \
+             five headings, deduplicating overlap while keeping every concrete identifier, file \
+             path, and final file state verbatim.{identifier_note}\n\n{combined}"
+        );
+        let reduced = match tokio::time::timeout(
             timeout,
-            provider.chat_with_system(Some(SUMMARIZER_SYSTEM), &user_prompt, summary_model, 0.1),
+            provider.chat_with_system(
+                Some(SUMMARIZER_SYSTEM),
+                &reduce_prompt,
+                summary_model,
+                0.1,
+            ),
         )
         .await
         {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "rolling summary LLM call failed, using transcript truncation");
-                truncate_chars(&transcript, self.config.summary_max_chars)
+            Ok(Ok(s)) if !s.trim().is_empty() => {
+                truncate_chars(&s, self.config.summary_max_chars)
             }
-            Err(_) => {
-                tracing::warn!(
-                    "rolling summary timed out after {}s, using transcript truncation",
-                    self.config.timeout_secs
-                );
-                truncate_chars(&transcript, self.config.summary_max_chars)
+            _ => {
+                truncate_chars(&combined, self.config.summary_max_chars.saturating_mul(3))
             }
         };
-        Ok(truncate_chars(&summary_raw, self.config.summary_max_chars))
+        (reduced, degraded)
+    }
+
+    fn microcompact_tool_outputs(
+        &self,
+        history: &mut [ChatMessage],
+        model: &str,
+        threshold: usize,
+        preserved_indices: &[usize],
+    ) -> usize {
+        const MIN_EVICT_BYTES: usize = 2_048;
+
+        let n = history.len();
+        let start = align_boundary_forward(history, self.config.protect_first_n.min(n));
+        let end = align_boundary_backward(
+            history,
+            n.saturating_sub(self.config.protect_last_n),
+        );
+        if start >= end {
+            return 0;
+        }
+        let mut current = estimate_tokens_for(history, model);
+        let mut evicted = 0usize;
+        for idx in start..end {
+            if current <= threshold {
+                break;
+            }
+            if preserved_indices.contains(&idx) {
+                continue;
+            }
+            let msg = &mut history[idx];
+            if msg.role != "tool" || is_compaction_banner(&msg.content) {
+                continue;
+            }
+            let before = crate::providers::traits::estimate_message_tokens(msg);
+            if !evict_tool_message_content(msg, MIN_EVICT_BYTES) {
+                continue;
+            }
+            let after = crate::providers::traits::estimate_message_tokens(msg);
+            current = current.saturating_sub(before.saturating_sub(after));
+            evicted += 1;
+        }
+        evicted
     }
 
     async fn compress_once_with_preserved(
@@ -463,59 +637,15 @@ impl ContextCompressor {
                     crate::observability::code_intel_metrics::incr_context_preserve_skip_compress();
                     return Ok(false);
                 }
-                crate::observability::code_intel_metrics::incr_context_preserve_skip_compress();
             }
         }
 
         let middle = &history[start..end];
-        let transcript = build_compaction_transcript(middle, self.config.source_max_chars);
-
-        if transcript.is_empty() {
+        let message_count = end - start;
+        let (summary, degraded) = self.summarize_transcript(middle, provider, model).await;
+        if summary.trim().is_empty() {
             return Ok(false);
         }
-
-        let message_count = end - start;
-        let summary_model = self.config.summary_model.as_deref().unwrap_or(model);
-
-        let identifier_note = if self.config.identifier_policy == "strict" {
-            "\nIMPORTANT: Preserve all identifiers exactly as they appear."
-        } else {
-            ""
-        };
-
-        let user_prompt = format!(
-            "Summarize the following conversation history ({message_count} messages) for context preservation. \
-             Keep it concise (max 20 bullet points).{identifier_note}\n\n{transcript}"
-        );
-
-        let timeout = Duration::from_secs(self.config.timeout_secs);
-        // Track whether we produced a real LLM summary or fell back to raw
-        // truncation, so the injected banner does not claim to be a faithful
-        // summary when middle content was actually dropped verbatim.
-        let mut degraded = false;
-        let summary_raw = match tokio::time::timeout(
-            timeout,
-            provider.chat_with_system(Some(SUMMARIZER_SYSTEM), &user_prompt, summary_model, 0.1),
-        )
-        .await
-        {
-            Ok(Ok(s)) => s,
-            Ok(Err(e)) => {
-                tracing::warn!(error = %e, "Summarization LLM call failed, using transcript truncation");
-                degraded = true;
-                truncate_chars(&transcript, self.config.summary_max_chars)
-            }
-            Err(_) => {
-                tracing::warn!(
-                    "Summarization timed out after {}s, using transcript truncation",
-                    self.config.timeout_secs
-                );
-                degraded = true;
-                truncate_chars(&transcript, self.config.summary_max_chars)
-            }
-        };
-
-        let summary = truncate_chars(&summary_raw, self.config.summary_max_chars);
 
         let summary_msg = if degraded {
             format!(
@@ -558,14 +688,55 @@ fn is_compaction_banner(content: &str) -> bool {
     content.starts_with(SUMMARY_BANNER_PREFIX) || content.starts_with(COMPACTION_BANNER_PREFIX)
 }
 
+const EVICTED_OUTPUT_MARKER: &str = "[tool output evicted";
+
+fn eviction_placeholder(bytes: usize) -> String {
+    format!(
+        "{EVICTED_OUTPUT_MARKER} during context compaction ({bytes} bytes). The result is no \
+         longer in context — re-run the tool or re-read the file if these details are needed \
+         again.]"
+    )
+}
+
+fn evict_tool_message_content(msg: &mut ChatMessage, min_bytes: usize) -> bool {
+    if msg.content.contains(EVICTED_OUTPUT_MARKER) {
+        return false;
+    }
+    if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
+        if let Some(obj) = value.as_object_mut() {
+            if obj.contains_key("tool_call_id") {
+                let payload_len = obj
+                    .get("content")
+                    .and_then(|c| c.as_str())
+                    .map(str::len)
+                    .unwrap_or(0);
+                if payload_len < min_bytes {
+                    return false;
+                }
+                obj.insert(
+                    "content".to_string(),
+                    serde_json::Value::String(eviction_placeholder(payload_len)),
+                );
+                if let Ok(serialized) = serde_json::to_string(&value) {
+                    msg.content = serialized;
+                    return true;
+                }
+                return false;
+            }
+        }
+    }
+    if msg.content.len() < min_bytes {
+        return false;
+    }
+    let bytes = msg.content.len();
+    msg.content = eviction_placeholder(bytes);
+    true
+}
+
 fn repair_tool_pairs(messages: &mut Vec<ChatMessage>) {
 
     let mut i = 0;
     while i < messages.len() {
-        // Match on a banner PREFIX (both summary and degraded-compaction forms)
-        // and only when the message actually starts with it, so a normal
-        // assistant message that merely quotes the banner text is never treated
-        // as a summary boundary.
         if is_compaction_banner(&messages[i].content) {
 
             while i + 1 < messages.len() && messages[i + 1].role == "tool" {

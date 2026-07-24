@@ -2,9 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 pub fn estimate_tokens(text: &str) -> u64 {
-
-    let chars = text.len() as f64;
-    (chars / 3.5).ceil() as u64
+    crate::providers::traits::estimate_content_tokens(text) as u64
 }
 
 pub fn estimate_json_tokens(value: &serde_json::Value) -> u64 {

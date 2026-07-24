@@ -158,17 +158,16 @@ pub fn map_changes_to_symbols(
     changed_ranges: &HashMap<PathBuf, Vec<(u32, u32)>>,
 ) -> Vec<SymbolId> {
     let mut out: Vec<SymbolId> = Vec::new();
-    for sym in &graph.symbols {
-        if sym.id.is_file_anchor() {
-            continue;
-        }
-        let Some(ranges) = changed_ranges.get(&sym.id.file) else {
-            continue;
-        };
-        let s = sym.id.line;
-        let e = sym.line_end.max(sym.id.line);
-        if ranges.iter().any(|(rs, re)| s <= *re && e >= *rs) {
-            out.push(sym.id.clone());
+    for (file, ranges) in changed_ranges {
+        for sym in graph.symbols_in_file(file) {
+            if sym.id.is_file_anchor() {
+                continue;
+            }
+            let s = sym.id.line;
+            let e = sym.line_end.max(sym.id.line);
+            if ranges.iter().any(|(rs, re)| s <= *re && e >= *rs) {
+                out.push(sym.id.clone());
+            }
         }
     }
     out
@@ -176,13 +175,15 @@ pub fn map_changes_to_symbols(
 
 #[must_use]
 pub fn symbols_in_files(graph: &SymbolGraph, files: &[PathBuf]) -> Vec<SymbolId> {
-    let set: std::collections::HashSet<&PathBuf> = files.iter().collect();
-    graph
-        .symbols
-        .iter()
-        .filter(|s| !s.id.is_file_anchor() && set.contains(&s.id.file))
-        .map(|s| s.id.clone())
-        .collect()
+    let mut out: Vec<SymbolId> = Vec::new();
+    for f in files {
+        for sym in graph.symbols_in_file(f) {
+            if !sym.id.is_file_anchor() {
+                out.push(sym.id.clone());
+            }
+        }
+    }
+    out
 }
 
 #[must_use]

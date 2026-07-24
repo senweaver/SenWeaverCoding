@@ -256,12 +256,33 @@ impl Tool for MultiEditTool {
             }
         }
 
+        for (i, edit) in edits.iter().enumerate() {
+            let path = &planned_paths[i];
+            if path.exists()
+                && edit.get("expected_mtime_ms").is_none()
+                && !crate::session::has_read_in_current_session(path)
+            {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Edit {i}: refusing to edit '{}': this session has not read the file yet. \
+                         Use file_read on it first (the edit needs to be based on the file's \
+                         CURRENT contents), then retry the edit.",
+                        path.display()
+                    )),
+                });
+            }
+        }
+
         let mut file_order: Vec<std::path::PathBuf> = Vec::new();
         let mut originals: std::collections::HashMap<std::path::PathBuf, Option<String>> =
             std::collections::HashMap::new();
         let mut currents: std::collections::HashMap<std::path::PathBuf, String> =
             std::collections::HashMap::new();
         let mut edit_counts: std::collections::HashMap<std::path::PathBuf, usize> =
+            std::collections::HashMap::new();
+        let mut encodings: std::collections::HashMap<std::path::PathBuf, Option<String>> =
             std::collections::HashMap::new();
 
         for (i, edit) in edits.iter().enumerate() {
@@ -302,9 +323,19 @@ impl Tool for MultiEditTool {
             }
 
             if !originals.contains_key(&path) {
-                let existing = match tokio::fs::read_to_string(&path).await {
-                    Ok(c) => Some(c),
-                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+                let (existing, label) = match tokio::fs::read(&path).await {
+                    Ok(bytes) => {
+                        let (text, label) =
+                            crate::tools::file::encoding::decode_best_effort(&bytes);
+                        let non_utf8 =
+                            if crate::tools::file::encoding::is_utf8_label(label) {
+                                None
+                            } else {
+                                Some(label.to_string())
+                            };
+                        (Some(text), non_utf8)
+                    }
+                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => (None, None),
                     Err(e) => {
                         return Ok(ToolResult {
                             success: false,
@@ -317,6 +348,7 @@ impl Tool for MultiEditTool {
                 if let Some(ref c) = existing {
                     currents.insert(path.clone(), c.clone());
                 }
+                encodings.insert(path.clone(), label);
                 originals.insert(path.clone(), existing);
             }
 
@@ -408,7 +440,14 @@ impl Tool for MultiEditTool {
                 original.as_ref().map(|s| s.as_bytes().to_vec()),
                 final_content.as_bytes().to_vec(),
             ));
+            let file_encoding = encodings.get(&path).cloned().flatten();
             let op = match original {
+                Some(_) if file_encoding.is_some() => EditOp::CreateFile {
+                    path: path.clone(),
+                    contents: final_content,
+                    overwrite: true,
+                    encoding: file_encoding,
+                },
                 Some(orig) => EditOp::Replace {
                     path: path.clone(),
                     byte_range: 0..orig.len(),

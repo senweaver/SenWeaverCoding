@@ -138,9 +138,6 @@ export function ToolCard({
   childResults,
 }: Props) {
   const t = useTranslation()
-  // Read the card's own session mode reactively (not the global mode via
-  // getState()), so a Plan-mode tab shows the correct badge and one tab's mode
-  // never bleeds onto another's cards.
   const globalCodingMode = useSettingsStore((s) => s.codingMode)
   const sessionCodingMode = useChatStore((s) =>
     parentSessionId ? s.sessionCodingMode[parentSessionId] : undefined,
@@ -178,9 +175,6 @@ export function ToolCard({
     Boolean(result && hasMeaningfulOutput(result.content))
   const hideVerb = category === 'web'
 
-  // Edit cards used to auto-expand, which synchronously mounts a heavy diff (word-level diff +
-  // syntax highlight) the instant a tool completes — a major source of jank during active
-  // editing. The collapsed header still shows the +/- line-count badge; users expand on click.
   const categoryDefaultExpanded = false
   const initialExpanded = defaultExpanded ?? categoryDefaultExpanded
   const [expanded, setExpanded] = useState<boolean>(initialExpanded)

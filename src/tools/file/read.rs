@@ -203,9 +203,6 @@ impl Tool for FileReadTool {
                             match crate::tools::file::office::extract_pdf_text_if_pdf(&bytes) {
                                 Some(text) => text,
                                 None => {
-                                    // Decode legacy encodings (GBK/Big5/Shift-JIS/…) properly
-                                    // instead of a lossy UTF-8 round-trip that would corrupt
-                                    // every non-ASCII byte the model then edits against.
                                     let (text, _label) =
                                         crate::tools::file::encoding::decode_best_effort(&bytes);
                                     text

@@ -31,7 +31,6 @@ export function diagramEngineForPath(path: string): DiagramEngine | null {
 
 type MermaidTheme = 'default' | 'dark'
 
-// mermaid is ~1.5MB; load it lazily only when a mermaid diagram is opened.
 type MermaidApi = typeof import('mermaid')['default']
 let diagramMermaidModulePromise: Promise<MermaidApi> | null = null
 function loadDiagramMermaid(): Promise<MermaidApi> {
@@ -361,7 +360,6 @@ export function DiagramRenderer({
       try {
         markmapRef.current.fit()
       } catch {
-        /* svg may be mid-detach during canvas close */
       }
     }
   }, [contentW, contentH])
@@ -373,7 +371,6 @@ export function DiagramRenderer({
       try {
         markmapRef.current?.destroy()
       } catch {
-        /* listeners may already be gone */
       }
       markmapRef.current = null
     },
@@ -424,7 +421,6 @@ export function DiagramRenderer({
         addToast({ type: 'success', message: t('designer.diagram.sourceCopied'), duration: 2500 }),
       )
       .catch(() => {
-        /* clipboard unavailable */
       })
   }, [source, addToast, t])
 

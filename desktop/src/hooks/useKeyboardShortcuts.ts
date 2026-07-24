@@ -39,9 +39,6 @@ export function useKeyboardShortcuts() {
     const handler = (e: KeyboardEvent) => {
       const bindings = useKeyboardShortcutsStore.getState().bindings
 
-      // Detect the typing context up front so configurable shortcuts that
-      // collide with normal typing (Ctrl+K, Ctrl+N, mode switch) don't steal
-      // focus while the user is composing a message or editing a file.
       const targetElEarly = e.target as HTMLElement | null
       const tagEarly = targetElEarly?.tagName?.toLowerCase()
       const isContentEditableEarly = targetElEarly?.isContentEditable === true
@@ -68,7 +65,7 @@ export function useKeyboardShortcuts() {
       }
 
       if (matchesBinding(e, bindings['sidebar-search'])) {
-        if (isTypingContext) return
+        if (isTypingContext || isMonacoEarly) return
         e.preventDefault()
         setSidebarOpen(true)
         requestAnimationFrame(() => {
@@ -86,10 +83,6 @@ export function useKeyboardShortcuts() {
           closeModal()
           return
         }
-        // Esc-to-interrupt (Claude Code muscle memory): only when the composer
-        // itself is focused and no in-composer popover (@ file search or /
-        // slash command) is open. Scoping this way avoids hijacking Esc from
-        // menus, the Monaco editor, dropdowns, and other native Esc consumers.
         const composerFocused =
           isChatInputEarly &&
           !document.getElementById('file-search-menu') &&
@@ -171,10 +164,6 @@ export function useKeyboardShortcuts() {
       const isEditingForGlobalSearch = isChatInput
 
       if (ctrlOrMeta && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'p') {
-        // Ctrl+P is the global quick-open (go-to-file), matching VS Code, and must
-        // fire even when the Monaco editor is focused. Do NOT early-return for
-        // Monaco: standalone Monaco does not bind Ctrl+P, so letting it through
-        // would fall to the WebView2 print dialog instead.
         e.preventDefault()
         e.stopPropagation()
         useUIStore.getState().openWorkspaceFinder('quick-open')
@@ -223,7 +212,6 @@ export function useKeyboardShortcuts() {
           }
           return
         }
-        // No multi-file editor context: cycle chat/session tabs instead.
         const tabState = useTabStore.getState()
         if (tabState.tabs.length > 1) {
           e.preventDefault()

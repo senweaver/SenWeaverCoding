@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 import { create } from 'zustand'
-import { getBaseUrl } from '../api/client'
+import { getBaseUrl, withAuthToken } from '../api/client'
 import { listVisionModels, stopComputerRun, type VisionModel } from '../api/computer'
 import { localizeComputerMessage } from '../lib/computerMessages'
 
@@ -255,7 +255,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
         pendingSteer: null,
       })
 
-      const wsUrl = `${getBaseUrl().replace(/^http/, 'ws')}/ws/computer/${runId}`
+      const wsUrl = withAuthToken(`${getBaseUrl().replace(/^http/, 'ws')}/ws/computer/${runId}`)
       let ws: WebSocket
       try {
         ws = new WebSocket(wsUrl)

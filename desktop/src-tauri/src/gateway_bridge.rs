@@ -49,17 +49,12 @@ pub fn spawn_bridge_client(gateway_url: String, token: String, generation: u64) 
                     run_bridge_session(stream, generation).await;
                     let session_secs = connected_at.elapsed().as_secs();
                     if session_secs >= 5 {
-                        // A healthy session that lasted a while: reset backoff so a
-                        // normal reconnect is fast.
                         backoff_ms = 500;
                         consecutive_failures = 0;
                         tracing::warn!(
                             "[gateway_bridge] bridge session ended after {session_secs}s; reconnecting"
                         );
                     } else {
-                        // Session collapsed almost immediately (auth rejected, route
-                        // error, half-open): treat like a failure so we back off
-                        // instead of hammering the gateway ~2Hz forever.
                         consecutive_failures += 1;
                         tracing::warn!(
                             "[gateway_bridge] bridge session ended immediately (<5s, failure #{consecutive_failures}); backing off {backoff_ms}ms"

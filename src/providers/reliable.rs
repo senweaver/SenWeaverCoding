@@ -557,6 +557,8 @@ pub const DEFAULT_CLIENT_LLM_RATE_LIMIT_REFILL_PER_SEC: f64 = 1.0;
 
 const STREAM_BACKOFF_CEILING_MS: u64 = 10_000;
 
+const STREAM_CONTEXT_TRUNCATION_MAX: u32 = 4;
+
 pub struct ReliableProvider {
     providers: Vec<(String, Arc<dyn Provider>)>,
     max_retries: u32,
@@ -760,9 +762,6 @@ impl ReliableProvider {
         messages: &serde_json::Value,
         tools: &serde_json::Value,
     ) {
-        // The fingerprint is used only for a debug trace, so canonicalizing and
-        // hashing the entire message history every request is pure overhead in
-        // production. Compute it on demand, only when DEBUG tracing is active.
         if !tracing::enabled!(tracing::Level::DEBUG) {
             return;
         }
@@ -1084,7 +1083,6 @@ impl Provider for ReliableProvider {
 
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
-                // Per provider×model retry budget (see the `chat` path for rationale).
                 state = RetryState::default();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
@@ -1202,7 +1200,6 @@ impl Provider for ReliableProvider {
 
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
-                // Per provider×model retry budget (see the `chat` path for rationale).
                 state = RetryState::default();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
@@ -1345,7 +1342,6 @@ impl Provider for ReliableProvider {
 
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
-                // Per provider×model retry budget (see the `chat` path for rationale).
                 state = RetryState::default();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
@@ -1474,17 +1470,29 @@ impl Provider for ReliableProvider {
 
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
-                // Reset the retry budget per provider×model so a fallback provider
-                // is not judged "class exhausted" just because the primary already
-                // burned the shared budget (matches the streaming path's behavior).
                 state = RetryState::default();
+                let idem_key = crate::providers::core::idempotency::fingerprint_json(
+                    provider_name,
+                    current_model,
+                    &serde_json::to_value(&effective_messages).unwrap_or(serde_json::Value::Null),
+                    &request
+                        .tools
+                        .and_then(|t| serde_json::to_value(t).ok())
+                        .unwrap_or(serde_json::Value::Null),
+                )
+                .into_inner();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
                     let req = ChatRequest {
                         messages: &effective_messages,
                         tools: request.tools,
                     };
-                    match provider.chat(req, current_model, temperature).await {
+                    match crate::providers::core::idempotency::scope_idempotency_key(
+                        idem_key.clone(),
+                        provider.chat(req, current_model, temperature),
+                    )
+                    .await
+                    {
                         Ok(resp) => {
                             if attempt > 0
                                 || *current_model != model
@@ -1636,7 +1644,7 @@ impl Provider for ReliableProvider {
                 }
             }
 
-            let messages_owned: Arc<Vec<ChatMessage>> = Arc::new(request.messages.to_vec());
+            let mut messages_owned: Vec<ChatMessage> = request.messages.to_vec();
             let tools_owned: Option<Arc<Vec<crate::tools::ToolSpec>>> =
                 request.tools.map(|t| Arc::new(t.to_vec()));
 
@@ -1665,6 +1673,7 @@ impl Provider for ReliableProvider {
                 Self::scope_stream_retry(scoped_session, scoped_mode, async move {
                     let total_combos = combos.len();
                     let mut last_failure: Option<String> = None;
+                    let mut context_truncation_passes: u32 = 0;
 
                     for (combo_idx, (provider_label, provider_arc, current_model)) in
                         combos.into_iter().enumerate()
@@ -1794,6 +1803,49 @@ impl Provider for ReliableProvider {
                             }
 
                             let anyhow_err = anyhow::anyhow!("{}", err_string);
+
+                            if is_context_window_exceeded(&anyhow_err) {
+                                if context_truncation_passes < STREAM_CONTEXT_TRUNCATION_MAX {
+                                    let removed = truncate_for_context(&mut messages_owned);
+                                    if removed > 0 {
+                                        context_truncation_passes += 1;
+                                        tracing::warn!(
+                                            target: "providers.reliable.retry",
+                                            session_id = %session_label,
+                                            provider = %provider_label,
+                                            model = %current_model,
+                                            removed,
+                                            pass = context_truncation_passes,
+                                            "stream request exceeded the context window; dropped oldest messages and retrying"
+                                        );
+                                        let notice = RetryNotice {
+                                            attempt: context_truncation_passes,
+                                            max_attempts: STREAM_CONTEXT_TRUNCATION_MAX,
+                                            wait_ms: 0,
+                                            failure_class: RetryClass::Transient,
+                                            provider: provider_label.clone(),
+                                            model: current_model.clone(),
+                                            last_error_summary: format!(
+                                                "context window exceeded; dropped {removed} oldest messages and retrying"
+                                            ),
+                                        };
+                                        if tx.send(Ok(StreamEvent::Retry(notice))).await.is_err() {
+                                            return;
+                                        }
+                                        continue 'retry;
+                                    }
+                                }
+                                break 'retry (
+                                    format!(
+                                        "Request exceeds the model context window and dropping older \
+                                         messages could not shrink it enough (passes={context_truncation_passes}). \
+                                         Reduce the conversation size or switch to a larger-context \
+                                         model. Last error: {err_string}"
+                                    ),
+                                    RetryClass::Transient,
+                                );
+                            }
+
                             let class = FailureClass::from_error(&anyhow_err);
 
                             let (class_attempts, cap_for_class, retry_class) = match class {

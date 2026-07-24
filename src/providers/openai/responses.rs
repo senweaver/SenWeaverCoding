@@ -87,17 +87,12 @@ impl OpenAiResponsesProvider {
         m.starts_with("gpt-5") || m.starts_with("o1") || m.starts_with("o3") || m.starts_with("o4")
     }
 
-    /// Set `temperature` on the request body only when the model accepts it.
-    /// Reasoning models (gpt-5/o-series) reject sampling params on the Responses
-    /// endpoint, so the key is omitted entirely for them.
     fn apply_temperature(body: &mut serde_json::Value, model: &str, requested: f64) {
         if !Self::is_reasoning_model(model) {
             body["temperature"] = serde_json::json!(requested);
         }
     }
 
-    /// Pass the configured reasoning effort through for reasoning models; the
-    /// API rejects the `reasoning` block on non-reasoning models.
     fn apply_reasoning(&self, body: &mut serde_json::Value, model: &str) {
         if let Some(effort) = self.reasoning_effort.as_deref() {
             if Self::is_reasoning_model(model) && !effort.trim().is_empty() {
@@ -106,8 +101,18 @@ impl OpenAiResponsesProvider {
         }
     }
 
-    /// Shared request path that carries native function tools through the
-    /// Responses API and parses both text and `function_call` outputs.
+    fn apply_prompt_cache_key(&self, body: &mut serde_json::Value) {
+        if !self.base_url.starts_with("https://api.openai.com") {
+            return;
+        }
+        if let Some(key) = crate::session::current_session_context()
+            .map(|ctx| format!("sen-{}", ctx.session_id))
+            .filter(|k| k.len() > 4)
+        {
+            body["prompt_cache_key"] = serde_json::Value::String(key);
+        }
+    }
+
     async fn run_tools_request(
         &self,
         messages: &[ChatMessage],
@@ -130,6 +135,7 @@ impl OpenAiResponsesProvider {
         });
         Self::apply_temperature(&mut body, model, temperature);
         self.apply_reasoning(&mut body, model);
+        self.apply_prompt_cache_key(&mut body);
         if let Some(instr) = instructions {
             body["instructions"] = serde_json::Value::String(instr);
         }
@@ -220,7 +226,6 @@ struct ResponsesOutputItem {
     content: Option<Vec<ResponsesOutputContent>>,
     #[serde(default)]
     text: Option<String>,
-    // function_call item fields
     #[serde(default)]
     call_id: Option<String>,
     #[serde(default)]
@@ -256,7 +261,6 @@ struct ResponsesUsageDetails {
 }
 
 impl ResponsesPayload {
-    /// Surface a failed response as an error instead of an empty success.
     fn ensure_not_failed(&self) -> anyhow::Result<()> {
         if self.status.as_deref() == Some("failed") {
             let code = self
@@ -274,9 +278,6 @@ impl ResponsesPayload {
         Ok(())
     }
 
-    /// Map Responses `status`/`incomplete_details` onto our StopReason so the
-    /// agent loop's length-continuation and content-filter handling fire for
-    /// this provider too (it has no `finish_reason` field).
     fn stop_reason(&self, has_tool_calls: bool) -> Option<crate::providers::traits::StopReason> {
         use crate::providers::traits::StopReason;
         match self.status.as_deref() {
@@ -369,10 +370,6 @@ impl ResponsesPayload {
     }
 }
 
-/// Builds the Responses API `input` item array from transcript messages,
-/// translating our stored envelopes: assistant `tool_calls` become `function_call`
-/// items and `tool` results become `function_call_output` items so multi-turn tool
-/// use round-trips correctly. Returns `(instructions, items)`.
 fn build_responses_input_items(
     messages: &[ChatMessage],
 ) -> (Option<String>, Vec<serde_json::Value>) {
@@ -381,9 +378,6 @@ fn build_responses_input_items(
     for m in messages {
         match m.role.as_str() {
             "system" => {
-                // Accumulate ALL system messages into instructions. Sanitize can
-                // inject a `[Context trimmed]` system note after the real prompt;
-                // overwriting with the last one silently dropped the main prompt.
                 match instructions.as_mut() {
                     Some(existing) => {
                         existing.push_str("\n\n");
@@ -444,10 +438,6 @@ fn build_responses_input_items(
                     }));
                 }
                 for tc in tool_calls {
-                    // Accept both the flat {id,name,arguments} form and the nested
-                    // OpenAI {id,function:{name,arguments}} form (the plan
-                    // auto-finalize path emits the nested one). Emitting an empty
-                    // name would 400 the whole request.
                     let func = tc.get("function").unwrap_or(&tc);
                     let name = func.get("name").and_then(|v| v.as_str()).unwrap_or("");
                     if name.trim().is_empty() {
@@ -492,9 +482,6 @@ fn build_responses_input_items(
                     })
                     .unwrap_or_else(|| m.content.clone());
                 if call_id.is_empty() {
-                    // A function_call_output with an empty call_id would 400. This
-                    // happens for cross-provider failover transcripts; degrade to a
-                    // user note so the result content is still visible to the model.
                     items.push(serde_json::json!({
                         "type": "message",
                         "role": "user",
@@ -514,7 +501,6 @@ fn build_responses_input_items(
     (instructions, items)
 }
 
-/// Converts our ToolSpec list into the Responses API function tool array.
 fn responses_tools_from_specs(
     tools: Option<&[crate::tools::ToolSpec]>,
 ) -> Option<Vec<serde_json::Value>> {
@@ -598,6 +584,7 @@ impl Provider for OpenAiResponsesProvider {
         });
         Self::apply_temperature(&mut request, model, temperature);
         self.apply_reasoning(&mut request, model);
+        self.apply_prompt_cache_key(&mut request);
         if let Some(sys) = system_prompt {
             request["instructions"] = serde_json::Value::String(sys.to_string());
         }
@@ -693,6 +680,7 @@ impl Provider for OpenAiResponsesProvider {
         });
         Self::apply_temperature(&mut body, model, temperature);
         self.apply_reasoning(&mut body, model);
+        self.apply_prompt_cache_key(&mut body);
         if let Some(max) = self.max_output_tokens {
             body["max_output_tokens"] = serde_json::json!(max);
         }

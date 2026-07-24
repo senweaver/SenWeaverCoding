@@ -120,9 +120,6 @@ export function TabBar() {
     setContextMenu({ sessionId, x: e.clientX, y: e.clientY })
   }
 
-  // Batch closes must respect the same "don't drop a running/queued session
-  // silently" rule as single close. Rather than pop N confirmation modals, skip
-  // sessions with a pending queue or an in-flight turn and only close idle ones.
   const closeIdleSessionsOnly = (ids: string[]) => {
     for (const id of ids) {
       const tab = tabs.find((t) => t.sessionId === id)

@@ -137,7 +137,6 @@ impl GroupService {
             })
     }
 
-    // ---- queries ----------------------------------------------------------
 
     pub fn list_groups(&self) -> Vec<GroupSummary> {
         self.store.list_groups()
@@ -175,7 +174,6 @@ impl GroupService {
         self.emit_unread();
     }
 
-    // ---- mutations --------------------------------------------------------
 
     pub fn create_group(self: &Arc<Self>, name: &str, description: &str) -> Result<GroupSummary> {
         let name = name.trim();
@@ -626,7 +624,6 @@ impl GroupService {
         Ok(msg_id)
     }
 
-    // ---- inbound handling -------------------------------------------------
 
     pub async fn handle_inbound(self: &Arc<Self>, peer_id: &str, msg: GroupInbound) {
         match msg {
@@ -803,7 +800,6 @@ impl GroupService {
         });
     }
 
-    // ---- events -----------------------------------------------------------
 
     fn emit_groups(&self) {
         emit_group("lan_groups", json!({ "groups": self.store.list_groups() }));

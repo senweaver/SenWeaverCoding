@@ -28,11 +28,6 @@ export function TokenUsageRing({ sessionId, size = 16 }: Props) {
   const t = useTranslation()
   const activeTabId = useTabStore((s) => s.activeTabId)
   const targetSessionId = sessionId === undefined ? activeTabId : sessionId
-  // Current context occupancy is the tokens sent on the LAST turn (prompt +
-  // cache), not the running lifetime sum. Using the last input reflects real
-  // window usage and naturally drops after compaction — unlike the old
-  // `cumulativeTokens % limit`, which silently wrapped to ~0 once a long
-  // session exceeded the window.
   const lastTurnUsage = useChatStore((s) =>
     targetSessionId ? s.sessions[targetSessionId]?.tokenUsage : undefined,
   )
@@ -77,7 +72,6 @@ export function TokenUsageRing({ sessionId, size = 16 }: Props) {
     if (limit <= 0) {
       return { used: occupancy, total: limit, pct: 0 }
     }
-    // Clamp instead of wrapping: over-window shows a full (error) ring.
     const fraction = Math.max(0, Math.min(1, occupancy / limit))
     return {
       used: occupancy,

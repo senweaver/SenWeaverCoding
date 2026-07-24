@@ -16,6 +16,9 @@ pub struct CostConfig {
     #[serde(default = "default_monthly_limit")]
     pub monthly_limit_usd: f64,
 
+    #[serde(default)]
+    pub per_session_limit_usd: f64,
+
     #[serde(default = "default_warn_percent")]
     pub warn_at_percent: u8,
 
@@ -98,6 +101,7 @@ impl Default for CostConfig {
             enabled: true,
             daily_limit_usd: default_daily_limit(),
             monthly_limit_usd: default_monthly_limit(),
+            per_session_limit_usd: 0.0,
             warn_at_percent: default_warn_percent(),
             allow_override: false,
             prices: get_default_pricing(),

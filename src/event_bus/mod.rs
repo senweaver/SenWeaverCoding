@@ -15,11 +15,6 @@ pub mod integration;
 pub mod types;
 pub use backpressure::BoundedSubscriber;
 
-// The global channel multiplexes high-frequency Broadcast/Tool events together
-// with infrequent but delivery-critical targeted Agent(_) task assignments. A
-// small buffer let a burst of broadcast events evict a pending AgentRequest on a
-// lagging subscriber, so the target agent never received its task. Size the buffer
-// generously so targeted events are not dropped in practice.
 const GLOBAL_CHANNEL_CAPACITY: usize = 8192;
 
 const DEFAULT_HISTORY_SIZE: usize = 1000;

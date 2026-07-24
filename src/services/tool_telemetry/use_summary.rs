@@ -1,9 +1,11 @@
 // SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use serde::{Deserialize, Serialize};
+
+const MAX_RETAINED_INVOCATIONS: usize = 2000;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolInvocation {
@@ -27,18 +29,21 @@ pub struct ToolUsageStats {
 }
 
 pub struct ToolUseSummaryService {
-    invocations: Vec<ToolInvocation>,
+    invocations: VecDeque<ToolInvocation>,
 }
 
 impl ToolUseSummaryService {
     pub fn new() -> Self {
         Self {
-            invocations: Vec::new(),
+            invocations: VecDeque::new(),
         }
     }
 
     pub fn record(&mut self, invocation: ToolInvocation) {
-        self.invocations.push(invocation);
+        self.invocations.push_back(invocation);
+        while self.invocations.len() > MAX_RETAINED_INVOCATIONS {
+            self.invocations.pop_front();
+        }
     }
 
     pub fn aggregate(&self) -> Vec<ToolUsageStats> {

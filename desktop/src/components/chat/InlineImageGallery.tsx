@@ -4,7 +4,7 @@
 
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { ImageGalleryModal } from './ImageGalleryModal'
-import { getBaseUrl } from '../../api/client'
+import { getBaseUrl, withAuthToken } from '../../api/client'
 
 const QUICK_SCAN_LIMIT_CHARS = 4000
 
@@ -36,7 +36,7 @@ export function extractImagePaths(text: string): string[] {
 }
 
 function fileUrl(filePath: string): string {
-  return `${getBaseUrl()}/api/filesystem/file?path=${encodeURIComponent(filePath)}`
+  return withAuthToken(`${getBaseUrl()}/api/filesystem/file?path=${encodeURIComponent(filePath)}`)
 }
 
 function fileName(filePath: string): string {

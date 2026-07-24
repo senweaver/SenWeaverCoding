@@ -81,7 +81,6 @@ export function startTaskbarAlertWatcher(): () => void {
       if (badge) await win.setOverlayIcon(badge)
       indicatorActive = true
     } catch {
-      // window APIs unavailable; ignore
     }
   }
 
@@ -93,7 +92,6 @@ export function startTaskbarAlertWatcher(): () => void {
       await win.requestUserAttention(null)
       await win.setOverlayIcon(undefined)
     } catch {
-      // window APIs unavailable; ignore
     }
   }
 

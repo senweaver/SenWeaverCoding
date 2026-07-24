@@ -19,10 +19,6 @@ pub struct FileEditNotice {
 
 #[must_use]
 pub fn relativize_for_workspace(path: &Path) -> PathBuf {
-    // Prefer the active session's workspace dir (task-local) over the process
-    // CWD: the desktop runs many concurrent sessions in one process, each with a
-    // different workspace, so a process-global CWD would relativize FileEdit
-    // events against the wrong root and mis-attribute them in the diff panel.
     let workspace = crate::session::current_session_context()
         .map(|ctx| PathBuf::from(ctx.workspace_dir))
         .filter(|p| !p.as_os_str().is_empty())
@@ -249,10 +245,6 @@ pub async fn emit_file_edit(
     let Some(tx) = take_parent_draft_channel() else {
         return;
     };
-    // Offload all CPU-heavy work (utf8 decode of full files, LCS line-change counting,
-    // unified-diff rendering, path canonicalization) onto the blocking pool so the async
-    // worker thread / agent loop is never stalled by large file edits. The send is still
-    // awaited afterwards to preserve event ordering.
     let before_owned = before_bytes.map(<[u8]>::to_vec);
     let after_owned = after_bytes.map(<[u8]>::to_vec);
     let path_owned = path.to_path_buf();
@@ -281,6 +273,42 @@ pub async fn emit_file_edit(
         }
         let rel = relativize_for_workspace(&path_owned);
         let diff = render_minimal_diff(&rel, &before_text, &after_text);
+        Some(DraftEvent::FileEdit {
+            path: rel.to_string_lossy().into_owned(),
+            additions,
+            deletions,
+            diff,
+            edit_batch_id,
+        })
+    })
+    .await;
+    if let Ok(Some(event)) = built {
+        let _ = tx.send(event).await;
+    }
+}
+
+pub async fn emit_file_edit_large(
+    path: &Path,
+    before_len: usize,
+    after_len: usize,
+    edit_batch_id: Option<String>,
+) {
+    let Some(tx) = take_parent_draft_channel() else {
+        return;
+    };
+    let path_owned = path.to_path_buf();
+    let built = tokio::task::spawn_blocking(move || -> Option<DraftEvent> {
+        let rel = relativize_for_workspace(&path_owned);
+        let delta = after_len as i64 - before_len as i64;
+        let (additions, deletions) = if delta >= 0 {
+            (delta as i32, 0i32)
+        } else {
+            (0i32, (-delta) as i32)
+        };
+        let diff = Some(format!(
+            "--- a/{p}\n+++ b/{p}\n@@ large file edit omitted from preview ({before_len} -> {after_len} bytes) @@\n",
+            p = rel.display()
+        ));
         Some(DraftEvent::FileEdit {
             path: rel.to_string_lossy().into_owned(),
             additions,

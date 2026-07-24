@@ -40,11 +40,6 @@ export type RenameTargetState = {
   initial: string
 }
 
-export type CreateTargetState = {
-  parentRelPath: string
-  kind: 'file' | 'folder'
-}
-
 export type FilterState = {
   active: boolean
   needle: string
@@ -60,7 +55,6 @@ type Props = {
 
   renameTarget: RenameTargetState | null
 
-  createTarget: CreateTargetState | null
   filter?: FilterState
   onSelect: (node: FileTreeNode) => void
   onFocus?: (relPath: string) => void
@@ -68,8 +62,6 @@ type Props = {
   onDrop: (event: React.DragEvent, target: FileTreeNode) => void
   onRenameSubmit: (value: string) => void
   onRenameCancel: () => void
-  onCreateSubmit: (value: string) => void
-  onCreateCancel: () => void
 }
 
 function renderHighlight(text: string, needle: string) {
@@ -130,7 +122,6 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   selectedRelPath,
   focusedRelPath,
   renameTarget,
-  createTarget,
   filter,
   onSelect,
   onFocus,
@@ -138,8 +129,6 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   onDrop,
   onRenameSubmit,
   onRenameCancel,
-  onCreateSubmit,
-  onCreateCancel,
 }: Props) {
   const t = useTranslation()
   const iconsReady = useEnsureVscodeIcons()
@@ -184,23 +173,12 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
 
   const filterActive = filter?.active ?? false
   const isAncestorMatch = filterActive ? (filter?.ancestors.has(node.relPath) ?? false) : false
-  const isSelfMatch = filterActive ? (filter?.matches.has(node.relPath) ?? false) : false
-  const visibleByFilter = !filterActive || isSelfMatch || isAncestorMatch
   const expanded = node.isDir && (
     filterActive && isAncestorMatch
       ? true
       : (dirState?.expanded ?? false)
   )
   const loading = node.isDir && (dirState?.loading ?? false)
-  const error = node.isDir ? dirState?.error : undefined
-  const children = useMemo<FileTreeNode[]>(() => {
-    if (!node.isDir) return []
-    const list = dirState?.loaded ? dirState.children ?? [] : node.children ?? []
-    if (!filterActive) return list
-    return list.filter(
-      (c) => (filter?.matches.has(c.relPath) ?? false) || (filter?.ancestors.has(c.relPath) ?? false),
-    )
-  }, [dirState, filter, filterActive, node.children, node.isDir, node.loaded])
 
   const isSelected = !node.isDir && selectedRelPath === node.relPath
   const isFocused = focusedRelPath === node.relPath
@@ -322,10 +300,6 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
     )
   }
 
-  if (!visibleByFilter) {
-    return null
-  }
-
   return (
     <>
       <div
@@ -431,63 +405,6 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
           )}
         </div>
       </div>
-      {node.isDir && expanded && (
-        <>
-          {createTarget && createTarget.parentRelPath === node.relPath && (
-            <div
-              className="px-1 py-0.5"
-              style={{ paddingLeft: `${(depth + 1) * 12 + 4}px` }}
-            >
-              <InlineNamePrompt
-                placeholder={
-                  createTarget.kind === 'file'
-                    ? t('files.newFile')
-                    : t('files.newFolder')
-                }
-                onCancel={onCreateCancel}
-                onSubmit={onCreateSubmit}
-              />
-            </div>
-          )}
-          {error ? (
-            <div
-              className="px-2 py-1 text-[11px] text-[var(--color-text-tertiary)]"
-              style={{ paddingLeft: `${(depth + 1) * 12 + 4}px` }}
-            >
-              {error}
-            </div>
-          ) : children.length === 0 && dirState?.loaded ? (
-            <div
-              className="px-2 py-1 text-[11px] text-[var(--color-text-tertiary)] italic"
-              style={{ paddingLeft: `${(depth + 1) * 12 + 4}px` }}
-            >
-              {}
-              ·
-            </div>
-          ) : (
-            children.map((child) => (
-              <FileTreeNodeView
-                key={child.relPath}
-                node={child}
-                depth={depth + 1}
-                selectedRelPath={selectedRelPath}
-                focusedRelPath={focusedRelPath}
-                renameTarget={renameTarget}
-                createTarget={createTarget}
-                filter={filter}
-                onSelect={onSelect}
-                onFocus={onFocus}
-                onContextMenu={onContextMenu}
-                onDrop={onDrop}
-                onRenameSubmit={onRenameSubmit}
-                onRenameCancel={onRenameCancel}
-                onCreateSubmit={onCreateSubmit}
-                onCreateCancel={onCreateCancel}
-              />
-            ))
-          )}
-        </>
-      )}
     </>
   )
 })

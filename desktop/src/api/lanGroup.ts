@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { api, getBaseUrl } from './client'
+import { api, getBaseUrl, withAuthToken } from './client'
 import type {
   LanGroupMessage,
   LanGroupSnapshot,
@@ -104,9 +104,11 @@ export const lanGroupApi = {
   },
 
   rawDocumentUrl(groupId: string, docId: string) {
-    return `${getBaseUrl()}/api/lan/groups/documents/raw?groupId=${encodeURIComponent(
-      groupId,
-    )}&docId=${encodeURIComponent(docId)}`
+    return withAuthToken(
+      `${getBaseUrl()}/api/lan/groups/documents/raw?groupId=${encodeURIComponent(
+        groupId,
+      )}&docId=${encodeURIComponent(docId)}`,
+    )
   },
 
   downloadDocument(groupId: string, docId: string) {

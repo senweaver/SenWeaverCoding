@@ -122,7 +122,6 @@ export function DirectoryPicker({ value, onChange }: Props) {
       setProjects(merged)
       setTotal(t)
     } catch {
-      /* keep current list on failure */
     } finally {
       setLoadingMore(false)
     }

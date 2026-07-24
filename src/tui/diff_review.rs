@@ -257,8 +257,6 @@ pub fn revert_file_entry(
             });
         }
         if outcome.reverted.is_empty() {
-            // Batch journal missing: the explicit 'R' keypress is the user's
-            // confirmation for the coarser revert-to-latest fallback.
             history.revert_to_latest(Path::new(&entry.path))?;
             Ok(RevertFileOutcome {
                 summary: format!(
@@ -292,11 +290,6 @@ pub fn revert_file_entry(
     }
 }
 
-/// Applies a file-revert outcome to the registry with path-level precision: an
-/// entry is painted Reverted only when ITS file actually rolled back — skipped
-/// stale files stay Pending, and sibling entries of the same batch whose files
-/// were reverted are updated too (previously only the selected entry flipped,
-/// and even when its file was skipped).
 pub fn apply_file_revert_outcome(
     registry: &mut EditBatchRegistry,
     entry_id: u64,

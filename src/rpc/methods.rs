@@ -162,8 +162,6 @@ impl RpcCtx {
     pub async fn handle_request(&self, method: &str, params: Value, id: Option<Value>) {
         let id = id.unwrap_or(Value::Null);
 
-        // SDK clients send dotted method names (session.prompt); the server
-        // dispatch uses slashes (session/prompt). Normalize so both forms work.
         let method = &method.replace('.', "/");
         let method = method.as_str();
 

@@ -61,8 +61,6 @@ impl LspContextSource for StaticLspContextSource {
                         })
                 })
                 .unwrap_or((0, 0));
-            // Only read from an already-running server: the passive per-turn
-            // injection must never trigger a cold start (see hover_if_running).
             let hover = services
                 .lsp
                 .hover_if_running(&abs, hover_line, hover_char)
@@ -98,6 +96,7 @@ struct SymbolGraphAdapter {
     workspace_root: PathBuf,
     per_file_cap: usize,
     dependents_cap: usize,
+    repo_map_cache: parking_lot::Mutex<Option<(u32, usize, String)>>,
 }
 
 impl SymbolGraphLookup for SymbolGraphAdapter {
@@ -130,8 +129,6 @@ impl SymbolGraphLookup for SymbolGraphAdapter {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_ascii_lowercase())
                 .unwrap_or_default();
-            // Use the graph's cached file-name → symbol-index map instead of
-            // rebuilding a full-graph HashMap on every focus lookup each turn.
             let candidate_indices = graph.symbol_indices_for_file_name(&file_name_key);
             let mut scored: Vec<(u32, usize)> = Vec::new();
             for &sym_idx in candidate_indices {
@@ -192,13 +189,41 @@ impl SymbolGraphLookup for SymbolGraphAdapter {
                     line_end: sym.line_end,
                     signature,
                     dependents,
-                    // Attach the focus file's direct imports to its first emitted symbol
-                    // so the model sees the file's dependency surface without extra RAG hits.
                     imports: std::mem::take(&mut file_imports),
                 });
             }
         }
         out
+    }
+
+    fn repo_map(
+        &self,
+        max_files: usize,
+        max_symbols_per_file: usize,
+        max_chars: usize,
+    ) -> String {
+        let graph_lock = self.writer.graph();
+        let graph = graph_lock.read();
+        if graph.symbols.is_empty() {
+            return String::new();
+        }
+        let cache_key = (graph.symbols.len() + graph.edges.len()) as u32;
+        {
+            let cache = self.repo_map_cache.lock();
+            if let Some((key, chars, rendered)) = cache.as_ref() {
+                if *key == cache_key && *chars == max_chars {
+                    return rendered.clone();
+                }
+            }
+        }
+        let map = crate::code_intel::repo_map::build_repo_map(
+            &graph,
+            max_files,
+            max_symbols_per_file,
+        );
+        let rendered = map.render(max_chars);
+        *self.repo_map_cache.lock() = Some((cache_key, max_chars, rendered.clone()));
+        rendered
     }
 }
 
@@ -221,11 +246,11 @@ fn truncate_dense_snippet(snippet: &str) -> String {
     let mut lines = 0usize;
     for line in snippet.lines() {
         if lines >= DENSE_SNIPPET_MAX_LINES || out.len() >= DENSE_SNIPPET_MAX_BYTES {
-            out.push_str(" …");
+            out.push_str("\n…");
             break;
         }
         if !out.is_empty() {
-            out.push(' ');
+            out.push('\n');
         }
         let remaining = DENSE_SNIPPET_MAX_BYTES.saturating_sub(out.len());
         if line.len() > remaining {
@@ -353,6 +378,7 @@ impl RagSource for CodeRagSource {
                     path: d.path.clone(),
                     line: d.start_line,
                     snippet: truncate_dense_snippet(&d.snippet),
+                    end_line: Some(d.end_line),
                 });
             }
         }
@@ -364,9 +390,6 @@ static CODE_RAG_CACHE: OnceLock<
     RwLock<std::collections::HashMap<PathBuf, Arc<dyn IncrementalIndex>>>,
 > = OnceLock::new();
 
-// Per-workspace-root async mutex serializing all vector-index mutations so the
-// one-shot seed task and incremental upserts never interleave on the same index
-// (which could otherwise leave stale/ghost chunks when an edit lands mid-seed).
 static VECTOR_INDEX_LOCKS: OnceLock<
     parking_lot::Mutex<std::collections::HashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>>,
 > = OnceLock::new();
@@ -424,9 +447,16 @@ fn vector_seed_started() -> &'static RwLock<std::collections::HashSet<PathBuf>> 
 const VECTOR_SEED_CHUNK_LINES: usize = 80;
 const VECTOR_SEED_MAX_FILE_BYTES: u64 = 512 * 1024;
 const VECTOR_SEED_MAX_CHUNKS: usize = 4000;
+const VECTOR_SEED_CHUNK_CAP_CEILING: usize = 24_000;
 const VECTOR_SEED_EMBED_BATCH: usize = 16;
 
-fn is_seedable_source_file(path: &Path) -> bool {
+fn adaptive_vector_chunk_cap(total_files: usize) -> usize {
+    total_files
+        .saturating_mul(6)
+        .clamp(VECTOR_SEED_MAX_CHUNKS, VECTOR_SEED_CHUNK_CAP_CEILING)
+}
+
+pub(crate) fn is_seedable_source_file(path: &Path) -> bool {
     let Some(ext) = path.extension().and_then(|e| e.to_str()) else {
         return false;
     };
@@ -502,6 +532,12 @@ fn chunk_source_for_vector_index(
 }
 
 fn collect_vector_seed_files(root: &Path) -> Vec<PathBuf> {
+    let ignore = crate::code_intel::search::build_gitignore_set(root);
+    let is_ignored = |path: &Path| -> bool {
+        ignore
+            .as_ref()
+            .is_some_and(|set| crate::code_intel::search::path_is_gitignored(set, root, path))
+    };
     let mut files = Vec::new();
     let mut stack = vec![root.to_path_buf()];
     while let Some(dir) = stack.pop() {
@@ -512,14 +548,12 @@ fn collect_vector_seed_files(root: &Path) -> Vec<PathBuf> {
         for entry in entries.flatten() {
             let path = entry.path();
             if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                if name.starts_with('.')
-                    || matches!(
-                        name,
-                        "target" | "node_modules" | "__pycache__" | "dist" | "build" | "vendor"
-                    )
-                {
+                if crate::util::is_index_skip_dir(name) {
                     continue;
                 }
+            }
+            if is_ignored(&path) {
+                continue;
             }
             match entry.file_type() {
                 Ok(ft) if ft.is_dir() => stack.push(path),
@@ -573,9 +607,6 @@ fn spawn_vector_index_seed(root: PathBuf, index: SharedVectorCodeIndex) {
         }
     }
     crate::runtime::spawn_supervised("rag.vector_seed", async move {
-        // Hold the per-root vector lock for the whole seed so incremental updates
-        // (T12/T13 write-back) queue behind it and apply on top of the seeded
-        // state instead of racing it.
         let seed_lock = vector_index_lock(&root);
         let _seed_guard = seed_lock.lock().await;
         let snapshot_dir = vector_snapshot_dir(&root);
@@ -598,17 +629,41 @@ fn spawn_vector_index_seed(root: PathBuf, index: SharedVectorCodeIndex) {
             }
         }
         let walk_root = root.clone();
-        let files = tokio::task::spawn_blocking(move || collect_vector_seed_files(&walk_root))
+        let mut files = tokio::task::spawn_blocking(move || collect_vector_seed_files(&walk_root))
             .await
             .unwrap_or_default();
+        let total_seed_files = files.len();
+        let chunk_cap = adaptive_vector_chunk_cap(total_seed_files);
+        {
+            let mtimes: std::collections::HashMap<std::path::PathBuf, std::time::SystemTime> =
+                files
+                    .iter()
+                    .map(|f| {
+                        let mt = std::fs::metadata(f)
+                            .and_then(|m| m.modified())
+                            .unwrap_or(std::time::UNIX_EPOCH);
+                        (f.clone(), mt)
+                    })
+                    .collect();
+            files.sort_by(|a, b| {
+                mtimes
+                    .get(b)
+                    .cmp(&mtimes.get(a))
+                    .then_with(|| a.cmp(b))
+            });
+        }
         let mut total_chunks = 0usize;
         let mut reused_chunks = 0usize;
         let mut embedded_chunks = 0usize;
+        let mut cap_truncated = false;
+        let mut files_indexed = 0usize;
         let mut batch: Vec<crate::rag::vector_code_index::CodeChunk> = Vec::new();
         for file in files {
-            if total_chunks >= VECTOR_SEED_MAX_CHUNKS {
+            if total_chunks >= chunk_cap {
+                cap_truncated = true;
                 break;
             }
+            files_indexed += 1;
             let read_path = file.clone();
             let content = match tokio::task::spawn_blocking(move || {
                 std::fs::read_to_string(&read_path)
@@ -629,7 +684,8 @@ fn spawn_vector_index_seed(root: PathBuf, index: SharedVectorCodeIndex) {
                 .collect();
             index.remove_ids(&stale).await;
             for chunk in chunks {
-                if total_chunks >= VECTOR_SEED_MAX_CHUNKS {
+                if total_chunks >= chunk_cap {
+                    cap_truncated = true;
                     break;
                 }
                 total_chunks += 1;
@@ -682,11 +738,25 @@ fn spawn_vector_index_seed(root: PathBuf, index: SharedVectorCodeIndex) {
                 "vector snapshot persist failed; cold start will re-embed"
             );
         }
+        if cap_truncated {
+            tracing::warn!(
+                target: "rag.code_index",
+                chunk_cap,
+                files_indexed,
+                total_seed_files,
+                root = %root.display(),
+                "vector code index hit the chunk cap; only the most-recently-modified \
+                 files were embedded. Dense retrieval covers a subset of this repo; \
+                 raise the cap or rely on lexical/symbol search for the remainder"
+            );
+        }
         tracing::info!(
             target: "rag.code_index",
             chunks = total_chunks,
             reused = reused_chunks,
             embedded = embedded_chunks,
+            files_indexed,
+            total_seed_files,
             root = %root.display(),
             "vector code index seeding complete"
         );
@@ -712,9 +782,6 @@ fn build_vector_index_for(root: &Path) -> Option<SharedVectorCodeIndex> {
         api_key,
         dims,
     } = cfg_arc.code_rag.embedder.clone();
-    // Inherit the primary provider key for the openai embedder backend so dense
-    // retrieval works out of the box when the user has configured an
-    // OpenAI-compatible provider but never set a separate embedder key.
     let main_provider_api_key = cfg_arc
         .api_key
         .clone()
@@ -788,9 +855,6 @@ fn build_vector_index_for(root: &Path) -> Option<SharedVectorCodeIndex> {
 
     let index = VectorCodeIndex::new(embedder, VectorCodeIndexConfig::default());
     let arc: SharedVectorCodeIndex = Arc::new(index);
-    // Insert under a write lock with a re-check so two racing builders converge on
-    // ONE cached instance; otherwise the loser's unseeded index could be cached
-    // (its seed is suppressed by vector_seed_started) and hand out empty results.
     let arc = if let Ok(mut guard) = code_rag_vector_cache().write() {
         if let Some(existing) = guard.get(root) {
             return Some(existing.clone());
@@ -835,6 +899,7 @@ pub fn symbol_graph_source_state(workspace_root: &Path) -> SymbolGraphSourceStat
                 workspace_root: root,
                 per_file_cap: 12,
                 dependents_cap: 5,
+                repo_map_cache: parking_lot::Mutex::new(None),
             }))
         }
         WriterAvailability::Building => SymbolGraphSourceState::Building,
@@ -897,6 +962,14 @@ pub fn invalidate_caches() {
     }
 }
 
+pub fn note_lexical_watcher_alive(root: &Path) {
+    if let Ok(guard) = code_rag_cache().read() {
+        if let Some(index) = guard.get(root) {
+            index.mark_walk_fresh();
+        }
+    }
+}
+
 pub fn note_code_files_changed(paths: &[PathBuf]) {
     if paths.is_empty() {
         return;
@@ -906,9 +979,6 @@ pub fn note_code_files_changed(paths: &[PathBuf]) {
     if let Ok(guard) = code_rag_cache().read() {
         for (root, index) in guard.iter() {
             for p in &paths {
-                // Only touch the index whose workspace root actually contains the
-                // path, otherwise a file from workspace A would be inserted into
-                // workspace B's lexical index (cross-workspace contamination).
                 if !p.starts_with(root) {
                     continue;
                 }
@@ -931,16 +1001,24 @@ pub fn note_code_files_changed(paths: &[PathBuf]) {
     }
     crate::runtime::spawn_supervised("rag.incremental_update", async move {
         for (root, index) in vector_indexes {
-            // Serialize against the seed task (and other incremental updates) for
-            // this root so remove_path+upsert never interleaves with seeding.
             let lock = vector_index_lock(&root);
             let _guard = lock.lock().await;
+            let ignore_root = root.clone();
+            let ignore = tokio::task::spawn_blocking(move || {
+                crate::code_intel::search::build_gitignore_set(&ignore_root)
+            })
+            .await
+            .ok()
+            .flatten();
             let mut touched = false;
             for p in &paths {
                 if !p.starts_with(&root) {
                     continue;
                 }
-                if !p.exists() || !is_seedable_source_file(p) {
+                let ignored = ignore.as_ref().is_some_and(|set| {
+                    crate::code_intel::search::path_is_gitignored(set, &root, p)
+                });
+                if !p.exists() || !is_seedable_source_file(p) || ignored {
                     index.remove_path(p).await;
                     touched = true;
                     continue;
@@ -970,8 +1048,6 @@ pub fn note_code_files_changed(paths: &[PathBuf]) {
                     .into_iter()
                     .filter(|id| !current_ids.contains(id))
                     .collect();
-                index.remove_ids(&stale).await;
-                touched = true;
                 let mut to_embed: Vec<crate::rag::vector_code_index::CodeChunk> = Vec::new();
                 for chunk in chunks {
                     if index.contains_same_content(&chunk.id, &chunk.content).await {
@@ -983,10 +1059,13 @@ pub fn note_code_files_changed(paths: &[PathBuf]) {
                     tracing::debug!(
                         target: "rag.code_index",
                         error = %err,
-                        "incremental vector upsert skipped (embedder unavailable)"
+                        "incremental vector upsert skipped (embedder unavailable); \
+                         leaving previous chunks intact"
                     );
                     break;
                 }
+                index.remove_ids(&stale).await;
+                touched = true;
             }
             if touched && vector_snapshot_save_due(&root) {
                 if let Err(err) = index.save_snapshot(&vector_snapshot_dir(&root)).await {
@@ -1070,8 +1149,6 @@ fn same_file(a: &Path, b: &Path) -> bool {
     if a_str == b_str {
         return true;
     }
-    // Suffix match must align on a path separator so `lib.rs` does not match
-    // `b.rs` (which would attribute one file's symbols to another).
     let suffix_matches = |long: &str, short: &str| -> bool {
         long.strip_suffix(short)
             .is_some_and(|prefix| prefix.is_empty() || prefix.ends_with('/'))

@@ -1700,7 +1700,6 @@ function CodingModeSettings() {
       try {
         ;(e.currentTarget as HTMLElement).setPointerCapture(st.pointerId)
       } catch {
-        /* capture not supported */
       }
     }
     const targetId = findModeAtPoint(e.clientX, e.clientY)
@@ -1714,7 +1713,6 @@ function CodingModeSettings() {
     try {
       ;(e.currentTarget as HTMLElement).releasePointerCapture(st.pointerId)
     } catch {
-      /* capture not supported */
     }
     if (st.active) {
       suppressClickRef.current = true

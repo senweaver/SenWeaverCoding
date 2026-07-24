@@ -162,7 +162,6 @@ export function DesignerCanvasPanel() {
       try {
         window.getSelection()?.removeAllRanges()
       } catch {
-        /* ignore */
       }
       selectUnit(activeTabId, null)
       const startX = event.clientX
@@ -176,7 +175,6 @@ export function DesignerCanvasPanel() {
         try {
           el.setPointerCapture(pointerId)
         } catch {
-          /* ignore */
         }
       }
       const onMove = (ev: PointerEvent) => {
@@ -191,7 +189,6 @@ export function DesignerCanvasPanel() {
           try {
             el.releasePointerCapture(pointerId)
           } catch {
-            /* ignore */
           }
         }
         window.removeEventListener('pointermove', onMove)

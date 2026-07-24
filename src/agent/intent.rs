@@ -311,10 +311,6 @@ const TDD_KEYWORDS: &[&str] = &[
     "测试驱动", "先写测试",
 ];
 
-// Deliberately excludes weak connectives like "then"/"steps" that appear in
-// ordinary coding requests ("fix the bug then run tests"): they used to push the
-// keyword fallback into read-only Plan mode under Auto. Kept signals are ones
-// that genuinely indicate a planning request.
 const PLAN_KEYWORDS: &[&str] = &[
     "plan", "step by step", "roadmap", "milestone", "after that", "phase",
     "计划", "路线",
@@ -362,17 +358,10 @@ pub fn analyze_intent(message: &str) -> IntentAnalysis {
         .max_by_key(|(_, hits)| *hits)
         .filter(|(_, hits)| *hits > 0);
 
-    // Require a strong plan signal (>=2 keyword hits) before overriding a coding
-    // intent, so a single incidental planning word can't route a write task into
-    // read-only Plan mode. A genuinely complex coding request with an explicit
-    // plan word still qualifies.
     let plan_worthy = plan_hits >= 2
         || (matches!(complexity, ComplexityTier::Complex) && coding_hits > 0 && plan_hits > 0);
 
     let (intent, base) = match best {
-        // Plan wins as the max only when its signal is strong; otherwise defer to
-        // the next-best coding-ish intent on ties (array order put Plan last, so a
-        // 1-1 tie previously handed the turn to Plan).
         Some((TaskIntent::Plan, hits)) if plan_worthy => (TaskIntent::Plan, hits),
         Some((TaskIntent::Plan, _)) => {
             let coding_like = [

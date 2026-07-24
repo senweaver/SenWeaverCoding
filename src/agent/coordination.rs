@@ -18,11 +18,6 @@ use super::registry::AgentId;
 use crate::observability::coordination_metrics::{self, LockAcquireOutcome};
 
 fn path_escapes_session_workspace(path: &Path) -> bool {
-    // Without a session workspace (e.g. a headless delegate_parallel executor
-    // whose workspace may differ from the process CWD) there is no reliable
-    // boundary to check against, so do not fabricate one — return "no escape"
-    // as before. The real path allowlist is enforced by SecurityPolicy; this
-    // region-lock check only adds a boundary when a session workspace is known.
     let root = match crate::session::current_session_context() {
         Some(ctx) if !ctx.workspace_dir.trim().is_empty() => PathBuf::from(&ctx.workspace_dir),
         _ => return false,
@@ -461,8 +456,6 @@ impl LockManager {
             locks.retain(|_, entry| entry.owner != agent_id);
             before - locks.len()
         };
-        // Also drop any file-region locks the agent still holds, otherwise a dead
-        // agent's byte-range locks linger until TTL and needlessly block siblings.
         {
             let mut regions = self.file_regions.write();
             for entries in regions.values_mut() {

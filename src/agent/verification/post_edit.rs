@@ -44,9 +44,6 @@ pub fn is_checkable_mutation(tool_name: &str) -> bool {
     )
 }
 
-// Runs an in-process syntax check plus a cached-LSP-diagnostics lookup on the
-// files a mutation tool just touched, returning a compact report the loop
-// appends to the tool result. Silent when everything is clean.
 pub async fn post_edit_check(
     tool_name: &str,
     args: &Value,
@@ -61,12 +58,6 @@ pub async fn post_edit_check(
     }
     paths.sort_by_key(|p| !is_code_extension(p));
 
-    // The edit just fired a didChange; the language server needs a moment to
-    // recompute. Pull fresh diagnostics where supported (rust-analyzer et al.)
-    // and give push-only servers (tsserver) a brief settle window so the
-    // notification pump can land the new set — otherwise we would report the
-    // pre-edit cached diagnostics (missing new errors, flagging already-fixed
-    // ones). Bounded and best-effort; the caller wraps this in a 3s timeout.
     if let Some(svc) = crate::services::try_get_services() {
         if let Some(root) = crate::session::current_session_context()
             .map(|c| PathBuf::from(c.workspace_dir))
@@ -82,7 +73,6 @@ pub async fn post_edit_check(
                 .collect();
             if !refresh_targets.is_empty() {
                 let refresh_futs = refresh_targets.into_iter().map(|(p, lang)| {
-                    let svc = svc.clone();
                     let root = root.clone();
                     async move {
                         let _ = tokio::time::timeout(

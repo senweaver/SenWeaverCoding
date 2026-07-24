@@ -100,8 +100,6 @@ impl OAuthService {
         }
     }
 
-    // Enable encrypted on-disk persistence so OAuth tokens survive a restart
-    // instead of living only in memory. Existing tokens are loaded immediately.
     pub async fn configure_persistence(&self, state_dir: &std::path::Path, encrypt: bool) {
         let path = state_dir.join("oauth-tokens.json");
         let secrets = crate::security::secrets::SecretStore::new(state_dir, encrypt);

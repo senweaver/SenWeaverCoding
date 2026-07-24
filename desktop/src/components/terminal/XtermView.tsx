@@ -81,11 +81,6 @@ export function XtermView(props: XtermViewProps) {
     onErrorRef.current = onError
   })
 
-  // Capture the cwd only for the FIRST spawn. Keeping `initialCwd` in the boot
-  // effect deps meant a later working-directory change (useTerminalCwdSync writes
-  // `cd` + updates tab.cwd) re-ran the effect, whose cleanup KILLS the PTY and
-  // respawns it — silently terminating a running dev server on tab switch. The
-  // cwd change is already applied via the `cd` command; the live PTY must survive.
   const initialCwdRef = useRef(initialCwd)
 
   const fitRafRef = useRef<number | null>(null)
@@ -111,7 +106,6 @@ export function XtermView(props: XtermViewProps) {
       try {
         fitAddon.fit()
       } catch {
-        /* host element may be 0x0 transiently; ignore */
       }
       if (mode === 'pty') {
         const sid = sessionIdRef.current
@@ -149,9 +143,6 @@ export function XtermView(props: XtermViewProps) {
   useEffect(() => {
     if (!active) return
     fit()
-    // Agent-mirror views are read-only (disableStdin); grabbing DOM focus for
-    // them swallowed keystrokes after chat-session switches re-targeted the
-    // active terminal tab. Only interactive PTY tabs may claim focus.
     if (mode === 'pty') {
       terminalRef.current?.focus()
     }
@@ -191,7 +182,6 @@ export function XtermView(props: XtermViewProps) {
       try {
         fitAddon.fit()
       } catch {
-        /* size 0 transiently */
       }
 
       observer = new ResizeObserver(() => fit())
@@ -222,7 +212,6 @@ export function XtermView(props: XtermViewProps) {
           try {
             outputUnlisten()
           } catch {
-            /* ignore */
           }
           return
         }
@@ -237,7 +226,6 @@ export function XtermView(props: XtermViewProps) {
             outputUnlisten()
             exitUnlisten()
           } catch {
-            /* ignore */
           }
           return
         }
@@ -312,7 +300,6 @@ export function XtermView(props: XtermViewProps) {
         try {
           u()
         } catch {
-          /* ignore */
         }
       })
       unlistenRef.current = []

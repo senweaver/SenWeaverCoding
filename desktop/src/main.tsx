@@ -22,9 +22,6 @@ function currentWindowLabelSync(): string | null {
 
 type MinimalWindowKind = 'minimal' | 'minimal-input' | null
 
-// Detects the minimal floating windows without depending on any single fragile
-// signal: a query param (reliably preserved by Tauri), the URL hash, and the
-// Tauri window label read straight from injected internals.
 function minimalWindowKindSync(): MinimalWindowKind {
   try {
     const hash = window.location.hash.replace(/^#/, '').split('?')[0]
@@ -60,8 +57,6 @@ function revealWindowNow() {
   if (revealRequested) return
   revealRequested = true
   void (async () => {
-    // The minimal floating window must reveal ITSELF; it must never invoke the
-    // main window's frontend-ready path (that shows the "main" window).
     if (isMinimalContextSync()) {
       await showCurrentWindow()
       return
@@ -111,10 +106,6 @@ function paintBootError(label: string, message: string, stack?: string) {
   btn.onclick = () => window.location.reload()
   wrap.appendChild(btn)
   root.appendChild(wrap)
-  // Surface the real failure to the main window (which stays visible) so the
-  // user isn't left staring at an invisible/blank minimal window. The minimal
-  // window must NOT reveal itself here: it is a hidden, always-on-top card that
-  // should only ever appear when the user explicitly enters minimal mode.
   if (isMinimalContextSync()) {
     void (async () => {
       try {
@@ -183,9 +174,6 @@ function storedLocale(): 'en' | 'zh' {
   return 'zh'
 }
 
-// The minimal floating windows are identified without relying on any single
-// fragile signal. The synchronous checks (query param / hash / injected label)
-// cover every real case; the async getCurrentWindow() label is a last resort.
 async function detectMinimalWindowKind(): Promise<MinimalWindowKind> {
   const sync = minimalWindowKindSync()
   if (sync) return sync
@@ -245,15 +233,7 @@ async function boot() {
       ),
     )
     bootCompleted = true
-    // The minimal windows are persistent config windows that MUST stay hidden at
-    // startup; they are only revealed when the user enters minimal mode. So they
-    // do NOT self-reveal here. Only the main window uses the frontend-ready
-    // reveal path (which shows the "main" window specifically).
     if (!minimalKind) {
-      // The window starts hidden, so requestAnimationFrame-based reveals never
-      // fire (the WebView pauses rAF while occluded). Use a timer instead: the
-      // initial React mount has already committed real content into #root by the
-      // time this runs, so revealing here shows the app, never the boot placeholder.
       setTimeout(() => revealWindowNow(), 0)
     }
   } catch (err) {

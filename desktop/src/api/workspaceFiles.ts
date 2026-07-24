@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 import { api } from './client'
-import { getBaseUrl } from './client'
+import { getAuthToken, getBaseUrl, withAuthToken } from './client'
 import type {
   FileContent,
   FileSearchResponse,
@@ -74,7 +74,7 @@ export const workspaceFilesApi = {
       .filter(Boolean)
       .map((s) => encodeURIComponent(s))
       .join('/')
-    return `${getBaseUrl()}/api/workspace/raw/${encodeURIComponent(rawId)}/${segs}`
+    return withAuthToken(`${getBaseUrl()}/api/workspace/raw/${encodeURIComponent(rawId)}/${segs}`)
   },
 
   writeFile(opts: {
@@ -125,9 +125,14 @@ export const workspaceFilesApi = {
     opts: { root: string; fromPath: string; toDir: string; signal?: AbortSignal },
     onEvent: (event: WorkspaceCopyEvent) => void,
   ): Promise<void> {
+    const copyHeaders: Record<string, string> = { 'Content-Type': 'application/json' }
+    const copyToken = getAuthToken()
+    if (copyToken) {
+      copyHeaders['X-Sen-Gateway-Token'] = copyToken
+    }
     const res = await fetch(`${getBaseUrl()}/api/workspace/copy`, {
       method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
+      headers: copyHeaders,
       body: JSON.stringify({
         root: opts.root,
         fromPath: opts.fromPath,
@@ -233,7 +238,7 @@ export const workspaceFilesApi = {
     if (typeof window === 'undefined' || typeof window.EventSource !== 'function') {
       return () => {}
     }
-    const url = `${getBaseUrl()}/api/workspace/watch${qs({ root })}`
+    const url = withAuthToken(`${getBaseUrl()}/api/workspace/watch${qs({ root })}`)
     let disposed = false
     let source: EventSource | null = null
     let retryTimer: ReturnType<typeof setTimeout> | null = null

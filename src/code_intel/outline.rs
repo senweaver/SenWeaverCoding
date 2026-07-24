@@ -339,9 +339,6 @@ fn find_named_scope_with_pattern(
 ) -> Option<std::ops::Range<usize>> {
     let bytes = content.as_bytes();
     let is_ident_byte = |b: u8| b.is_ascii_alphanumeric() || b == b'_';
-    // The bare `NAME(` fallback pattern can otherwise anchor onto a call site
-    // and return a wrong "scope" range. Only accept it when NAME is the first
-    // token on its line (method shorthand / bare declaration), never mid-line.
     let bare_call_pattern = search == format!("{name}(");
     let leading_boundary_exempt = search.starts_with(") ");
 

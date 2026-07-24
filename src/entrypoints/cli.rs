@@ -153,13 +153,18 @@ impl CliEntrypoint {
 
         {
             crate::workers::init_global_supervisor(cwd.clone());
-            crate::workers::scan_and_recover_at(&cwd);
+            crate::workers::scan_and_recover_with_resume(
+                &cwd,
+                Some(crate::workers::WorkerRunContext {
+                    config: std::sync::Arc::new(config.clone()),
+                    live_config: None,
+                    parent_workspace_dir: None,
+                    parent_permission_mode: None,
+                    parent_cost_ctx: None,
+                }),
+            );
         }
 
-        // The headless/interactive CLI paths must install the workspace resource
-        // manager too (the gateway installs its own). Without it the cross-session
-        // write lock and stale-file detection are inert on the no-gateway path, so
-        // concurrent agent sessions sharing this workspace would not serialize.
         crate::session::install_global_workspace_resources(
             crate::session::WorkspaceResourceManager::new(),
         );
@@ -315,6 +320,12 @@ impl CliEntrypoint {
                  but [gateway] paired_tokens in config.toml is empty. Pair with the gateway first \
                  (or add a valid token to [gateway] / disable require_pairing), then retry."
             );
+        } else if let Some(token) = config
+            .config_path
+            .parent()
+            .and_then(crate::gateway::loopback_auth::read_token_file)
+        {
+            url.push_str(&format!("&token={token}"));
         }
 
         tracing::info!(url = %format!("ws://{host}:{port}/ws/chat"), "Remote mode: connecting to gateway");

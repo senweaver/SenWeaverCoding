@@ -9,12 +9,6 @@ use regex::Regex;
 
 use crate::providers::ToolCall;
 
-// Gate for the two loosest text fallbacks (GLM one-line shorthand and bare JSON
-// scanning). Those layers have a very wide false-positive surface: a final
-// answer that merely contains `docs/setup>see README` or a `{"name":...}`
-// example would otherwise be executed as a real tool call. They only make sense
-// for providers that cannot emit native tool calls, and only when the parsed
-// name is an actually-registered tool.
 #[derive(Clone, Copy)]
 pub(crate) struct ParseGate<'a> {
     pub native_tools_supported: bool,
@@ -23,12 +17,10 @@ pub(crate) struct ParseGate<'a> {
 
 impl ParseGate<'_> {
     fn loose_fallbacks_enabled(gate: Option<&ParseGate<'_>>) -> bool {
-        // No gate => permissive (preserves behavior for callers without context).
         gate.is_none_or(|g| !g.native_tools_supported)
     }
 
     fn name_is_known(gate: Option<&ParseGate<'_>>, name: &str) -> bool {
-        // No gate => cannot verify, accept. With a gate, require registry membership.
         gate.is_none_or(|g| g.known_tools.contains(name))
     }
 }
@@ -893,10 +885,6 @@ pub(crate) fn parse_glm_shortened_body(body: &str) -> Option<ParsedToolCall> {
     }
 
     None
-}
-
-pub(crate) fn parse_tool_calls(response: &str) -> (String, Vec<ParsedToolCall>) {
-    parse_tool_calls_gated(response, None)
 }
 
 pub(crate) fn parse_tool_calls_gated(

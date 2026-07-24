@@ -117,11 +117,6 @@ impl EmbeddingProvider for OpenAiEmbedding {
             "model": self.model,
             "input": texts,
         });
-        // Pin the output dimensionality for models that support it (text-embedding-3-*)
-        // so the returned vectors actually match the configured `dims`. Without
-        // this the model returns its native size (e.g. 1536 for 3-small) while the
-        // fingerprint/snapshot expects `dims` (e.g. 768), so every cold start
-        // discarded the snapshot and re-embedded the whole corpus.
         if self.model.starts_with("text-embedding-3") {
             body["dimensions"] = serde_json::json!(self.dims);
         }
@@ -348,10 +343,6 @@ pub fn create_embedding_provider(
             ))
         }
         "ollama" => {
-            // Local Ollama exposes an OpenAI-compatible embeddings endpoint and needs
-            // no API key, so dense retrieval works out of the box on the default build
-            // for anyone running Ollama with an embedding model (e.g. nomic-embed-text,
-            // bge-m3). Honour OLLAMA_HOST / SEN_OLLAMA_HOST for non-default hosts.
             let base = crate::util::get_runtime_var("OLLAMA_HOST")
                 .or_else(|| crate::util::get_runtime_var("SEN_OLLAMA_HOST"))
                 .map(|h| {

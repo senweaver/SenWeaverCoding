@@ -226,6 +226,8 @@ pub struct CronAddBody {
     pub model: Option<String>,
     pub allowed_tools: Option<Vec<String>>,
     pub delete_after_run: Option<bool>,
+    pub folder_path: Option<String>,
+    pub use_worktree: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -814,6 +816,8 @@ pub async fn handle_api_cron_add(
         model,
         allowed_tools,
         delete_after_run,
+        folder_path,
+        use_worktree,
     } = body;
 
     let config = state.config.lock().clone();
@@ -863,6 +867,8 @@ pub async fn handle_api_cron_add(
                 delivery,
                 delete_after_run,
                 allowed_tools,
+                folder_path,
+                use_worktree,
                 ..Default::default()
             },
         )
@@ -2247,9 +2253,6 @@ pub async fn handle_api_session_messages(
                 .unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
             match limit_param {
                 Some(limit) => {
-                    // Single-snapshot page read: count, window and user-index
-                    // base all come from one transaction, so a concurrent
-                    // purge/delete can't shift the OFFSET mid-composition.
                     let (loaded, start, total, base_user_index) = backend_arc
                         .load_page_with_counts(&session_key_owned, before_param, limit);
                     (loaded, start, total, base_user_index, last_activity)
@@ -2290,9 +2293,6 @@ pub async fn handle_api_session_messages(
             {
                 let is_live_user = lm.message.role == "user" && lm.tombstoned_at.is_none();
                 let user_message_index = is_live_user.then_some(running_user_index);
-                // Per-row created_at gives every entry its real timestamp; the
-                // session's last_activity is only a fallback — stamping ALL rows
-                // with it made whole transcripts share one fake time in the UI.
                 let row_ts = lm.created_at.as_deref().unwrap_or(&last_activity_for_map);
                 out.push(message_entry_with_tombstone(
                     &id_for_map,
@@ -2716,9 +2716,6 @@ pub async fn handle_api_session_slash_commands(
         return e.into_response();
     }
 
-    // Desktop sessions execute commands over WS without a TTY: advertise only
-    // the commands that surface can actually run (plus /clear, which the WS
-    // handler implements with desktop semantics).
     let registry = crate::commands::registry::CommandRegistry::from_inventory();
     let mut commands: Vec<serde_json::Value> = registry
         .available_commands(false, false)
@@ -2831,9 +2828,12 @@ fn rewind_session_locks()
     LOCKS.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
 }
 
-async fn acquire_rewind_lock(session_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
+pub(crate) async fn acquire_rewind_lock(session_id: &str) -> tokio::sync::OwnedMutexGuard<()> {
     let lock = {
         let mut map = rewind_session_locks().lock();
+        if map.len() > 64 {
+            map.retain(|_, l| std::sync::Arc::strong_count(l) > 1);
+        }
         std::sync::Arc::clone(
             map.entry(session_id.to_string())
                 .or_insert_with(|| std::sync::Arc::new(tokio::sync::Mutex::new(()))),
@@ -2842,9 +2842,6 @@ async fn acquire_rewind_lock(session_id: &str) -> tokio::sync::OwnedMutexGuard<(
     lock.lock_owned().await
 }
 
-/// Returns a 409 response if the session currently has a turn running, so
-/// file-mutating rewind/restore/revert endpoints don't race an in-flight turn's
-/// writes. `None` means it is safe to proceed.
 fn reject_if_session_running(state: &AppState, id: &str) -> Option<axum::response::Response> {
     if state.session_run_state.is_running(id) {
         return Some(
@@ -3272,9 +3269,6 @@ pub async fn handle_api_session_rewind_commit(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    // Purging tombstoned rows compacts the positional id space; doing that while
-    // a turn is appending would shift the running turn's rows mid-flight. Same
-    // guard as rewind/restore.
     if let Some(resp) = reject_if_session_running(&state, &id) {
         return resp;
     }
@@ -3385,6 +3379,239 @@ pub async fn handle_api_session_revert_batches(
         "ok": failed_batch_ids.is_empty(),
         "revertedPaths": reverted_paths,
         "failedBatchIds": failed_batch_ids,
+    }))
+    .into_response()
+}
+
+const EDIT_REVIEW_MAX_SIDE_BYTES: usize = 1_048_576;
+
+fn edit_review_rel_path_ok(rel: &str) -> bool {
+    if rel.is_empty() {
+        return false;
+    }
+    let p = std::path::Path::new(rel);
+    if p.is_absolute() {
+        return false;
+    }
+    !p.components().any(|c| {
+        matches!(
+            c,
+            std::path::Component::ParentDir | std::path::Component::Prefix(_)
+        )
+    })
+}
+
+fn edit_review_file_entry(
+    workspace: &std::path::Path,
+    history: &crate::tools::edit_history::EditHistory,
+    file: &crate::tools::edit_history::SessionEditedFile,
+) -> Option<serde_json::Value> {
+    let abs = workspace.join(&file.rel_path);
+    let before_bytes: Vec<u8> = if file.pre_image.absent {
+        Vec::new()
+    } else {
+        history.read_blob(&file.pre_image.sha256).ok()?
+    };
+    let after_bytes = std::fs::read(&abs).ok();
+    let exists_now = after_bytes.is_some();
+    let after_bytes = after_bytes.unwrap_or_default();
+
+    if before_bytes == after_bytes && (exists_now || file.pre_image.absent) {
+        return None;
+    }
+
+    let status = if file.pre_image.absent {
+        if exists_now { "created" } else { "noop" }
+    } else if !exists_now {
+        "deleted"
+    } else {
+        "modified"
+    };
+    if status == "noop" {
+        return None;
+    }
+
+    let (additions, deletions) = if before_bytes.len() <= EDIT_REVIEW_MAX_SIDE_BYTES
+        && after_bytes.len() <= EDIT_REVIEW_MAX_SIDE_BYTES
+    {
+        let before_text = String::from_utf8_lossy(&before_bytes);
+        let after_text = String::from_utf8_lossy(&after_bytes);
+        let diff = similar::TextDiff::from_lines(before_text.as_ref(), after_text.as_ref());
+        let mut adds: u64 = 0;
+        let mut dels: u64 = 0;
+        for change in diff.iter_all_changes() {
+            match change.tag() {
+                similar::ChangeTag::Insert => adds += 1,
+                similar::ChangeTag::Delete => dels += 1,
+                similar::ChangeTag::Equal => {}
+            }
+        }
+        (Some(adds), Some(dels))
+    } else {
+        (None, None)
+    };
+
+    Some(serde_json::json!({
+        "path": file.rel_path,
+        "status": status,
+        "additions": additions,
+        "deletions": deletions,
+        "batchIds": file.batch_ids,
+        "firstSnapshotIndex": file.first_snapshot_index,
+    }))
+}
+
+pub async fn handle_api_session_edit_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let session_key = format!("{GW_SESSION_PREFIX}{id}");
+    let files = {
+        let state_cl = state.clone();
+        tokio::task::spawn_blocking(move || {
+            let workspace = resolve_session_workspace(&state_cl, &session_key);
+            let history =
+                crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
+            let mut out: Vec<serde_json::Value> = Vec::new();
+            for file in history.session_edited_files() {
+                if let Some(entry) = edit_review_file_entry(&workspace, &history, &file) {
+                    out.push(entry);
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default()
+    };
+    Json(serde_json::json!({ "files": files })).into_response()
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EditReviewFileQuery {
+    pub path: String,
+}
+
+pub async fn handle_api_session_edit_review_file(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<EditReviewFileQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if !edit_review_rel_path_ok(&query.path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid path"})),
+        )
+            .into_response();
+    }
+    let session_key = format!("{GW_SESSION_PREFIX}{id}");
+    let rel_path = query.path.clone();
+    let result = {
+        let state_cl = state.clone();
+        tokio::task::spawn_blocking(move || {
+            let workspace = resolve_session_workspace(&state_cl, &session_key);
+            let history =
+                crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
+            let abs = workspace.join(&rel_path);
+            let Some((_, pre_image)) = history.session_first_index_for(&abs) else {
+                return None;
+            };
+            let before_bytes: Vec<u8> = if pre_image.absent {
+                Vec::new()
+            } else {
+                history.read_blob(&pre_image.sha256).unwrap_or_default()
+            };
+            let after_bytes = std::fs::read(&abs).unwrap_or_default();
+            let before_truncated = before_bytes.len() > EDIT_REVIEW_MAX_SIDE_BYTES;
+            let after_truncated = after_bytes.len() > EDIT_REVIEW_MAX_SIDE_BYTES;
+            let clip = |bytes: &[u8]| -> String {
+                let end = bytes.len().min(EDIT_REVIEW_MAX_SIDE_BYTES);
+                String::from_utf8_lossy(&bytes[..end]).into_owned()
+            };
+            Some(serde_json::json!({
+                "path": rel_path,
+                "before": clip(&before_bytes),
+                "after": clip(&after_bytes),
+                "beforeTruncated": before_truncated,
+                "afterTruncated": after_truncated,
+                "createdInSession": pre_image.absent,
+            }))
+        })
+        .await
+        .unwrap_or(None)
+    };
+    match result {
+        Some(body) => Json(body).into_response(),
+        None => (
+            StatusCode::NOT_FOUND,
+            Json(serde_json::json!({"error": "no session edit history for this path"})),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+pub struct SessionRevertFilesBody {
+    pub paths: Vec<String>,
+}
+
+pub async fn handle_api_session_revert_files(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<SessionRevertFilesBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
+    let _rewind_guard = acquire_rewind_lock(&id).await;
+
+    let session_key = format!("{GW_SESSION_PREFIX}{id}");
+    let (reverted, failed) = {
+        let state_cl = state.clone();
+        let paths = body.paths.clone();
+        tokio::task::spawn_blocking(move || {
+            let workspace = resolve_session_workspace(&state_cl, &session_key);
+            let history =
+                crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
+            let mut reverted: Vec<String> = Vec::new();
+            let mut failed: Vec<serde_json::Value> = Vec::new();
+            for rel in paths {
+                if !edit_review_rel_path_ok(&rel) {
+                    failed.push(serde_json::json!({"path": rel, "error": "invalid path"}));
+                    continue;
+                }
+                let abs = workspace.join(&rel);
+                match history.revert_to_session_start(&abs) {
+                    Ok(()) => reverted.push(rel),
+                    Err(e) => {
+                        failed.push(serde_json::json!({
+                            "path": rel,
+                            "error": e.to_string(),
+                        }));
+                    }
+                }
+            }
+            (reverted, failed)
+        })
+        .await
+        .unwrap_or_else(|_| (Vec::new(), Vec::new()))
+    };
+
+    Json(serde_json::json!({
+        "ok": failed.is_empty(),
+        "revertedPaths": reverted,
+        "failed": failed,
     }))
     .into_response()
 }

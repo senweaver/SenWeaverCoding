@@ -268,8 +268,6 @@ impl DispatchMode {
         if tool_names.len() <= 1 {
             return DispatchMode::Sequential;
         }
-        // A cap of 1 means parallelism is disabled (parallel_tools_enabled=false
-        // resolves the cap to 1); run strictly sequentially.
         if max_concurrency <= 1 {
             return DispatchMode::Sequential;
         }
@@ -279,17 +277,10 @@ impl DispatchMode {
         if tool_names.iter().any(|n| needs_approval(n.as_ref())) {
             return DispatchMode::Sequential;
         }
-        // Any file mutation in a multi-tool batch runs sequentially: a read
-        // racing a concurrent write can observe a half-applied file, and the
-        // per-session file write lock is reentrant within a session so it does
-        // not serialize same-session writers. Two shells also race on shared
-        // state (e.g. `cargo build` vs `cargo run` fighting over target/).
         let mutation_count = tool_names
             .iter()
             .filter(|n| crate::agent::mode::effects::is_file_mutation_tool(n.as_ref()))
             .count();
-        // Use the shared command-execution predicate (covers run_terminal_cmd /
-        // execute_command too) instead of a narrower literal list.
         let shell_count = tool_names
             .iter()
             .filter(|n| {

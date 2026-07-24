@@ -8,7 +8,6 @@ use serde_json::Value;
 use std::panic::AssertUnwindSafe;
 use tracing::info;
 
-use crate::channels::traits::ChannelMessage;
 use crate::providers::traits::{ChatMessage, ChatResponse};
 use crate::tools::traits::ToolResult;
 
@@ -63,15 +62,6 @@ impl HookRunner {
         Self::join_isolated("gateway_start", futs).await;
     }
 
-    pub async fn fire_gateway_stop(&self) {
-        let futs: Vec<_> = self
-            .handlers
-            .iter()
-            .map(|h| (h.name(), h.on_gateway_stop()))
-            .collect();
-        Self::join_isolated("gateway_stop", futs).await;
-    }
-
     pub async fn fire_session_start(&self, session_id: &str, channel: &str) {
         let futs: Vec<_> = self
             .handlers
@@ -117,55 +107,40 @@ impl HookRunner {
         Self::join_isolated("after_tool_call", futs).await;
     }
 
-    pub async fn fire_message_sent(&self, channel: &str, recipient: &str, content: &str) {
+    pub async fn fire_turn_end(&self, channel: &str, final_text: &str, tools_used: &[String]) {
         let futs: Vec<_> = self
             .handlers
             .iter()
-            .map(|h| (h.name(), h.on_message_sent(channel, recipient, content)))
+            .map(|h| (h.name(), h.on_turn_end(channel, final_text, tools_used)))
             .collect();
-        Self::join_isolated("message_sent", futs).await;
+        Self::join_isolated("turn_end", futs).await;
     }
 
-    pub async fn fire_heartbeat_tick(&self) {
+    pub async fn fire_subagent_stop(&self, worker_id: &str, status: &str, summary: &str) {
         let futs: Vec<_> = self
             .handlers
             .iter()
-            .map(|h| (h.name(), h.on_heartbeat_tick()))
+            .map(|h| (h.name(), h.on_subagent_stop(worker_id, status, summary)))
             .collect();
-        Self::join_isolated("heartbeat_tick", futs).await;
+        Self::join_isolated("subagent_stop", futs).await;
     }
 
-    pub async fn run_before_model_resolve(
-        &self,
-        mut provider: String,
-        mut model: String,
-    ) -> HookResult<(String, String)> {
-        for h in &self.handlers {
-            let hook_name = h.name();
-            match AssertUnwindSafe(h.before_model_resolve(provider.clone(), model.clone()))
-                .catch_unwind()
-                .await
-            {
-                Ok(HookResult::Continue((p, m))) => {
-                    provider = p;
-                    model = m;
-                }
-                Ok(HookResult::Cancel(reason)) => {
-                    info!(
-                        hook = hook_name,
-                        reason, "before_model_resolve cancelled by hook"
-                    );
-                    return HookResult::Cancel(reason);
-                }
-                Err(_) => {
-                    tracing::error!(
-                        hook = hook_name,
-                        "before_model_resolve hook panicked; continuing with previous values"
-                    );
-                }
-            }
-        }
-        HookResult::Continue((provider, model))
+    pub async fn fire_pre_compact(&self, trigger: &str, estimated_tokens: usize) {
+        let futs: Vec<_> = self
+            .handlers
+            .iter()
+            .map(|h| (h.name(), h.on_pre_compact(trigger, estimated_tokens)))
+            .collect();
+        Self::join_isolated("pre_compact", futs).await;
+    }
+
+    pub async fn fire_notification(&self, kind: &str, message: &str) {
+        let futs: Vec<_> = self
+            .handlers
+            .iter()
+            .map(|h| (h.name(), h.on_notification(kind, message)))
+            .collect();
+        Self::join_isolated("notification", futs).await;
     }
 
     pub async fn run_before_prompt_build(&self, mut prompt: String) -> HookResult<String> {
@@ -176,6 +151,17 @@ impl HookRunner {
                 .await
             {
                 Ok(HookResult::Continue(p)) => prompt = p,
+                Ok(HookResult::RequireApproval(_, message)) => {
+                    let reason = message
+                        .unwrap_or_else(|| "manual approval required".to_string());
+                    info!(
+                        hook = hook_name,
+                        reason, "before_prompt_build ask degraded to cancel"
+                    );
+                    return HookResult::Cancel(format!(
+                        "hooks.json requested user confirmation: {reason}"
+                    ));
+                }
                 Ok(HookResult::Cancel(reason)) => {
                     info!(
                         hook = hook_name,
@@ -194,44 +180,12 @@ impl HookRunner {
         HookResult::Continue(prompt)
     }
 
-    pub async fn run_before_llm_call(
-        &self,
-        mut messages: Vec<ChatMessage>,
-        mut model: String,
-    ) -> HookResult<(Vec<ChatMessage>, String)> {
-        for h in &self.handlers {
-            let hook_name = h.name();
-            match AssertUnwindSafe(h.before_llm_call(messages.clone(), model.clone()))
-                .catch_unwind()
-                .await
-            {
-                Ok(HookResult::Continue((m, mdl))) => {
-                    messages = m;
-                    model = mdl;
-                }
-                Ok(HookResult::Cancel(reason)) => {
-                    info!(
-                        hook = hook_name,
-                        reason, "before_llm_call cancelled by hook"
-                    );
-                    return HookResult::Cancel(reason);
-                }
-                Err(_) => {
-                    tracing::error!(
-                        hook = hook_name,
-                        "before_llm_call hook panicked; continuing with previous values"
-                    );
-                }
-            }
-        }
-        HookResult::Continue((messages, model))
-    }
-
     pub async fn run_before_tool_call(
         &self,
         mut name: String,
         mut args: Value,
     ) -> HookResult<(String, Value)> {
+        let mut approval_message: Option<String> = None;
         for h in &self.handlers {
             let hook_name = h.name();
             match AssertUnwindSafe(h.before_tool_call(name.clone(), args.clone()))
@@ -241,6 +195,19 @@ impl HookRunner {
                 Ok(HookResult::Continue((n, a))) => {
                     name = n;
                     args = a;
+                }
+                Ok(HookResult::RequireApproval((n, a), message)) => {
+                    name = n;
+                    args = a;
+                    info!(
+                        hook = hook_name,
+                        "before_tool_call requires user approval (hook ask)"
+                    );
+                    if approval_message.is_none() {
+                        approval_message = Some(message.unwrap_or_else(|| {
+                            "manual approval required by hooks.json".to_string()
+                        }));
+                    }
                 }
                 Ok(HookResult::Cancel(reason)) => {
                     info!(
@@ -257,74 +224,9 @@ impl HookRunner {
                 }
             }
         }
-        HookResult::Continue((name, args))
-    }
-
-    pub async fn run_on_message_received(
-        &self,
-        mut message: ChannelMessage,
-    ) -> HookResult<ChannelMessage> {
-        for h in &self.handlers {
-            let hook_name = h.name();
-            match AssertUnwindSafe(h.on_message_received(message.clone()))
-                .catch_unwind()
-                .await
-            {
-                Ok(HookResult::Continue(m)) => message = m,
-                Ok(HookResult::Cancel(reason)) => {
-                    info!(
-                        hook = hook_name,
-                        reason, "on_message_received cancelled by hook"
-                    );
-                    return HookResult::Cancel(reason);
-                }
-                Err(_) => {
-                    tracing::error!(
-                        hook = hook_name,
-                        "on_message_received hook panicked; continuing with previous message"
-                    );
-                }
-            }
+        match approval_message {
+            Some(message) => HookResult::RequireApproval((name, args), Some(message)),
+            None => HookResult::Continue((name, args)),
         }
-        HookResult::Continue(message)
-    }
-
-    pub async fn run_on_message_sending(
-        &self,
-        mut channel: String,
-        mut recipient: String,
-        mut content: String,
-    ) -> HookResult<(String, String, String)> {
-        for h in &self.handlers {
-            let hook_name = h.name();
-            match AssertUnwindSafe(h.on_message_sending(
-                channel.clone(),
-                recipient.clone(),
-                content.clone(),
-            ))
-            .catch_unwind()
-            .await
-            {
-                Ok(HookResult::Continue((c, r, ct))) => {
-                    channel = c;
-                    recipient = r;
-                    content = ct;
-                }
-                Ok(HookResult::Cancel(reason)) => {
-                    info!(
-                        hook = hook_name,
-                        reason, "on_message_sending cancelled by hook"
-                    );
-                    return HookResult::Cancel(reason);
-                }
-                Err(_) => {
-                    tracing::error!(
-                        hook = hook_name,
-                        "on_message_sending hook panicked; continuing with previous message"
-                    );
-                }
-            }
-        }
-        HookResult::Continue((channel, recipient, content))
     }
 }

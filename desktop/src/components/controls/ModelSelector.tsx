@@ -296,10 +296,8 @@ export function ModelSelector({
   const handleRuntimeSelect = (selection: RuntimeSelection) => {
     if (!runtimeKey) return
     persistRuntimeSelection(runtimeKey, selection)
-    void syncRuntimeSelectionToBackend(
-      selection,
-      runtimeKey !== DRAFT_RUNTIME_SELECTION_KEY ? runtimeKey : null,
-    )
+    const scopedSessionId = runtimeKey !== DRAFT_RUNTIME_SELECTION_KEY ? runtimeKey : null
+    void syncRuntimeSelectionToBackend(selection, scopedSessionId, scopedSessionId === null)
     setOpen(false)
   }
 

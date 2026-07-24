@@ -13,8 +13,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::event::SessionEvent;
 use crate::workers::events::{WorkerMeta, WorkerSummary};
-use crate::workers::persistence::{WorkerEventLog, list_meta, read_meta};
-use crate::workers::supervisor::global_supervisor;
+use crate::workers::persistence::{WorkerEventLog, find_worker_root, list_meta, read_meta};
+use crate::workers::supervisor::{candidate_worker_roots, global_supervisor};
 
 #[derive(Debug, Deserialize)]
 pub struct ListQuery {
@@ -62,19 +62,23 @@ async fn handle_list(Query(q): Query<ListQuery>) -> impl IntoResponse {
 
     let mut summaries: Vec<WorkerSummary> = Vec::new();
 
-    let workspace_root = supervisor
-        .as_ref()
-        .map(|s| s.workspace_root().to_path_buf())
-        .or_else(|| crate::bootstrap::try_get_state().map(|st| st.read(|s| s.cwd.clone())))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
+    let roots = candidate_worker_roots();
 
     let metas = {
-        let wr = workspace_root.clone();
-        tokio::task::spawn_blocking(move || list_meta(&wr))
-            .await
-            .ok()
-            .and_then(Result::ok)
-            .unwrap_or_default()
+        tokio::task::spawn_blocking(move || {
+            let mut out: Vec<WorkerMeta> = Vec::new();
+            let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+            for root in &roots {
+                for meta in list_meta(root).unwrap_or_default() {
+                    if seen.insert(meta.worker_id.clone()) {
+                        out.push(meta);
+                    }
+                }
+            }
+            out
+        })
+        .await
+        .unwrap_or_default()
     };
 
     if let Some(parent) = q.session_id.as_deref() {
@@ -112,20 +116,25 @@ async fn handle_list(Query(q): Query<ListQuery>) -> impl IntoResponse {
 
 async fn handle_get(Path(id): Path<String>) -> impl IntoResponse {
     let supervisor = global_supervisor();
-    let workspace_root = supervisor
-        .as_ref()
-        .map(|s| s.workspace_root().to_path_buf())
-        .or_else(|| crate::bootstrap::try_get_state().map(|st| st.read(|s| s.cwd.clone())))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let summary = supervisor.as_ref().and_then(|s| s.summary_for(&id));
 
     let read_result = {
-        let wr = workspace_root.clone();
+        let roots = candidate_worker_roots();
+        let live_root = supervisor
+            .as_ref()
+            .and_then(|s| s.get(&id))
+            .map(|h| h.workspace_root.clone());
         let id = id.clone();
-        tokio::task::spawn_blocking(move || read_meta(&wr, &id))
-            .await
-            .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
+        tokio::task::spawn_blocking(move || {
+            let root = live_root
+                .or_else(|| find_worker_root(&roots, &id))
+                .or_else(|| roots.first().cloned())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            read_meta(&root, &id)
+        })
+        .await
+        .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
     };
 
     let meta = match read_result {
@@ -147,6 +156,8 @@ async fn handle_get(Path(id): Path<String>) -> impl IntoResponse {
                     finished_at: s.finished_at,
                     output: None,
                     error: None,
+                    workspace_dir: None,
+                    resume_count: 0,
                 }
             } else {
                 return (
@@ -193,17 +204,20 @@ async fn handle_cancel(Path(id): Path<String>) -> impl IntoResponse {
 
 async fn handle_events(Path(id): Path<String>) -> impl IntoResponse {
     let supervisor = global_supervisor();
-    let workspace_root = supervisor
-        .as_ref()
-        .map(|s| s.workspace_root().to_path_buf())
-        .or_else(|| crate::bootstrap::try_get_state().map(|st| st.read(|s| s.cwd.clone())))
-        .unwrap_or_else(|| std::path::PathBuf::from("."));
 
     let events = {
-        let wr = workspace_root.clone();
+        let roots = candidate_worker_roots();
+        let live_root = supervisor
+            .as_ref()
+            .and_then(|s| s.get(&id))
+            .map(|h| h.workspace_root.clone());
         let id = id.clone();
         tokio::task::spawn_blocking(move || {
-            WorkerEventLog::open(&wr, &id).and_then(|log| log.replay())
+            let root = live_root
+                .or_else(|| find_worker_root(&roots, &id))
+                .or_else(|| roots.first().cloned())
+                .unwrap_or_else(|| std::path::PathBuf::from("."));
+            WorkerEventLog::open(&root, &id).and_then(|log| log.replay())
         })
         .await
         .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))

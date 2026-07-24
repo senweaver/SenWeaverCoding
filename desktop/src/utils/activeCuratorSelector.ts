@@ -98,7 +98,6 @@ export function selectCuratorCardExecutionState(
 
 type ActiveCuratorResult = { card: CuratorCardMsg; state: CuratorExecutionState } | null
 
-// Memoize by messages array reference (see activePlanSelector for rationale).
 const activeCuratorCache = new WeakMap<UIMessage[], Map<string, ActiveCuratorResult>>()
 
 function computeActiveExecutingCurator(

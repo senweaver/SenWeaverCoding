@@ -150,14 +150,12 @@ struct LspServerHandle {
     initialized: bool,
     opened_files: HashSet<String>,
     doc_versions: HashMap<String, i32>,
+    doc_texts: HashMap<String, String>,
+    did_change_support: super::incremental::DidChangeSupport,
 
     #[cfg(feature = "lsp-push-diagnostics")]
     notification_listeners: Arc<std::sync::RwLock<Vec<Arc<dyn DiagnosticsListener>>>>,
 
-    // Server-initiated notifications (publishDiagnostics) are routed here by the
-    // reader instead of the request/response channel, so they are drained by a
-    // dedicated pump the moment they arrive rather than only while some request
-    // happens to be in flight. Taken by ensure_server_started to start the pump.
     #[cfg(feature = "lsp-push-diagnostics")]
     notifications: Option<tokio::sync::mpsc::Receiver<serde_json::Value>>,
 }
@@ -173,6 +171,24 @@ impl LspServerHandle {
         let counter = self.doc_versions.entry(uri.to_string()).or_insert(1);
         *counter = counter.saturating_add(1);
         *counter
+    }
+
+    fn build_did_change_params(
+        &self,
+        uri: &str,
+        version: i32,
+        new_text: &str,
+    ) -> serde_json::Value {
+        if self.did_change_support == super::incremental::DidChangeSupport::Incremental {
+            if let Some(old) = self.doc_texts.get(uri) {
+                return super::incremental::build_incremental_change(uri, version, old, new_text);
+            }
+        }
+        super::incremental::build_full_change(uri, version, new_text)
+    }
+
+    fn cache_doc_text(&mut self, uri: &str, text: &str) {
+        self.doc_texts.insert(uri.to_string(), text.to_string());
     }
 }
 
@@ -196,16 +212,11 @@ fn spawn_stdout_reader(stdout: ChildStdout) -> StdoutReader {
                 Err(_) => break,
             };
             if msg.get("id").is_some() {
-                // Request/response traffic (and server->client requests, which
-                // also carry an id) stay on the request channel.
                 if tx.send(msg).await.is_err() {
                     break;
                 }
                 continue;
             }
-            // Server-initiated notification. Route publishDiagnostics to the
-            // dedicated notification pump; drop other notifications we don't act
-            // on so they can never back up the request channel.
             #[cfg(feature = "lsp-push-diagnostics")]
             if msg.get("method").and_then(|m| m.as_str())
                 == Some("textDocument/publishDiagnostics")
@@ -338,9 +349,6 @@ impl LspService {
                 Arc::clone(&inner.diagnostics_listeners)
             };
             handle.notification_listeners = Arc::clone(&listeners);
-            // Drain server-pushed diagnostics independently of request traffic so
-            // an edit's fresh diagnostics are dispatched to the cache the moment
-            // the server emits them, not only when the next request happens.
             if let Some(mut notifications) = handle.notifications.take() {
                 crate::runtime::spawn_supervised("lsp.diagnostics_pump", async move {
                     while let Some(msg) = notifications.recv().await {
@@ -420,17 +428,9 @@ impl LspService {
             return Ok(());
         }
         let version = h.next_doc_version(&uri);
-        h.send_notification(
-            "textDocument/didChange",
-            json!({
-                "textDocument": {
-                    "uri": uri,
-                    "version": version,
-                },
-                "contentChanges": [{ "text": contents }],
-            }),
-        )
-        .await
+        let params = h.build_did_change_params(&uri, version, contents);
+        h.cache_doc_text(&uri, contents);
+        h.send_notification("textDocument/didChange", params).await
     }
 
     pub async fn ensure_server_started(
@@ -473,6 +473,7 @@ impl LspService {
             }),
         )
         .await?;
+        h.cache_doc_text(&uri, text);
         h.opened_files.insert(uri);
         Ok(())
     }
@@ -505,6 +506,7 @@ impl LspService {
                 }),
             )
             .await?;
+            h.cache_doc_text(&uri, text);
             h.opened_files.insert(uri.clone());
         }
         let change_version = match clamp_doc_version(version) {
@@ -514,25 +516,11 @@ impl LspService {
             }
             None => h.next_doc_version(&uri),
         };
-        h.send_notification(
-            "textDocument/didChange",
-            json!({
-                "textDocument": {
-                    "uri": uri,
-                    "version": change_version,
-                },
-                "contentChanges": [{ "text": text }],
-            }),
-        )
-        .await
+        let params = h.build_did_change_params(&uri, change_version, text);
+        h.cache_doc_text(&uri, text);
+        h.send_notification("textDocument/didChange", params).await
     }
 
-    /// Notify a running server that a file changed OUT OF BAND (user save, git
-    /// checkout, formatter). Only fires when a server is already running for the
-    /// file's `(language, workspace_root)` AND the file is already open — it never
-    /// spawns a server and never opens new documents. This keeps LSP diagnostics /
-    /// definitions from drifting after external edits, without triggering cold
-    /// starts from the passive fs watcher.
     pub async fn notify_external_change_if_open(&self, path: &Path) {
         let Some(language) = lsp_language_id_from_path(path) else {
             return;
@@ -553,15 +541,9 @@ impl LspService {
             return;
         }
         let change_version = h.next_doc_version(&uri);
-        let _ = h
-            .send_notification(
-                "textDocument/didChange",
-                json!({
-                    "textDocument": { "uri": uri, "version": change_version },
-                    "contentChanges": [{ "text": text }],
-                }),
-            )
-            .await;
+        let params = h.build_did_change_params(&uri, change_version, &text);
+        h.cache_doc_text(&uri, &text);
+        let _ = h.send_notification("textDocument/didChange", params).await;
     }
 
     pub async fn save_text_document(
@@ -603,6 +585,7 @@ impl LspService {
             return Ok(());
         }
         h.doc_versions.remove(&uri);
+        h.doc_texts.remove(&uri);
         h.send_notification(
             "textDocument/didClose",
             json!({
@@ -685,9 +668,6 @@ impl LspService {
     }
 
     pub async fn get_diagnostics(&self, file: &PathBuf) -> Vec<LspDiagnostic> {
-        // refresh_diagnostics stores under canonical_diag_key; look that up
-        // first (with the raw path as fallback) so a non-canonical caller path
-        // never misses diagnostics that are actually present.
         let canonical = canonical_diag_key(file);
         let inner = self.inner.lock().await;
         #[cfg(feature = "lsp-push-diagnostics")]
@@ -765,11 +745,6 @@ impl LspService {
         }
     }
 
-    /// Hover that NEVER spawns a language server: it only queries a server that
-    /// is already running for this file's `(language, workspace_root)`. The
-    /// per-turn context-injection path uses this so a passive hover under a 3s
-    /// timeout can't trigger (and then abandon) a heavyweight cold start of e.g.
-    /// rust-analyzer on every user message.
     pub async fn hover_if_running(
         &self,
         path: impl AsRef<Path>,
@@ -899,6 +874,8 @@ impl LspServerHandle {
             initialized: false,
             opened_files: HashSet::new(),
             doc_versions: HashMap::new(),
+            doc_texts: HashMap::new(),
+            did_change_support: super::incremental::DidChangeSupport::Full,
             #[cfg(feature = "lsp-push-diagnostics")]
             notification_listeners: Arc::new(std::sync::RwLock::new(Vec::new())),
             #[cfg(feature = "lsp-push-diagnostics")]
@@ -953,6 +930,8 @@ impl LspServerHandle {
             initialized: false,
             opened_files: HashSet::new(),
             doc_versions: HashMap::new(),
+            doc_texts: HashMap::new(),
+            did_change_support: super::incremental::DidChangeSupport::Full,
             #[cfg(feature = "lsp-push-diagnostics")]
             notification_listeners: Arc::new(std::sync::RwLock::new(Vec::new())),
             #[cfg(feature = "lsp-push-diagnostics")]
@@ -1179,9 +1158,22 @@ impl LspServerHandle {
             }]
         });
 
-        self.send_request_with_timeout("initialize", params, INIT_TIMEOUT)
+        let init_result = self
+            .send_request_with_timeout("initialize", params, INIT_TIMEOUT)
             .await
             .context("Language server initialization failed")?;
+
+        let sync = init_result
+            .get("capabilities")
+            .and_then(|c| c.get("textDocumentSync"));
+        let change_kind = match sync {
+            Some(serde_json::Value::Number(n)) => n.as_i64(),
+            Some(serde_json::Value::Object(o)) => o.get("change").and_then(|v| v.as_i64()),
+            _ => None,
+        };
+        if let Some(kind) = change_kind {
+            self.did_change_support = super::incremental::DidChangeSupport::from_capability(kind);
+        }
 
         self.send_notification("initialized", json!({})).await?;
         self.initialized = true;
@@ -1218,6 +1210,7 @@ impl LspServerHandle {
         )
         .await?;
 
+        self.cache_doc_text(&uri, &text);
         self.opened_files.insert(uri);
         Ok(())
     }
@@ -1524,9 +1517,6 @@ pub fn path_to_uri(path: &Path) -> String {
 }
 
 fn percent_encode_uri_path(path: &str) -> String {
-    // RFC 3986 unreserved plus the path chars LSP servers universally accept
-    // unescaped. Everything else (spaces, CJK, etc.) is percent-encoded so
-    // Windows paths with spaces or non-ASCII segments form valid URIs.
     const KEEP: &[u8] = b"/:-._~!$&'()*+,;=@";
     let mut out = String::with_capacity(path.len());
     for byte in path.as_bytes() {
@@ -1587,8 +1577,6 @@ fn normalize_drive_case(path: &str) -> String {
 fn uri_to_path_string(uri: &str) -> String {
     let stripped = uri.strip_prefix("file://").unwrap_or(uri);
     let decoded = percent_decode(stripped);
-    // `file:///d:/x` decodes to `/d:/x`: drop the leading slash for Windows
-    // drive paths while keeping it for POSIX absolute paths.
     let bytes = decoded.as_bytes();
     let trimmed = if bytes.len() >= 3
         && bytes[0] == b'/'

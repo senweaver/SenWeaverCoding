@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 use super::super::traits::{Tool, ToolResult};
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
-use crate::agent::subagent_limiter::{PermitResult, SubagentLimiter, SubagentPermit};
+use crate::agent::subagent_limiter::{SubagentLimiter, SubagentPermit};
 use crate::config::{DelegateAgentConfig, DelegateToolConfig};
 use crate::observability::traits::{Observer, ObserverEvent, ObserverMetric};
 use crate::providers::{self, ChatMessage, Provider};
@@ -182,10 +182,6 @@ impl DelegateTool {
         &self.cancellation_token
     }
 
-    /// The cancellation scope a delegated subagent should attach to. Prefers the
-    /// owning session/turn's live cancel token (so a parent turn cancel or a
-    /// `stop_generation` from any connection terminates the subagent too),
-    /// falling back to the tool's own token when no session turn is registered.
     fn parent_scope_token(&self) -> CancellationToken {
         if let Some(ctx) = crate::session::current_session_context() {
             if let Some(feed) = crate::session::get_turn_feed(&ctx.session_id) {
@@ -236,41 +232,28 @@ async fn acquire_subagent_permit(
     label: &str,
     cancel: &CancellationToken,
 ) -> Result<SubagentPermit, String> {
-    match limiter.try_acquire() {
-        PermitResult::Granted(p) => return Ok(p),
-        PermitResult::Rejected { active, max } => {
-            return Err(format!(
+    let deadline = crate::services::try_get_services()
+        .map(|svc| svc.config().agent_runtime.subagent_call_timeout_secs)
+        .filter(|secs| *secs > 0)
+        .map(|secs| {
+            std::time::Instant::now() + Duration::from_secs(secs).saturating_mul(2)
+        });
+    match limiter.acquire_queued(cancel, deadline).await {
+        Ok(p) => Ok(p),
+        Err(crate::agent::subagent_limiter::QueuedAcquireError::Cancelled) => Err(format!(
+            "subagent '{label}' cancelled while waiting for a concurrency permit"
+        )),
+        Err(crate::agent::subagent_limiter::QueuedAcquireError::Rejected { active, max }) => {
+            Err(format!(
                 "subagent '{label}' rejected: concurrency limit reached ({active}/{max})"
-            ));
+            ))
         }
-        PermitResult::Queued => {}
-    }
-    let deadline = std::time::Instant::now() + Duration::from_secs(60);
-    let mut wait = Duration::from_millis(25);
-    loop {
-        if cancel.is_cancelled() {
-            return Err(format!(
-                "subagent '{label}' cancelled while waiting for a concurrency permit"
-            ));
-        }
-        tokio::time::sleep(wait).await;
-        wait = (wait * 2).min(Duration::from_millis(500));
-        match limiter.try_acquire() {
-            PermitResult::Granted(p) => return Ok(p),
-            PermitResult::Rejected { active, max } => {
-                return Err(format!(
-                    "subagent '{label}' rejected: concurrency limit reached ({active}/{max})"
-                ));
-            }
-            PermitResult::Queued => {}
-        }
-        if std::time::Instant::now() > deadline {
-            return Err(format!(
-                "subagent '{label}' timed out waiting for a concurrency permit (active={}/{})",
-                limiter.active_count(),
-                limiter.max_concurrent()
-            ));
-        }
+        Err(crate::agent::subagent_limiter::QueuedAcquireError::DeadlineExceeded {
+            active,
+            max,
+        }) => Err(format!(
+            "subagent '{label}' timed out waiting for a concurrency permit (active={active}/{max})"
+        )),
     }
 }
 
@@ -770,8 +753,6 @@ impl DelegateTool {
         let multimodal_config = self.multimodal_config.clone();
         let delegate_config = self.delegate_config.clone();
         let workspace_root = Arc::clone(&self.workspace_root);
-        // Attach the background subagent to the owning turn/session cancel scope so
-        // cancelling the parent turn also terminates this detached task.
         let child_token = self.parent_scope_token().child_token();
         background_task_tokens()
             .lock()
@@ -1000,8 +981,6 @@ impl DelegateTool {
         }
 
         let limiter = resolve_subagent_limiter();
-        // Parallel batch children attach to the owning turn/session cancel scope so
-        // a parent cancel tears down the whole in-flight batch (lineage subtree).
         let batch_token = self.parent_scope_token().child_token();
         let _batch_guard = DelegateBatchCancelGuard {
             token: batch_token.clone(),
@@ -1499,6 +1478,7 @@ impl DelegateTool {
         };
 
         let pacing_default = crate::config::PacingConfig::default();
+        let delegate_hooks = crate::hooks::global_hooks().and_then(|h| h.current());
         let delegated_policy = crate::agent::loop_::policy::PolicyBundle::delegated(
             provider,
             &sub_tools,
@@ -1512,6 +1492,7 @@ impl DelegateTool {
         )
         .with_temperature(temperature)
         .with_max_iterations(agent_config.max_iterations)
+        .with_hooks(delegate_hooks.as_deref())
         .with_on_delta(on_delta_for_loop);
 
         let sub_agent_mode = crate::agent::coding_mode::CodingMode::default();

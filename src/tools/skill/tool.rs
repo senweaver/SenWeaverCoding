@@ -66,9 +66,6 @@ impl SkillShellTool {
             for (key, value) in obj {
                 let placeholder = format!("{{{{{}}}}}", key);
                 let raw = value.as_str().unwrap_or_default();
-                // Shell-escape the model-supplied value so it can only ever be a
-                // single argument to the skill author's command, never break out
-                // of it (e.g. `& del ...`, `; rm -rf`, `$(...)`, backticks).
                 let replacement = shell_escape_arg(raw);
                 command = command.replace(&placeholder, &replacement);
             }
@@ -77,14 +74,9 @@ impl SkillShellTool {
     }
 }
 
-/// Quote an argument value for safe interpolation into a shell command line.
-/// Windows uses double quotes with `"` doubled; POSIX uses single quotes with the
-/// close-quote trick for embedded single quotes. Empty values become explicit
-/// empty quotes so a placeholder never vanishes into an adjacent token.
 fn shell_escape_arg(value: &str) -> String {
     #[cfg(windows)]
     {
-        // Reject control characters outright; there is no safe cmd.exe quoting.
         if value.contains(['\r', '\n', '\0']) {
             return "\"\"".to_string();
         }
@@ -126,10 +118,7 @@ impl Tool for SkillShellTool {
             });
         }
 
-        let command_approved = args
-            .get("approved")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let command_approved = crate::agent::loop_::current_tool_runtime_approved();
         match self
             .security
             .validate_command_execution(&command, command_approved)

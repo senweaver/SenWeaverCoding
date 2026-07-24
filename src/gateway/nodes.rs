@@ -99,9 +99,6 @@ impl NodeRegistry {
         self.nodes.write().remove(node_id);
     }
 
-    /// Unregister only if the stored entry still belongs to this connection.
-    /// Prevents a stale connection's disconnect from evicting a newer connection
-    /// that re-registered under the same node_id.
     pub fn unregister_if_owner(
         &self,
         node_id: &str,

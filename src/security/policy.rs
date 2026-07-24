@@ -1308,10 +1308,6 @@ impl SecurityPolicy {
         };
         let normalised = lexically_normalise(&absolute);
 
-        // Forbidden paths are checked FIRST so a sensitive location configured
-        // inside the workspace (e.g. `.env`, `secrets/`) is actually denied. It
-        // previously ran after the workspace/allowed-root allow, making
-        // forbidden_paths inside the workspace a no-op.
         for forbidden in &self.forbidden_paths {
             let forbidden_path = expand_user_path(forbidden);
             if crate::util::path_is_within(&normalised, &forbidden_path) {
@@ -1341,8 +1337,6 @@ impl SecurityPolicy {
             return true;
         }
 
-        // Forbidden paths take precedence over the workspace/allowed-root allow so
-        // a forbidden location nested inside the workspace is still denied.
         for forbidden in &self.forbidden_paths {
             let forbidden_path = expand_user_path(forbidden);
             if crate::util::path_is_within(resolved, &forbidden_path) {

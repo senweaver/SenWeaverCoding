@@ -1826,9 +1826,6 @@ impl LarkChannel {
             use axum::http::StatusCode;
             use axum::response::IntoResponse;
 
-            // Every inbound callback (challenge and real events alike) must carry the
-            // configured verification token; otherwise anyone on the network could
-            // inject synthetic events that drive the agent.
             let provided_token = extract_lark_token(&payload).unwrap_or("");
             if !crate::security::pairing::constant_time_eq(
                 provided_token,
@@ -1882,9 +1879,6 @@ impl LarkChannel {
             anyhow::anyhow!("Lark webhook mode requires `port` to be set in [channels_config.lark]")
         })?;
 
-        // The webhook binds to a public interface, so a verification token is
-        // mandatory: without it every callback is unauthenticated and anyone could
-        // inject events. Refuse to start rather than expose an open injection point.
         if self.verification_token.trim().is_empty() {
             anyhow::bail!(
                 "Lark webhook mode requires a non-empty `verification_token` in \

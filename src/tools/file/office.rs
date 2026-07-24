@@ -117,9 +117,6 @@ fn reconstruct_pdf_tables(text: &str) -> String {
                     break;
                 }
             }
-            // Only treat as a table when at least two consecutive lines share the SAME
-            // column count; this avoids mangling ordinary prose that happens to contain
-            // wide gaps. Otherwise fall through and emit the original line verbatim.
             if group.len() >= 2 {
                 if !noted {
                     out.push_str(

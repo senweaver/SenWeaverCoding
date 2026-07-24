@@ -40,7 +40,6 @@ pub mod capabilities;
 pub mod job_object;
 pub mod rbac;
 pub mod sandbox;
-pub mod taint;
 
 pub use audit::{
     AuditEvent, AuditEventType, AuditLogger, global_audit_logger, record_command_execution,
@@ -64,7 +63,6 @@ pub use prompt_guard::{GuardAction, GuardResult, PromptGuard};
 pub use rbac::{
     AccessContext, AuthSource, AuthorizationResult, CallerIdentity, RbacConfig, RbacEngine,
 };
-pub use taint::{TaintLabel, TaintSink, TaintViolation, TaintedValue};
 pub use workspace_boundary::{BoundaryVerdict, WorkspaceBoundary};
 
 pub use sandbox::{

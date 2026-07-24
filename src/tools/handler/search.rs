@@ -447,10 +447,6 @@ impl ToolSearchTool {
 }
 
 fn append_spec(output: &mut String, spec: &ToolSpec) {
-    // Serialize the whole spec object with serde_json so a hostile MCP tool
-    // description (backslashes, newlines, or a literal `</function>`) cannot
-    // break out of the JSON string or inject a forged `<function>` entry. The
-    // hand-rolled string that only escaped `"` was a prompt-injection surface.
     let obj = serde_json::json!({
         "name": spec.name,
         "description": spec.description,

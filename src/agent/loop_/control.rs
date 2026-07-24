@@ -81,10 +81,17 @@ impl LoopControlState {
 
         for (name, args, output) in results {
             has_payload = true;
+            let canonical_args =
+                crate::agent::loop_::detector::canonicalise_args_string(args);
             name.hash(&mut fingerprint_hasher);
-            crate::agent::loop_::detector::canonicalise_args_string(args).hash(&mut fingerprint_hasher);
+            canonical_args.hash(&mut fingerprint_hasher);
             output.hash(&mut fingerprint_hasher);
-            let det = self.loop_detector.record(name, args, output);
+            let det = self.loop_detector.record_with_failure_hashed(
+                name,
+                crate::agent::loop_::detector::hash_canonical_str(&canonical_args),
+                output,
+                false,
+            );
             match det {
                 crate::agent::loop_::detector::LoopDetectionResult::Warning(msg) => {
                     tracing::warn!("[Loop Detection] {msg}");
@@ -203,7 +210,32 @@ impl LoopControlState {
         let result = self
             .loop_detector
             .record_with_failure(name, args, output, was_failure);
-        match &result {
+        self.notify_detection(&result);
+        result
+    }
+
+    pub fn record_per_tool_with_failure_canonical(
+        &mut self,
+        name: &str,
+        canonical_args: &str,
+        output: &str,
+        was_failure: bool,
+    ) -> crate::agent::loop_::detector::LoopDetectionResult {
+        let result = self.loop_detector.record_with_failure_hashed(
+            name,
+            crate::agent::loop_::detector::hash_canonical_str(canonical_args),
+            output,
+            was_failure,
+        );
+        self.notify_detection(&result);
+        result
+    }
+
+    fn notify_detection(
+        &self,
+        result: &crate::agent::loop_::detector::LoopDetectionResult,
+    ) {
+        match result {
             crate::agent::loop_::detector::LoopDetectionResult::Warning(msg) => {
                 self.notify(msg);
             }
@@ -215,17 +247,25 @@ impl LoopControlState {
             }
             _ => {}
         }
-        result
     }
 
-    /// Tail count of consecutive identical (name, args) failures.
-    /// Returns 0 if the previous matching call(s) did not fail.
     pub fn consecutive_identical_failures(
         &self,
         name: &str,
         args: &serde_json::Value,
     ) -> usize {
         self.loop_detector.peek_consecutive_failures(name, args)
+    }
+
+    pub fn consecutive_identical_failures_canonical(
+        &self,
+        name: &str,
+        canonical_args: &str,
+    ) -> usize {
+        self.loop_detector.peek_consecutive_failures_hashed(
+            name,
+            crate::agent::loop_::detector::hash_canonical_str(canonical_args),
+        )
     }
 
     pub fn check_iteration_fingerprint(

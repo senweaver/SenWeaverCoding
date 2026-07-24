@@ -51,10 +51,6 @@ export function WorkspaceQueuePanel({ sessionId }: Props) {
   const toggleExpanded = useWorkspaceQueueStore((s) => s.toggleExpanded)
   const moveToFront = useWorkspaceQueueStore((s) => s.moveToFront)
 
-  // Cursor-style per-item actions. Edit pulls the message back into the
-  // composer; send-now promotes it to the queue head and either stops the
-  // running turn (the idle transition auto-drains the head) or drains
-  // immediately when nothing is running.
   const handleEdit = (item: QueuedItem) => {
     cancel(item.id)
     useChatStore.getState().queueComposerPrefill(item.sessionId, {

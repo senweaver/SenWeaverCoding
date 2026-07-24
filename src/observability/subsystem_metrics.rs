@@ -13,6 +13,9 @@ pub struct SubsystemMetrics {
     pub inline_completion_latency_ms_sum: AtomicU64,
     pub inline_completion_latency_count: AtomicU64,
     pub inline_completion_accepted: AtomicU64,
+    pub inline_completion_shown: AtomicU64,
+    pub inline_completion_rejected: AtomicU64,
+    pub inline_completion_timed_out: AtomicU64,
     pub inline_completion_throttled: AtomicU64,
 
     pub inline_edit_runs: AtomicU64,
@@ -79,6 +82,9 @@ impl SubsystemMetrics {
                 }
             },
             inline_completion_accepted: self.inline_completion_accepted.load(Ordering::Relaxed),
+            inline_completion_shown: self.inline_completion_shown.load(Ordering::Relaxed),
+            inline_completion_rejected: self.inline_completion_rejected.load(Ordering::Relaxed),
+            inline_completion_timed_out: self.inline_completion_timed_out.load(Ordering::Relaxed),
             inline_completion_throttled: self.inline_completion_throttled.load(Ordering::Relaxed),
             inline_edit_runs: self.inline_edit_runs.load(Ordering::Relaxed),
             inline_edit_hunks_applied: self.inline_edit_hunks_applied.load(Ordering::Relaxed),
@@ -152,6 +158,9 @@ pub struct SubsystemSnapshot {
     pub inline_completion_cache_misses: u64,
     pub inline_completion_latency_ms_avg: f64,
     pub inline_completion_accepted: u64,
+    pub inline_completion_shown: u64,
+    pub inline_completion_rejected: u64,
+    pub inline_completion_timed_out: u64,
     pub inline_completion_throttled: u64,
     pub inline_edit_runs: u64,
     pub inline_edit_hunks_applied: u64,
@@ -228,6 +237,18 @@ impl SubsystemSnapshot {
         counter!(
             "sen_inline_completion_acceptance_total",
             self.inline_completion_accepted
+        );
+        counter!(
+            "sen_inline_completion_shown_total",
+            self.inline_completion_shown
+        );
+        counter!(
+            "sen_inline_completion_rejected_total",
+            self.inline_completion_rejected
+        );
+        counter!(
+            "sen_inline_completion_timed_out_total",
+            self.inline_completion_timed_out
         );
         counter!(
             "sen_inline_completion_throttled_total",
@@ -370,6 +391,21 @@ pub fn observe_inline_completion_latency_ms(ms: u64) {
 pub fn incr_inline_completion_accepted() {
     global()
         .inline_completion_accepted
+        .fetch_add(1, Ordering::Relaxed);
+}
+pub fn incr_inline_completion_shown() {
+    global()
+        .inline_completion_shown
+        .fetch_add(1, Ordering::Relaxed);
+}
+pub fn incr_inline_completion_rejected() {
+    global()
+        .inline_completion_rejected
+        .fetch_add(1, Ordering::Relaxed);
+}
+pub fn incr_inline_completion_timed_out() {
+    global()
+        .inline_completion_timed_out
         .fetch_add(1, Ordering::Relaxed);
 }
 pub fn incr_inline_completion_throttled() {

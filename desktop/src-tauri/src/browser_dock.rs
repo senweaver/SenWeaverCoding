@@ -534,22 +534,6 @@ const BRIDGE_JS: &str = r#"
     });
   }
 
-  // -------- Agent driver: static handlers (no dynamic eval) --------
-  // Each handler receives `(args)` and returns a value (or thenable);
-  // throwing rejects the round-trip with the error text.
-  //
-  // Result transport
-  // ----------------
-  // Results travel back as `senbridge://event?kind=result&data=…` URLs
-  // intercepted by `WebviewBuilder::on_navigation`.  Because URL length
-  // limits vary across WebView2 / WebKitGTK / WKWebView, payloads
-  // larger than ~16KB are split into `result_chunk` frames keyed by
-  // `(reqId, seq, total)`; the Rust controller reassembles them and
-  // signals the awaiting oneshot only when the final frame arrives.
-  //
-  // The threshold is generous on purpose: small results stay on the
-  // single-frame fast-path, only `snapshot`-style payloads pay the
-  // chunking cost.
   const RESULT_CHUNK_BYTES = 14000;
   function postResult(reqId, ok, value, error) {
     let envelopeJson;
@@ -1202,11 +1186,6 @@ const BRIDGE_JS: &str = r#"
     },
     dock_close() { return { closed: true }; },
     screenshot_dom() {
-      // Best-effort DOM render fallback.  Without a html-to-canvas
-      // shim available in cross-origin pages, this returns the
-      // serialised body text + viewport rect so the agent at least
-      // knows what was on screen.  The OS-level capture path
-      // (xcap on the Rust side) is the primary route.
       return {
         text: (document.body && document.body.innerText ? document.body.innerText.slice(0, 4000) : ''),
         title: document.title || '',
@@ -1269,10 +1248,6 @@ const BRIDGE_JS: &str = r#"
       send('cleared', out);
     },
     consoleBuffer() { return consoleRing.slice(); },
-    /** Agent-driver entry point.  Looks up `kind` in the static
-     *  handler map and posts the result back via `senbridge://event`
-     *  keyed by `reqId`.  Never throws — failures become
-     *  `{ ok: false, error }` envelopes. */
     exec(payload) {
       const reqId = payload && payload.reqId;
       const kind = payload && payload.kind;
@@ -3614,6 +3589,10 @@ fn mirror_test_target_to_gateway(app: &AppHandle, session_id: &str, tab_id: Opti
         static MIRROR_FAILURES: AtomicU64 = AtomicU64::new(0);
         match crate::adapters_restart_client()
             .post(format!("{url}/api/debug/test-target"))
+            .header(
+                senweavercoding::gateway::loopback_auth::TOKEN_HEADER,
+                senweavercoding::gateway::loopback_auth::loopback_token(),
+            )
             .json(&payload)
             .send()
             .await

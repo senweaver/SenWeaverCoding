@@ -53,9 +53,6 @@ impl MarkdownMemory {
     async fn append_to_file(&self, path: &Path, content: &str) -> anyhow::Result<()> {
         self.ensure_dirs().await?;
 
-        // Serialize the read-modify-write so concurrent stores never clobber each
-        // other's appends, and write atomically so a crash mid-write cannot leave
-        // a truncated/corrupt memory file.
         let _guard = markdown_write_lock().lock().await;
 
         let existing = if path.exists() {

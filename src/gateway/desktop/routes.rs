@@ -547,31 +547,7 @@ fn provider_to_saved_provider(
 }
 
 fn effective_model_names(profile: &crate::config::ModelProviderConfig) -> Vec<String> {
-    if !profile.model_names.is_empty() {
-        return profile
-            .model_names
-            .iter()
-            .map(|s| s.trim().to_string())
-            .filter(|s| !s.is_empty())
-            .collect();
-    }
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut out: Vec<String> = Vec::new();
-    for slot in ["main", "haiku", "sonnet", "opus"] {
-        if let Some(value) = profile.models.get(slot) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
-                out.push(trimmed.to_string());
-            }
-        }
-    }
-    for (_, value) in profile.models.iter() {
-        let trimmed = value.trim();
-        if !trimmed.is_empty() && seen.insert(trimmed.to_string()) {
-            out.push(trimmed.to_string());
-        }
-    }
-    out
+    profile.effective_model_names()
 }
 
 fn mask_api_key(raw: &str) -> String {
@@ -1446,46 +1422,11 @@ pub(crate) fn apply_active_profile_to_top_level(
     id: &str,
     profile: &crate::config::ModelProviderConfig,
 ) {
-    cfg.default_provider = Some(id.to_string());
-
-    cfg.api_key = profile
-        .api_key
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    cfg.api_url = profile
-        .base_url
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    cfg.api_path = profile
-        .api_path
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-
-    cfg.provider_max_tokens = profile.max_tokens;
-
-    cfg.model_context_windows = profile.model_context_windows.clone();
-
-    let models = effective_model_names(profile);
-    let current_model_belongs = cfg
-        .default_model
-        .as_deref()
-        .map(|m| models.iter().any(|x| x == m))
-        .unwrap_or(false);
-    if !current_model_belongs {
-        if let Some(first) = models.into_iter().next() {
-            cfg.default_model = Some(first);
-        } else {
-            cfg.default_model = None;
-        }
+    if !cfg.model_providers.contains_key(id) {
+        cfg.model_providers
+            .insert(id.to_string(), profile.clone());
     }
+    cfg.apply_model_provider_profile(id);
 }
 
 pub async fn handle_providers_official(

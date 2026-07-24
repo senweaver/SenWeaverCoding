@@ -73,9 +73,6 @@ pub async fn run_worker(
         supervisor: Arc::clone(&supervisor),
         handle: Arc::clone(&handle),
     };
-    // Use the parent-derived workspace root captured on the handle, not the global
-    // supervisor root (which is locked to the first session and would make workers
-    // from other workspaces write into the wrong `.sen/workers/`).
     let workspace_root = handle.workspace_root.clone();
 
     let event_log = match WorkerEventLog::open(&workspace_root, &handle.worker_id) {
@@ -291,7 +288,11 @@ fn write_meta_safe(
     handle: &WorkerHandle,
     spec: &WorkerSpec,
 ) {
-    let meta = handle.to_meta(&spec.prompt, spec.context.as_deref());
+    let meta = handle.to_meta(
+        &spec.prompt,
+        spec.context.as_deref(),
+        spec.workspace_dir.as_deref(),
+    );
     if let Err(err) = write_meta(workspace_root, &meta) {
         tracing::warn!(
             worker_id = %handle.worker_id,
@@ -342,6 +343,13 @@ async fn finalize_worker(
     emit_worker_lifecycle(handle, parent_draft_tx, summary_kind, event_log).await;
 
     write_meta_safe(&handle.workspace_root, handle, spec);
+
+    if let Some(hooks) = crate::hooks::global_hooks() {
+        let summary = error_text.as_deref().unwrap_or(output.as_str());
+        hooks
+            .fire_subagent_stop(&handle.worker_id, status.as_str(), summary)
+            .await;
+    }
 
     handle.complete(result);
 

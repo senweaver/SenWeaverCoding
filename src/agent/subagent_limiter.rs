@@ -44,6 +44,7 @@ pub struct SubagentLimiter {
     max_concurrent: Arc<AtomicUsize>,
     queue_excess: bool,
     lineage: Arc<Mutex<LineageTable>>,
+    released: Arc<tokio::sync::Notify>,
 }
 
 #[derive(Default)]
@@ -82,33 +83,56 @@ pub enum PermitResult {
     Rejected { active: usize, max: usize },
 }
 
+#[derive(Debug)]
+pub enum QueuedAcquireError {
+    Cancelled,
+    Rejected { active: usize, max: usize },
+    DeadlineExceeded { active: usize, max: usize },
+}
+
 pub struct SubagentPermit {
     active: Arc<AtomicUsize>,
+    released: Arc<tokio::sync::Notify>,
 }
 
 impl Drop for SubagentPermit {
     fn drop(&mut self) {
         self.active.fetch_sub(1, Ordering::SeqCst);
+        self.released.notify_waiters();
     }
+}
+
+fn clamp_max_concurrent(requested: usize) -> usize {
+    let ceiling = crate::constants::system::MAX_CONCURRENT_SUBAGENTS as usize;
+    let clamped = requested.clamp(1, ceiling);
+    if clamped != requested {
+        tracing::warn!(
+            target: "agent.subagent_limiter",
+            requested,
+            effective = clamped,
+            ceiling,
+            "subagent max_concurrent clamped to the supported ceiling"
+        );
+    }
+    clamped
 }
 
 impl SubagentLimiter {
     pub fn new(config: &SubagentLimitConfig) -> Self {
-        let max = config.max_concurrent.clamp(1, 8);
+        let max = clamp_max_concurrent(config.max_concurrent);
         Self {
             active: Arc::new(AtomicUsize::new(0)),
             max_concurrent: Arc::new(AtomicUsize::new(max)),
             queue_excess: config.queue_excess,
             lineage: Arc::new(Mutex::new(LineageTable::default())),
+            released: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
-    /// Update the concurrency ceiling after construction so the globally-shared
-    /// runtime limiter can adopt the user's configured `subagent_limit` instead of
-    /// being stuck at the built-in default.
     pub fn set_max_concurrent(&self, max_concurrent: usize) {
         self.max_concurrent
-            .store(max_concurrent.clamp(1, 8), Ordering::SeqCst);
+            .store(clamp_max_concurrent(max_concurrent), Ordering::SeqCst);
+        self.released.notify_waiters();
     }
 
     pub fn try_acquire(&self) -> PermitResult {
@@ -117,6 +141,7 @@ impl SubagentLimiter {
         if current < max {
             PermitResult::Granted(SubagentPermit {
                 active: Arc::clone(&self.active),
+                released: Arc::clone(&self.released),
             })
         } else {
             self.active.fetch_sub(1, Ordering::SeqCst);
@@ -127,6 +152,41 @@ impl SubagentLimiter {
                     active: current,
                     max,
                 }
+            }
+        }
+    }
+
+    pub async fn acquire_queued(
+        &self,
+        cancel: &CancellationToken,
+        deadline: Option<std::time::Instant>,
+    ) -> Result<SubagentPermit, QueuedAcquireError> {
+        loop {
+            match self.try_acquire() {
+                PermitResult::Granted(p) => return Ok(p),
+                PermitResult::Rejected { active, max } => {
+                    return Err(QueuedAcquireError::Rejected { active, max });
+                }
+                PermitResult::Queued => {}
+            }
+            let notified = self.released.notified();
+            if let PermitResult::Granted(p) = self.try_acquire() {
+                return Ok(p);
+            }
+            let sleep_cap = std::time::Duration::from_millis(500);
+            tokio::select! {
+                biased;
+                _ = cancel.cancelled() => return Err(QueuedAcquireError::Cancelled),
+                _ = notified => {}
+                _ = tokio::time::sleep(sleep_cap) => {}
+            }
+            if let Some(d) = deadline
+                && std::time::Instant::now() > d
+            {
+                return Err(QueuedAcquireError::DeadlineExceeded {
+                    active: self.active_count(),
+                    max: self.max_concurrent(),
+                });
             }
         }
     }

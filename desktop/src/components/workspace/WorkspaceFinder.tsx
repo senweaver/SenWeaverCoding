@@ -43,7 +43,6 @@ function uriToRel(uri: string, workDir: string): string | null {
   try {
     p = decodeURI(p)
   } catch {
-    /* ignore */
   }
   let abs = p
   if (/^\/[A-Za-z]:\//.test(abs)) abs = abs.slice(1)
@@ -166,14 +165,12 @@ export function WorkspaceFinder({ mode, workDir, onClose }: Props) {
       try {
         await requestNavigation(hit.relPath, hit.line, 0)
       } catch {
-        /* ignore */
       }
       return
     }
     try {
       await selectFile(hit.relPath)
     } catch {
-      /* ignore */
     }
   }
 
@@ -189,7 +186,6 @@ export function WorkspaceFinder({ mode, workDir, onClose }: Props) {
         hit.range.start.character,
       )
     } catch {
-      /* ignore */
     }
   }
 

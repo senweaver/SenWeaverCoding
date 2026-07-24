@@ -605,13 +605,6 @@ pub fn sse_bytes_to_events(
                                         let index = match delta.index {
                                             Some(i) => i,
                                             None => {
-                                                // Some OpenAI-compatible gateways omit `index`
-                                                // and stream each tool_call as a self-contained
-                                                // object. Treat a delta that carries a fresh id
-                                                // or function name as the start of a NEW slot
-                                                // instead of clobbering the previous one; a
-                                                // bare arguments continuation appends to the
-                                                // current (last) slot.
                                                 let starts_new_call = delta
                                                     .id
                                                     .as_deref()
@@ -712,15 +705,19 @@ pub fn sse_bytes_to_events(
                 return;
             }
 
-            if !emitted_tool_calls {
-                for tool_call in tool_calls
-                    .drain(..)
-                    .filter_map(StreamToolCallAccumulator::into_provider_tool_call)
-                {
-                    made_progress = true;
-                    if tx.send(Ok(StreamEvent::ToolCall(tool_call))).await.is_err() {
-                        return;
-                    }
+            if emitted_tool_calls && tool_calls.iter().any(|acc| !acc.is_empty_slot()) {
+                tracing::warn!(
+                    late = tool_calls.len(),
+                    "tool_call deltas arrived after finish_reason emit; emitting them as additional calls"
+                );
+            }
+            for tool_call in tool_calls
+                .drain(..)
+                .filter_map(StreamToolCallAccumulator::into_provider_tool_call)
+            {
+                made_progress = true;
+                if tx.send(Ok(StreamEvent::ToolCall(tool_call))).await.is_err() {
+                    return;
                 }
             }
 
@@ -768,8 +765,6 @@ fn chunk_text_from_response(chunk: &StreamChunkResponse) -> Option<StreamChunk> 
         .filter(|r| !r.is_empty());
     match (content, reasoning) {
         (None, None) => None,
-        // Carry BOTH when a single chunk has content and reasoning together, so
-        // the reasoning stream is never silently dropped on this path.
         (content, reasoning) => Some(StreamChunk {
             delta: content.unwrap_or("").to_string(),
             reasoning: reasoning.map(str::to_string),

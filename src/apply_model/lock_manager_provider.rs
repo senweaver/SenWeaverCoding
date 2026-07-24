@@ -93,12 +93,6 @@ impl LockManagerProvider {
 
         let lock_manager = self.coordinator.locks_arc();
 
-        // Fold the current session identity into the lock holder so that distinct
-        // agent sessions (including subagents/delegates, which each run under their
-        // own session id) become distinct lock holders and therefore mutually
-        // exclude on overlapping regions. Without this discriminator every writer
-        // shares the fixed provider holder id and region locks become a no-op
-        // across agents.
         let session = crate::session::resource_lock::current_session_context()
             .map(|ctx| ctx.session_id)
             .filter(|id| !id.trim().is_empty());
@@ -122,11 +116,6 @@ impl LockManagerProvider {
     }
 }
 
-/// Resolves the coordinator's lock manager at acquire time instead of freezing
-/// the decision when the applier is constructed. Appliers built before the
-/// multi-agent runtime is initialized (early CLI paths, lazily-created flows)
-/// would otherwise silently keep a no-op provider for their whole lifetime and
-/// never serialize against other writers.
 #[derive(Debug, Clone)]
 pub struct LazyRuntimeLockProvider {
     holder_id: &'static str,

@@ -86,10 +86,6 @@ function memberMessageContentKey(m: UIMessage): string {
   return `${m.type}|${superseded}|${pending}|${text}`
 }
 
-// Compares two message lists by their stable content, ignoring the (churning)
-// synthetic ids that `mapHistoryMessagesToUiMessages` assigns to sub-blocks. Used
-// to reuse the previous array reference when a poll returns identical content, so
-// the transcript is not fully remounted every 1.5s.
 function sameMemberMessages(a: UIMessage[], b: UIMessage[]): boolean {
   if (a.length !== b.length) return false
   for (let i = 0; i < a.length; i++) {
@@ -142,8 +138,6 @@ function syncMemberSessionMessages(
     memberStatus === 'running' || hasPendingMessages ? 'thinking' : 'idle'
   useChatStore.setState((state) => {
     const existing = state.sessions[sessionId]
-    // Nothing changed since the last poll: skip the update so subscribers don't
-    // re-render on every 1.5s tick.
     if (
       existing &&
       existing.messages === messages &&
@@ -260,8 +254,6 @@ export const useTeamStore = create<TeamStore>((set, get) => ({
         existingMessages,
         transcriptMessages,
       )
-      // If the poll produced identical content, keep the previous array (and its
-      // stable object references) so React does not remount the whole transcript.
       const finalMessages = sameMemberMessages(existingMessages, mergedMessages)
         ? existingMessages
         : mergedMessages

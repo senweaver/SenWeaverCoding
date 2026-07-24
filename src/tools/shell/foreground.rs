@@ -24,6 +24,10 @@ pub(crate) enum ForegroundOutcome {
     Timeout(String, String),
     Cancelled(String, String),
     WaitError(std::io::Error),
+    Backgrounded {
+        partial_stdout: String,
+        partial_stderr: String,
+    },
 }
 
 pub(crate) const CANCELLED_BANNER: &str = "The user manually cancelled this command. \
@@ -68,9 +72,6 @@ where
     R: tokio::io::AsyncRead + Unpin + Send + 'static,
 {
     let (tx, rx) = tokio::sync::oneshot::channel();
-    // Shared with the drain step so that, when a lingering grandchild keeps the
-    // pipe open past EOF, the drain timeout can still snapshot everything read so
-    // far instead of handing the model an empty string.
     let buf: Arc<Mutex<Vec<u8>>> = Arc::new(Mutex::new(Vec::new()));
     let reader_buf = buf.clone();
     crate::runtime::spawn_supervised(label, async move {
@@ -119,9 +120,6 @@ fn drain_stream(handle: StreamReaderHandle) -> impl std::future::Future<Output =
     async move {
         match tokio::time::timeout(Duration::from_millis(500), handle.rx).await {
             Ok(Ok(text)) => text,
-            // The reader task never signalled EOF within the grace window (a
-            // grandchild is still holding the pipe). Return whatever it has
-            // buffered so far rather than an empty string.
             _ => {
                 let raw_all = handle.buf.lock();
                 crate::util::decode_subprocess_bytes(&raw_all)
@@ -131,11 +129,32 @@ fn drain_stream(handle: StreamReaderHandle) -> impl std::future::Future<Output =
 }
 
 pub(crate) async fn run_foreground_streamed(
+    child: tokio::process::Child,
+    mirror_id: &str,
+    mirror_session_id: Option<&str>,
+    mirror_started: std::time::Instant,
+    timeout_duration: Duration,
+) -> ForegroundOutcome {
+    run_foreground_streamed_inner(
+        child,
+        mirror_id,
+        mirror_session_id,
+        mirror_started,
+        timeout_duration,
+        None,
+        "",
+    )
+    .await
+}
+
+pub(crate) async fn run_foreground_streamed_inner(
     mut child: tokio::process::Child,
     mirror_id: &str,
     mirror_session_id: Option<&str>,
     mirror_started: std::time::Instant,
     timeout_duration: Duration,
+    block_until: Option<Duration>,
+    command_text: &str,
 ) -> ForegroundOutcome {
     let stdout_handle = spawn_stream_reader(
         child.stdout.take(),
@@ -172,10 +191,18 @@ pub(crate) async fn run_foreground_streamed(
         WaitError(std::io::Error),
         Timeout,
         Cancelled,
+        Background,
     }
 
     let sleep = tokio::time::sleep(timeout_duration);
     tokio::pin!(sleep);
+    let block_sleep = async {
+        match block_until {
+            Some(d) => tokio::time::sleep(d).await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(block_sleep);
     let mut heartbeat = tokio::time::interval(Duration::from_secs(2));
     heartbeat.tick().await;
 
@@ -200,6 +227,9 @@ pub(crate) async fn run_foreground_streamed(
                 }
                 break WaitOutcome::Timeout;
             }
+            _ = &mut block_sleep => {
+                break WaitOutcome::Background;
+            }
             _ = &mut kill_rx => {
                 crate::util::kill_child_process_tree(&mut child).await;
                 let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
@@ -219,6 +249,48 @@ pub(crate) async fn run_foreground_streamed(
         registry::unregister_foreground(sid, token);
     }
 
+    if matches!(wait_outcome, WaitOutcome::Background) {
+        let partial_stdout = {
+            let raw = stdout_handle.buf.lock();
+            crate::util::decode_subprocess_bytes(&raw)
+        };
+        let partial_stderr = {
+            let raw = stderr_handle.buf.lock();
+            crate::util::decode_subprocess_bytes(&raw)
+        };
+        let (bg_kill_tx, mut bg_kill_rx) = tokio::sync::oneshot::channel::<()>();
+        registry::register(
+            mirror_id.to_string(),
+            command_text.to_string(),
+            bg_kill_tx,
+            mirror_session_id.map(str::to_string),
+        );
+        let watchdog_id = mirror_id.to_string();
+        let watchdog_sid = mirror_session_id.map(str::to_string);
+        crate::runtime::spawn_supervised("tools.shell.fg_backgrounded", async move {
+            let exit = tokio::select! {
+                _ = &mut bg_kill_rx => {
+                    crate::util::kill_child_process_tree(&mut child).await;
+                    child.wait().await.ok()
+                }
+                status = child.wait() => status.ok(),
+            };
+            let _ = drain_stream(stdout_handle).await;
+            let _ = drain_stream(stderr_handle).await;
+            registry::unregister(&watchdog_id);
+            registry::publish(BackgroundShellSignal::Exited {
+                id: watchdog_id.clone(),
+                elapsed_secs: mirror_started.elapsed().as_secs(),
+                exit_code: exit.and_then(|s| s.code()),
+                session_id: watchdog_sid,
+            });
+        });
+        return ForegroundOutcome::Backgrounded {
+            partial_stdout,
+            partial_stderr,
+        };
+    }
+
     let drained_stdout = drain_stream(stdout_handle).await;
     let drained_stderr = drain_stream(stderr_handle).await;
 
@@ -229,5 +301,6 @@ pub(crate) async fn run_foreground_streamed(
         WaitOutcome::WaitError(e) => ForegroundOutcome::WaitError(e),
         WaitOutcome::Timeout => ForegroundOutcome::Timeout(drained_stdout, drained_stderr),
         WaitOutcome::Cancelled => ForegroundOutcome::Cancelled(drained_stdout, drained_stderr),
+        WaitOutcome::Background => unreachable!("handled above"),
     }
 }

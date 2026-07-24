@@ -61,11 +61,6 @@ pub trait LlmRefiner: Send + Sync {
         2
     }
 
-    /// Full-file merge (Morph/Relace-style fast-apply): given the original file and
-    /// a lazy edit snippet (which may use `// ... existing code ...` markers), return
-    /// the COMPLETE merged file. This is the last-resort fallback when diff-based
-    /// application keeps failing — the model reasons over whole content instead of
-    /// re-emitting a fragile patch. Default: unsupported.
     async fn merge_full_file(
         &self,
         _source: &str,
@@ -247,12 +242,14 @@ impl LlmRefiner for HttpLlmRefiner {
         instruction: Option<&str>,
     ) -> Result<String, ApplyError> {
         let user = build_full_file_merge_prompt(source, edit_snippet, instruction);
-        // The merge system prompt asks for the whole file verbatim, no fences.
-        let fut = self.provider.chat_with_system(
-            Some(FULL_FILE_MERGE_SYSTEM_PROMPT),
-            &user,
-            &self.model,
-            self.temperature,
+        let fut = crate::providers::core::prediction::scope_predicted_output(
+            source.to_string(),
+            self.provider.chat_with_system(
+                Some(FULL_FILE_MERGE_SYSTEM_PROMPT),
+                &user,
+                &self.model,
+                self.temperature,
+            ),
         );
         let reply = match tokio::time::timeout(self.timeout, fut).await {
             Ok(Ok(r)) => r,

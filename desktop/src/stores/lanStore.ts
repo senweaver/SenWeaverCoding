@@ -79,7 +79,6 @@ export const useLanStore = create<LanState>((set, get) => {
       const res = await lanApi.getConversations()
       set({ conversations: res.conversations, unread: res.unread })
     } catch {
-      // ignore transient errors
     }
   }
 
@@ -157,7 +156,6 @@ export const useLanStore = create<LanState>((set, get) => {
       try {
         socket?.close()
       } catch {
-        // ignore
       }
     }
   }
@@ -205,7 +203,6 @@ export const useLanStore = create<LanState>((set, get) => {
         const identity = await lanApi.getIdentity()
         set({ identity })
       } catch {
-        // ignore
       }
     },
 
@@ -217,7 +214,6 @@ export const useLanStore = create<LanState>((set, get) => {
           const peersRes = await lanApi.getPeers()
           set({ peers: peersRes.peers })
         } catch {
-          // ignore
         }
       } else {
         set({ peers: [] })
@@ -247,7 +243,6 @@ export const useLanStore = create<LanState>((set, get) => {
           messagesByPeer: { ...state.messagesByPeer, [peerId]: res.messages },
         }))
       } catch {
-        // ignore
       }
       await get().markRead(peerId)
     },
@@ -294,7 +289,6 @@ export const useLanStore = create<LanState>((set, get) => {
           }
         })
       } catch {
-        // ignore
       }
     },
   }

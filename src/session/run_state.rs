@@ -76,8 +76,6 @@ impl SessionRunGuard {
         &self.session_id
     }
 
-    /// Whether this guard actually claimed the session's run slot (i.e. the
-    /// session was not already running when this guard was created).
     pub fn was_inserted(&self) -> bool {
         self.was_inserted
     }
@@ -85,9 +83,6 @@ impl SessionRunGuard {
 
 impl Drop for SessionRunGuard {
     fn drop(&mut self) {
-        // A nested/duplicate guard (was_inserted == false) does NOT own this
-        // session's run: releasing its resource locks here would strip the
-        // still-running outer turn of the file/shell/browser locks it holds.
         if !self.was_inserted {
             return;
         }

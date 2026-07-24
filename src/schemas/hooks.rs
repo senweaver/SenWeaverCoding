@@ -99,6 +99,47 @@ impl HookSchema {
                     supports_filter: true,
                     supports_mutation: false,
                 },
+                HookEventSchema {
+                    event: "session_start".to_string(),
+                    description: "Fired when a session is opened.".to_string(),
+                    payload_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "session_id": { "type": "string" },
+                            "channel": { "type": "string" }
+                        }
+                    }),
+                    supports_filter: false,
+                    supports_mutation: false,
+                },
+                HookEventSchema {
+                    event: "session_end".to_string(),
+                    description: "Fired when a session is closed.".to_string(),
+                    payload_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "session_id": { "type": "string" },
+                            "channel": { "type": "string" }
+                        }
+                    }),
+                    supports_filter: false,
+                    supports_mutation: false,
+                },
+                HookEventSchema {
+                    event: "pre_compact".to_string(),
+                    description:
+                        "Fired before conversation history is compacted to fit the model window."
+                            .to_string(),
+                    payload_schema: serde_json::json!({
+                        "type": "object",
+                        "properties": {
+                            "trigger": { "type": "string" },
+                            "estimated_tokens": { "type": "number" }
+                        }
+                    }),
+                    supports_filter: false,
+                    supports_mutation: false,
+                },
             ],
         }
     }

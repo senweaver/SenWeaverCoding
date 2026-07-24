@@ -44,11 +44,6 @@ pub struct PacingConfig {
     #[serde(default = "default_no_progress_iteration_limit")]
     pub no_progress_iteration_limit: usize,
 
-    // When a turn modified code files, run the workspace verification pipeline
-    // (cargo check / tsc --noEmit / go vet / pytest --collect-only, whichever the
-    // repo has) before finalizing and feed real build/type errors back to the
-    // model instead of trusting it to self-verify. This is the deterministic
-    // "don't say done until it builds" gate.
     #[serde(default = "default_auto_verify_after_edit")]
     pub auto_verify_after_edit: bool,
 
@@ -76,10 +71,6 @@ pub(crate) fn default_stream_idle_timeout_secs() -> Option<u64> {
 }
 
 pub(crate) fn default_loop_detection_min_elapsed_secs() -> Option<u64> {
-    // Must match `Default` (Some(0)). With plain `#[serde(default)]` this
-    // deserialized to None when a `[pacing]` table omitted the key, and the
-    // loop_/mod.rs `None => false` branch then disabled the per-iteration
-    // identical-output circuit breaker entirely.
     Some(0)
 }
 

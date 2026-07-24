@@ -18,10 +18,6 @@ export const SETTINGS_SLASH_COMMANDS: ReadonlyArray<{
   { name: 'plugins', descriptionKey: 'slash.plugins.desc', tab: 'plugins' },
 ]
 
-// Only commands that actually execute on this surface: local UI panels plus
-// backend registry commands runnable over the desktop WS (no TTY). The
-// authoritative list comes from the slash-commands API; this is the offline
-// fallback and must never advertise commands the backend cannot run.
 const FALLBACK_SLASH_COMMAND_KEYS: ReadonlyArray<{
   name: string
   descriptionKey: TranslationKey

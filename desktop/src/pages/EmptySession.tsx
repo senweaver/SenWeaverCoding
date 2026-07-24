@@ -234,7 +234,7 @@ export function EmptySession() {
       connectToSession(sessionId)
       useSessionRuntimeStore.getState().setSelection(sessionId, draftSelection)
 
-      setSessionRuntime(sessionId, draftSelection)
+      setSessionRuntime(sessionId, draftSelection, { persist: false })
       const attachmentPayload: AttachmentRef[] = attachments.map((attachment) => ({
         type: attachment.type,
         name: attachment.name,

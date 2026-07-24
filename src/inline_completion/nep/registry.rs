@@ -83,11 +83,7 @@ pub fn default_registry(config: &crate::config::Config) -> Arc<NepRegistry> {
     if let Some(provider_name_raw) = config.default_provider.clone() {
         let provider_name =
             crate::providers::resolve_runtime_provider_name(&provider_name_raw, config);
-        let model = match config
-            .agent_runtime
-            .fast_apply_model
-            .clone()
-            .filter(|s| !s.trim().is_empty())
+        let model = match crate::providers::resolve_fast_apply_model(config)
             .or_else(|| config.default_model.clone().filter(|s| !s.trim().is_empty()))
         {
             Some(m) => m,

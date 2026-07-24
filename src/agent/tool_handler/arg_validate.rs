@@ -27,10 +27,6 @@ pub fn validate_args_against_schema(
         return None;
     }
 
-    // Defer to the tool's own validation for schemas using composition or
-    // references we do not fully model here. Enforcing missing-required against
-    // these risks false rejections of otherwise-valid calls (common in MCP
-    // tool schemas), which is worse than passing a bad call through.
     const UNSUPPORTED_KEYWORDS: &[&str] =
         &["anyOf", "oneOf", "allOf", "$ref", "if", "then", "else", "not", "dependentRequired"];
     if UNSUPPORTED_KEYWORDS
@@ -66,11 +62,6 @@ pub fn validate_args_against_schema(
         }
     }
 
-    // Only flag STRUCTURALLY incompatible type mismatches — passing an
-    // array/object where a scalar is expected, or vice versa. Scalar<->string
-    // interchange (e.g. "5" for an integer, or a number where a string is
-    // expected) is deliberately tolerated: models emit these constantly and
-    // virtually every tool coerces them, so rejecting would break valid calls.
     let mut type_errors: Vec<String> = Vec::new();
     if let Some(props) = properties {
         for (key, value) in args_obj {
@@ -84,8 +75,6 @@ pub fn validate_args_against_schema(
             let structurally_ok = match expected {
                 "array" => value.is_array(),
                 "object" => value.is_object(),
-                // Scalars: reject only if the model sent a composite (array or
-                // object) where a scalar was expected; accept any scalar form.
                 "string" | "boolean" | "integer" | "number" => {
                     !value.is_array() && !value.is_object()
                 }

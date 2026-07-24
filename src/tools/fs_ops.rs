@@ -167,8 +167,6 @@ impl Tool for CopyPathTool {
             });
         }
 
-        // Guard against copying a directory into itself/a descendant, which would
-        // recurse into the growing destination and blow up disk usage.
         if src_path.is_dir() {
             let src_norm = crate::util::normalize_path_for_containment(&src_path);
             let dst_norm = crate::util::normalize_path_for_containment(&dst_path);
@@ -202,9 +200,6 @@ impl Tool for CopyPathTool {
     }
 }
 
-/// Collect regular files under `root` (or `root` itself if it is a file), up to
-/// `limit`, using an iterative walk. Used to snapshot files before a recursive
-/// delete without pulling in a walker dependency or unbounded recursion.
 fn collect_files_bounded(root: &std::path::Path, limit: usize) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if root.is_file() {
@@ -431,9 +426,6 @@ impl Tool for DeletePathTool {
             });
         }
 
-        // Snapshot content into edit-history before an irreversible recursive
-        // delete so it can be recovered (restore_file only covers git-tracked
-        // files). Bounded so deleting a huge tree doesn't stall.
         const MAX_DELETE_SNAPSHOTS: usize = 200;
         let workspace = self.security.workspace_dir();
         let history = crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);

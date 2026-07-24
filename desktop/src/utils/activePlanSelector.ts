@@ -101,9 +101,6 @@ export function selectPlanCardExecutionState(
 
 type ActivePlanResult = { card: PlanCardMsg; state: PlanExecutionState } | null
 
-// Memoize by the messages array reference so the O(n) tail scan runs at most once
-// per (messages, chatState) instead of on every zustand set() (many of which only
-// touch streamingText and leave the messages array reference unchanged).
 const activePlanCache = new WeakMap<UIMessage[], Map<string, ActivePlanResult>>()
 
 function computeActiveExecutingPlan(

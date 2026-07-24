@@ -25,8 +25,6 @@ fn buddy_session_key() -> String {
         .unwrap_or_else(|| "__no_session__".to_string())
 }
 
-// Per-session companion so one session's mood/idle state never bleeds into
-// another's (the buddy state was previously a single process-wide singleton).
 fn with_companion<R>(config: &BuddyConfig, f: impl FnOnce(&mut Companion) -> R) -> R {
     let mut map = companions().lock();
     let companion = map

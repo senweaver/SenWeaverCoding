@@ -36,6 +36,16 @@ pub enum HookEvent {
     AfterFileEdit,
 
     Stop,
+
+    SessionStart,
+
+    SessionEnd,
+
+    SubagentStop,
+
+    PreCompact,
+
+    Notification,
 }
 
 impl HookEvent {
@@ -50,6 +60,11 @@ impl HookEvent {
             HookEvent::BeforeSubmitPrompt => "beforeSubmitPrompt",
             HookEvent::AfterFileEdit => "afterFileEdit",
             HookEvent::Stop => "stop",
+            HookEvent::SessionStart => "sessionStart",
+            HookEvent::SessionEnd => "sessionEnd",
+            HookEvent::SubagentStop => "subagentStop",
+            HookEvent::PreCompact => "preCompact",
+            HookEvent::Notification => "notification",
         }
     }
 }
@@ -99,10 +114,6 @@ impl HooksConfig {
 }
 
 fn strip_jsonc_comments(text: &str) -> String {
-    // Iterate by char, not byte: `out.push(b as char)` mangled every multi-byte
-    // UTF-8 sequence (e.g. Chinese paths in hook commands) into mojibake. All
-    // JSONC delimiters are ASCII, so char iteration handles them identically
-    // while preserving non-ASCII content verbatim.
     let mut out = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();
     let mut in_string = false;
@@ -288,27 +299,13 @@ impl ScriptHookRunner {
     }
 
     fn commands_for(&self, event: HookEvent, payload: &HookPayload) -> Vec<&HookCommand> {
-        let lookup_events: Vec<HookEvent> = match event {
-            HookEvent::BeforeMcpExecution | HookEvent::PreToolUse => {
-                vec![HookEvent::BeforeMcpExecution, HookEvent::PreToolUse]
-            }
-            other => vec![other],
-        };
-
-        // Merge matching commands from ALL sources (home/global + workspace)
-        // rather than letting the highest-precedence source shadow the rest. A
-        // workspace hooks.json must not be able to silently disable a user's
-        // global security/audit hook for an event like preToolUse just by
-        // defining its own handler; security semantics are additive.
         let mut out: Vec<&HookCommand> = Vec::new();
         for src in &self.sources {
-            for ev in &lookup_events {
-                if let Some(cmds) = src.config.hooks.get(ev) {
-                    out.extend(
-                        cmds.iter()
-                            .filter(|c| matcher_matches(c.matchers.as_ref(), payload)),
-                    );
-                }
+            if let Some(cmds) = src.config.hooks.get(&event) {
+                out.extend(
+                    cmds.iter()
+                        .filter(|c| matcher_matches(c.matchers.as_ref(), payload)),
+                );
             }
         }
         out
@@ -586,18 +583,24 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
-pub fn event_for_tool_pre(tool: &str) -> Option<HookEvent> {
+pub fn events_for_tool_pre(tool: &str) -> Vec<HookEvent> {
     let lower = tool.to_ascii_lowercase();
+    let mut events = Vec::with_capacity(2);
     if lower.starts_with("mcp.") || lower.starts_with("mcp_") {
-        return Some(HookEvent::PreToolUse);
-    }
-    match lower.as_str() {
-        "shell_exec" | "shell" | "bash" | "terminal_run" | "process_exec" => {
-            Some(HookEvent::BeforeShellExecution)
+        events.push(HookEvent::BeforeMcpExecution);
+    } else {
+        match lower.as_str() {
+            "shell_exec" | "shell" | "bash" | "terminal_run" | "process_exec" => {
+                events.push(HookEvent::BeforeShellExecution);
+            }
+            "file_read" | "read_file" | "fs_read" => {
+                events.push(HookEvent::BeforeReadFile);
+            }
+            _ => {}
         }
-        "file_read" | "read_file" | "fs_read" => Some(HookEvent::BeforeReadFile),
-        _ => None,
     }
+    events.push(HookEvent::PreToolUse);
+    events
 }
 
 pub fn event_for_tool_post(tool: &str) -> Option<HookEvent> {
@@ -626,21 +629,26 @@ impl HookHandler for ScriptHookRunner {
         name: String,
         args: Value,
     ) -> HookResult<(String, Value)> {
-        let Some(event) = event_for_tool_pre(&name) else {
-            return HookResult::Continue((name, args));
-        };
-        let payload = HookPayload {
-            event: event.as_str(),
-            tool_name: Some(name.clone()),
-            workspace_dir: self.workspace_dir.to_string_lossy().into_owned(),
-            extras: args.clone(),
-        };
-        match self.dispatch(event, payload).await {
+        let mut overall = HookDecision::Allow;
+        for event in events_for_tool_pre(&name) {
+            let payload = HookPayload {
+                event: event.as_str(),
+                tool_name: Some(name.clone()),
+                workspace_dir: self.workspace_dir.to_string_lossy().into_owned(),
+                extras: args.clone(),
+            };
+            let decision = self.dispatch(event, payload).await;
+            let was_deny = decision.is_deny();
+            overall = overall.merge(decision);
+            if was_deny {
+                break;
+            }
+        }
+        match overall {
             HookDecision::Allow => HookResult::Continue((name, args)),
-            HookDecision::Ask { user_message } => HookResult::Cancel(format!(
-                "hooks.json requested user confirmation: {}",
-                user_message.unwrap_or_else(|| "manual approval required".into())
-            )),
+            HookDecision::Ask { user_message } => {
+                HookResult::RequireApproval((name, args), user_message)
+            }
             HookDecision::Deny {
                 user_message,
                 agent_message,
@@ -702,9 +710,9 @@ impl HookHandler for ScriptHookRunner {
         }
     }
 
-    async fn on_session_end(&self, session_id: &str, channel: &str) {
+    async fn on_session_start(&self, session_id: &str, channel: &str) {
         let payload = HookPayload {
-            event: HookEvent::Stop.as_str(),
+            event: HookEvent::SessionStart.as_str(),
             tool_name: None,
             workspace_dir: self.workspace_dir.to_string_lossy().into_owned(),
             extras: json!({
@@ -712,6 +720,73 @@ impl HookHandler for ScriptHookRunner {
                 "channel": channel,
             }),
         };
+        let _ = self.dispatch(HookEvent::SessionStart, payload).await;
+    }
+
+    async fn on_session_end(&self, session_id: &str, channel: &str) {
+        let payload = HookPayload {
+            event: HookEvent::SessionEnd.as_str(),
+            tool_name: None,
+            workspace_dir: self.workspace_dir.to_string_lossy().into_owned(),
+            extras: json!({
+                "session_id": session_id,
+                "channel": channel,
+            }),
+        };
+        let _ = self.dispatch(HookEvent::SessionEnd, payload).await;
+    }
+
+    async fn on_turn_end(&self, channel: &str, final_text: &str, tools_used: &[String]) {
+        let payload = HookPayload {
+            event: HookEvent::Stop.as_str(),
+            tool_name: None,
+            workspace_dir: self.workspace_dir.to_string_lossy().into_owned(),
+            extras: json!({
+                "channel": channel,
+                "response_text": truncate_for_payload(final_text, 8192),
+                "tools_used": tools_used,
+            }),
+        };
         let _ = self.dispatch(HookEvent::Stop, payload).await;
+    }
+
+    async fn on_subagent_stop(&self, worker_id: &str, status: &str, summary: &str) {
+        let payload = HookPayload {
+            event: HookEvent::SubagentStop.as_str(),
+            tool_name: None,
+            workspace_dir: self.workspace_dir.to_string_lossy().into_owned(),
+            extras: json!({
+                "worker_id": worker_id,
+                "status": status,
+                "summary": truncate_for_payload(summary, 4096),
+            }),
+        };
+        let _ = self.dispatch(HookEvent::SubagentStop, payload).await;
+    }
+
+    async fn on_pre_compact(&self, trigger: &str, estimated_tokens: usize) {
+        let payload = HookPayload {
+            event: HookEvent::PreCompact.as_str(),
+            tool_name: None,
+            workspace_dir: self.workspace_dir.to_string_lossy().into_owned(),
+            extras: json!({
+                "trigger": trigger,
+                "estimated_tokens": estimated_tokens,
+            }),
+        };
+        let _ = self.dispatch(HookEvent::PreCompact, payload).await;
+    }
+
+    async fn on_notification(&self, kind: &str, message: &str) {
+        let payload = HookPayload {
+            event: HookEvent::Notification.as_str(),
+            tool_name: None,
+            workspace_dir: self.workspace_dir.to_string_lossy().into_owned(),
+            extras: json!({
+                "kind": kind,
+                "message": truncate_for_payload(message, 4096),
+            }),
+        };
+        let _ = self.dispatch(HookEvent::Notification, payload).await;
     }
 }

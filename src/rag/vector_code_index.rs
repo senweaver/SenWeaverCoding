@@ -58,10 +58,49 @@ pub struct VectorCodeHit {
     pub score: f32,
 }
 
+const EMBED_CACHE_CAP: usize = 8_192;
+
+struct EmbedCache {
+    map: HashMap<[u8; 32], Vec<f32>>,
+    order: std::collections::VecDeque<[u8; 32]>,
+}
+
+impl EmbedCache {
+    fn new() -> Self {
+        Self {
+            map: HashMap::new(),
+            order: std::collections::VecDeque::new(),
+        }
+    }
+
+    fn get(&self, key: &[u8; 32]) -> Option<Vec<f32>> {
+        self.map.get(key).cloned()
+    }
+
+    fn insert(&mut self, key: [u8; 32], vec: Vec<f32>) {
+        if self.map.insert(key, vec).is_none() {
+            self.order.push_back(key);
+            while self.order.len() > EMBED_CACHE_CAP {
+                if let Some(old) = self.order.pop_front() {
+                    self.map.remove(&old);
+                }
+            }
+        }
+    }
+}
+
+fn content_hash(content: &str) -> [u8; 32] {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(content.as_bytes());
+    hasher.finalize().into()
+}
+
 pub struct VectorCodeIndex {
     embedder: Box<dyn EmbeddingProvider>,
     index: Mutex<IvfVectorIndex>,
     chunks: Mutex<HashMap<String, CodeChunk>>,
+    embed_cache: Mutex<EmbedCache>,
 }
 
 impl VectorCodeIndex {
@@ -71,6 +110,7 @@ impl VectorCodeIndex {
             embedder,
             index: Mutex::new(index),
             chunks: Mutex::new(HashMap::new()),
+            embed_cache: Mutex::new(EmbedCache::new()),
         }
     }
 
@@ -91,10 +131,19 @@ impl VectorCodeIndex {
         if dims == 0 {
             anyhow::bail!("vector index disabled: embedder has zero dimensions");
         }
-        let vec = self.embedder.embed_one(&chunk.content).await?;
-        if vec.is_empty() {
-            anyhow::bail!("embedder returned empty vector for chunk {}", chunk.id);
-        }
+        let key = content_hash(&chunk.content);
+        let cached = self.embed_cache.lock().await.get(&key);
+        let vec = match cached {
+            Some(v) => v,
+            None => {
+                let v = self.embedder.embed_one(&chunk.content).await?;
+                if v.is_empty() {
+                    anyhow::bail!("embedder returned empty vector for chunk {}", chunk.id);
+                }
+                self.embed_cache.lock().await.insert(key, v.clone());
+                v
+            }
+        };
         let mut index = self.index.lock().await;
         index.upsert(&chunk.id, &vec);
         let mut chunks = self.chunks.lock().await;
@@ -106,18 +155,43 @@ impl VectorCodeIndex {
         if chunks.is_empty() {
             return Ok(());
         }
-        let texts: Vec<&str> = chunks.iter().map(|c| c.content.as_str()).collect();
-        let vecs = self.embedder.embed(&texts).await?;
-        if vecs.len() != chunks.len() {
-            anyhow::bail!(
-                "embedder returned {got} vectors for {expected} inputs",
-                got = vecs.len(),
-                expected = chunks.len()
-            );
+        let mut resolved: Vec<Option<Vec<f32>>> = Vec::with_capacity(chunks.len());
+        let mut miss_indices: Vec<usize> = Vec::new();
+        {
+            let cache = self.embed_cache.lock().await;
+            for (i, chunk) in chunks.iter().enumerate() {
+                match cache.get(&content_hash(&chunk.content)) {
+                    Some(v) => resolved.push(Some(v)),
+                    None => {
+                        resolved.push(None);
+                        miss_indices.push(i);
+                    }
+                }
+            }
+        }
+        if !miss_indices.is_empty() {
+            let texts: Vec<&str> = miss_indices
+                .iter()
+                .map(|&i| chunks[i].content.as_str())
+                .collect();
+            let vecs = self.embedder.embed(&texts).await?;
+            if vecs.len() != miss_indices.len() {
+                anyhow::bail!(
+                    "embedder returned {got} vectors for {expected} inputs",
+                    got = vecs.len(),
+                    expected = miss_indices.len()
+                );
+            }
+            let mut cache = self.embed_cache.lock().await;
+            for (&i, vec) in miss_indices.iter().zip(vecs.into_iter()) {
+                cache.insert(content_hash(&chunks[i].content), vec.clone());
+                resolved[i] = Some(vec);
+            }
         }
         let mut index = self.index.lock().await;
         let mut store = self.chunks.lock().await;
-        for (chunk, vec) in chunks.into_iter().zip(vecs.into_iter()) {
+        for (chunk, vec) in chunks.into_iter().zip(resolved.into_iter()) {
+            let Some(vec) = vec else { continue };
             index.upsert(&chunk.id, &vec);
             store.insert(chunk.id.clone(), chunk);
         }
@@ -228,13 +302,6 @@ impl VectorCodeIndex {
         if !ivf_path.is_file() || !chunks_path.is_file() {
             return Ok(0);
         }
-        // A matching embedder fingerprint (model identity) is authoritative: the
-        // persisted index was built by the same embedder, so its native vector
-        // width is correct even when it differs from the configured `dims` hint
-        // (Ollama/Gemini return the model's native width regardless of the hint).
-        // Only fall back to the dims check for legacy snapshots that carry no
-        // fingerprint — otherwise we would discard and fully re-embed the corpus
-        // on every cold start whenever configured dims != native dims.
         let mut fingerprint_verified = false;
         if let Ok(raw) = std::fs::read(&meta_path) {
             if let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&raw) {
@@ -284,6 +351,14 @@ impl VectorCodeIndex {
             );
         }
         let count = restored.len();
+        {
+            let mut cache = self.embed_cache.lock().await;
+            for (id, emb) in loaded.iter_entries() {
+                if let Some(chunk) = restored.get(id) {
+                    cache.insert(content_hash(&chunk.content), emb.to_vec());
+                }
+            }
+        }
         {
             let mut index = self.index.lock().await;
             *index = loaded;

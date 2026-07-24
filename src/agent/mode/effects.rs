@@ -170,10 +170,6 @@ pub fn remove_stale_mode_reminders(history: &mut Vec<ChatMessage>, mode: CodingM
 pub fn replace_or_push_system_reminder(history: &mut Vec<ChatMessage>, msg: String) {
     if let Some(marker) = extract_reminder_marker(&msg) {
         let marker_owned = marker.to_string();
-        // Update the existing reminder in place rather than remove-and-append.
-        // Keeping its position stable preserves the byte-identical message
-        // prefix that OpenAI-compatible providers rely on for prompt caching;
-        // reordering it to the tail every turn silently busted the cache.
         if let Some(slot) = history.iter_mut().find(|m| {
             m.role == "system" && m.content.trim_start().starts_with(&marker_owned)
         }) {
@@ -186,9 +182,6 @@ pub fn replace_or_push_system_reminder(history: &mut Vec<ChatMessage>, msg: Stri
     history.push(ChatMessage::system(msg));
 }
 
-// Removes any system reminder carrying the given marker prefix (e.g.
-// "[Context Budget]"). Used to retract a reminder once its condition no longer
-// holds so a stale, misleading banner does not linger in the transcript.
 pub fn remove_system_reminder(history: &mut Vec<ChatMessage>, marker_prefix: &str) -> bool {
     let before = history.len();
     history.retain(|m| {
@@ -199,10 +192,6 @@ pub fn remove_system_reminder(history: &mut Vec<ChatMessage>, marker_prefix: &st
 
 pub const CONTEXT_BUDGET_MARKER: &str = "[Context Budget]";
 
-// Emits a budget reminder once context occupancy crosses a discrete tier.
-// The tier label (not a raw percentage) keeps the message byte-stable within a
-// tier so it does not bust the provider prompt cache every single turn while
-// occupancy inches up; it only changes text at 75% -> 90% -> 97% crossings.
 pub fn build_context_budget_message(
     mode: CodingMode,
     history: &[ChatMessage],
@@ -213,20 +202,20 @@ pub fn build_context_budget_message(
     }
     let used = crate::providers::traits::estimate_total_tokens(history);
     let ratio = used as f64 / max_context_tokens as f64;
-    let tier = if ratio >= 0.97 {
-        "over 97%"
-    } else if ratio >= 0.90 {
-        "over 90%"
+    let tier = if ratio >= 0.85 {
+        "over 85% full — automatic compaction is imminent"
     } else if ratio >= 0.75 {
-        "over 75%"
+        "over 75% full"
+    } else if ratio >= 0.60 {
+        "over 60% full"
     } else {
         return None;
     };
     Some(format!(
-        "{CONTEXT_BUDGET_MARKER} Context window is {tier} full ({} mode). Be economical: \
+        "{CONTEXT_BUDGET_MARKER} Context window is {tier} ({} mode). Be economical: \
          avoid re-reading files you have already seen, prefer targeted searches over \
-         whole-file reads, and keep tool outputs small. Automatic compaction will summarize \
-         older turns if the window fills.",
+         whole-file reads, and keep tool outputs small. Around 85% the runtime first \
+         evicts stale tool outputs, then summarizes older turns.",
         mode.label()
     ))
 }

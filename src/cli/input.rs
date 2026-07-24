@@ -17,9 +17,6 @@ pub fn read_stdin_line_lossy() -> std::io::Result<Option<String>> {
     read_line_lossy(&mut std::io::stdin().lock())
 }
 
-// Piped stdin on Windows consoles frequently arrives as GBK (or another ANSI
-// code page) rather than UTF-8; decode with the same best-effort detection the
-// file tools use instead of failing the whole read on the first invalid byte.
 pub fn read_stdin_to_string_best_effort() -> std::io::Result<String> {
     let mut raw = Vec::new();
     std::io::stdin().lock().read_to_end(&mut raw)?;

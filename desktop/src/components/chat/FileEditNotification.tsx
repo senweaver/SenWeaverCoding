@@ -104,8 +104,13 @@ export function FileEditNotification({
   )
 }
 
+const DIFF_PREVIEW_LINES = 200
+
 function DiffLines({ diff }: { diff: string }) {
-  const lines = diff.replace(/\n$/, '').split('\n')
+  const [showAll, setShowAll] = useState(false)
+  const allLines = diff.replace(/\n$/, '').split('\n')
+  const truncated = !showAll && allLines.length > DIFF_PREVIEW_LINES
+  const lines = truncated ? allLines.slice(0, DIFF_PREVIEW_LINES) : allLines
   return (
     <div
       className="m-0 max-h-[260px] overflow-auto bg-[var(--color-code-bg)] py-1 font-[var(--font-mono)] text-[11px] leading-[1.5]"
@@ -139,6 +144,15 @@ function DiffLines({ diff }: { diff: string }) {
           </div>
         )
       })}
+      {truncated && (
+        <button
+          type="button"
+          onClick={() => setShowAll(true)}
+          className="w-full px-3 py-1 text-left text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+        >
+          {`… ${allLines.length - DIFF_PREVIEW_LINES} more lines — show all`}
+        </button>
+      )}
     </div>
   )
 }

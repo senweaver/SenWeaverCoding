@@ -1927,25 +1927,8 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
     .await
     .context("Failed to create provider")?;
 
-    let hooks: Option<Arc<crate::hooks::HookRunner>> = if config.hooks.enabled {
-        let mut runner = crate::hooks::HookRunner::new();
-        runner.register(Box::new(
-            crate::hooks::builtin::command_logger::CommandLoggerHook::new(),
-        ));
-        match crate::hooks::builtin::webhook_audit::WebhookAuditHook::new(
-            crate::config::schema::WebhookAuditConfig::default(),
-        ) {
-            Ok(hook) => runner.register(Box::new(hook)),
-            Err(e) => tracing::warn!(
-                target: "channels",
-                error = %e,
-                "skipping webhook audit hook: failed to construct from default config"
-            ),
-        }
-        Some(Arc::new(runner))
-    } else {
-        None
-    };
+    let hooks: Option<Arc<crate::hooks::HookRunner>> =
+        crate::hooks::build_runner(&config, &workspace_dir);
 
     let rbac_engine: Option<Arc<crate::security::rbac::RbacEngine>> =
         if config.rbac.enabled {
@@ -1957,9 +1940,6 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
             None
         };
 
-    // Channel daemons have no stdin approval surface for the requesting chat
-    // user: construct with non-interactive semantics so approval fallbacks
-    // deny cleanly instead of blocking the daemon process on its own terminal.
     let approval_manager = Arc::new({
         let audit_path = config
             .config_path

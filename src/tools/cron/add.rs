@@ -135,6 +135,14 @@ impl Tool for CronAddTool {
                     "items": { "type": "string" },
                     "description": "Optional allowlist of tool names for agent jobs. When omitted, all tools remain available."
                 },
+                "folder_path": {
+                    "type": "string",
+                    "description": "Optional working folder for agent jobs. Absolute, or relative to the workspace directory."
+                },
+                "use_worktree": {
+                    "type": "boolean",
+                    "description": "If true, agent jobs run in an isolated git worktree; results are merged back when the parent workspace is clean, otherwise kept on a sen-cron/* branch."
+                },
                 "delivery": {
                     "type": "object",
                     "description": "Optional delivery config to send job output to a channel after each run. When provided, all three of mode, channel, and to are expected.",
@@ -162,11 +170,6 @@ impl Tool for CronAddTool {
                 "delete_after_run": {
                     "type": "boolean",
                     "description": "If true, the job is automatically deleted after its first successful run. Defaults to true for 'at' schedules."
-                },
-                "approved": {
-                    "type": "boolean",
-                    "description": "Set true to explicitly approve medium/high-risk shell commands in supervised mode",
-                    "default": false
                 }
             },
             "required": ["schedule"]
@@ -231,10 +234,7 @@ impl Tool for CronAddTool {
             .get("delete_after_run")
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(default_delete_after_run);
-        let approved = args
-            .get("approved")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
+        let approved = crate::agent::loop_::current_tool_runtime_approved();
         let delivery = match args.get("delivery") {
             Some(v) => match serde_json::from_value::<DeliveryConfig>(v.clone()) {
                 Ok(cfg) => Some(cfg),
@@ -337,6 +337,16 @@ impl Tool for CronAddTool {
                     return Ok(blocked);
                 }
 
+                let folder_path = args
+                    .get("folder_path")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(str::to_string);
+                let use_worktree = args
+                    .get("use_worktree")
+                    .and_then(serde_json::Value::as_bool);
+
                 cron::add_agent_job(
                     &self.config,
                     name,
@@ -348,6 +358,8 @@ impl Tool for CronAddTool {
                         delivery,
                         delete_after_run,
                         allowed_tools,
+                        folder_path,
+                        use_worktree,
                         ..Default::default()
                     },
                 )

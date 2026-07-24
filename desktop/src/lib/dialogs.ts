@@ -4,14 +4,6 @@
 
 import { isTauriRuntime } from './desktopRuntime'
 
-/**
- * Ask the user to confirm a destructive action.
- *
- * In the Tauri desktop shell the native `window.confirm` is overridden to an async,
- * permission-gated plugin call, so a synchronous `if (window.confirm(...))` both throws
- * (when the permission is missing) and evaluates a Promise as truthy. This helper routes
- * through the dialog plugin in Tauri and falls back to `window.confirm` in a browser.
- */
 export async function confirmDialog(message: string, title?: string): Promise<boolean> {
   if (isTauriRuntime()) {
     try {

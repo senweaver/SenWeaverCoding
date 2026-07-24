@@ -87,9 +87,6 @@ pub enum EditOp {
         path: PathBuf,
         #[serde(with = "range_serde")]
         byte_range: Range<usize>,
-        /// Optional expected content of the range being deleted. When present it
-        /// is verified against the file so a stale offset (the file changed after
-        /// the range was computed) is rejected instead of deleting wrong bytes.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         old_text: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]

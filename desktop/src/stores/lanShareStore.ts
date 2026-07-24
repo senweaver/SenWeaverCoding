@@ -95,7 +95,6 @@ export const useLanShareStore = create<LanShareState>((set, get) => {
       try {
         socket?.close()
       } catch {
-        // ignore
       }
     }
   }

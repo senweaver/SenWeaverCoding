@@ -720,8 +720,6 @@ impl BrowserTool {
     async fn rust_native_available(&self) -> bool {
         #[cfg(feature = "browser-native")]
         {
-            // The availability probe does blocking DNS + TCP connect; keep it off
-            // the async runtime worker threads.
             let headless = self.native_headless;
             let url = self.native_webdriver_url.clone();
             let chrome = self.native_chrome_path.clone();
@@ -2685,8 +2683,6 @@ mod native_backend {
                             "selector": sel,
                         }))
                     } else if let Some(duration_ms) = ms {
-                        // Clamp model-supplied sleeps so a huge value cannot hang the
-                        // turn until the outer pacing timeout.
                         const MAX_WAIT_MS: u64 = 60_000;
                         let clamped = duration_ms.min(MAX_WAIT_MS);
                         tokio::time::sleep(Duration::from_millis(clamped)).await;
@@ -3012,9 +3008,6 @@ mod native_backend {
     }
 
     async fn wait_for_selector(client: &Client, selector: &str) -> Result<()> {
-        // fantoccini's default `wait()` never times out. Bound it so a selector
-        // that never appears fails promptly instead of hanging the whole turn until
-        // the outer tool-pacing timeout.
         const WAIT_SELECTOR_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
         match parse_selector(selector) {
             SelectorKind::Css(css) => {

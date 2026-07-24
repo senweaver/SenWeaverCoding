@@ -81,13 +81,8 @@ function handleSessions(
       ws = { seen: new Set(), scannedLen: 0 }
       watchStateBySession.set(sessionId, ws)
     }
-    // Only scan the newly-appended tail. The persistent `seen` set (kept per
-    // session rather than copied per array) plus the `scannedLen` cursor turns
-    // the previous O(n) full scan + O(n) set copy on every update into O(delta).
     let start = ws.scannedLen
     if (start > messages.length) {
-      // Array was replaced/shrank (rewind, reload); rescan from the top. The
-      // `seen` set still dedups already-notified entries.
       start = 0
     }
 
@@ -125,7 +120,6 @@ function handleSessions(
     ws.scannedLen = messages.length
   }
 
-  // Drop watch state for sessions that no longer exist to avoid unbounded growth.
   if (watchStateBySession.size > Object.keys(sessions).length) {
     for (const key of watchStateBySession.keys()) {
       if (!(key in sessions)) {

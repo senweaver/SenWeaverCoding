@@ -242,20 +242,40 @@ impl SessionEventLog {
         })?;
         match tx.try_send(SessionLogMsg::Append(evt.clone())) {
             Ok(()) => {}
-            Err(mpsc::TrySendError::Full(_msg)) => {
-                // `append` runs synchronously on a tokio worker thread (via
-                // SessionActor::apply_event). The old blocking `std::thread::sleep`
-                // backoff (up to ~1.9s) stalled that worker and any other async
-                // task sharing it. Go straight to the non-blocking emergency
-                // direct-append fallback instead.
+            Err(mpsc::TrySendError::Full(msg)) => {
                 self.write_degraded.store(true, Ordering::Relaxed);
                 let failures = self.write_failures.fetch_add(1, Ordering::Relaxed) + 1;
                 tracing::warn!(
                     session_id = %self.id,
                     total_failures = failures,
-                    "session event log write queue full; writing event directly (no blocking backoff)"
+                    "session event log write queue full; applying bounded backpressure (ordered)"
                 );
-                self.emergency_append(evt)?;
+                const EMERGENCY_BUDGET: Duration = Duration::from_secs(5);
+                const EMERGENCY_STEP: Duration = Duration::from_millis(20);
+                let deadline = std::time::Instant::now() + EMERGENCY_BUDGET;
+                let mut pending = msg;
+                loop {
+                    match tx.try_send(pending) {
+                        Ok(()) => break,
+                        Err(mpsc::TrySendError::Full(m)) => {
+                            if std::time::Instant::now() >= deadline {
+                                return Err(std::io::Error::new(
+                                    std::io::ErrorKind::WouldBlock,
+                                    "session event log write queue still full after backpressure budget; \
+                                     event dropped rather than written out of order",
+                                ));
+                            }
+                            pending = m;
+                            std::thread::sleep(EMERGENCY_STEP);
+                        }
+                        Err(mpsc::TrySendError::Disconnected(_)) => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::BrokenPipe,
+                                "session event log writer thread is gone",
+                            ));
+                        }
+                    }
+                }
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 return Err(std::io::Error::new(
@@ -267,18 +287,6 @@ impl SessionEventLog {
         let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
         let _bumped = self.since_snapshot.fetch_add(1, Ordering::SeqCst) + 1;
         Ok(seq)
-    }
-
-    fn emergency_append(&self, evt: &SessionEvent) -> std::io::Result<()> {
-        let line = serde_json::to_string(evt)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
-        let mut file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.root.join(EVENTS_FILE))?;
-        file.write_all(line.as_bytes())?;
-        file.write_all(b"\n")?;
-        file.flush()
     }
 
     pub fn needs_snapshot(&self) -> bool {
@@ -381,10 +389,6 @@ impl SessionEventLog {
         }
 
         if events_path.exists() {
-            // Skip the leading active-log lines the snapshot already absorbed
-            // (set when a crash happened between snapshot write and log rotation);
-            // 0 in the normal case. When the snapshot was corrupt we rebuilt from
-            // rotated logs above, so the whole active log must be replayed.
             let (skip, expected_hash) = if snapshot_corrupt {
                 (0, None)
             } else {
@@ -692,13 +696,7 @@ fn write_snapshot_to_disk(
     state: &SessionState,
 ) -> std::io::Result<()> {
     let active = root.join(EVENTS_FILE);
-    // Flush pending events first so the on-disk active log matches what the
-    // snapshot is about to absorb.
     writer.flush()?;
-    // Record how many active-log lines this snapshot already reflects. If we
-    // crash after writing the snapshot but before rotating the active log, replay
-    // uses this marker to skip the already-absorbed prefix and avoid re-applying
-    // (which would duplicate turns/tool calls, since apply() is append-style).
     let (absorbed, absorbed_hash) = count_and_hash_nonempty_lines(&active);
 
     let snap_path = root.join(SNAPSHOT_FILE);
@@ -713,12 +711,9 @@ fn write_snapshot_to_disk(
             .truncate(true)
             .open(&tmp_path)?;
         tmp.write_all(&json)?;
-        // fsync before rename so a crash cannot leave an empty/half-written
-        // snapshot that would discard most of the session history on replay.
         tmp.sync_all()?;
     }
     std::fs::rename(&tmp_path, &snap_path)?;
-    // Snapshot is now durable and reflects `absorbed` leading active-log lines.
     write_absorbed_marker(root, absorbed, absorbed_hash);
 
     let rotated = root.join(format!("events.{}.jsonl", state.version));

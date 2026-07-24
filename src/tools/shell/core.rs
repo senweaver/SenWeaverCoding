@@ -20,10 +20,6 @@ const MAX_OUTPUT_BYTES: usize = 1_048_576;
 const DEFAULT_LLM_OUTPUT_CAP: usize = 32_768;
 
 fn workspace_build_lock_enabled() -> bool {
-    // Default ON so two parallel sessions sharing a directory cannot run
-    // conflicting build/VCS commands (cargo build, git checkout, ...)
-    // simultaneously and clobber each other. Opt out with
-    // SEN_WORKSPACE_BUILD_LOCK=0.
     crate::util::get_runtime_var("SEN_WORKSPACE_BUILD_LOCK")
         .map(|v| {
             let t = v.trim();
@@ -35,21 +31,10 @@ fn workspace_build_lock_enabled() -> bool {
         .unwrap_or(true)
 }
 
-// Heuristic: does this command mutate shared build/VCS state such that two
-// concurrent same-directory runs would conflict? Kept intentionally narrow so
-// read-only commands still run in parallel across sessions.
-/// Best-effort extraction of filesystem write targets from a shell command line,
-/// used to feed the workspace-confinement gate. It is intentionally conservative:
-/// it recognizes output redirections (`>`, `>>`) and the destination argument of
-/// common write commands (cp/mv/tee/install/dd of=). It is a defense-in-depth
-/// heuristic layered on top of `validate_command_execution` + `forbidden_path_argument`,
-/// not a full shell parser; unrecognized shapes simply pass through to the OS
-/// sandbox (Job Object on Windows, Landlock on Linux) as before.
 fn extract_shell_write_targets(command: &str) -> Vec<String> {
     let mut targets = Vec::new();
     let tokens: Vec<String> = tokenize_shell_words(command);
 
-    // Redirections: `> file`, `>> file`, `N> file`, and `>file` attached form.
     for (i, tok) in tokens.iter().enumerate() {
         let t = tok.as_str();
         let redir_body = t
@@ -70,8 +55,6 @@ fn extract_shell_write_targets(command: &str) -> Vec<String> {
         }
     }
 
-    // First non-flag argument of common write commands (destination for cp/mv is
-    // last, but gating on any operand is sufficient for confinement).
     let head = tokens
         .first()
         .map(|s| {
@@ -596,14 +579,13 @@ impl Tool for ShellTool {
                     "type": "string",
                     "description": command_desc
                 },
-                "approved": {
-                    "type": "boolean",
-                    "description": "Deprecated / ignored: approval is decided by the runtime approval policy, not by this flag. Do not set it to bypass a confirmation.",
-                    "default": false
-                },
                 "timeout_ms": {
                     "type": "integer",
                     "description": "Override the default timeout in milliseconds (default: 60000). Use higher values for long-running commands."
+                },
+                "block_until_ms": {
+                    "type": "integer",
+                    "description": "Run in the foreground for at most this many ms; if the command has not finished by then it is auto-moved to the background and a 'bg-<id>' handle is returned so you can keep working and poll with background_status / background_logs / background_wait. Use for commands that may be long-running (dev servers, watchers, builds) without committing to background: true up front."
                 },
                 "compact": {
                     "type": "boolean",
@@ -625,10 +607,7 @@ impl Tool for ShellTool {
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' parameter"))?;
-        let approved = args
-            .get("approved")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let approved = crate::agent::loop_::current_tool_runtime_approved();
 
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
@@ -641,7 +620,6 @@ impl Tool for ShellTool {
         let risk_level = match self.security.validate_command_execution(command, approved) {
             Ok(risk) => risk,
             Err(reason) => {
-                // Record the denied attempt on the tamper-evident audit chain too.
                 crate::security::record_command_execution(
                     "agent", command, "denied", approved, false, false, 0,
                 );
@@ -661,14 +639,6 @@ impl Tool for ShellTool {
             });
         }
 
-        // Filesystem-confinement gate for shell writes. The structured file tools
-        // already route through `sandbox_allows_path`, but the shell (which on
-        // Windows / NoopSandbox platforms has no OS-level filesystem jail) did
-        // not. Parse likely write targets (redirections + common write commands)
-        // and defer the allow/deny decision to the same deny-by-default confinement
-        // check. This is a hard boundary and is intentionally NOT bypassable by the
-        // model-supplied `approved` flag; it no-ops entirely when filesystem
-        // confinement is disabled (the check returns true).
         {
             let ws = self.security.workspace_dir();
             for target in extract_shell_write_targets(command) {
@@ -699,9 +669,6 @@ impl Tool for ShellTool {
             });
         }
 
-        // Command cleared every policy gate and is about to run: record it on the
-        // tamper-evident audit chain (allowed=true). This is the wiring that was
-        // previously missing entirely (the AuditLogger had zero call sites).
         crate::security::record_command_execution(
             "agent",
             command,
@@ -724,9 +691,6 @@ impl Tool for ShellTool {
             None => None,
         };
 
-        // Opt-in cross-session serialization for build/VCS commands so two
-        // parallel sessions sharing a directory cannot run conflicting builds
-        // simultaneously. Enabled via SEN_WORKSPACE_BUILD_LOCK=1.
         let _workspace_guard = if workspace_build_lock_enabled()
             && command_is_build_like(command)
         {
@@ -745,11 +709,6 @@ impl Tool for ShellTool {
             None
         };
 
-        // Fold the shell command's declared write targets (redirections + common
-        // write commands) into the same cross-session FileWrite lock the
-        // structured editors use, so a shell `> file` / `tee file` cannot race a
-        // parallel session's file_edit on the same path. Best-effort: undetected
-        // write shapes still fall through to the OS sandbox as before.
         let _shell_write_guards = {
             let ws = self.security.workspace_dir();
             let mut paths: Vec<std::path::PathBuf> = Vec::new();
@@ -829,6 +788,10 @@ impl Tool for ShellTool {
         cmd.stderr(std::process::Stdio::piped());
         cmd.stdin(std::process::Stdio::null());
         cmd.kill_on_drop(true);
+        #[cfg(unix)]
+        {
+            cmd.process_group(0);
+        }
 
         let background = args
             .get("background")
@@ -846,6 +809,11 @@ impl Tool for ShellTool {
         let timeout_secs = timeout_duration.as_secs();
         let job_limits = self.job_limits;
 
+        let block_until = args
+            .get("block_until_ms")
+            .and_then(|v| v.as_u64())
+            .filter(|ms| *ms > 0)
+            .map(Duration::from_millis);
         let mirror_id = format!(
             "sync-{}",
             uuid::Uuid::new_v4()
@@ -904,14 +872,44 @@ impl Tool for ShellTool {
             }
         };
 
-        let outcome = super::foreground::run_foreground_streamed(
+        let outcome = super::foreground::run_foreground_streamed_inner(
             child,
             &mirror_id,
             mirror_session_id.as_deref(),
             mirror_started,
             timeout_duration,
+            block_until,
+            command,
         )
         .await;
+
+        if let super::foreground::ForegroundOutcome::Backgrounded {
+            partial_stdout,
+            partial_stderr,
+        } = &outcome
+        {
+            let mut msg = format!(
+                "Command still running after {}ms; moved to background as '{mirror_id}'. \
+                 Poll with background_status / background_logs(id=\"{mirror_id}\") / \
+                 background_wait(id=\"{mirror_id}\"), or stop it with background_kill.",
+                block_until.map(|d| d.as_millis()).unwrap_or(0)
+            );
+            let preview: String = partial_stdout
+                .lines()
+                .chain(partial_stderr.lines())
+                .take(20)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !preview.trim().is_empty() {
+                msg.push_str("\n\n--- output so far ---\n");
+                msg.push_str(&preview);
+            }
+            return Ok(ToolResult {
+                success: true,
+                output: msg,
+                error: None,
+            });
+        }
 
         if let super::foreground::ForegroundOutcome::Cancelled(part_stdout, part_stderr) = &outcome {
             super::super::background::registry::publish(
@@ -949,6 +947,9 @@ impl Tool for ShellTool {
                         ),
                         error: None,
                     });
+                }
+                super::foreground::ForegroundOutcome::Backgrounded { .. } => {
+                    unreachable!("Backgrounded handled before result mapping");
                 }
             };
 
