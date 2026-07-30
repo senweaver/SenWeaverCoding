@@ -311,6 +311,24 @@ impl AuditLogger {
         self.rotate_if_needed()?;
 
         let mut chained = event.clone();
+        if let Some(action) = chained.action.as_mut() {
+            if let Some(command) = action.command.take() {
+                action.command = Some(
+                    crate::services::governance::credential_vault::redact_for_audit_optional(
+                        &command,
+                    ),
+                );
+            }
+        }
+        if let Some(result) = chained.result.as_mut() {
+            if let Some(error) = result.error.take() {
+                result.error = Some(
+                    crate::services::governance::credential_vault::redact_for_audit_optional(
+                        &error,
+                    ),
+                );
+            }
+        }
         {
             let mut state = self.chain.lock();
             chained.sequence = state.sequence;

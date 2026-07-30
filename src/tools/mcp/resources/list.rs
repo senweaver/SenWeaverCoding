@@ -57,7 +57,10 @@ impl Tool for McpResourcesListTool {
         };
 
         let servers = svc.mcp.list_servers().await;
-        if servers.is_empty() {
+        let registry_has_servers = crate::tools::mcp::client::global_registry()
+            .map(|r| !r.is_empty())
+            .unwrap_or(false);
+        if servers.is_empty() && !registry_has_servers {
             return Ok(ToolResult {
                 success: true,
                 output: "No MCP servers connected. Configure MCP servers in your settings to see available resources."
@@ -67,7 +70,7 @@ impl Tool for McpResourcesListTool {
         }
 
         let resources = svc.mcp.all_resources().await;
-        let filtered: Vec<_> = if let Some(name) = server_filter {
+        let mut filtered: Vec<_> = if let Some(name) = server_filter {
             resources
                 .into_iter()
                 .filter(|r| r.server_name == name)
@@ -75,6 +78,28 @@ impl Tool for McpResourcesListTool {
         } else {
             resources
         };
+
+        if filtered.is_empty() {
+            if let Some(registry) = crate::tools::mcp::client::global_registry() {
+                let target_servers: Vec<String> = match server_filter {
+                    Some(name) => vec![name.to_string()],
+                    None => registry.server_names().await,
+                };
+                for server_name in target_servers {
+                    if let Ok(live) = registry.list_resources(Some(&server_name)).await {
+                        filtered.extend(live.into_iter().map(|r| {
+                            crate::services::mcp_manager::McpResource {
+                                uri: r.uri,
+                                name: r.name,
+                                description: r.description,
+                                mime_type: r.mime_type,
+                                server_name: server_name.clone(),
+                            }
+                        }));
+                    }
+                }
+            }
+        }
 
         if filtered.is_empty() {
             let msg = if let Some(name) = server_filter {

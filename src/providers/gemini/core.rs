@@ -1021,7 +1021,10 @@ impl GeminiProvider {
         project: Option<&str>,
         oauth_token: Option<&str>,
     ) -> reqwest::RequestBuilder {
-        let req = self.http_client().post(url).json(request);
+        let req = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client().post(url),
+        )
+        .json(request);
         match auth {
             GeminiAuth::OAuthToken(_) | GeminiAuth::ManagedOAuth => {
                 let token = oauth_token.unwrap_or_default();
@@ -1042,10 +1045,11 @@ impl GeminiProvider {
                         tool_config: request.tool_config.clone(),
                     },
                 };
-                self.http_client()
-                    .post(url)
-                    .json(&internal_request)
-                    .bearer_auth(token)
+                crate::providers::core::idempotency::apply_idempotency_header(
+                    self.http_client().post(url),
+                )
+                .json(&internal_request)
+                .bearer_auth(token)
             }
             _ if auth.is_api_key() => {
                 req.header("x-goog-api-key", auth.api_key_credential())
@@ -1478,7 +1482,9 @@ impl GeminiProvider {
                 {
                     None
                 } else {
-                    Some(t.parameters.clone())
+                    Some(crate::tools::schema::SchemaCleanr::clean_for_gemini(
+                        t.parameters.clone(),
+                    ))
                 },
             })
             .collect();
@@ -1514,7 +1520,9 @@ impl GeminiProvider {
                     if p.is_null() || p.as_object().is_some_and(|o| o.is_empty()) {
                         None
                     } else {
-                        Some(p.clone())
+                        Some(crate::tools::schema::SchemaCleanr::clean_for_gemini(
+                            p.clone(),
+                        ))
                     }
                 });
                 Some(GeminiFunctionDeclaration {
@@ -1647,8 +1655,14 @@ impl Provider for GeminiProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<crate::providers::traits::StructuredResponse> {
-
-        let (system_parts, contents) = Self::convert_messages_native(messages);
+        let sanitized = crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+            self,
+            messages.to_vec(),
+            model,
+            self.max_output_tokens as usize,
+            None,
+        );
+        let (system_parts, contents) = Self::convert_messages_native(&sanitized);
 
         let system_instruction = if system_parts.is_empty() {
             None
@@ -1663,7 +1677,9 @@ impl Provider for GeminiProvider {
             temperature,
             max_output_tokens: self.max_output_tokens,
             response_mime_type: Some("application/json".to_string()),
-            response_schema: Some(schema.clone()),
+            response_schema: Some(crate::tools::schema::SchemaCleanr::clean_for_gemini(
+                schema.clone(),
+            )),
             thinking_config: None,
         };
 
@@ -1930,9 +1946,12 @@ impl Provider for GeminiProvider {
             crate::providers::traits::StreamResult<StreamEvent>,
         >(64);
 
+        let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
         crate::runtime::spawn_supervised("providers.gemini.stream", async move {
-            let response = match client
-                .post(&url)
+            let response = match crate::providers::core::idempotency::apply_idempotency_header_value(
+                client.post(&url),
+                idempotency_key,
+            )
                 .header("x-goog-api-key", &api_key)
                 .json(&gen_req)
                 .send()
@@ -1964,9 +1983,22 @@ impl Provider for GeminiProvider {
             let mut parser = crate::providers::core::sse::SseParser::new();
             let mut last_usage: Option<TokenUsage> = None;
             let mut made_progress = false;
-            loop {
-                let chunk = match byte_stream.next().await {
-                    Some(Ok(c)) => c,
+            let mut saw_stop_reason = false;
+            let mut stream_ended = false;
+            while !stream_ended {
+                match byte_stream.next().await {
+                    Some(Ok(chunk)) => {
+                        parser.push(&chunk);
+                        if parser.overflowed() {
+                            let _ = tx
+                                .send(Err(StreamError::Provider(
+                                    "Gemini SSE event exceeded size limit; upstream response malformed or truncated"
+                                        .to_string(),
+                                )))
+                                .await;
+                            return;
+                        }
+                    }
                     Some(Err(e)) => {
                         let _ = tx
                             .send(Err(StreamError::Provider(format!(
@@ -1975,9 +2007,11 @@ impl Provider for GeminiProvider {
                             .await;
                         return;
                     }
-                    None => break,
-                };
-                parser.push(&chunk);
+                    None => {
+                        parser.finish();
+                        stream_ended = true;
+                    }
+                }
                 while let Some(event) = parser.next_event() {
                     if event.data.trim().is_empty() || event.is_done() {
                         continue;
@@ -2009,6 +2043,9 @@ impl Provider for GeminiProvider {
                     else {
                         continue;
                     };
+                    if candidate.finish_reason.is_some() {
+                        saw_stop_reason = true;
+                    }
                     if let Some(reason) = candidate
                         .finish_reason
                         .as_deref()
@@ -2048,7 +2085,7 @@ impl Provider for GeminiProvider {
                     }
                 }
             }
-            if !made_progress {
+            if !made_progress && !saw_stop_reason {
                 let _ = tx
                     .send(Err(StreamError::Provider(
                         "Gemini stream ended without any content; connection closed mid-response"
@@ -2056,6 +2093,12 @@ impl Provider for GeminiProvider {
                     )))
                     .await;
                 return;
+            }
+            if !made_progress && saw_stop_reason {
+                tracing::warn!(
+                    target: "providers.gemini.stream",
+                    "Gemini stream reported a finish reason but produced no text/tool output; finishing with an empty response"
+                );
             }
             if let Some(usage) = last_usage {
                 let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;

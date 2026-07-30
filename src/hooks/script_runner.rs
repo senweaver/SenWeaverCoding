@@ -333,6 +333,17 @@ impl ScriptHookRunner {
     }
 
     async fn run_single(&self, cmd: &HookCommand, payload: &[u8]) -> HookDecision {
+        if let Err(reason) = crate::security::detect::ensure_sandbox_available() {
+            tracing::error!(
+                command = cmd.command,
+                error = %reason,
+                "refusing to run hooks.json script: explicitly configured sandbox backend is unavailable"
+            );
+            return HookDecision::Deny {
+                user_message: Some(reason.clone()),
+                agent_message: Some(reason),
+            };
+        }
         let timeout = cmd
             .timeout_ms
             .map(Duration::from_millis)
@@ -364,11 +375,23 @@ impl ScriptHookRunner {
 
         let stdin = child.stdin.take();
         let payload_owned = payload.to_vec();
+        let stdin_write_timed_out =
+            std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stdin_flag = std::sync::Arc::clone(&stdin_write_timed_out);
+        let stdin_write_deadline = Duration::from_secs(2).min(timeout);
         let output_future = async move {
             if let Some(mut stdin) = stdin {
                 use tokio::io::AsyncWriteExt;
-                let _ = stdin.write_all(&payload_owned).await;
-                let _ = stdin.shutdown().await;
+                let write = async {
+                    let _ = stdin.write_all(&payload_owned).await;
+                    let _ = stdin.shutdown().await;
+                };
+                if tokio::time::timeout(stdin_write_deadline, write)
+                    .await
+                    .is_err()
+                {
+                    stdin_flag.store(true, std::sync::atomic::Ordering::Relaxed);
+                }
             }
             child.wait_with_output().await
         };
@@ -379,6 +402,15 @@ impl ScriptHookRunner {
                 return HookDecision::Allow;
             }
             Err(_) => {
+                if stdin_write_timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+                    tracing::warn!(
+                        command = cmd.command,
+                        timeout_ms = timeout.as_millis() as u64,
+                        "hook script did not consume its stdin payload and then timed out; \
+                         treating as allow (only an explicit script response can deny)"
+                    );
+                    return HookDecision::Allow;
+                }
                 tracing::warn!(
                     command = cmd.command,
                     timeout_ms = timeout.as_millis() as u64,
@@ -394,6 +426,15 @@ impl ScriptHookRunner {
                 };
             }
         };
+
+        if stdin_write_timed_out.load(std::sync::atomic::Ordering::Relaxed) {
+            tracing::warn!(
+                command = cmd.command,
+                "hook script did not consume its stdin payload within {}ms; \
+                 stdin was closed early",
+                stdin_write_deadline.as_millis() as u64
+            );
+        }
 
         if !output.status.success() {
 
@@ -517,6 +558,40 @@ fn truncate_for_payload(s: &str, max: usize) -> String {
     out
 }
 
+const PRE_TOOL_PAYLOAD_STRING_MAX: usize = 4096;
+
+fn truncate_json_strings(value: &mut Value, max: usize) {
+    match value {
+        Value::String(s) => {
+            if s.len() > max {
+                *s = truncate_for_payload(s, max);
+            }
+        }
+        Value::Array(items) => {
+            for item in items {
+                truncate_json_strings(item, max);
+            }
+        }
+        Value::Object(map) => {
+            for (_, v) in map.iter_mut() {
+                truncate_json_strings(v, max);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn sanitize_pre_tool_extras(args: &Value) -> Value {
+    let mut extras = args.clone();
+    truncate_json_strings(&mut extras, PRE_TOOL_PAYLOAD_STRING_MAX);
+    if let Some(obj) = extras.as_object_mut() {
+        obj.remove("event");
+        obj.remove("tool_name");
+        obj.remove("workspace_dir");
+    }
+    extras
+}
+
 fn build_shell_command(line: &str) -> tokio::process::Command {
     #[cfg(target_os = "windows")]
     {
@@ -583,16 +658,49 @@ fn home_dir() -> Option<PathBuf> {
     }
 }
 
+static SHELL_CAPABLE_TOOLS: std::sync::LazyLock<
+    parking_lot::RwLock<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| parking_lot::RwLock::new(std::collections::HashSet::new()));
+
+pub fn register_shell_capable_tool(name: &str) {
+    SHELL_CAPABLE_TOOLS.write().insert(name.to_string());
+}
+
+fn is_shell_capable_tool(tool: &str) -> bool {
+    if SHELL_CAPABLE_TOOLS.read().contains(tool) {
+        return true;
+    }
+    matches!(
+        tool.to_ascii_lowercase().as_str(),
+        "shell_exec" | "shell" | "bash" | "terminal_run" | "process_exec" | "powershell"
+    )
+}
+
+fn is_mcp_tool(tool: &str) -> bool {
+    let lower = tool.to_ascii_lowercase();
+    if lower.starts_with("mcp.") || lower.starts_with("mcp_") {
+        return true;
+    }
+    if let Some((head, tail)) = tool.split_once("__") {
+        if !head.is_empty() && !tail.is_empty() {
+            return match crate::tools::mcp::client::global_registry() {
+                Some(registry) => registry.has_tool(tool),
+                None => true,
+            };
+        }
+    }
+    false
+}
+
 pub fn events_for_tool_pre(tool: &str) -> Vec<HookEvent> {
     let lower = tool.to_ascii_lowercase();
     let mut events = Vec::with_capacity(2);
-    if lower.starts_with("mcp.") || lower.starts_with("mcp_") {
+    if is_mcp_tool(tool) {
         events.push(HookEvent::BeforeMcpExecution);
+    } else if is_shell_capable_tool(tool) {
+        events.push(HookEvent::BeforeShellExecution);
     } else {
         match lower.as_str() {
-            "shell_exec" | "shell" | "bash" | "terminal_run" | "process_exec" => {
-                events.push(HookEvent::BeforeShellExecution);
-            }
             "file_read" | "read_file" | "fs_read" => {
                 events.push(HookEvent::BeforeReadFile);
             }
@@ -629,13 +737,14 @@ impl HookHandler for ScriptHookRunner {
         name: String,
         args: Value,
     ) -> HookResult<(String, Value)> {
+        let extras = sanitize_pre_tool_extras(&args);
         let mut overall = HookDecision::Allow;
         for event in events_for_tool_pre(&name) {
             let payload = HookPayload {
                 event: event.as_str(),
                 tool_name: Some(name.clone()),
                 workspace_dir: self.workspace_dir.to_string_lossy().into_owned(),
-                extras: args.clone(),
+                extras: extras.clone(),
             };
             let decision = self.dispatch(event, payload).await;
             let was_deny = decision.is_deny();

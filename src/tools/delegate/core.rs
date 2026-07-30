@@ -1,9 +1,9 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 use super::super::traits::{Tool, ToolResult};
 use crate::agent::prompt::{PromptContext, SystemPromptBuilder};
-use crate::agent::subagent_limiter::{SubagentLimiter, SubagentPermit};
+use crate::agent::subagent::limiter::{SubagentLimiter, SubagentPermit};
 use crate::config::{DelegateAgentConfig, DelegateToolConfig};
 use crate::observability::traits::{Observer, ObserverEvent, ObserverMetric};
 use crate::providers::{self, ChatMessage, Provider};
@@ -222,7 +222,7 @@ fn resolve_subagent_limiter() -> Arc<SubagentLimiter> {
             &svc.config().agent_runtime.subagent_limit,
         )),
         None => Arc::new(SubagentLimiter::new(
-            &crate::agent::subagent_limiter::SubagentLimitConfig::default(),
+            &crate::agent::subagent::limiter::SubagentLimitConfig::default(),
         )),
     }
 }
@@ -240,15 +240,15 @@ async fn acquire_subagent_permit(
         });
     match limiter.acquire_queued(cancel, deadline).await {
         Ok(p) => Ok(p),
-        Err(crate::agent::subagent_limiter::QueuedAcquireError::Cancelled) => Err(format!(
+        Err(crate::agent::subagent::limiter::QueuedAcquireError::Cancelled) => Err(format!(
             "subagent '{label}' cancelled while waiting for a concurrency permit"
         )),
-        Err(crate::agent::subagent_limiter::QueuedAcquireError::Rejected { active, max }) => {
+        Err(crate::agent::subagent::limiter::QueuedAcquireError::Rejected { active, max }) => {
             Err(format!(
                 "subagent '{label}' rejected: concurrency limit reached ({active}/{max})"
             ))
         }
-        Err(crate::agent::subagent_limiter::QueuedAcquireError::DeadlineExceeded {
+        Err(crate::agent::subagent::limiter::QueuedAcquireError::DeadlineExceeded {
             active,
             max,
         }) => Err(format!(

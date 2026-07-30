@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 #[derive(Clone)]
 pub struct WorktreeInfo {
@@ -11,22 +12,92 @@ pub struct WorktreeInfo {
     pub base: PathBuf,
 }
 
-pub async fn parent_workspace_is_dirty(base: &Path) -> bool {
-    crate::util::hidden_async_command("git")
+static BASE_MERGE_LOCKS: OnceLock<dashmap::DashMap<PathBuf, Arc<tokio::sync::Mutex<()>>>> =
+    OnceLock::new();
+
+pub fn base_merge_lock(base: &Path) -> Arc<tokio::sync::Mutex<()>> {
+    let map = BASE_MERGE_LOCKS.get_or_init(dashmap::DashMap::new);
+    let key = base.canonicalize().unwrap_or_else(|_| base.to_path_buf());
+    map.entry(key)
+        .or_insert_with(|| Arc::new(tokio::sync::Mutex::new(())))
+        .clone()
+}
+
+pub fn is_internal_repo_path(rel: &str) -> bool {
+    let rel = rel.trim();
+    rel.is_empty()
+        || rel == ".sen"
+        || rel.starts_with(".sen/")
+        || rel.starts_with(".sen\\")
+        || rel == ".git"
+        || rel.starts_with(".git/")
+        || rel.starts_with(".git\\")
+}
+
+fn porcelain_entry_is_internal(line: &str) -> bool {
+    let line = line.trim_end_matches('\r');
+    if line.trim().is_empty() {
+        return true;
+    }
+    if line.len() < 4 {
+        return false;
+    }
+    let status: String = line.chars().take(2).collect();
+    let rest = &line[3..];
+    let is_rename = status.contains('R') || status.contains('C');
+    let (first, second) = if is_rename {
+        match rest.split_once(" -> ") {
+            Some((a, b)) => (a, Some(b)),
+            None => (rest, None),
+        }
+    } else {
+        (rest, None)
+    };
+    for raw in std::iter::once(first).chain(second) {
+        let rel = unquote_git_path(raw);
+        if !is_internal_repo_path(&rel) {
+            return false;
+        }
+    }
+    true
+}
+
+pub fn porcelain_has_real_changes(stdout: &str) -> bool {
+    stdout.lines().any(|line| !porcelain_entry_is_internal(line))
+}
+
+pub async fn parent_workspace_is_dirty(base: &Path) -> Result<bool, String> {
+    let out = crate::util::hidden_async_command("git")
         .args(["status", "--porcelain"])
         .current_dir(base)
         .output()
         .await
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| !String::from_utf8_lossy(&o.stdout).trim().is_empty())
-        .unwrap_or(false)
+        .map_err(|e| format!("git status failed to spawn: {e}"))?;
+    if !out.status.success() {
+        let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
+        if stderr.is_empty() {
+            return Err("git status exited with a non-zero status".to_string());
+        }
+        return Err(stderr);
+    }
+    Ok(porcelain_has_real_changes(&String::from_utf8_lossy(&out.stdout)))
 }
 
-pub async fn commit_worker_changes(info: &WorktreeInfo) -> Result<(), String> {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WorktreeCommit {
+    Committed,
+    NoChanges,
+}
+
+pub struct WorktreeSalvage {
+    pub note: String,
+    pub retained: bool,
+}
+
+pub async fn commit_worker_changes(info: &WorktreeInfo) -> Result<WorktreeCommit, String> {
     let path = info.path.to_string_lossy().to_string();
     if !info.path.exists() {
-        return Ok(());
+        return Ok(WorktreeCommit::NoChanges);
     }
     let add = crate::util::hidden_async_command("git")
         .args(["-C", &path, "add", "-A"])
@@ -41,18 +112,47 @@ pub async fn commit_worker_changes(info: &WorktreeInfo) -> Result<(), String> {
         .output()
         .await
         .map_err(|e| format!("git diff --cached failed: {e}"))?;
-    if !staged.status.success() {
-        let msg = format!("sen-worker: {}", info.branch);
-        let commit = crate::util::hidden_async_command("git")
-            .args(["-C", &path, "commit", "-m", &msg, "--no-verify"])
-            .output()
-            .await
-            .map_err(|e| format!("git commit failed: {e}"))?;
-        if !commit.status.success() {
-            return Err(String::from_utf8_lossy(&commit.stderr).trim().to_string());
-        }
+    if staged.status.success() {
+        return Ok(WorktreeCommit::NoChanges);
     }
-    Ok(())
+    let msg = format!("sen-worker: {}", info.branch);
+    let commit = crate::util::hidden_async_command("git")
+        .args(["-C", &path, "commit", "-m", &msg, "--no-verify"])
+        .output()
+        .await
+        .map_err(|e| format!("git commit failed: {e}"))?;
+    if !commit.status.success() {
+        return Err(String::from_utf8_lossy(&commit.stderr).trim().to_string());
+    }
+    Ok(WorktreeCommit::Committed)
+}
+
+pub async fn salvage_worktree(info: &WorktreeInfo) -> WorktreeSalvage {
+    match commit_worker_changes(info).await {
+        Ok(WorktreeCommit::Committed) => {
+            let note = remove_worktree_keep_branch(info).await;
+            WorktreeSalvage {
+                note: format!("committed: work saved on branch `{}`{note}", info.branch),
+                retained: false,
+            }
+        }
+        Ok(WorktreeCommit::NoChanges) => {
+            let note = remove_worktree_keep_branch(info).await;
+            WorktreeSalvage {
+                note: format!("no_changes: nothing to commit{note}"),
+                retained: false,
+            }
+        }
+        Err(err) => WorktreeSalvage {
+            note: format!(
+                "retained_uncommitted: commit failed ({err}); worktree kept at `{}` on branch \
+                 `{}` so the uncommitted work can be recovered manually",
+                info.path.display(),
+                info.branch
+            ),
+            retained: true,
+        },
+    }
 }
 
 pub async fn remove_worktree_keep_branch(info: &WorktreeInfo) -> String {
@@ -78,7 +178,14 @@ pub async fn remove_worktree_keep_branch(info: &WorktreeInfo) -> String {
 pub async fn commit_and_merge_worker(info: &WorktreeInfo) -> Result<String, String> {
     let base = info.base.to_string_lossy().to_string();
 
-    commit_worker_changes(info).await?;
+    if let Err(err) = commit_worker_changes(info).await {
+        return Err(format!(
+            "commit failed ({err}); worktree kept at `{}` on branch `{}` so the uncommitted \
+             work can be recovered manually",
+            info.path.display(),
+            info.branch
+        ));
+    }
 
     let ahead = crate::util::hidden_async_command("git")
         .args([
@@ -91,11 +198,28 @@ pub async fn commit_and_merge_worker(info: &WorktreeInfo) -> Result<String, Stri
         .output()
         .await
         .map_err(|e| format!("git rev-list failed: {e}"))?;
-    let ahead_count: u64 = String::from_utf8_lossy(&ahead.stdout)
-        .trim()
-        .parse()
-        .unwrap_or(0);
-    if !ahead.status.success() || ahead_count == 0 {
+    if !ahead.status.success() {
+        let stderr = String::from_utf8_lossy(&ahead.stderr).trim().to_string();
+        return Err(format!(
+            "git rev-list failed ({stderr}); worktree kept at `{}` on branch `{}` so the \
+             committed work is preserved",
+            info.path.display(),
+            info.branch
+        ));
+    }
+    let ahead_stdout = String::from_utf8_lossy(&ahead.stdout).trim().to_string();
+    let ahead_count: u64 = match ahead_stdout.parse() {
+        Ok(n) => n,
+        Err(_) => {
+            return Err(format!(
+                "git rev-list returned unparseable output `{ahead_stdout}`; worktree kept at \
+                 `{}` on branch `{}` so the committed work is preserved",
+                info.path.display(),
+                info.branch
+            ));
+        }
+    };
+    if ahead_count == 0 {
         let cleanup = remove_worker_worktree(info).await;
         return Ok(format!("no commits ahead of parent; merge skipped{cleanup}"));
     }
@@ -198,11 +322,29 @@ pub async fn remove_worker_worktree(info: &WorktreeInfo) -> String {
         .map(|o| o.status.success())
         .unwrap_or(false);
     if removed {
-        let _ = crate::util::hidden_async_command("git")
-            .args(["-C", &base, "branch", "-D", &info.branch])
+        let deleted = crate::util::hidden_async_command("git")
+            .args(["-C", &base, "branch", "-d", &info.branch])
             .output()
             .await;
-        " (worktree and branch cleaned up)".to_string()
+        match deleted {
+            Ok(o) if o.status.success() => " (worktree and branch cleaned up)".to_string(),
+            Ok(o) => {
+                let stderr = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                let reason = if stderr.is_empty() {
+                    "git branch -d refused to delete it".to_string()
+                } else {
+                    stderr
+                };
+                format!(
+                    " (worktree removed; branch `{}` not deleted: {reason})",
+                    info.branch
+                )
+            }
+            Err(e) => format!(
+                " (worktree removed; branch `{}` not deleted: {e})",
+                info.branch
+            ),
+        }
     } else {
         let _ = crate::util::hidden_async_command("git")
             .args(["-C", &base, "worktree", "prune"])
@@ -313,7 +455,7 @@ async fn replicate_uncommitted_changes(base: &Path, path: &Path, path_str: &str,
             continue;
         };
         let rel = unquote_git_path(raw);
-        if rel.is_empty() || rel == ".sen" || rel.starts_with(".sen/") || rel.starts_with(".git") {
+        if is_internal_repo_path(&rel) {
             continue;
         }
         let is_dir = rel.ends_with('/');

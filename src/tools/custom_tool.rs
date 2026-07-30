@@ -31,6 +31,7 @@ pub struct CustomTool {
 impl CustomTool {
     pub fn from_def(def: &CustomToolDef, workspace_root: Arc<RwLock<PathBuf>>) -> Self {
         let registered_name = format!("custom_{}", def.name.trim());
+        crate::hooks::script_runner::register_shell_capable_tool(&registered_name);
         let schema = if def.schema.is_object() {
             def.schema.clone()
         } else {
@@ -130,6 +131,14 @@ impl Tool for CustomTool {
     }
 
     async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
+        if let Err(reason) = crate::security::detect::ensure_sandbox_available() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(reason),
+            });
+        }
+
         let json_payload = serde_json::to_string(&args).unwrap_or_else(|_| "{}".to_string());
 
         let resolved_args: Vec<String> = self

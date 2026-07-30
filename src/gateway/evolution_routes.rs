@@ -668,7 +668,7 @@ pub async fn handle_config_put(
         cfg.evolution = snapshot.clone();
         cfg.clone()
     };
-    if let Err(e) = snapshot_full.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot_full).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -732,7 +732,7 @@ pub async fn handle_persistence_put(
         cfg.evolution.persist_training_data = body.persist_training_data;
         cfg.clone()
     };
-    if let Err(e) = snapshot_full.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot_full).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -1286,7 +1286,7 @@ pub async fn handle_recycling_config_put(
         cfg.evolution = snapshot.clone();
         cfg.clone()
     };
-    if let Err(e) = snapshot_full.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot_full).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -1543,7 +1543,7 @@ pub async fn handle_reflection_config_put(
         cfg.evolution = snapshot.clone();
         cfg.clone()
     };
-    if let Err(e) = snapshot_full.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot_full).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -1682,7 +1682,7 @@ pub async fn handle_reflection_run(
             StatusCode::CONFLICT,
             Json(serde_json::json!({
                 "error": "persistence_required",
-                "detail": "请先在『自我进化』总卡片开启『持久化训练数据』",
+                "detail": "请先在『自我进化』总卡片开启『持久化训练数据」",
             })),
         )
             .into_response();
@@ -1698,7 +1698,7 @@ pub async fn handle_reflection_run(
                 ),
                 "persistence_required" => (
                     StatusCode::CONFLICT,
-                    "请先在『自我进化』总卡片开启『持久化训练数据』",
+                    "请先在『自我进化』总卡片开启『持久化训练数据」",
                 ),
                 "no_turns_available" => (
                     StatusCode::BAD_REQUEST,

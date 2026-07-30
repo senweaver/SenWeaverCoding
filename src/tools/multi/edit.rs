@@ -230,20 +230,19 @@ impl Tool for MultiEditTool {
         }
 
         let mut batch = EditBatch::new(EditOrigin::MultiEditTool).with_atomic(true);
-        let _resource_guards = match crate::session::acquire_many_file_writes_for_current_session(
+        let _resource_guards = match crate::session::acquire_many_file_write_guards(
             planned_paths.clone(),
         )
         .await
         {
-            Some(Ok(g)) => Some(g),
-            Some(Err(e)) => {
+            Ok(g) => g,
+            Err(e) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
                     error: Some(format!("{e}")),
                 });
             }
-            None => None,
         };
 
         for p in &planned_paths {
@@ -325,8 +324,30 @@ impl Tool for MultiEditTool {
             if !originals.contains_key(&path) {
                 let (existing, label) = match tokio::fs::read(&path).await {
                     Ok(bytes) => {
+                        if crate::tools::file::encoding::is_probably_binary(&bytes) {
+                            return Ok(ToolResult {
+                                success: false,
+                                output: String::new(),
+                                error: Some(format!(
+                                    "Edit {i}: refusing to edit binary file '{}'",
+                                    path.display()
+                                )),
+                            });
+                        }
                         let (text, label) =
-                            crate::tools::file::encoding::decode_best_effort(&bytes);
+                            match crate::tools::file::encoding::decode_for_edit(&bytes) {
+                                Ok(decoded) => decoded,
+                                Err(error) => {
+                                    return Ok(ToolResult {
+                                        success: false,
+                                        output: String::new(),
+                                        error: Some(format!(
+                                            "Edit {i}: cannot decode '{}' safely: {error}",
+                                            path.display()
+                                        )),
+                                    });
+                                }
+                            };
                         let non_utf8 =
                             if crate::tools::file::encoding::is_utf8_label(label) {
                                 None

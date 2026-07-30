@@ -465,6 +465,7 @@ impl OpsApplier {
         batch: EditBatch,
     ) -> Result<BatchOutcome, ApplyBatchError> {
         let ws = self.workspace_snapshot();
+        self.recover_pending_journals_once().await;
 
         if let Some(dup) = first_conflicting_multi_op_path(&batch) {
             return Err(ApplyBatchError::Apply {
@@ -530,6 +531,16 @@ impl OpsApplier {
             .write_journal_pending(&batch, Arc::clone(&pre_images))
             .await?;
 
+        let op_serial: Arc<std::sync::Mutex<()>> = Arc::new(std::sync::Mutex::new(()));
+        let mut torn_guard = TornBatchGuard {
+            pre_images: Arc::clone(&pre_images),
+            journal_path: journal_path.clone(),
+            atomic: batch.atomic,
+            batch_id: batch.batch_id.clone(),
+            op_serial: Arc::clone(&op_serial),
+            armed: true,
+        };
+
         let preview = if self.validator_is_noop {
             BatchPreview {
                 batch_id: batch.batch_id.clone(),
@@ -549,7 +560,7 @@ impl OpsApplier {
 
         for (idx, op) in batch.ops.iter().enumerate() {
             let touched = op.primary_path().to_path_buf();
-            match self.apply_one(idx, op).await {
+            match self.apply_one(idx, op, Arc::clone(&op_serial)).await {
                 Ok((before, after, post_sha)) => {
                     if let Some(sha) = post_sha {
                         post_images.push((idx, sha));
@@ -575,7 +586,7 @@ impl OpsApplier {
                         error: Some(msg.clone()),
                     });
                     if batch.atomic {
-
+                        torn_guard.disarm();
                         if let Err(rb) = restore_pre_images_async(&pre_images).await {
                             self.finalize_journal_async(
                                 journal_path.clone(),
@@ -603,6 +614,7 @@ impl OpsApplier {
 
         if let Err(verr) = self.validator.validate(&batch, &preview).await {
             if batch.atomic {
+                torn_guard.disarm();
                 if let Err(rb) = restore_pre_images_async(&pre_images).await {
                     self.finalize_journal_async(
                         journal_path.clone(),
@@ -641,6 +653,7 @@ impl OpsApplier {
                         super::validator::validate_edit(before_text.as_deref(), &text, Some(path));
                     if report.is_confident_failure() {
                         if batch.atomic {
+                            torn_guard.disarm();
                             let _ = restore_pre_images_async(&pre_images).await;
                             self.finalize_journal_async(
                                 journal_path.clone(),
@@ -679,6 +692,7 @@ impl OpsApplier {
             })
             .collect();
 
+        torn_guard.disarm();
         self.finalize_journal_committed(
             journal_path.clone(),
             degraded,
@@ -753,7 +767,22 @@ impl OpsApplier {
                     path: path.clone(),
                     source,
                 })?;
-            let (text, label) = crate::tools::file::encoding::decode_best_effort(&raw_bytes);
+            if crate::tools::file::encoding::is_probably_binary(&raw_bytes) {
+                return Err(ApplyBatchError::Io {
+                    op_index: 0,
+                    path: path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        "refusing to apply a text diff to a binary file",
+                    ),
+                });
+            }
+            let (text, label) = crate::tools::file::encoding::decode_for_edit(&raw_bytes)
+                .map_err(|source| ApplyBatchError::Io {
+                    op_index: 0,
+                    path: path.clone(),
+                    source,
+                })?;
             (text, label)
         };
         let mut options = options.clone();
@@ -879,10 +908,16 @@ impl OpsApplier {
         &self,
         op_index: usize,
         op: &EditOp,
+        op_serial: Arc<std::sync::Mutex<()>>,
     ) -> Result<(Option<usize>, Option<usize>, Option<String>), ApplyBatchError> {
         let op = op.clone();
         let apply_opts = self.apply_opts.clone();
+        #[cfg(feature = "crdt-coordination")]
+        let (crdt_site, crdt_workspace_key) = crate::crdt::coordination_identity();
         let join = tokio::task::spawn_blocking(move || {
+            let _serial = op_serial
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let op = &op;
             let apply_opts = &apply_opts;
             match op {
@@ -894,7 +929,8 @@ impl OpsApplier {
                 ..
             } => {
                 #[cfg(feature = "crdt-coordination")]
-                let remote_merged = crate::crdt::pull_remote_before_edit(path);
+                let remote_merged =
+                    crate::crdt::pull_remote_before_edit(path, &crdt_site, &crdt_workspace_key);
                 #[cfg(not(feature = "crdt-coordination"))]
                 let remote_merged = false;
                 let bytes = std::fs::read(path).map_err(|source| ApplyBatchError::Io {
@@ -940,14 +976,24 @@ impl OpsApplier {
                 })?;
                 #[cfg(feature = "crdt-coordination")]
                 {
-                    let _ = crate::crdt::observe_after_disk_write(op);
+                    if let Err(e) =
+                        crate::crdt::observe_after_disk_write(op, &crdt_site, &crdt_workspace_key)
+                    {
+                        tracing::error!(
+                            target: "apply_model.ops_applier",
+                            path = %path.display(),
+                            error = %e,
+                            "crdt observe_after_disk_write failed: the disk write succeeded but the op did not reach the shared log; marking document for full snapshot resync"
+                        );
+                        crate::crdt::mark_needs_resync(path, &crdt_site, &crdt_workspace_key);
+                    }
                 }
                 let post = sha256_hex(&out);
                 Ok((Some(before), Some(out.len()), Some(post)))
             }
             EditOp::Insert { path, at_byte, text, .. } => {
                 #[cfg(feature = "crdt-coordination")]
-                if crate::crdt::pull_remote_before_edit(path) {
+                if crate::crdt::pull_remote_before_edit(path, &crdt_site, &crdt_workspace_key) {
                     return Err(ApplyBatchError::Apply {
                         op_index,
                         path: path.clone(),
@@ -974,7 +1020,17 @@ impl OpsApplier {
                 })?;
                 #[cfg(feature = "crdt-coordination")]
                 {
-                    let _ = crate::crdt::observe_after_disk_write(op);
+                    if let Err(e) =
+                        crate::crdt::observe_after_disk_write(op, &crdt_site, &crdt_workspace_key)
+                    {
+                        tracing::error!(
+                            target: "apply_model.ops_applier",
+                            path = %path.display(),
+                            error = %e,
+                            "crdt observe_after_disk_write failed: the disk write succeeded but the op did not reach the shared log; marking document for full snapshot resync"
+                        );
+                        crate::crdt::mark_needs_resync(path, &crdt_site, &crdt_workspace_key);
+                    }
                 }
                 let post = sha256_hex(&out);
                 Ok((Some(before), Some(out.len()), Some(post)))
@@ -986,7 +1042,7 @@ impl OpsApplier {
                 ..
             } => {
                 #[cfg(feature = "crdt-coordination")]
-                if crate::crdt::pull_remote_before_edit(path) {
+                if crate::crdt::pull_remote_before_edit(path, &crdt_site, &crdt_workspace_key) {
                     return Err(ApplyBatchError::Apply {
                         op_index,
                         path: path.clone(),
@@ -1025,7 +1081,17 @@ impl OpsApplier {
                 })?;
                 #[cfg(feature = "crdt-coordination")]
                 {
-                    let _ = crate::crdt::observe_after_disk_write(op);
+                    if let Err(e) =
+                        crate::crdt::observe_after_disk_write(op, &crdt_site, &crdt_workspace_key)
+                    {
+                        tracing::error!(
+                            target: "apply_model.ops_applier",
+                            path = %path.display(),
+                            error = %e,
+                            "crdt observe_after_disk_write failed: the disk write succeeded but the op did not reach the shared log; marking document for full snapshot resync"
+                        );
+                        crate::crdt::mark_needs_resync(path, &crdt_site, &crdt_workspace_key);
+                    }
                 }
                 let post = sha256_hex(&out);
                 Ok((Some(before), Some(out.len()), Some(post)))
@@ -1033,7 +1099,7 @@ impl OpsApplier {
             EditOp::CreateFile {
                 path,
                 contents,
-                overwrite: _,
+                overwrite,
                 encoding,
             } => {
                 if let Some(parent) = path.parent() {
@@ -1047,24 +1113,50 @@ impl OpsApplier {
                     Some(label)
                         if !crate::tools::file::encoding::is_utf8_label(label) =>
                     {
-                        crate::tools::file::encoding::encode_with_label(label, contents)
-                            .unwrap_or_else(|| contents.as_bytes().to_vec())
+                        match crate::tools::file::encoding::encode_with_label(label, contents) {
+                            Some(bytes) => bytes,
+                            None => {
+                                return Err(ApplyBatchError::Io {
+                                    op_index,
+                                    path: path.clone(),
+                                    source: std::io::Error::new(
+                                        std::io::ErrorKind::InvalidData,
+                                        format!(
+                                            "content cannot be represented in requested encoding {label}"
+                                        ),
+                                    ),
+                                });
+                            }
+                        }
                     }
                     _ => contents.as_bytes().to_vec(),
                 };
-                atomic_write(path, &out_bytes).map_err(|source| {
+                let write_result = if *overwrite {
+                    atomic_write(path, &out_bytes)
+                } else {
+                    crate::util::atomic_write_new(path, &out_bytes)
+                };
+                write_result.map_err(|source| {
                     ApplyBatchError::Io {
                         op_index,
                         path: path.clone(),
                         source,
                     }
                 })?;
+                #[cfg(feature = "crdt-coordination")]
+                crate::crdt::invalidate(path);
                 let post = sha256_hex(&out_bytes);
                 Ok((None, Some(out_bytes.len()), Some(post)))
             }
             EditOp::DeleteFile { path, missing_ok } => match std::fs::remove_file(path) {
-                Ok(()) => Ok((None, None, None)),
+                Ok(()) => {
+                    #[cfg(feature = "crdt-coordination")]
+                    crate::crdt::invalidate(path);
+                    Ok((None, None, None))
+                }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound && *missing_ok => {
+                    #[cfg(feature = "crdt-coordination")]
+                    crate::crdt::invalidate(path);
                     Ok((None, None, None))
                 }
                 Err(source) => Err(ApplyBatchError::Io {
@@ -1076,7 +1168,7 @@ impl OpsApplier {
             EditOp::RenameFile {
                 from,
                 to,
-                overwrite: _,
+                overwrite,
             } => {
                 if let Some(parent) = to.parent() {
                     std::fs::create_dir_all(parent).map_err(|source| ApplyBatchError::Io {
@@ -1085,11 +1177,40 @@ impl OpsApplier {
                         source,
                     })?;
                 }
-                match std::fs::rename(from, to) {
-                    Ok(()) => Ok((None, None, None)),
-                    Err(_) => {
-
-                        std::fs::copy(from, to).map_err(|source| ApplyBatchError::Io {
+                let rename_result = if *overwrite {
+                    crate::util::atomic_replace_file(from, to)
+                } else {
+                    crate::util::atomic_move_no_replace(from, to)
+                };
+                match rename_result {
+                    Ok(()) => {
+                        #[cfg(feature = "crdt-coordination")]
+                        {
+                            crate::crdt::invalidate(from);
+                            crate::crdt::invalidate(to);
+                        }
+                        let bytes = std::fs::read(to).map_err(|source| ApplyBatchError::Io {
+                            op_index,
+                            path: to.clone(),
+                            source,
+                        })?;
+                        Ok((None, Some(bytes.len()), Some(sha256_hex(&bytes))))
+                    }
+                    Err(source) => {
+                        if !*overwrite {
+                            return Err(ApplyBatchError::Io {
+                                op_index,
+                                path: to.clone(),
+                                source,
+                            });
+                        }
+                        let bytes =
+                            std::fs::read(from).map_err(|source| ApplyBatchError::Io {
+                                op_index,
+                                path: from.clone(),
+                                source,
+                            })?;
+                        atomic_write(to, &bytes).map_err(|source| ApplyBatchError::Io {
                             op_index,
                             path: to.clone(),
                             source,
@@ -1099,7 +1220,12 @@ impl OpsApplier {
                             path: from.clone(),
                             source,
                         })?;
-                        Ok((None, None, None))
+                        #[cfg(feature = "crdt-coordination")]
+                        {
+                            crate::crdt::invalidate(from);
+                            crate::crdt::invalidate(to);
+                        }
+                        Ok((None, Some(bytes.len()), Some(sha256_hex(&bytes))))
                     }
                 }
             }
@@ -1114,8 +1240,24 @@ impl OpsApplier {
                     path: path.clone(),
                     source,
                 })?;
+                if crate::tools::file::encoding::is_probably_binary(&raw_bytes) {
+                    return Err(ApplyBatchError::Io {
+                        op_index,
+                        path: path.clone(),
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "refusing to apply a text hunk to a binary file",
+                        ),
+                    });
+                }
                 let (source, encoding_label) =
-                    crate::tools::file::encoding::decode_best_effort(&raw_bytes);
+                    crate::tools::file::encoding::decode_for_edit(&raw_bytes).map_err(
+                        |source| ApplyBatchError::Io {
+                            op_index,
+                            path: path.clone(),
+                            source,
+                        },
+                    )?;
                 let before = source.len();
                 let mut opts = apply_opts.clone();
                 opts.max_fuzz = *fuzz as usize;
@@ -1146,12 +1288,26 @@ impl OpsApplier {
                     encoding_label,
                     &outcome.applied,
                 )
-                .unwrap_or_else(|| outcome.applied.as_bytes().to_vec());
+                .ok_or_else(|| ApplyBatchError::Io {
+                    op_index,
+                    path: path.clone(),
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "edited content cannot be represented in original encoding {encoding_label}"
+                        ),
+                    ),
+                })?;
                 atomic_write(path, &out_bytes).map_err(|source| ApplyBatchError::Io {
                     op_index,
                     path: path.clone(),
                     source,
                 })?;
+                #[cfg(feature = "crdt-coordination")]
+                {
+                    crate::crdt::invalidate(path);
+                    crate::crdt::mark_needs_resync(path, &crdt_site, &crdt_workspace_key);
+                }
                 let post = sha256_hex(&out_bytes);
                 Ok((Some(before), Some(out_bytes.len()), Some(post)))
             }
@@ -1187,6 +1343,11 @@ impl OpsApplier {
                     path: path.clone(),
                     source,
                 })?;
+                #[cfg(feature = "crdt-coordination")]
+                {
+                    crate::crdt::invalidate(path);
+                    crate::crdt::mark_needs_resync(path, &crdt_site, &crdt_workspace_key);
+                }
                 let _ = cell_op_label(cell_op);
                 let post = sha256_hex(out.as_bytes());
                 Ok((Some(raw.len()), Some(out.len()), Some(post)))
@@ -1323,7 +1484,14 @@ impl OpsApplier {
                     scope_anchor,
                 } => {
                     let raw = std::fs::read(path).unwrap_or_default();
-                    let (source, _) = crate::tools::file::encoding::decode_best_effort(&raw);
+                    let (source, _) =
+                        crate::tools::file::encoding::decode_for_edit(&raw).map_err(
+                            |source| ApplyBatchError::Io {
+                                op_index: idx,
+                                path: path.clone(),
+                                source,
+                            },
+                        )?;
                     let mut opts = apply_opts.clone();
                     opts.max_fuzz = *fuzz as usize;
                     opts.dry_run = true;
@@ -1491,6 +1659,184 @@ impl OpsApplier {
         .await;
     }
 
+    async fn recover_pending_journals_once(&self) {
+        let dir = self.journal_dir_snapshot();
+        {
+            let mut seen = RECOVERED_JOURNAL_DIRS.lock();
+            if !seen.insert(dir.clone()) {
+                return;
+            }
+        }
+        let _ = tokio::task::spawn_blocking(move || recover_pending_journals_in(&dir)).await;
+    }
+
+}
+
+static RECOVERED_JOURNAL_DIRS: std::sync::LazyLock<
+    parking_lot::Mutex<std::collections::HashSet<PathBuf>>,
+> = std::sync::LazyLock::new(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+
+struct TornBatchGuard {
+    pre_images: Arc<BTreeMap<PathBuf, PreImage>>,
+    journal_path: Option<PathBuf>,
+    atomic: bool,
+    batch_id: String,
+    op_serial: Arc<std::sync::Mutex<()>>,
+    armed: bool,
+}
+
+impl TornBatchGuard {
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for TornBatchGuard {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        let _serial = self
+            .op_serial
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if self.atomic {
+            match restore_pre_images(&self.pre_images) {
+                Ok(()) => {
+                    tracing::warn!(
+                        target: "apply_model.ops_applier",
+                        batch_id = %self.batch_id,
+                        "atomic edit batch dropped mid-flight (cancelled or panicked); \
+                         pre-images restored to prevent torn writes"
+                    );
+                    if let Some(p) = &self.journal_path {
+                        append_footer_to_path(p, JournalStatus::RolledBack, false);
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(
+                        target: "apply_model.ops_applier",
+                        batch_id = %self.batch_id,
+                        error = %e,
+                        "atomic edit batch dropped mid-flight and pre-image restore failed; \
+                         pending journal kept for startup recovery"
+                    );
+                    if let Some(p) = &self.journal_path {
+                        append_footer_to_path(p, JournalStatus::RolledBack, true);
+                    }
+                }
+            }
+        } else {
+            tracing::warn!(
+                target: "apply_model.ops_applier",
+                batch_id = %self.batch_id,
+                "edit batch dropped mid-flight; partial non-atomic results kept"
+            );
+            if let Some(p) = &self.journal_path {
+                append_footer_to_path(p, JournalStatus::Committed, true);
+            }
+        }
+    }
+}
+
+fn recover_pending_journals_in(dir: &Path) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.filter_map(|e| e.ok()) {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("jsonl") {
+            continue;
+        }
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let mut header: Option<JournalHeader> = None;
+        let mut records: Vec<JournalRecord> = Vec::new();
+        let mut has_footer = false;
+        for line in raw.lines().filter(|l| !l.trim().is_empty()) {
+            let Ok(parsed) = serde_json::from_str::<JournalLine>(line) else {
+                continue;
+            };
+            match parsed.kind {
+                JournalLineKind::Header => header = parsed.header,
+                JournalLineKind::Record => {
+                    if let Some(rec) = parsed.record {
+                        records.push(rec);
+                    }
+                }
+                JournalLineKind::Footer => has_footer = true,
+            }
+        }
+        if has_footer {
+            continue;
+        }
+        let Some(header) = header else {
+            continue;
+        };
+        let age = Utc::now().signed_duration_since(header.started_at);
+        if age < chrono::Duration::seconds(60) {
+            continue;
+        }
+        if !header.atomic {
+            append_footer_to_path(&path, JournalStatus::Committed, true);
+            continue;
+        }
+        let mut restored = 0usize;
+        let mut failed = 0usize;
+        for record in records.iter().rev() {
+            if let Some(pre) = &record.pre_image {
+                let current = std::fs::read(&pre.path).ok();
+                let current_sha = current.as_ref().map(|b| sha256_hex(b));
+                if current_sha == pre.sha256 {
+                    continue;
+                }
+                if let Some(bytes) = current.as_ref() {
+                    let backup = path.with_extension(format!("op{}.recovered", record.op_index));
+                    let _ = std::fs::write(&backup, bytes);
+                }
+                match restore_one(pre) {
+                    Ok(()) => restored += 1,
+                    Err(e) => {
+                        failed += 1;
+                        tracing::error!(
+                            target: "apply_model.ops_applier",
+                            path = %pre.path.display(),
+                            error = %e,
+                            "pending journal recovery failed to restore a pre-image"
+                        );
+                    }
+                }
+            } else if let EditOp::RenameFile { from, to, .. } = &record.op {
+                let _ = std::fs::rename(to, from);
+            }
+        }
+        append_footer_to_path(&path, JournalStatus::RolledBack, failed > 0);
+        tracing::warn!(
+            target: "apply_model.ops_applier",
+            batch_id = %header.batch_id,
+            restored,
+            failed,
+            journal = %path.display(),
+            "recovered torn atomic edit batch from pending journal; \
+             overwritten torn content saved alongside the journal"
+        );
+    }
+}
+
+fn journal_is_finalized(path: &Path) -> bool {
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return true;
+    };
+    for line in raw.lines().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        return serde_json::from_str::<JournalLine>(line)
+            .map(|l| matches!(l.kind, JournalLineKind::Footer))
+            .unwrap_or(true);
+    }
+    true
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
@@ -1833,9 +2179,24 @@ fn rotate_journals_in(dir: &Path, retention: usize) {
         return;
     }
     files.sort_by_key(|(t, _)| *t);
-    let to_remove = files.len() - retention;
-    for (_, path) in files.into_iter().take(to_remove) {
+    let mut to_remove = files.len() - retention;
+    const STALE_PENDING_MAX_AGE: std::time::Duration =
+        std::time::Duration::from_secs(7 * 24 * 60 * 60);
+    for (mtime, path) in files.into_iter() {
+        if to_remove == 0 {
+            break;
+        }
+        if !journal_is_finalized(&path) {
+            let stale = mtime
+                .elapsed()
+                .map(|age| age > STALE_PENDING_MAX_AGE)
+                .unwrap_or(false);
+            if !stale {
+                continue;
+            }
+        }
         let _ = std::fs::remove_file(path);
+        to_remove -= 1;
     }
 }
 

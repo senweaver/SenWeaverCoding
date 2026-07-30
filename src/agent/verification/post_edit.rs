@@ -48,6 +48,7 @@ pub async fn post_edit_check(
     tool_name: &str,
     args: &Value,
     result_output: &str,
+    deadline: std::time::Instant,
 ) -> Option<String> {
     let mut paths = crate::agent::tool_handler::focus::extract_tool_paths(tool_name, args);
     if paths.is_empty() {
@@ -63,14 +64,23 @@ pub async fn post_edit_check(
             .map(|c| PathBuf::from(c.workspace_dir))
             .filter(|p| p.is_dir())
         {
-            let refresh_targets: Vec<(PathBuf, &'static str)> = paths
-                .iter()
-                .filter(|p| is_code_extension(p))
-                .take(MAX_FILES)
-                .filter_map(|p| {
-                    crate::services::lsp::detect_language(p).map(|lang| (p.clone(), lang))
-                })
-                .collect();
+            let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+            let refresh_budget = remaining
+                .saturating_sub(std::time::Duration::from_millis(800))
+                .min(std::time::Duration::from_secs(4));
+            let refresh_targets: Vec<(PathBuf, &'static str)> =
+                if refresh_budget < std::time::Duration::from_millis(200) {
+                    Vec::new()
+                } else {
+                    paths
+                        .iter()
+                        .filter(|p| is_code_extension(p))
+                        .take(MAX_FILES)
+                        .filter_map(|p| {
+                            crate::services::lsp::detect_language(p).map(|lang| (p.clone(), lang))
+                        })
+                        .collect()
+                };
             if !refresh_targets.is_empty() {
                 let refresh_futs = refresh_targets.into_iter().map(|(p, lang)| {
                     let root = root.clone();
@@ -82,8 +92,16 @@ pub async fn post_edit_check(
                         .await;
                     }
                 });
-                futures_util::future::join_all(refresh_futs).await;
-                tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                let _ = tokio::time::timeout(
+                    refresh_budget,
+                    futures_util::future::join_all(refresh_futs),
+                )
+                .await;
+                if deadline.saturating_duration_since(std::time::Instant::now())
+                    > std::time::Duration::from_millis(400)
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+                }
             }
         }
     }

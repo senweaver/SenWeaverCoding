@@ -176,54 +176,115 @@ pub fn session_to_agent_events(event: &SessionEvent) -> Vec<AgentEvent> {
             ),
         }],
         SessionEventKind::WorkerSpawned {
+            parent_tool_use_id,
             worker_id,
             title,
             model,
-            ..
-        } => vec![AgentEvent::StatusUpdate {
-            action: "worker_spawned".into(),
-            detail: format!("{worker_id} '{title}' ({model})"),
-        }],
+        } => vec![
+            AgentEvent::SubagentSpawn {
+                id: worker_id.clone(),
+                description: title.clone(),
+            },
+            AgentEvent::SubagentChildEvent {
+                agent_id: worker_id.clone(),
+                task_id: parent_tool_use_id.clone(),
+                block_kind: "Status".into(),
+                payload: serde_json::json!({
+                    "action": "spawned",
+                    "text": format!("'{title}' ({model})"),
+                }),
+            },
+            AgentEvent::StatusUpdate {
+                action: "worker_spawned".into(),
+                detail: format!("{worker_id} '{title}' ({model})"),
+            },
+        ],
         SessionEventKind::WorkerStatus {
             worker_id,
             status,
             detail,
-        } => vec![AgentEvent::StatusUpdate {
-            action: "worker_status".into(),
-            detail: format!(
-                "{worker_id} status={status}{}",
-                detail
-                    .as_deref()
-                    .map(|d| format!(" detail={d}"))
-                    .unwrap_or_default()
-            ),
-        }],
+        } => {
+            let lane_status = match status.as_str() {
+                "starting" | "starting_up" => crate::agent::bridge_types::SubagentStatus::StartingUp,
+                "completed" | "done" | "success" => {
+                    crate::agent::bridge_types::SubagentStatus::Completed
+                }
+                "failed" | "error" | "stopped" => {
+                    crate::agent::bridge_types::SubagentStatus::Failed
+                }
+                _ => crate::agent::bridge_types::SubagentStatus::Running,
+            };
+            vec![
+                AgentEvent::SubagentUpdate {
+                    id: worker_id.clone(),
+                    status: lane_status,
+                    result: detail.clone(),
+                },
+                AgentEvent::StatusUpdate {
+                    action: "worker_status".into(),
+                    detail: format!(
+                        "{worker_id} status={status}{}",
+                        detail
+                            .as_deref()
+                            .map(|d| format!(" detail={d}"))
+                            .unwrap_or_default()
+                    ),
+                },
+            ]
+        }
         SessionEventKind::WorkerProgress {
             worker_id,
             action,
             detail,
-        } => vec![AgentEvent::StatusUpdate {
-            action: "worker_progress".into(),
-            detail: format!("{worker_id} {action}: {detail}"),
-        }],
+        } => vec![
+            AgentEvent::SubagentChildEvent {
+                agent_id: worker_id.clone(),
+                task_id: String::new(),
+                block_kind: "Status".into(),
+                payload: serde_json::json!({
+                    "action": action,
+                    "text": detail,
+                }),
+            },
+            AgentEvent::StatusUpdate {
+                action: "worker_progress".into(),
+                detail: format!("{worker_id} {action}: {detail}"),
+            },
+        ],
         SessionEventKind::WorkerCompleted {
             worker_id,
             success,
             summary,
-        } => vec![AgentEvent::StatusUpdate {
-            action: if *success {
-                "worker_completed".into()
-            } else {
-                "worker_failed".into()
+        } => vec![
+            AgentEvent::SubagentUpdate {
+                id: worker_id.clone(),
+                status: if *success {
+                    crate::agent::bridge_types::SubagentStatus::Completed
+                } else {
+                    crate::agent::bridge_types::SubagentStatus::Failed
+                },
+                result: Some(summary.clone()),
             },
-            detail: format!("{worker_id}: {summary}"),
-        }],
-        SessionEventKind::WorkerStopped { worker_id, reason } => {
-            vec![AgentEvent::StatusUpdate {
+            AgentEvent::StatusUpdate {
+                action: if *success {
+                    "worker_completed".into()
+                } else {
+                    "worker_failed".into()
+                },
+                detail: format!("{worker_id}: {summary}"),
+            },
+        ],
+        SessionEventKind::WorkerStopped { worker_id, reason } => vec![
+            AgentEvent::SubagentUpdate {
+                id: worker_id.clone(),
+                status: crate::agent::bridge_types::SubagentStatus::Failed,
+                result: Some(reason.clone()),
+            },
+            AgentEvent::StatusUpdate {
                 action: "worker_stopped".into(),
                 detail: format!("{worker_id}: {reason}"),
-            }]
-        }
+            },
+        ],
         SessionEventKind::ParentResumed { reason } => vec![AgentEvent::StatusUpdate {
             action: "parent_resumed".into(),
             detail: reason.clone(),

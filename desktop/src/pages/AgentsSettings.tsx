@@ -1058,6 +1058,8 @@ function RuntimeSection({
   const [hardCap, setHardCap] = useState(0)
   const [maxSubs, setMaxSubs] = useState(0)
   const [parConc, setParConc] = useState(0)
+  const [subLimitMaxConc, setSubLimitMaxConc] = useState(0)
+  const [subLimitGlobalCap, setSubLimitGlobalCap] = useState(0)
   const [subTimeout, setSubTimeout] = useState(0)
   const [fastModel, setFastModel] = useState('')
   const [fastTimeout, setFastTimeout] = useState(0)
@@ -1077,6 +1079,8 @@ function RuntimeSection({
     setHardCap(cfg.perTurnTokenHardCap)
     setMaxSubs(cfg.maxSubagents)
     setParConc(cfg.parallelToolMaxConcurrency)
+    setSubLimitMaxConc(cfg.subagentLimit?.maxConcurrent ?? 0)
+    setSubLimitGlobalCap(cfg.subagentLimit?.globalCap ?? 0)
     setSubTimeout(cfg.subagentCallTimeoutSecs)
     setFastModel(cfg.fastApplyModel ?? '')
     setFastTimeout(cfg.fastApplyTimeoutSecs)
@@ -1099,6 +1103,10 @@ function RuntimeSection({
         perTurnTokenHardCap: hardCap,
         maxSubagents: maxSubs,
         parallelToolMaxConcurrency: parConc,
+        subagentLimit: {
+          maxConcurrent: subLimitMaxConc,
+          globalCap: subLimitGlobalCap,
+        },
         subagentCallTimeoutSecs: subTimeout,
         fastApplyModel: fastModel.trim().length > 0 ? fastModel.trim() : null,
         fastApplyTimeoutSecs: fastTimeout,
@@ -1160,6 +1168,20 @@ function RuntimeSection({
         label={t('settings.agents.field.runtimeParallelConcurrency')}
         value={parConc}
         onChange={setParConc}
+        min={0}
+      />
+      <NumberField
+        label={t('settings.agents.field.runtimeSubagentMaxConcurrent')}
+        hint={t('settings.agents.field.runtimeSubagentMaxConcurrentHint')}
+        value={subLimitMaxConc}
+        onChange={setSubLimitMaxConc}
+        min={0}
+      />
+      <NumberField
+        label={t('settings.agents.field.runtimeSubagentGlobalCap')}
+        hint={t('settings.agents.field.runtimeSubagentGlobalCapHint')}
+        value={subLimitGlobalCap}
+        onChange={setSubLimitGlobalCap}
         min={0}
       />
       <NumberField

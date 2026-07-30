@@ -125,19 +125,20 @@ impl PersistLimiter {
         Self::new(MIN_PERSIST_INTERVAL)
     }
 
-    pub fn try_acquire(&self) -> bool {
-        let mut guard = self.last_persist.lock();
+    pub fn is_due(&self) -> bool {
+        let guard = self.last_persist.lock();
         match *guard {
             Some(at) if at.elapsed() < self.min_interval => {
                 crate::observability::subsystem_metrics::incr_symbol_graph_persist_skipped();
                 false
             }
-            _ => {
-                *guard = Some(Instant::now());
-                crate::observability::subsystem_metrics::incr_symbol_graph_rebuild();
-                true
-            }
+            _ => true,
         }
+    }
+
+    pub fn mark_persisted(&self) {
+        *self.last_persist.lock() = Some(Instant::now());
+        crate::observability::subsystem_metrics::incr_symbol_graph_rebuild();
     }
 }
 
@@ -159,6 +160,8 @@ pub struct SymbolGraphWriter {
     debouncer: Arc<Debouncer>,
     persist_limiter: Arc<PersistLimiter>,
     sync_signal: Arc<(Mutex<()>, Condvar)>,
+    generation: std::sync::atomic::AtomicU64,
+    persist_pending: std::sync::atomic::AtomicBool,
 }
 
 struct GlobalWriterEntry {
@@ -505,6 +508,9 @@ fn schedule_global_drain(entry: Arc<GlobalWriterEntry>) {
             writer.flush_pending_blocking(Duration::from_secs(2))
         })
         .await;
+        tokio::time::sleep(MIN_PERSIST_INTERVAL).await;
+        let writer = Arc::clone(&entry.writer);
+        let _ = tokio::task::spawn_blocking(move || writer.persist_if_pending()).await;
     });
 }
 
@@ -519,12 +525,18 @@ impl SymbolGraphWriter {
             debouncer: Arc::new(Debouncer::with_default()),
             persist_limiter: Arc::new(PersistLimiter::with_default()),
             sync_signal: Arc::new((Mutex::new(()), Condvar::new())),
+            generation: std::sync::atomic::AtomicU64::new(0),
+            persist_pending: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
     #[must_use]
     pub fn graph(&self) -> Arc<RwLock<SymbolGraph>> {
         Arc::clone(&self.graph)
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation.load(std::sync::atomic::Ordering::Acquire)
     }
 
     pub fn on_files_changed(&self, paths: &[PathBuf]) {
@@ -614,17 +626,49 @@ impl SymbolGraphWriter {
         let payload = {
             let mut graph = self.graph.write();
             graph.partial_rebuild(&changed, &removed, &self.root);
-            if self.persist_limiter.try_acquire() {
+            self.generation
+                .fetch_add(1, std::sync::atomic::Ordering::Release);
+            if self.persist_limiter.is_due() {
                 let read = parking_lot::RwLockWriteGuard::downgrade(graph);
                 read.serialize_for_persist().ok()
             } else {
+                self.persist_pending
+                    .store(true, std::sync::atomic::Ordering::Release);
                 None
             }
         };
         if let Some(body) = payload {
-            let _ = SymbolGraph::persist_bytes(&self.root, &body);
+            if SymbolGraph::persist_bytes(&self.root, &body).is_ok() {
+                self.persist_limiter.mark_persisted();
+                self.persist_pending
+                    .store(false, std::sync::atomic::Ordering::Release);
+            } else {
+                self.persist_pending
+                    .store(true, std::sync::atomic::Ordering::Release);
+            }
         }
         crate::observability::code_intel_metrics::incr_symbol_graph_sync_executed();
+        true
+    }
+
+    fn persist_if_pending(&self) -> bool {
+        if !self
+            .persist_pending
+            .load(std::sync::atomic::Ordering::Acquire)
+            || !self.persist_limiter.is_due()
+        {
+            return false;
+        }
+        let body = match self.graph.read().serialize_for_persist() {
+            Ok(body) => body,
+            Err(_) => return false,
+        };
+        if SymbolGraph::persist_bytes(&self.root, &body).is_err() {
+            return false;
+        }
+        self.persist_limiter.mark_persisted();
+        self.persist_pending
+            .store(false, std::sync::atomic::Ordering::Release);
         true
     }
 }

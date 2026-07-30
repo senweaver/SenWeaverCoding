@@ -1,4 +1,4 @@
-﻿// SPDX-License-Identifier: MIT
+// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
@@ -14,7 +14,7 @@ use super::super::traits::{Tool, ToolResult};
 use crate::agent::multi_agent_runtime::{MultiAgentRuntime, global_runtime};
 use crate::agent::scheduler::SchedulableTask;
 use crate::agent::scheduler::runtime::TaskExecutor;
-use crate::agent::subagent_limiter::SubagentLimiter;
+use crate::agent::subagent::limiter::SubagentLimiter;
 use crate::coordinator::delegation::{
     DelegationPlan, MergeStrategy, MergedOutput, SubTask, SubTaskResult,
     merge_results_structured, merge_results_with_judge_structured,
@@ -266,7 +266,7 @@ impl Tool for DelegateParallelTool {
             }
             None => (
                 Arc::new(SubagentLimiter::new(
-                    &crate::agent::subagent_limiter::SubagentLimitConfig::default(),
+                    &crate::agent::subagent::limiter::SubagentLimitConfig::default(),
                 )),
                 Some(Duration::from_secs(120)),
             ),
@@ -295,8 +295,24 @@ impl Tool for DelegateParallelTool {
                 self.workspace_root.read().to_string_lossy().into_owned()
             });
 
-        let effective_runtime: Arc<MultiAgentRuntime> =
-            global_runtime().unwrap_or_else(|| Arc::new(MultiAgentRuntime::new()));
+        let effective_runtime: Arc<MultiAgentRuntime> = match global_runtime() {
+            Some(rt) => rt,
+            None => {
+                if !allow_fallback {
+                    return Ok(err_result(
+                        "multi-agent runtime is not initialized; initialize the global runtime \
+                         before delegate_parallel, or set allow_single_agent_fallback=true to \
+                         run tasks in degraded single-agent mode",
+                    ));
+                }
+                tracing::warn!(
+                    target: "tools.delegate_parallel",
+                    "global multi-agent runtime missing; running with an ephemeral runtime in \
+                     single-agent fallback mode"
+                );
+                Arc::new(MultiAgentRuntime::new())
+            }
+        };
         let runtime_exec = Arc::clone(&effective_runtime);
 
         let exec: TaskExecutor = Arc::new(move |task, ct| {
@@ -333,12 +349,12 @@ impl Tool for DelegateParallelTool {
                     .await
                 {
                     Ok(p) => p,
-                    Err(crate::agent::subagent_limiter::QueuedAcquireError::Cancelled) => {
+                    Err(crate::agent::subagent::limiter::QueuedAcquireError::Cancelled) => {
                         return Err(format!(
                             "subagent '{id}' cancelled while waiting for permit"
                         ));
                     }
-                    Err(crate::agent::subagent_limiter::QueuedAcquireError::Rejected {
+                    Err(crate::agent::subagent::limiter::QueuedAcquireError::Rejected {
                         active,
                         max,
                     }) => {
@@ -346,7 +362,7 @@ impl Tool for DelegateParallelTool {
                             "subagent '{id}' rejected: limiter at capacity ({active}/{max})"
                         ));
                     }
-                    Err(crate::agent::subagent_limiter::QueuedAcquireError::DeadlineExceeded {
+                    Err(crate::agent::subagent::limiter::QueuedAcquireError::DeadlineExceeded {
                         active,
                         max,
                     }) => {

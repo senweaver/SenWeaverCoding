@@ -254,7 +254,7 @@ pub async fn handle_models_set_current(
         cfg.default_model = Some(body.model_id.clone());
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -307,7 +307,7 @@ pub async fn handle_effort_set(
         cfg.runtime.reasoning_effort = Some(body.level.clone());
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({
@@ -1136,7 +1136,7 @@ pub async fn handle_providers_create(
         snapshot = cfg.clone();
     }
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -1259,7 +1259,7 @@ pub async fn handle_providers_update(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -1310,7 +1310,7 @@ pub async fn handle_providers_delete(
         sanitize_active_profile_in_place(&mut cfg);
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -1342,7 +1342,7 @@ pub async fn handle_providers_activate(
         apply_active_profile_to_top_level(&mut cfg, &id, &profile);
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -3141,7 +3141,7 @@ pub async fn handle_mcp_create(
         cfg.mcp.servers.push(body_to_server(&name, &body));
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -3190,7 +3190,7 @@ pub async fn handle_mcp_update(
         cfg.mcp.servers[idx] = new_server;
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -3231,7 +3231,7 @@ pub async fn handle_mcp_delete(
         cfg.mcp.servers.remove(idx);
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -3268,7 +3268,7 @@ pub async fn handle_mcp_toggle(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (mcp toggle): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -4303,7 +4303,7 @@ pub async fn handle_adapters_put(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -4884,7 +4884,18 @@ pub async fn handle_permissions_autonomy_put(
         next_cfg.autonomy.enable_command_policy = v;
     }
 
-    if let Err(e) = next_cfg.save().await {
+    if let Err(e) = next_cfg.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "config_validation_failed",
+                "detail": format!("{e:#}"),
+            })),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = crate::gateway::persist_config(&next_cfg).await {
         tracing::error!(
             target: "gateway.permissions",
             error = %e,
@@ -4999,7 +5010,18 @@ pub async fn handle_loop_controls_put(
         next_cfg.cost.enabled = v;
     }
 
-    if let Err(e) = next_cfg.save().await {
+    if let Err(e) = next_cfg.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "config_validation_failed",
+                "detail": format!("{e:#}"),
+            })),
+        )
+            .into_response();
+    }
+
+    if let Err(e) = crate::gateway::persist_config(&next_cfg).await {
         tracing::error!(
             target: "gateway.loop_controls",
             error = %e,
@@ -5340,20 +5362,8 @@ pub async fn handle_designer_submodes(
         return e.into_response();
     }
     let schemas = crate::agent::designer::params::all_submode_schemas();
-    let media_models = serde_json::json!({
-        "image": crate::tools::media::registry::default_models(
-            crate::tools::media::MediaSurface::Image
-        ),
-        "video": crate::tools::media::registry::default_models(
-            crate::tools::media::MediaSurface::Video
-        ),
-        "audio": crate::tools::media::registry::default_models(
-            crate::tools::media::MediaSurface::Audio
-        ),
-    });
     Json(serde_json::json!({
         "submodes": schemas.get("submodes").cloned().unwrap_or(serde_json::json!([])),
-        "mediaModels": media_models,
     }))
     .into_response()
 }
@@ -6221,8 +6231,26 @@ pub async fn handle_session_design_artifacts(
         return Json(serde_json::json!({ "artifacts": [] })).into_response();
     };
     let session_key = format!("gw_{id}");
+    let fallback_dir = state
+        .config
+        .lock()
+        .workspace_dir
+        .to_string_lossy()
+        .into_owned();
     let backend_cloned = backend.clone();
+    let session_id = id.clone();
     let artifacts = tokio::task::spawn_blocking(move || {
+        let work_dir = backend_cloned
+            .get_session_work_dir(&session_key)
+            .ok()
+            .flatten()
+            .unwrap_or(fallback_dir);
+        crate::agent::designer::reconcile_session_artifacts(
+            backend_cloned.as_ref(),
+            &session_key,
+            &session_id,
+            std::path::Path::new(&work_dir),
+        );
         backend_cloned
             .list_design_artifacts(&session_key)
             .into_iter()
@@ -6712,7 +6740,7 @@ pub async fn handle_hooks_put(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (hooks): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6763,7 +6791,7 @@ pub async fn handle_guardrails_put(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (guardrails): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6780,7 +6808,11 @@ pub async fn handle_guardrails_put(
 }
 
 fn agent_to_camel_json(name: &str, cfg: &crate::config::DelegateAgentConfig) -> serde_json::Value {
-    let snake = serde_json::to_value(cfg).unwrap_or_else(|_| serde_json::json!({}));
+    let mut masked_cfg = cfg.clone();
+    if masked_cfg.api_key.as_deref().is_some_and(|k| !k.is_empty()) {
+        masked_cfg.api_key = Some(crate::gateway::api::core::MASKED_SECRET.to_string());
+    }
+    let snake = serde_json::to_value(&masked_cfg).unwrap_or_else(|_| serde_json::json!({}));
     let mut camel = to_camel_case_keys(snake);
     if let serde_json::Value::Object(ref mut map) = camel {
         map.insert(
@@ -6848,7 +6880,7 @@ pub async fn handle_agent_create(
         let mut payload_obj = body.as_object().cloned().unwrap_or_default();
         payload_obj.remove("name");
         let snake = to_snake_case_keys(serde_json::Value::Object(payload_obj));
-        let parsed: crate::config::DelegateAgentConfig = match serde_json::from_value(snake) {
+        let mut parsed: crate::config::DelegateAgentConfig = match serde_json::from_value(snake) {
             Ok(v) => v,
             Err(err) => {
                 return (
@@ -6860,6 +6892,9 @@ pub async fn handle_agent_create(
                     .into_response();
             }
         };
+        if parsed.api_key.as_deref() == Some(crate::gateway::api::core::MASKED_SECRET) {
+            parsed.api_key = None;
+        }
         let errors = parsed.validate();
         if !errors.is_empty() {
             return (
@@ -6872,7 +6907,7 @@ pub async fn handle_agent_create(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (agents.create): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6916,7 +6951,7 @@ pub async fn handle_agent_update(
         patch_map.remove("name");
         deep_merge(&mut merged_camel, serde_json::Value::Object(patch_map));
         let snake = to_snake_case_keys(merged_camel);
-        let parsed: crate::config::DelegateAgentConfig = match serde_json::from_value(snake) {
+        let mut parsed: crate::config::DelegateAgentConfig = match serde_json::from_value(snake) {
             Ok(v) => v,
             Err(err) => {
                 return (
@@ -6928,6 +6963,9 @@ pub async fn handle_agent_update(
                     .into_response();
             }
         };
+        if parsed.api_key.as_deref() == Some(crate::gateway::api::core::MASKED_SECRET) {
+            parsed.api_key = existing.api_key.clone();
+        }
         let errors = parsed.validate();
         if !errors.is_empty() {
             return (
@@ -6940,7 +6978,7 @@ pub async fn handle_agent_update(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (agents.update): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -6979,7 +7017,7 @@ pub async fn handle_agent_delete(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (agents.delete): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -7064,7 +7102,7 @@ pub async fn handle_custom_tools_create(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (custom_tools.create): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -7149,7 +7187,7 @@ pub async fn handle_custom_tools_update(
         (cfg.clone(), idx)
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (custom_tools.update): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -7194,7 +7232,7 @@ pub async fn handle_custom_tools_delete(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (custom_tools.delete): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -7800,7 +7838,7 @@ pub async fn handle_agent_config_put(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (agent): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -7861,7 +7899,7 @@ pub async fn handle_agent_runtime_put(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (agent_runtime): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -7921,7 +7959,7 @@ pub async fn handle_web_search_put(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (web_search): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -7981,7 +8019,7 @@ pub async fn handle_web_fetch_put(
         cfg.clone()
     };
 
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         tracing::error!("Failed to save config (web_fetch): {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -8109,7 +8147,7 @@ pub async fn handle_lsp_global_put(
         cfg.lsp.enabled = body.enabled;
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -8170,7 +8208,7 @@ pub async fn handle_lsp_preferences_put(
         }
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -8218,7 +8256,7 @@ pub async fn handle_lsp_create(
         cfg.lsp.servers.push(new_entry.clone());
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -8276,7 +8314,7 @@ pub async fn handle_lsp_update(
         cfg.lsp.servers[idx] = next;
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -8318,7 +8356,7 @@ pub async fn handle_lsp_delete(
         cfg.lsp.servers.remove(idx);
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -8353,7 +8391,7 @@ pub async fn handle_lsp_toggle(
         cfg.lsp.servers[idx].enabled = !cfg.lsp.servers[idx].enabled;
         cfg.clone()
     };
-    if let Err(e) = snapshot.save().await {
+    if let Err(e) = crate::gateway::persist_config(&snapshot).await {
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(serde_json::json!({"error": format!("save config: {e}")})),
@@ -9749,7 +9787,7 @@ pub async fn handle_template_library_create(
                 "description": description,
                 "baseKind": base_kind,
                 "draftMarkdown": format!("# {name}\n\n## Section 1\n\nDraft content.\n"),
-                "blueprintMarkdown": format!("# {name} — Implementation Blueprint\n\n## Overview\n\nBlueprint content.\n"),
+                "blueprintMarkdown": format!("# {name} —Implementation Blueprint\n\n## Overview\n\nBlueprint content.\n"),
             });
             vec![(
                 format!("curator-templates/{id}.json"),

@@ -456,8 +456,12 @@ fn read_preview(path: &Path) -> String {
     match std::fs::metadata(path) {
         Ok(meta) if meta.len() > MAX => {
             let bytes = std::fs::read(path).unwrap_or_default();
-            let slice = &bytes[..(MAX as usize).min(bytes.len())];
-            String::from_utf8_lossy(slice).into_owned()
+            let mut end = (MAX as usize).min(bytes.len());
+            let floor = end.saturating_sub(3);
+            while end > floor && bytes.get(end).is_some_and(|b| (*b & 0xC0) == 0x80) {
+                end -= 1;
+            }
+            String::from_utf8_lossy(&bytes[..end]).into_owned()
                 + &format!("\n\n… truncated at {MAX} bytes (file is {} B)", meta.len())
         }
         Ok(_) => std::fs::read_to_string(path).unwrap_or_else(|e| format!("(read error: {e})")),

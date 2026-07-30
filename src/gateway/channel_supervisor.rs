@@ -97,6 +97,19 @@ pub fn start_embedded_channels(config: &Config, live_config: &LiveConfig) {
     ensure_supervisor(live_config).start_if_needed(config);
 }
 
+pub fn supervisor_running() -> bool {
+    SUPERVISOR
+        .get()
+        .map(|s| {
+            s.handle
+                .lock()
+                .as_ref()
+                .map(|h| !h.is_finished())
+                .unwrap_or(false)
+        })
+        .unwrap_or(false)
+}
+
 pub async fn restart_channels(state: &AppState) -> Result<(), String> {
     let snapshot = state.config.lock().clone();
     state.push_live_config(snapshot);

@@ -30,7 +30,7 @@ impl CodeEmbedderConfig {
             backend: CodeEmbedderBackend::OpenAi,
             model: model.into(),
             endpoint: Some("https://api.openai.com/v1".to_string()),
-            api_key: Some(api_key.into()),
+            api_key: Some(api_key.into()).filter(|k| !k.trim().is_empty()),
             dims,
         }
     }

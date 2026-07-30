@@ -43,23 +43,6 @@ fn prompt_template_field(surface: &str) -> Value {
     f
 }
 
-fn model_field(surface: crate::tools::media::MediaSurface, default: &str) -> Value {
-    let mut options = vec![opt("auto", "Auto (provider default)", "自动(默认模型)")];
-    if let Some(models) = crate::tools::media::registry::default_models(surface).as_array() {
-        for m in models {
-            let id = m.get("id").and_then(|v| v.as_str()).unwrap_or_default();
-            let label = m.get("label").and_then(|v| v.as_str()).unwrap_or(id);
-            if !id.is_empty() {
-                options.push(opt(id, label, label));
-            }
-        }
-    }
-    let mut f = field("model", "Model", "模型", "select");
-    f["options"] = json!(options);
-    f["default"] = json!(default);
-    f
-}
-
 fn aspect_options() -> Vec<Value> {
     MEDIA_ASPECTS
         .iter()
@@ -328,7 +311,6 @@ pub fn submode_param_schema(sub: DesignerSubMode) -> Value {
         DesignerSubMode::Image => vec![
             design_system_field(),
             prompt_template_field("image"),
-            model_field(crate::tools::media::MediaSurface::Image, "auto"),
             {
                 let mut f = field("aspect", "Ratio", "比例", "select");
                 f["options"] = json!(aspect_options());
@@ -351,7 +333,6 @@ pub fn submode_param_schema(sub: DesignerSubMode) -> Value {
         DesignerSubMode::Video => vec![
             design_system_field(),
             prompt_template_field("video"),
-            model_field(crate::tools::media::MediaSurface::Video, "auto"),
             {
                 let mut f = field("aspect", "Ratio", "比例", "select");
                 f["options"] = json!(aspect_options());
@@ -381,7 +362,6 @@ pub fn submode_param_schema(sub: DesignerSubMode) -> Value {
             },
         ],
         DesignerSubMode::Audio => vec![
-            model_field(crate::tools::media::MediaSurface::Audio, "auto"),
             {
                 let mut f = field("audioKind", "Audio type", "音频类型", "select");
                 f["options"] = json!([
@@ -435,12 +415,17 @@ pub fn submode_param_schema(sub: DesignerSubMode) -> Value {
         ],
     };
 
+    let model_picker = matches!(
+        sub,
+        DesignerSubMode::Image | DesignerSubMode::Video | DesignerSubMode::Audio
+    );
     json!({
         "id": sub.id(),
         "labelEn": sub.label_en(),
         "labelZh": sub.label_zh(),
         "icon": sub.icon(),
         "surface": sub.media_surface(),
+        "modelPicker": model_picker,
         "fields": fields,
     })
 }

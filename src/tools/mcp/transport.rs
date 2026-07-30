@@ -7,7 +7,7 @@ use std::borrow::Cow;
 use anyhow::{Context, Result, anyhow, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::process::Child;
-use tokio::sync::{Mutex, Notify, oneshot};
+use tokio::sync::{Notify, oneshot};
 use tokio::time::{Duration, timeout};
 use tokio_stream::StreamExt;
 
@@ -339,7 +339,7 @@ pub struct SseTransport {
     client: reqwest::Client,
     headers: std::collections::HashMap<String, String>,
     stream_state: SseStreamState,
-    shared: std::sync::Arc<Mutex<SseSharedState>>,
+    shared: std::sync::Arc<parking_lot::Mutex<SseSharedState>>,
     notify: std::sync::Arc<Notify>,
     shutdown_tx: Option<oneshot::Sender<()>>,
     reader_task: Option<crate::runtime::TaskHandle>,
@@ -363,7 +363,7 @@ impl SseTransport {
             client,
             headers: config.headers.clone(),
             stream_state: SseStreamState::Unknown,
-            shared: std::sync::Arc::new(Mutex::new(SseSharedState::default())),
+            shared: std::sync::Arc::new(parking_lot::Mutex::new(SseSharedState::default())),
             notify: std::sync::Arc::new(Notify::new()),
             shutdown_tx: None,
             reader_task: None,
@@ -457,7 +457,7 @@ impl SseTransport {
                                 let data = cur_data.join("\n");
                                 cur_data.clear();
                                 let id = cur_id.take();
-                                handle_sse_event(&server_name, &sse_url, &shared, &notify, event.as_deref(), id.as_deref(), data).await;
+                                handle_sse_event(&server_name, &sse_url, &shared, &notify, event.as_deref(), id.as_deref(), data);
                                 continue;
                             }
 
@@ -477,23 +477,23 @@ impl SseTransport {
                             }
                         }
                     }
+                }
 
-                    let pending = {
-                        let mut guard = shared.lock().await;
-                        std::mem::take(&mut guard.pending)
-                    };
-                    for (_, tx) in pending {
-                        let _ = tx.send(JsonRpcResponse {
-                            jsonrpc: crate::tools::mcp::protocol::JSONRPC_VERSION.to_string(),
-                            id: None,
-                            result: None,
-                            error: Some(JsonRpcError {
-                                code: INTERNAL_ERROR,
-                                message: "SSE connection closed".to_string(),
-                                data: None,
-                            }),
-                        });
-                    }
+                let pending = {
+                    let mut guard = shared.lock();
+                    std::mem::take(&mut guard.pending)
+                };
+                for (_, tx) in pending {
+                    let _ = tx.send(JsonRpcResponse {
+                        jsonrpc: crate::tools::mcp::protocol::JSONRPC_VERSION.to_string(),
+                        id: None,
+                        result: None,
+                        error: Some(JsonRpcError {
+                            code: INTERNAL_ERROR,
+                            message: "SSE connection closed".to_string(),
+                            data: None,
+                        }),
+                    });
                 }
             },
         );
@@ -503,22 +503,45 @@ impl SseTransport {
         Ok(())
     }
 
-    async fn get_message_url(&self) -> Result<(String, bool)> {
-        let guard = self.shared.lock().await;
-        if let Some(url) = &guard.message_url {
-            return Ok((url.clone(), guard.message_url_from_endpoint));
+    fn get_message_url(&self) -> Result<(String, bool)> {
+        {
+            let guard = self.shared.lock();
+            if let Some(url) = &guard.message_url {
+                return Ok((url.clone(), guard.message_url_from_endpoint));
+            }
         }
-        drop(guard);
 
         let derived = derive_message_url(&self.sse_url, "messages")
             .or_else(|| derive_message_url(&self.sse_url, "message"))
             .ok_or_else(|| anyhow!("invalid SSE URL"))?;
-        let mut guard = self.shared.lock().await;
+        let mut guard = self.shared.lock();
         if guard.message_url.is_none() {
             guard.message_url = Some(derived.clone());
             guard.message_url_from_endpoint = false;
         }
         Ok((derived, false))
+    }
+}
+
+struct SsePendingGuard {
+    shared: std::sync::Arc<parking_lot::Mutex<SseSharedState>>,
+    id: u64,
+}
+
+impl Drop for SsePendingGuard {
+    fn drop(&mut self) {
+        self.shared.lock().pending.remove(&self.id);
+    }
+}
+
+impl Drop for SseTransport {
+    fn drop(&mut self) {
+        if let Some(tx) = self.shutdown_tx.take() {
+            let _ = tx.send(());
+        }
+        if let Some(task) = self.reader_task.take() {
+            task.abort();
+        }
     }
 }
 
@@ -550,10 +573,10 @@ fn derive_message_url(sse_url: &str, message_path: &str) -> Option<String> {
     Some(new_url.to_string())
 }
 
-async fn handle_sse_event(
+fn handle_sse_event(
     server_name: &str,
     sse_url: &str,
-    shared: &std::sync::Arc<Mutex<SseSharedState>>,
+    shared: &std::sync::Arc<parking_lot::Mutex<SseSharedState>>,
     notify: &std::sync::Arc<Notify>,
     event: Option<&str>,
     _id: Option<&str>,
@@ -567,7 +590,7 @@ async fn handle_sse_event(
 
     if event.eq_ignore_ascii_case("endpoint") || event.eq_ignore_ascii_case("mcp-endpoint") {
         if let Some(url) = parse_endpoint_from_data(sse_url, trimmed) {
-            let mut guard = shared.lock().await;
+            let mut guard = shared.lock();
             guard.message_url = Some(url);
             guard.message_url_from_endpoint = true;
             drop(guard);
@@ -584,8 +607,16 @@ async fn handle_sse_event(
         return;
     };
 
-    let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value.clone()) else {
-        let _ = serde_json::from_value::<JsonRpcRequest>(value);
+    if value.get("method").is_some() {
+        tracing::debug!(
+            "MCP SSE `{}` received server-initiated request/notification `{}`; not treated as a response",
+            server_name,
+            value.get("method").and_then(|m| m.as_str()).unwrap_or("")
+        );
+        return;
+    }
+
+    let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value) else {
         return;
     };
 
@@ -598,7 +629,7 @@ async fn handle_sse_event(
     };
 
     let tx = {
-        let mut guard = shared.lock().await;
+        let mut guard = shared.lock();
         guard.pending.remove(&id)
     };
     if let Some(tx) = tx {
@@ -728,8 +759,13 @@ async fn read_first_jsonrpc_from_sse_response(
                 continue;
             }
             let json_str = extract_json_from_sse_text(trimmed);
-            if let Ok(resp) = serde_json::from_str::<JsonRpcResponse>(json_str.as_ref()) {
-                return Ok(Some(resp));
+            if let Ok(value) = serde_json::from_str::<serde_json::Value>(json_str.as_ref()) {
+                if value.get("method").is_some() {
+                    continue;
+                }
+                if let Ok(resp) = serde_json::from_value::<JsonRpcResponse>(value) {
+                    return Ok(Some(resp));
+                }
             }
             continue;
         }
@@ -757,11 +793,11 @@ impl McpTransportConn for SseTransport {
         let id = request.id.as_ref().and_then(|v| v.as_u64());
         let body = serde_json::to_string(request)?;
 
-        let (mut message_url, mut from_endpoint) = self.get_message_url().await?;
+        let (mut message_url, mut from_endpoint) = self.get_message_url()?;
         if self.stream_state == SseStreamState::Connected && !from_endpoint {
             for _ in 0..3 {
                 {
-                    let guard = self.shared.lock().await;
+                    let guard = self.shared.lock();
                     if guard.message_url_from_endpoint {
                         if let Some(url) = &guard.message_url {
                             message_url = url.clone();
@@ -787,15 +823,16 @@ impl McpTransportConn for SseTransport {
         };
         let has_secondary = secondary_url.is_some();
 
-        let mut rx = None;
+        let mut rx: Option<(SsePendingGuard, oneshot::Receiver<JsonRpcResponse>)> = None;
         if let Some(id) = id {
             if self.stream_state == SseStreamState::Connected {
                 let (tx, ch) = oneshot::channel();
-                {
-                    let mut guard = self.shared.lock().await;
-                    guard.pending.insert(id, tx);
-                }
-                rx = Some((id, ch));
+                self.shared.lock().pending.insert(id, tx);
+                let guard = SsePendingGuard {
+                    shared: std::sync::Arc::clone(&self.shared),
+                    id,
+                };
+                rx = Some((guard, ch));
             }
         }
 
@@ -899,23 +936,19 @@ impl McpTransportConn for SseTransport {
                 } else {
                     Cow::Borrowed(trimmed)
                 };
-                if let Ok(mcp_resp) = serde_json::from_str::<JsonRpcResponse>(json_str.as_ref()) {
-                    got_direct = Some(mcp_resp);
+                if let Ok(value) =
+                    serde_json::from_str::<serde_json::Value>(json_str.as_ref())
+                {
+                    if value.get("method").is_none() {
+                        if let Ok(mcp_resp) =
+                            serde_json::from_value::<JsonRpcResponse>(value)
+                        {
+                            got_direct = Some(mcp_resp);
+                        }
+                    }
                 }
             }
             break;
-        }
-
-        if let Some((id, _)) = rx.as_ref() {
-            if got_direct.is_some() {
-                let mut guard = self.shared.lock().await;
-                guard.pending.remove(id);
-            } else if let Some(status) = last_status {
-                if !status.is_success() {
-                    let mut guard = self.shared.lock().await;
-                    guard.pending.remove(id);
-                }
-            }
         }
 
         if let Some(resp) = got_direct {
@@ -930,7 +963,7 @@ impl McpTransportConn for SseTransport {
             bail!("MCP request not sent");
         }
 
-        let Some((_id, rx)) = rx else {
+        let Some((_pending_guard, rx)) = rx else {
             bail!("MCP server returned no response");
         };
 

@@ -19,6 +19,35 @@ fn utf8_floor_boundary(bytes: &[u8], target: usize) -> usize {
     idx
 }
 
+pub(crate) async fn read_line_capped<R>(
+    reader: &mut R,
+    line: &mut Vec<u8>,
+    cap: usize,
+) -> std::io::Result<usize>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::AsyncBufReadExt;
+    let mut consumed = 0usize;
+    loop {
+        let available = reader.fill_buf().await?;
+        if available.is_empty() {
+            return Ok(consumed);
+        }
+        let (take, done) = match memchr::memchr(b'\n', available) {
+            Some(pos) => (pos + 1, true),
+            None => (available.len(), false),
+        };
+        let room = cap.saturating_sub(line.len());
+        line.extend_from_slice(&available[..take.min(room)]);
+        std::pin::Pin::new(&mut *reader).consume(take);
+        consumed = consumed.saturating_add(take);
+        if done {
+            return Ok(consumed);
+        }
+    }
+}
+
 pub(crate) enum ForegroundOutcome {
     Exited(std::process::ExitStatus, String, String),
     Timeout(String, String),
@@ -77,12 +106,11 @@ where
     crate::runtime::spawn_supervised(label, async move {
         let mut capped = false;
         if let Some(pipe) = pipe {
-            use tokio::io::AsyncBufReadExt;
             let mut reader = tokio::io::BufReader::new(pipe);
             let mut line: Vec<u8> = Vec::new();
             loop {
                 line.clear();
-                match reader.read_until(b'\n', &mut line).await {
+                match read_line_capped(&mut reader, &mut line, FOREGROUND_STREAM_CAP).await {
                     Ok(0) => break,
                     Ok(_) => {
                         if !capped {
@@ -128,27 +156,9 @@ fn drain_stream(handle: StreamReaderHandle) -> impl std::future::Future<Output =
     }
 }
 
-pub(crate) async fn run_foreground_streamed(
-    child: tokio::process::Child,
-    mirror_id: &str,
-    mirror_session_id: Option<&str>,
-    mirror_started: std::time::Instant,
-    timeout_duration: Duration,
-) -> ForegroundOutcome {
-    run_foreground_streamed_inner(
-        child,
-        mirror_id,
-        mirror_session_id,
-        mirror_started,
-        timeout_duration,
-        None,
-        "",
-    )
-    .await
-}
-
 pub(crate) async fn run_foreground_streamed_inner(
     mut child: tokio::process::Child,
+    job_guard: Option<crate::security::JobObjectGuard>,
     mirror_id: &str,
     mirror_session_id: Option<&str>,
     mirror_started: std::time::Instant,
@@ -268,6 +278,7 @@ pub(crate) async fn run_foreground_streamed_inner(
         let watchdog_id = mirror_id.to_string();
         let watchdog_sid = mirror_session_id.map(str::to_string);
         crate::runtime::spawn_supervised("tools.shell.fg_backgrounded", async move {
+            let _job_guard = job_guard;
             let exit = tokio::select! {
                 _ = &mut bg_kill_rx => {
                     crate::util::kill_child_process_tree(&mut child).await;

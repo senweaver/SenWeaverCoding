@@ -9,6 +9,10 @@ use tokio::sync::broadcast;
 
 use super::schema::Config;
 
+fn validate_full(config: &Config) -> Result<(), String> {
+    config.validate().map_err(|err| format!("{err:#}"))
+}
+
 #[derive(Debug, Clone)]
 pub struct ConfigChangedEvent {
     pub changed_fields: Vec<String>,
@@ -67,44 +71,16 @@ impl LiveConfig {
 
     #[inline]
     pub fn store_validated(&self, config: Config) -> Result<(), String> {
-        let report = crate::config::validator::ConfigValidator::new(&config).run();
-        if !report.is_ok() {
-            let mut buf = String::new();
-            for section in &report.sections {
-                for error in &section.errors {
-                    if !buf.is_empty() {
-                        buf.push(';');
-                    }
-                    buf.push_str(section.section);
-                    buf.push(':');
-                    buf.push_str(error);
-                }
-            }
-            return Err(buf);
-        }
+        validate_full(&config)?;
         self.inner
             .as_ref()
-            .store(config, vec!["runtime_hot_reload".into()]);
+            .apply(config, vec!["runtime_hot_reload".into()]);
         Ok(())
     }
 
     #[inline]
     pub fn swap(&self, config: Config) -> Result<Config, String> {
-        let report = crate::config::validator::ConfigValidator::new(&config).run();
-        if !report.is_ok() {
-            let mut buf = String::new();
-            for section in &report.sections {
-                for error in &section.errors {
-                    if !buf.is_empty() {
-                        buf.push(';');
-                    }
-                    buf.push_str(section.section);
-                    buf.push(':');
-                    buf.push_str(error);
-                }
-            }
-            return Err(buf);
-        }
+        validate_full(&config)?;
         let old = ArcSwap::swap(&self.inner.inner, Arc::new(config));
         let _ = self.inner.notify.send(ConfigChangedEvent {
             changed_fields: vec!["manual_swap".into()],
@@ -174,26 +150,19 @@ impl SharedConfig {
     }
 
     pub fn store(&self, new_config: Config, changed_fields: Vec<String>) {
-        let report = crate::config::validator::ConfigValidator::new(&new_config).run();
-        if !report.is_ok() {
-            for section in &report.sections {
-                for error in &section.errors {
-                    tracing::warn!(
-                        target: "config.hot_reload",
-                        section = section.section,
-                        %error,
-                        "live config update failed validation"
-                    );
-                }
-            }
+        if let Err(error) = validate_full(&new_config) {
             tracing::warn!(
                 target: "config.hot_reload",
-                total_errors = report.total_errors(),
+                %error,
                 changed_fields = ?changed_fields,
                 "rejecting invalid live config update; previous snapshot remains active"
             );
             return;
         }
+        self.apply(new_config, changed_fields);
+    }
+
+    fn apply(&self, new_config: Config, changed_fields: Vec<String>) {
         self.inner.as_ref().store(Arc::new(new_config));
         let _ = self.notify.send(ConfigChangedEvent { changed_fields });
     }
@@ -208,21 +177,7 @@ impl SharedConfig {
     }
 
     pub fn swap(&self, new_config: Config) -> Result<Config, String> {
-        let report = crate::config::validator::ConfigValidator::new(&new_config).run();
-        if !report.is_ok() {
-            let mut buf = String::new();
-            for section in &report.sections {
-                for error in &section.errors {
-                    if !buf.is_empty() {
-                        buf.push(';');
-                    }
-                    buf.push_str(section.section);
-                    buf.push(':');
-                    buf.push_str(error);
-                }
-            }
-            return Err(buf);
-        }
+        validate_full(&new_config)?;
         let old = ArcSwap::swap(self.inner.as_ref(), Arc::new(new_config));
         let _ = self.notify.send(ConfigChangedEvent {
             changed_fields: vec!["manual_swap".into()],
@@ -256,12 +211,28 @@ impl SharedConfig {
                 let callback = std::sync::Arc::clone(&callback);
                 async move {
                     let mut rx = store.subscribe();
-                    while let Ok(event) = rx.recv().await {
-                        let refs: Vec<&str> = prefixes.iter().map(String::as_str).collect();
-                        if event.affects(&refs) {
-                            if let Ok(mut cb) = callback.lock() {
-                                cb(store.load());
+                    loop {
+                        match rx.recv().await {
+                            Ok(event) => {
+                                let refs: Vec<&str> =
+                                    prefixes.iter().map(String::as_str).collect();
+                                if event.affects(&refs) {
+                                    if let Ok(mut cb) = callback.lock() {
+                                        cb(store.load());
+                                    }
+                                }
                             }
+                            Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                                tracing::warn!(
+                                    target: "config.hot_reload",
+                                    skipped,
+                                    "config change subscriber lagged; applying latest snapshot"
+                                );
+                                if let Ok(mut cb) = callback.lock() {
+                                    cb(store.load());
+                                }
+                            }
+                            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                         }
                     }
                 }

@@ -12,7 +12,7 @@ use super::coordination::{Coordinator, CoordinatorHandle};
 use super::registry::{AgentRegistry, AgentRegistryHandle};
 use super::scheduler::{SchedulableTask, TaskOutcome, TaskScheduler};
 use super::scheduler::runtime::{SchedulerSpanContext, TaskExecutor, TaskSchedulerRuntime};
-use super::subagent_limiter::{SubagentLimitConfig, SubagentLimiter};
+use super::subagent::limiter::{SubagentLimitConfig, SubagentLimiter};
 use super::supervisor::{Supervisor, SupervisorConfig, SupervisorHandle};
 use super::task_orchestrator::queue::{TaskQueue, TaskQueueHandle};
 use crate::error::SenError;
@@ -486,7 +486,23 @@ impl MultiAgentRuntimeManager {
         match stored.as_mut() {
             Some(existing) => {
                 let mut changed = false;
+                let allow_shared =
+                    existing.allow_shared_identity || incoming.allow_shared_identity;
                 for (agent_id, caller_user_id) in incoming.sub_agent_identities {
+                    if !allow_shared
+                        && existing.sub_agent_identities.iter().any(|(id, user)| {
+                            *id != agent_id && *user == caller_user_id
+                        })
+                    {
+                        tracing::error!(
+                            agent_id = %agent_id,
+                            caller_user_id = %caller_user_id,
+                            "merge_config: rejected sub-agent identity that duplicates another \
+                             agent's CallerIdentity user_id; per-agent RBAC isolation would break. \
+                             Set allow_shared_identity=true to permit explicitly"
+                        );
+                        continue;
+                    }
                     if let Some(slot) = existing
                         .sub_agent_identities
                         .iter_mut()
@@ -634,6 +650,37 @@ impl MultiAgentRuntime {
 
 static MANAGER: LazyLock<MultiAgentRuntimeManager> = LazyLock::new(MultiAgentRuntimeManager::new);
 
+static MAINTENANCE_STARTED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+const RUNTIME_MAINTENANCE_INTERVAL: std::time::Duration = std::time::Duration::from_secs(60);
+
+fn ensure_runtime_maintenance_task() {
+    use std::sync::atomic::Ordering;
+    if MAINTENANCE_STARTED.load(Ordering::Relaxed) {
+        return;
+    }
+    if tokio::runtime::Handle::try_current().is_err() {
+        return;
+    }
+    if MAINTENANCE_STARTED.swap(true, Ordering::SeqCst) {
+        return;
+    }
+    crate::runtime::task_manager::spawn_supervised("multi_agent.maintenance", async move {
+        let mut ticker = tokio::time::interval(RUNTIME_MAINTENANCE_INTERVAL);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        ticker.tick().await;
+        loop {
+            ticker.tick().await;
+            if let Some(rt) = MANAGER.get() {
+                let report = rt.maintenance();
+                let _ = report;
+            }
+        }
+    });
+    info!("Multi-agent runtime maintenance task started");
+}
+
 pub fn init_global_runtime() -> Arc<MultiAgentRuntime> {
     match init_global_runtime_with_config(MultiAgentRuntimeConfig::default()) {
         Ok(runtime) => runtime,
@@ -675,12 +722,17 @@ pub fn init_global_runtime_with_config(
     }
 
     let runtime = MANAGER.get_or_init(config.clone());
+    ensure_runtime_maintenance_task();
     info!("Global multi-agent runtime initialized");
     Ok(runtime)
 }
 
 pub fn global_runtime() -> Option<Arc<MultiAgentRuntime>> {
-    MANAGER.get()
+    let runtime = MANAGER.get();
+    if runtime.is_some() {
+        ensure_runtime_maintenance_task();
+    }
+    runtime
 }
 
 pub fn session_scoped_key(key: &str) -> String {

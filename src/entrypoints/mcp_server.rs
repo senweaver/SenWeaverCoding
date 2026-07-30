@@ -58,6 +58,7 @@ impl McpServerEntrypoint {
     pub async fn run(
         config: McpServerConfig,
         tools: Vec<Arc<dyn Tool>>,
+        sse_config_token: Option<String>,
     ) -> anyhow::Result<()> {
         tracing::info!(
             transport = ?config.transport,
@@ -82,7 +83,7 @@ impl McpServerEntrypoint {
                 let bind = config.bind.unwrap_or_else(|| {
                     SocketAddr::from((std::net::Ipv4Addr::LOCALHOST, 8765))
                 });
-                crate::services::mcp_server::sse::serve(server, bind).await
+                crate::services::mcp_server::sse::serve(server, bind, sse_config_token).await
             }
         }
     }
@@ -90,7 +91,8 @@ impl McpServerEntrypoint {
     pub async fn run_default(config: McpServerConfig) -> anyhow::Result<()> {
         let app_config = Config::load_or_init_sync();
         let tools = default_tool_surface(&app_config);
-        Self::run(config, tools).await
+        let sse_config_token = app_config.mcp_server.sse_token.clone();
+        Self::run(config, tools, sse_config_token).await
     }
 
     pub fn list_default_tools(config: &McpServerConfig) -> Vec<String> {

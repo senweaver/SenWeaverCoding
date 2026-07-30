@@ -3,9 +3,17 @@
 // Licensed under the MIT License.
 
 import { useTranslation } from '../../i18n'
+import { isCredentialGroup } from '../../api/credentials'
+import { useCredentialsStore } from '../../stores/credentialsStore'
 import type { UIAttachment } from '../../types/chat'
 import { AttachmentGallery } from './AttachmentGallery'
-import { hasRefTokens, parseRefSegments, refIconName, refKind } from './composerRefs'
+import {
+  credChipLabel,
+  hasRefTokens,
+  parseRefSegments,
+  refIconName,
+  refKind,
+} from './composerRefs'
 
 type Props = {
   content: string
@@ -29,6 +37,31 @@ type Props = {
   designRefElementLabel?: string
 }
 
+function CredChip({ name, field }: { name: string; field?: string }) {
+  const meta = useCredentialsStore((s) => s.credentials.find((c) => c.name === name))
+  const group = !field && meta != null && isCredentialGroup(meta)
+  const fieldCount = meta?.fields?.length ?? 0
+  const title = group
+    ? fieldCount > 0
+      ? `${name} (${fieldCount})`
+      : name
+    : credChipLabel(name, field)
+  return (
+    <span
+      data-ref-kind="cred"
+      className="mx-0.5 inline-flex select-none items-center gap-1 rounded-md bg-[var(--color-ref-chip-cred-bg)] px-1.5 align-middle text-[var(--color-text-secondary)]"
+      title={title}
+    >
+      <span className="material-symbols-outlined text-[13px] leading-none">
+        {group ? 'vpn_key' : 'key'}
+      </span>
+      <span className="text-[12px] font-medium text-[var(--color-text-primary)]">
+        {credChipLabel(name, field)}
+      </span>
+    </span>
+  )
+}
+
 function renderMessageContent(content: string) {
   if (!hasRefTokens(content)) return content
   return parseRefSegments(content).map((segment, index) => {
@@ -36,19 +69,7 @@ function renderMessageContent(content: string) {
       return <span key={index}>{segment.text}</span>
     }
     if (segment.type === 'cred') {
-      return (
-        <span
-          key={index}
-          data-ref-kind="cred"
-          className="mx-0.5 inline-flex select-none items-center gap-1 rounded-md bg-[var(--color-ref-chip-cred-bg)] px-1.5 align-middle text-[var(--color-text-secondary)]"
-          title={segment.name}
-        >
-          <span className="material-symbols-outlined text-[13px] leading-none">key</span>
-          <span className="text-[12px] font-medium text-[var(--color-text-primary)]">
-            {segment.name}
-          </span>
-        </span>
-      )
+      return <CredChip key={index} name={segment.name} field={segment.field} />
     }
     const bgClass =
       refKind(segment.relPath) === 'session'

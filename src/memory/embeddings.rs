@@ -177,7 +177,24 @@ impl EmbeddingProvider for OpenAiEmbedding {
                 .filter_map(|v| v.as_f64().map(|f| f as f32))
                 .collect();
 
+            if self.dims != 0 && vec.len() != self.dims {
+                anyhow::bail!(
+                    "embedding dimension mismatch: model '{}' returned {} dimensions but the \
+                     configured dims is {}; fix the configured dims to match the model",
+                    self.model,
+                    vec.len(),
+                    self.dims
+                );
+            }
             embeddings.push(vec);
+        }
+
+        if embeddings.len() != texts.len() {
+            anyhow::bail!(
+                "embedding API returned {got} vectors for {expected} inputs",
+                got = embeddings.len(),
+                expected = texts.len()
+            );
         }
 
         Ok(embeddings)

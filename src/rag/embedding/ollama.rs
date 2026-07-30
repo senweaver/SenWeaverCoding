@@ -55,7 +55,20 @@ impl OllamaCodeEmbedding {
         format!("{}/api/embed", self.endpoint)
     }
 
-    async fn embed_batch(&self, texts: &[&str]) -> Option<Vec<Vec<f32>>> {
+    fn validate_dims(&self, embedding: &[f32]) -> anyhow::Result<()> {
+        if self.dims != 0 && embedding.len() != self.dims {
+            anyhow::bail!(
+                "ollama embedding dimension mismatch: model '{}' returned {} dimensions but \
+                 code_rag.embedder.dims is {}; fix the configured dims to match the model",
+                self.model,
+                embedding.len(),
+                self.dims
+            );
+        }
+        Ok(())
+    }
+
+    async fn embed_batch(&self, texts: &[&str]) -> anyhow::Result<Option<Vec<Vec<f32>>>> {
         let client = self.http_client();
         let body = serde_json::json!({
             "model": self.model,
@@ -66,7 +79,9 @@ impl OllamaCodeEmbedding {
             .json(&body)
             .send()
             .await
-            .ok()?;
+            .map_err(|e| {
+                anyhow::Error::new(e).context("ollama batch embedding request failed")
+            })?;
         let status = resp.status();
         if !status.is_success() {
             let detail = resp.text().await.unwrap_or_default();
@@ -75,13 +90,25 @@ impl OllamaCodeEmbedding {
                 detail = %detail.chars().take(200).collect::<String>(),
                 "ollama batch embed endpoint unavailable; falling back to per-text embeddings"
             );
-            return None;
+            return Ok(None);
         }
-        let parsed: OllamaBatchEmbedResponse = resp.json().await.ok()?;
+        let parsed: OllamaBatchEmbedResponse = resp
+            .json::<OllamaBatchEmbedResponse>()
+            .await
+            .map_err(|e| {
+                anyhow::Error::new(e).context("ollama batch embedding response was not valid JSON")
+            })?;
         if parsed.embeddings.len() != texts.len() {
-            return None;
+            anyhow::bail!(
+                "ollama batch embedding returned {got} vectors for {expected} inputs",
+                got = parsed.embeddings.len(),
+                expected = texts.len()
+            );
         }
-        Some(parsed.embeddings)
+        for embedding in &parsed.embeddings {
+            self.validate_dims(embedding)?;
+        }
+        Ok(Some(parsed.embeddings))
     }
 
     async fn embed_single(&self, text: &str) -> anyhow::Result<Vec<f32>> {
@@ -128,6 +155,7 @@ impl OllamaCodeEmbedding {
             anyhow::bail!("ollama embedding api error {status}: {detail}");
         }
         let parsed: OllamaEmbedResponse = resp.json().await?;
+        self.validate_dims(&parsed.embedding)?;
         Ok(parsed.embedding)
     }
 }
@@ -151,7 +179,7 @@ impl EmbeddingProvider for OllamaCodeEmbedding {
             return Ok(Vec::new());
         }
 
-        if let Some(batch) = self.embed_batch(texts).await {
+        if let Some(batch) = self.embed_batch(texts).await? {
             return Ok(batch);
         }
 

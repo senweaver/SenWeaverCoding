@@ -207,7 +207,7 @@ pub struct ServiceContainerConfig {
 impl Default for ServiceContainerConfig {
     fn default() -> Self {
         Self {
-            data_dir: PathBuf::from(".senweavercoding"),
+            data_dir: crate::config::schema::resolved_sen_dir_sync(),
             team_sync_enabled: false,
             policy_rules: Vec::new(),
             conflict_strategy: ConflictStrategy::LastWriterWins,
@@ -571,14 +571,27 @@ impl ServiceContainer {
 }
 
 static GLOBAL_SERVICES: OnceLock<ServiceContainer> = OnceLock::new();
+static FALLBACK_INITIALIZED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 pub fn init_services(cfg: ServiceContainerConfig) -> &'static ServiceContainer {
     if GLOBAL_SERVICES.get().is_some() {
-        tracing::warn!(
-            "init_services called after the global ServiceContainer was already initialized; \
-             the new configuration is ignored. Initialize services once at startup before any \
-             component reads them."
-        );
+        if FALLBACK_INITIALIZED.load(Ordering::Relaxed) {
+            tracing::error!(
+                data_dir = %cfg.data_dir.display(),
+                shared_config_provided = cfg.shared_config.is_some(),
+                "init_services called after require_services already initialized the global \
+                 ServiceContainer with fallback defaults; the real configuration passed here is \
+                 DISCARDED (data_dir and shared_config remain at fallback values). Fix the \
+                 startup order so init_services runs before any require_services caller."
+            );
+        } else {
+            tracing::warn!(
+                "init_services called after the global ServiceContainer was already initialized; \
+                 the new configuration is ignored. Initialize services once at startup before any \
+                 component reads them."
+            );
+        }
         return GLOBAL_SERVICES.get().expect("just checked is_some");
     }
     let services = GLOBAL_SERVICES.get_or_init(|| ServiceContainer::new(cfg));
@@ -594,14 +607,21 @@ pub fn require_services() -> &'static ServiceContainer {
     if let Some(services) = GLOBAL_SERVICES.get() {
         return services;
     }
-    tracing::warn!(
-        "require_services called before init_services; initializing a default ServiceContainer \
-         (call init_services() during startup to control its configuration)"
+    tracing::error!(
+        "require_services called before init_services; initializing a fallback \
+         ServiceContainer with default configuration (resolved sen dir, empty shared config). \
+         Any configuration later passed to init_services will be discarded. Call \
+         init_services() during startup before this code path runs."
     );
+    let mut initialized_here = false;
     let services = GLOBAL_SERVICES.get_or_init(|| {
+        initialized_here = true;
+        FALLBACK_INITIALIZED.store(true, Ordering::Relaxed);
         ServiceContainer::new(ServiceContainerConfig::default())
     });
-    services.analytics.start_persistence_loop();
+    if initialized_here {
+        services.analytics.start_persistence_loop();
+    }
     services
 }
 

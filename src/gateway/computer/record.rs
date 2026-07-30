@@ -323,12 +323,14 @@ pub async fn handle_ws_record(
         return reject;
     }
     if state.exposed || state.pairing.require_pairing() {
-        let token = super::super::ws::extract_ws_token(&headers, None).unwrap_or("");
-        let authed = if state.exposed {
-            state.pairing.is_authenticated_strict(token)
-        } else {
-            state.pairing.is_authenticated(token)
-        };
+        let tokens = super::super::ws::websocket_tokens(&headers, None);
+        let authed = tokens.iter().any(|token| {
+            if state.exposed {
+                state.pairing.is_authenticated_strict(token)
+            } else {
+                state.pairing.is_authenticated(token)
+            }
+        });
         if !authed {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,

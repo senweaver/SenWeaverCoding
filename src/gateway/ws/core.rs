@@ -132,8 +132,6 @@ struct ConnectParams {
 
 const WS_PROTOCOL: &str = "sen.v1";
 
-const BEARER_SUBPROTO_PREFIX: &str = "bearer.";
-
 const MAX_WS_CHAT_CONNECTIONS: usize = 64;
 
 const WS_HANDSHAKE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
@@ -217,8 +215,10 @@ pub(crate) fn authorize_ws_request(
     }
 
     if state.exposed {
-        let token = extract_ws_token(headers, query_token).unwrap_or("");
-        if state.pairing.is_authenticated_strict(token) {
+        if websocket_tokens(headers, query_token)
+            .iter()
+            .any(|token| state.pairing.is_authenticated_strict(token))
+        {
             return Ok(());
         }
         return Err((
@@ -229,8 +229,10 @@ pub(crate) fn authorize_ws_request(
     }
 
     if state.pairing.require_pairing() {
-        let token = extract_ws_token(headers, query_token).unwrap_or("");
-        if state.pairing.is_authenticated(token) {
+        if websocket_tokens(headers, query_token)
+            .iter()
+            .any(|token| state.pairing.is_authenticated(token))
+        {
             return Ok(());
         }
         return Err((
@@ -256,40 +258,60 @@ pub(crate) fn authorize_ws_request(
         .into_response())
 }
 
-pub fn extract_ws_token<'a>(headers: &'a HeaderMap, query_token: Option<&'a str>) -> Option<&'a str> {
-
+pub fn websocket_tokens(headers: &HeaderMap, query_token: Option<&str>) -> Vec<String> {
+    let mut tokens = Vec::with_capacity(3);
     if let Some(t) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|auth| auth.strip_prefix("Bearer "))
     {
         if !t.is_empty() {
-            return Some(t);
+            tokens.push(t.to_string());
         }
     }
 
-    if let Some(t) = headers
+    if let Some(protocols) = headers
         .get("sec-websocket-protocol")
         .and_then(|v| v.to_str().ok())
-        .and_then(|protos| {
-            protos
-                .split(',')
-                .map(|p| p.trim())
-                .find_map(|p| p.strip_prefix(BEARER_SUBPROTO_PREFIX))
-        })
     {
-        if !t.is_empty() {
-            return Some(t);
+        for protocol in protocols.split(',').map(str::trim) {
+            if let Some(token) =
+                crate::gateway::loopback_auth::decode_websocket_bearer_protocol(protocol)
+            {
+                tokens.push(token);
+            }
         }
     }
 
-    if let Some(t) = query_token {
-        if !t.is_empty() {
-            return Some(t);
+    if let Some(token) = query_token {
+        if !token.is_empty() {
+            tokens.push(token.to_string());
         }
     }
 
+    tokens
+}
+
+pub(crate) fn select_websocket_auth_protocol(headers: &HeaderMap) -> Option<String> {
+    let protocols = headers
+        .get("sec-websocket-protocol")
+        .and_then(|v| v.to_str().ok())?;
+    for protocol in protocols.split(',').map(str::trim) {
+        if crate::gateway::loopback_auth::decode_websocket_bearer_protocol(protocol).is_some() {
+            return Some(protocol.to_string());
+        }
+    }
     None
+}
+
+pub(crate) fn with_websocket_auth_protocol(
+    ws: WebSocketUpgrade,
+    headers: &HeaderMap,
+) -> WebSocketUpgrade {
+    match select_websocket_auth_protocol(headers) {
+        Some(protocol) => ws.protocols([protocol]),
+        None => ws,
+    }
 }
 
 pub async fn handle_ws_chat(
@@ -818,7 +840,9 @@ async fn process_chat_message(
                     args,
                     tool_call_id: _,
                 } => {
-                    serde_json::json!({ "type": "tool_call", "name": name, "args": args })
+                    let safe_args =
+                        crate::services::governance::credential_vault::redact_args_optional(&args);
+                    serde_json::json!({ "type": "tool_call", "name": name, "args": safe_args })
                 }
                 TurnEvent::ToolResult {
                     name,
@@ -826,10 +850,14 @@ async fn process_chat_message(
                     success,
                     tool_call_id: _,
                 } => {
+                    let safe_output =
+                        crate::services::governance::credential_vault::redact_for_audit_optional(
+                            &output,
+                        );
                     serde_json::json!({
                         "type": "tool_result",
                         "name": name,
-                        "output": output,
+                        "output": safe_output,
                         "success": success,
                         "isError": crate::agent::tool_handler::event_status::tool_result_is_error(
                             &name,

@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import type { SavedProvider } from '../types/provider'
+import { modelTypesForId, type ModelType } from './modelTypes'
 
 export type AggregatedProviderModel = {
   modelId: string
@@ -11,6 +12,7 @@ export type AggregatedProviderModel = {
   presetName?: string
   isPrimary: boolean
   enabled: boolean
+  types: ModelType[]
 }
 
 export function isProviderModelEnabled(provider: SavedProvider, modelId: string): boolean {
@@ -42,6 +44,7 @@ export function aggregateProviderModels(
         presetName: dedupedPresetName,
         isPrimary: modelId === primaryModelId,
         enabled: isProviderModelEnabled(provider, modelId),
+        types: modelTypesForId(provider, modelId),
       })
     }
   }

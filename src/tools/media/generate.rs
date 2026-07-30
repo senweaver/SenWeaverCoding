@@ -16,15 +16,15 @@ use std::sync::Arc;
 
 pub struct MediaGenTool {
     security: Arc<SecurityPolicy>,
-    workspace_dir: PathBuf,
 }
 
 impl MediaGenTool {
-    pub fn new(security: Arc<SecurityPolicy>, workspace_dir: PathBuf) -> Self {
-        Self {
-            security,
-            workspace_dir,
-        }
+    pub fn new(security: Arc<SecurityPolicy>) -> Self {
+        Self { security }
+    }
+
+    fn workspace_root(&self) -> PathBuf {
+        self.security.workspace_dir()
     }
 
     fn http_client(services: &crate::services::ServiceContainer) -> reqwest::Client {
@@ -73,19 +73,20 @@ impl MediaGenTool {
     }
 
     async fn resolve_workspace_file(&self, raw: &str, what: &str) -> anyhow::Result<PathBuf> {
+        let workspace_dir = self.workspace_root();
         let cleaned = raw.replace('\\', "/");
         let p = PathBuf::from(&cleaned);
         let abs = if p.is_absolute() {
             p
         } else {
-            self.workspace_dir.join(p)
+            workspace_dir.join(p)
         };
         let canon = tokio::fs::canonicalize(&abs)
             .await
             .map_err(|_| anyhow::anyhow!("{what} `{raw}` not found in the workspace"))?;
-        let ws = tokio::fs::canonicalize(&self.workspace_dir)
+        let ws = tokio::fs::canonicalize(&workspace_dir)
             .await
-            .unwrap_or_else(|_| self.workspace_dir.clone());
+            .unwrap_or_else(|_| workspace_dir.clone());
         if !canon.starts_with(&ws) {
             anyhow::bail!("{what} `{raw}` resolves outside the workspace");
         }
@@ -127,18 +128,43 @@ impl MediaGenTool {
             .map(str::to_string)
     }
 
+    fn designer_ui_params(surface: MediaSurface) -> Option<serde_json::Value> {
+        if !matches!(
+            crate::agent::coding_mode::active_coding_mode(),
+            crate::agent::coding_mode::CodingMode::Designer
+        ) {
+            return None;
+        }
+        let svc = crate::services::try_get_services()?;
+        let session = crate::session::current_session_context()?;
+        let sel = svc
+            .session_designer(&format!("gw_{}", session.session_id))
+            .or_else(|| svc.session_designer(&session.session_id))?;
+        let sub = crate::agent::designer::DesignerSubMode::from_id(&sel.submode_id)?;
+        if sub.media_surface() != Some(surface.as_str()) {
+            return None;
+        }
+        Some(sel.params)
+    }
+
     fn output_dir(&self, subdir: &str) -> PathBuf {
         if matches!(
             crate::agent::coding_mode::active_coding_mode(),
             crate::agent::coding_mode::CodingMode::Designer
         ) {
             if let Some(session) = crate::session::current_session_context() {
+                let session_workspace = PathBuf::from(&session.workspace_dir);
+                let root = if session_workspace.is_absolute() {
+                    session_workspace
+                } else {
+                    self.workspace_root()
+                };
                 let rel =
                     crate::agent::designer::pipeline::designer_session_dir(&session.session_id);
-                return self.workspace_dir.join(rel).join(subdir);
+                return root.join(rel).join(subdir);
             }
         }
-        self.workspace_dir.join(subdir)
+        self.workspace_root().join(subdir)
     }
 
     async fn run(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
@@ -164,12 +190,25 @@ impl MediaGenTool {
             .and_then(|v| v.as_str())
             .filter(|s| !s.trim().is_empty());
 
-        let model = args
-            .get("model")
-            .and_then(|v| v.as_str())
-            .map(str::trim)
-            .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
-            .map(str::to_string)
+        let ui_params = Self::designer_ui_params(surface);
+        let ui_str = |key: &str| -> Option<String> {
+            ui_params
+                .as_ref()
+                .and_then(|p| p.get(key))
+                .and_then(|v| v.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
+                .map(str::to_string)
+        };
+
+        let model = ui_str("model")
+            .or_else(|| {
+                args.get("model")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && !s.eq_ignore_ascii_case("auto"))
+                    .map(str::to_string)
+            })
             .unwrap_or_else(|| {
                 registry::default_models(surface)
                     .get(0)
@@ -180,28 +219,44 @@ impl MediaGenTool {
             });
 
         let provider = args.get("provider").and_then(|v| v.as_str());
-        let aspect = args
-            .get("aspect")
-            .and_then(|v| v.as_str())
-            .unwrap_or("1:1")
-            .to_string();
-        let audio_kind = Self::str_arg(&args, &["audio_kind", "audioKind"])
-            .unwrap_or("speech")
-            .to_string();
+        let aspect = ui_str("aspect").unwrap_or_else(|| {
+            args.get("aspect")
+                .and_then(|v| v.as_str())
+                .unwrap_or("1:1")
+                .to_string()
+        });
+        let audio_kind = ui_str("audioKind").unwrap_or_else(|| {
+            Self::str_arg(&args, &["audio_kind", "audioKind"])
+                .unwrap_or("speech")
+                .to_string()
+        });
         let voice = args
             .get("voice")
             .and_then(|v| v.as_str())
             .map(str::to_string)
             .filter(|s| !s.trim().is_empty());
-        let count = Self::u64_arg(&args, &["count"]).unwrap_or(1).clamp(1, 4) as usize;
-        let resolution = Self::str_arg(&args, &["resolution"])
+        let count = ui_str("count")
+            .and_then(|s| s.parse::<u64>().ok())
+            .or_else(|| Self::u64_arg(&args, &["count"]))
+            .unwrap_or(1)
+            .clamp(1, 4) as usize;
+        let resolution = ui_str("resolution")
             .map(|s| s.to_ascii_lowercase())
-            .filter(|s| matches!(s.as_str(), "2k" | "4k"));
-        let seconds = Self::u64_arg(&args, &["length", "duration"]).unwrap_or(match surface {
-            MediaSurface::Video => 5,
-            MediaSurface::Audio => 15,
-            MediaSurface::Image => 0,
-        }) as u32;
+            .filter(|s| matches!(s.as_str(), "2k" | "4k"))
+            .or_else(|| {
+                Self::str_arg(&args, &["resolution"])
+                    .map(|s| s.to_ascii_lowercase())
+                    .filter(|s| matches!(s.as_str(), "2k" | "4k"))
+            });
+        let seconds = ui_str("length")
+            .or_else(|| ui_str("duration"))
+            .and_then(|s| s.trim_end_matches('s').trim_end_matches('秒').parse::<u64>().ok())
+            .or_else(|| Self::u64_arg(&args, &["length", "duration"]))
+            .unwrap_or(match surface {
+                MediaSurface::Video => 5,
+                MediaSurface::Audio => 15,
+                MediaSurface::Image => 0,
+            }) as u32;
         let filename = args
             .get("filename")
             .and_then(|v| v.as_str())
@@ -275,7 +330,9 @@ impl MediaGenTool {
             });
         };
         let config = services.config();
-        let inferred_provider = if provider.is_none() {
+        let inferred_provider = if provider.is_none()
+            && credentials::provider_for_model(&config, &model).is_none()
+        {
             Self::infer_provider(surface, &model)
         } else {
             None
@@ -400,7 +457,7 @@ impl MediaGenTool {
             if p.is_absolute() {
                 p
             } else {
-                self.workspace_dir.join(p)
+                self.workspace_root().join(p)
             }
         };
         let out_dir = self.output_dir("videos");

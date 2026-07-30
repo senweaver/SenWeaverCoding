@@ -11,7 +11,7 @@ export type FileRefDragPayload = {
 export type RefSegment =
   | { type: 'text'; text: string }
   | { type: 'ref'; name: string; relPath: string }
-  | { type: 'cred'; name: string }
+  | { type: 'cred'; name: string; field?: string }
 
 export type RefKind = 'file' | 'folder' | 'session'
 
@@ -19,12 +19,17 @@ export const SESSION_REF_PREFIX = 'session:'
 
 const CRED_NAME_CHARS = '[A-Za-z0-9_-]+'
 const COMBINED_TOKEN_RE = new RegExp(
-  `@\\[([^\\]\\n]*)\\]\\(([^)\\n]*)\\)|\\$\\{cred\\.(${CRED_NAME_CHARS})\\}`,
+  `@\\[([^\\]\\n]*)\\]\\(([^)\\n]*)\\)|\\$\\{cred\\.(${CRED_NAME_CHARS})(?:\\.(${CRED_NAME_CHARS}))?\\}`,
   'g',
 )
 
-export function makeCredToken(name: string): string {
+export function makeCredToken(name: string, field?: string): string {
+  if (field) return `\${cred.${name}.${field}}`
   return `\${cred.${name}}`
+}
+
+export function credChipLabel(name: string, field?: string): string {
+  return field ? `${name}.${field}` : name
 }
 
 export function makeSessionRefToken(name: string, sessionId: string): string {
@@ -64,7 +69,11 @@ export function parseRefSegments(value: string): RefSegment[] {
       segments.push({ type: 'text', text: value.slice(lastIndex, match.index) })
     }
     if (match[3] !== undefined) {
-      segments.push({ type: 'cred', name: match[3] })
+      segments.push({
+        type: 'cred',
+        name: match[3],
+        field: match[4] || undefined,
+      })
     } else {
       segments.push({ type: 'ref', name: match[1] ?? '', relPath: match[2] ?? '' })
     }
@@ -86,7 +95,7 @@ export function refsToPlainText(value: string): string {
   return parseRefSegments(value)
     .map((segment) => {
       if (segment.type === 'text') return segment.text
-      if (segment.type === 'cred') return segment.name
+      if (segment.type === 'cred') return credChipLabel(segment.name, segment.field)
       return `@${segment.name || segment.relPath}`
     })
     .join('')

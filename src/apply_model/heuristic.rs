@@ -146,7 +146,7 @@ pub fn apply_unified_diff_with_ctx(
     };
 
     let source_lines: Vec<&str> = source.split_inclusive('\n').collect();
-    let newline: &str = if source.contains("\r\n") { "\r\n" } else { "\n" };
+    let newline: &str = dominant_newline(source);
     let source_had_trailing_newline = source.ends_with('\n');
     let mut cursor = 0usize;
     let mut output: Vec<String> = Vec::with_capacity(source_lines.len());
@@ -877,6 +877,13 @@ pub fn locate_hunk_with_ctx(
         }
         Err(LocateError::NotFound)
     }
+}
+
+fn dominant_newline(source: &str) -> &'static str {
+    let crlf = source.matches("\r\n").count();
+    let total_lf = source.bytes().filter(|b| *b == b'\n').count();
+    let bare_lf = total_lf.saturating_sub(crlf);
+    if crlf > bare_lf { "\r\n" } else { "\n" }
 }
 
 fn with_newline(line: &str, newline: &str) -> String {

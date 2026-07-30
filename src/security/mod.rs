@@ -44,14 +44,16 @@ pub mod sandbox;
 pub use audit::{
     AuditEvent, AuditEventType, AuditLogger, global_audit_logger, record_command_execution,
 };
-pub use detect::create_sandbox;
+pub use detect::{
+    active_sandbox_status, create_sandbox, ensure_sandbox_available, SandboxStatus,
+};
 pub use domain_matcher::DomainMatcher;
 pub use estop::{EstopLevel, EstopManager, EstopState, ResumeSelector};
 pub use otp::OtpValidator;
 pub use pairing::PairingGuard;
 pub use policy::{is_system_path, AutonomyLevel, SecurityPolicy};
 pub use secrets::SecretStore;
-pub use traits::{NoopSandbox, Sandbox};
+pub use traits::{NoopSandbox, Sandbox, UnavailableSandbox};
 
 pub use iam_policy::{IamPolicy, PolicyDecision};
 pub use nevis::{NevisAuthProvider, NevisIdentity};

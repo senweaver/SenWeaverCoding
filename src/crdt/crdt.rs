@@ -153,6 +153,14 @@ pub struct Document {
     outbox: Vec<CrdtUpdate>,
 
     consumed_seq: u64,
+
+    seen: std::collections::HashMap<String, u64>,
+
+    needs_snapshot_publish: bool,
+
+    disk_mtime: Option<std::time::SystemTime>,
+    disk_len: u64,
+    disk_hash: String,
 }
 
 impl Document {
@@ -164,6 +172,8 @@ impl Document {
             Err(e) => return Err(CrdtError::Io(e)),
         };
         let seed = chrono::Utc::now().timestamp_millis().max(0) as u64;
+        let (disk_mtime, disk_len) = read_disk_stamp(path);
+        let disk_hash = region_hash(&text);
         Ok(Self {
             path: path.to_path_buf(),
             text,
@@ -171,6 +181,11 @@ impl Document {
             history: Vec::new(),
             outbox: Vec::new(),
             consumed_seq: 0,
+            seen: std::collections::HashMap::new(),
+            needs_snapshot_publish: false,
+            disk_mtime,
+            disk_len,
+            disk_hash,
         })
     }
 
@@ -179,15 +194,30 @@ impl Document {
         self.clock
     }
 
+    fn note_seen_internal(&mut self, site: &str, clock: u64) {
+        let entry = self.seen.entry(site.to_string()).or_insert(0);
+        *entry = (*entry).max(clock);
+    }
+
+    pub fn note_seen(&mut self, site: &str, clock: u64) {
+        self.note_seen_internal(site, clock);
+        self.clock = self.clock.max(clock);
+    }
+
     fn record_local(&mut self, update: CrdtUpdate) {
+        self.note_seen_internal(update.site(), update.clock());
         self.history.push(update.clone());
-        if self.outbox.len() >= MAX_OUTBOX_ENTRIES {
-            let drop = self.outbox.len() + 1 - MAX_OUTBOX_ENTRIES;
-            self.outbox.drain(..drop);
-        }
-        self.outbox.push(update);
         self.prune_history();
         coordination_metrics::incr_crdt_local_ops(1);
+        if self.needs_snapshot_publish {
+            return;
+        }
+        if self.outbox.len() >= MAX_OUTBOX_ENTRIES {
+            self.needs_snapshot_publish = true;
+            self.outbox.clear();
+            return;
+        }
+        self.outbox.push(update);
     }
 
     pub fn apply_local(&mut self, op: &EditOp, site: &str) -> Result<(), CrdtError> {
@@ -365,7 +395,34 @@ impl Document {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
             Err(e) => return Err(CrdtError::Io(e)),
         };
+        let (mtime, len) = read_disk_stamp(&self.path);
+        self.disk_mtime = mtime;
+        self.disk_len = len;
+        self.disk_hash = region_hash(&self.text);
         Ok(())
+    }
+
+    pub fn ensure_disk_fresh(&mut self) -> Result<bool, CrdtError> {
+        let (mtime, len) = read_disk_stamp(&self.path);
+        if mtime.is_some() && mtime == self.disk_mtime && len == self.disk_len {
+            return Ok(false);
+        }
+        let disk_text = match std::fs::read_to_string(&self.path) {
+            Ok(s) => s,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(e) => return Err(CrdtError::Io(e)),
+        };
+        let disk_hash = region_hash(&disk_text);
+        if disk_hash == self.disk_hash {
+            self.disk_mtime = mtime;
+            self.disk_len = len;
+            return Ok(false);
+        }
+        self.text = disk_text;
+        self.disk_hash = disk_hash;
+        self.disk_mtime = mtime;
+        self.disk_len = len;
+        Ok(true)
     }
 
     fn prune_history(&mut self) {
@@ -382,13 +439,10 @@ impl Document {
     ) -> RemoteApplyOutcome {
         if !local_site.is_empty() && parsed.site() == local_site {
             self.clock = self.clock.max(parsed.clock());
+            self.note_seen_internal(parsed.site(), parsed.clock());
             return RemoteApplyOutcome::OwnOp;
         }
-        if self
-            .history
-            .iter()
-            .any(|u| u.site() == parsed.site() && u.clock() == parsed.clock())
-        {
+        if self.seen.get(parsed.site()).copied().unwrap_or(0) >= parsed.clock() {
             return RemoteApplyOutcome::Duplicate;
         }
 
@@ -458,6 +512,7 @@ impl Document {
                     }
                 }
                 self.clock = self.clock.max(parsed.clock());
+                self.note_seen_internal(parsed.site(), parsed.clock());
                 self.history.push(parsed);
                 self.prune_history();
                 coordination_metrics::incr_crdt_remote_updates(1);
@@ -491,18 +546,65 @@ impl Document {
         self.consumed_seq = seq;
     }
 
+    pub fn seen_clocks(&self) -> &std::collections::HashMap<String, u64> {
+        &self.seen
+    }
+
+    pub fn restore_meta(&mut self, consumed_seq: u64, seen: std::collections::HashMap<String, u64>) {
+        self.consumed_seq = self.consumed_seq.max(consumed_seq);
+        for (site, clock) in seen {
+            let entry = self.seen.entry(site).or_insert(0);
+            *entry = (*entry).max(clock);
+        }
+        let max_seen = self.seen.values().copied().max().unwrap_or(0);
+        self.clock = self.clock.max(max_seen);
+    }
+
+    pub fn has_pending(&self) -> bool {
+        !self.outbox.is_empty()
+    }
+
+    pub fn needs_snapshot_publish(&self) -> bool {
+        self.needs_snapshot_publish
+    }
+
+    pub fn mark_needs_snapshot_publish(&mut self) {
+        self.needs_snapshot_publish = true;
+        self.outbox.clear();
+    }
+
+    pub fn clear_needs_snapshot_publish(&mut self) {
+        self.needs_snapshot_publish = false;
+    }
+
+    pub fn current_clock(&self) -> u64 {
+        self.clock
+    }
+
     pub fn current_text(&self) -> &str {
         &self.text
     }
 
-    pub fn save(&self) -> std::io::Result<()> {
+    pub fn save(&mut self) -> std::io::Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        crate::util::atomic_write(&self.path, self.text.as_bytes())
+        crate::util::atomic_write(&self.path, self.text.as_bytes())?;
+        let (mtime, len) = read_disk_stamp(&self.path);
+        self.disk_mtime = mtime;
+        self.disk_len = len;
+        self.disk_hash = region_hash(&self.text);
+        Ok(())
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+}
+
+fn read_disk_stamp(path: &Path) -> (Option<std::time::SystemTime>, u64) {
+    match std::fs::metadata(path) {
+        Ok(meta) => (meta.modified().ok(), meta.len()),
+        Err(_) => (None, 0),
     }
 }

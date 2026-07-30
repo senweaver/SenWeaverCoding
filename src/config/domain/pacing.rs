@@ -14,7 +14,7 @@ pub struct PacingConfig {
     #[serde(default = "default_tool_timeout_secs")]
     pub tool_timeout_secs: Option<u64>,
 
-    #[serde(default)]
+    #[serde(default = "default_total_turn_timeout_secs")]
     pub total_turn_timeout_secs: Option<u64>,
 
     #[serde(default = "default_stream_idle_timeout_secs")]
@@ -78,6 +78,10 @@ pub(crate) fn default_tool_timeout_secs() -> Option<u64> {
     Some(600)
 }
 
+pub(crate) fn default_total_turn_timeout_secs() -> Option<u64> {
+    Some(3600)
+}
+
 pub(crate) fn default_loop_detection_enabled() -> bool {
     true
 }
@@ -103,7 +107,7 @@ impl Default for PacingConfig {
         Self {
             step_timeout_secs: None,
             tool_timeout_secs: default_tool_timeout_secs(),
-            total_turn_timeout_secs: None,
+            total_turn_timeout_secs: default_total_turn_timeout_secs(),
             stream_idle_timeout_secs: default_stream_idle_timeout_secs(),
             loop_detection_min_elapsed_secs: Some(0),
             loop_ignore_tools: Vec::new(),

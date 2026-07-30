@@ -147,9 +147,10 @@ impl OpenAiResponsesProvider {
             body["tool_choice"] = serde_json::Value::String("auto".to_string());
         }
 
-        let response = self
-            .http_client()
-            .post(format!("{}/responses", self.base_url))
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post(format!("{}/responses", self.base_url)),
+        )
             .header("Authorization", format!("Bearer {credential}"))
             .json(&body)
             .send()
@@ -592,9 +593,10 @@ impl Provider for OpenAiResponsesProvider {
             request["max_output_tokens"] = serde_json::json!(max);
         }
 
-        let response = self
-            .http_client()
-            .post(format!("{}/responses", self.base_url))
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post(format!("{}/responses", self.base_url)),
+        )
             .header("Authorization", format!("Bearer {credential}"))
             .json(&request)
             .send()
@@ -666,6 +668,8 @@ impl Provider for OpenAiResponsesProvider {
 
         let (instructions, input_items) = build_responses_input_items(messages);
 
+        let strict_schema =
+            crate::tools::schema::SchemaCleanr::prepare_for_strict_output(schema.clone());
         let mut body = serde_json::json!({
             "model": model,
             "input": input_items,
@@ -673,7 +677,7 @@ impl Provider for OpenAiResponsesProvider {
                 "format": {
                     "type": "json_schema",
                     "name": "structured_output",
-                    "schema": schema,
+                    "schema": strict_schema,
                     "strict": true
                 }
             }
@@ -688,9 +692,10 @@ impl Provider for OpenAiResponsesProvider {
             body["instructions"] = serde_json::Value::String(instr);
         }
 
-        let response = self
-            .http_client()
-            .post(format!("{}/responses", self.base_url))
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post(format!("{}/responses", self.base_url)),
+        )
             .header("Authorization", format!("Bearer {credential}"))
             .json(&body)
             .send()

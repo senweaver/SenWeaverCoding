@@ -586,14 +586,15 @@ impl AgentBuilder {
         if let Some(ref deny_list) = denied {
             tools.retain(|t| !deny_list.iter().any(|name| name == t.name()));
         }
+        crate::tools::dedupe_tool_registry(&mut tools);
         let tool_specs_vec: Vec<ToolSpec> = tools.iter().map(|tool| tool.spec()).collect();
         let tool_specs =
             std::sync::Arc::new(crate::tools::dedupe_tool_specs(&tool_specs_vec));
-        let tool_index: std::collections::HashMap<String, usize> = tools
-            .iter()
-            .enumerate()
-            .map(|(i, tool)| (tool.name().to_string(), i))
-            .collect();
+        let mut tool_index: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::with_capacity(tools.len());
+        for (i, tool) in tools.iter().enumerate() {
+            tool_index.entry(tool.name().to_string()).or_insert(i);
+        }
 
         let baseline_max_iter = self
             .config
@@ -2056,24 +2057,20 @@ impl Agent {
     pub fn signal_runtime_model_switch(&mut self, provider: String, model: String) {
         let trimmed_provider = provider.trim();
         let trimmed_model = model.trim();
-        if !trimmed_provider.is_empty() && !trimmed_model.is_empty() {
-            self.runtime_selection_override =
-                Some((trimmed_provider.to_string(), trimmed_model.to_string()));
+        if trimmed_provider.is_empty() || trimmed_model.is_empty() {
+            return;
         }
-        if !trimmed_provider.is_empty() {
-            self.cached_provider = trimmed_provider.to_string();
-        }
-        if !trimmed_model.is_empty() && trimmed_model != self.model_name {
+        if trimmed_model != self.model_name || trimmed_provider != self.cached_provider {
             tracing::info!(
                 target = "runtime_model_switch",
                 old_model = %self.model_name,
                 new_model = %trimmed_model,
                 provider = %trimmed_provider,
-                "UI-initiated model switch: updating in-memory model_name"
+                "UI-initiated model switch: recording runtime selection override"
             );
-            self.model_name = trimmed_model.to_string();
-            self.refresh_history_system_prompt();
         }
+        self.runtime_selection_override =
+            Some((trimmed_provider.to_string(), trimmed_model.to_string()));
     }
 
     pub async fn apply_runtime_config_now(&mut self) -> Result<()> {
@@ -2196,6 +2193,7 @@ impl Agent {
             )));
         }
 
+        crate::tools::dedupe_tool_registry(&mut self.tools);
         let specs: Vec<crate::tools::ToolSpec> =
             self.tools.iter().map(|t| t.spec()).collect();
         self.tool_specs = std::sync::Arc::new(crate::tools::dedupe_tool_specs(&specs));
@@ -2346,6 +2344,7 @@ impl Agent {
             .unwrap_or_else(|| config_arc.workspace_dir.clone());
         self.reload_skills_for_workspace(&workspace_for_skills);
 
+        crate::tools::dedupe_tool_registry(&mut self.tools);
         let specs: Vec<crate::tools::ToolSpec> =
             self.tools.iter().map(|t| t.spec()).collect();
         self.tool_specs = std::sync::Arc::new(crate::tools::dedupe_tool_specs(&specs));
@@ -2355,12 +2354,12 @@ impl Agent {
     }
 
     fn rebuild_tool_index(&mut self) {
-        self.tool_index = self
-            .tools
-            .iter()
-            .enumerate()
-            .map(|(i, t)| (t.name().to_string(), i))
-            .collect();
+        let mut index: std::collections::HashMap<String, usize> =
+            std::collections::HashMap::with_capacity(self.tools.len());
+        for (i, t) in self.tools.iter().enumerate() {
+            index.entry(t.name().to_string()).or_insert(i);
+        }
+        self.tool_index = index;
     }
 
     fn compute_mcp_signature(config: &crate::config::Config) -> u64 {
@@ -2451,6 +2450,7 @@ impl Agent {
         );
         self.attach_mcp_registry(registry, config_arc.mcp.deferred_loading)
             .await;
+        crate::tools::dedupe_tool_registry(&mut self.tools);
         let specs: Vec<crate::tools::ToolSpec> = self.tools.iter().map(|t| t.spec()).collect();
         self.tool_specs = std::sync::Arc::new(crate::tools::dedupe_tool_specs(&specs));
         self.rebuild_tool_index();
@@ -2629,6 +2629,7 @@ impl Agent {
                 std::sync::Arc::clone(&registry),
             )));
         }
+        crate::tools::dedupe_tool_registry(&mut self.tools);
         let specs: Vec<ToolSpec> = self.tools.iter().map(|t| t.spec()).collect();
         self.tool_specs = std::sync::Arc::new(crate::tools::dedupe_tool_specs(&specs));
         self.rebuild_tool_index();
@@ -3499,6 +3500,7 @@ impl Agent {
         let max_messages = self.config.max_history_messages;
 
         const MAX_CHARS: usize = 400_000;
+        const TRIM_NOTICE_PREFIX: &str = "[context notice]";
 
         let lead_system_end = self
             .history
@@ -3512,9 +3514,11 @@ impl Agent {
             self.history.drain(0..lead_system_end).collect();
         let mut body: Vec<ConversationMessage> = self.history.drain(..).collect();
 
+        let mut dropped_total = 0usize;
         if body.len() > max_messages {
             let drop_count = body.len() - max_messages;
             body.drain(0..drop_count);
+            dropped_total += drop_count;
         }
 
         let lead_chars: usize = lead.iter().map(|m| Self::msg_char_len(m)).sum();
@@ -3530,6 +3534,30 @@ impl Agent {
         }
         if keep_from > 0 {
             body.drain(0..keep_from);
+            dropped_total += keep_from;
+        }
+
+        if dropped_total > 0 {
+            while matches!(
+                body.first(),
+                Some(ConversationMessage::Chat(c))
+                    if c.role == "user" && c.content.starts_with(TRIM_NOTICE_PREFIX)
+            ) {
+                body.remove(0);
+            }
+            tracing::warn!(
+                target: "agent.history",
+                dropped = dropped_total,
+                "trim_history removed earlier messages beyond hard history limits; inserting truncation notice"
+            );
+            body.insert(
+                0,
+                ConversationMessage::Chat(crate::providers::traits::ChatMessage::user(&format!(
+                    "{TRIM_NOTICE_PREFIX} {dropped_total} earlier message(s) were removed \
+                     because the conversation exceeded hard history limits; their content is \
+                     no longer available."
+                ))),
+            );
         }
 
         lead.append(&mut body);

@@ -31,6 +31,29 @@ fn timed_fallback_client(
     builder.build().unwrap_or_else(|_| reqwest::Client::new())
 }
 
+const FAIL_CLOSED_PROXY_URL: &str = "http://127.0.0.1:9";
+
+fn fail_closed_client(
+    timeout_secs: Option<u64>,
+    connect_timeout_secs: Option<u64>,
+    no_redirect: bool,
+) -> reqwest::Client {
+    let timeout = timeout_secs.unwrap_or(FALLBACK_TIMEOUT_SECS);
+    let connect = connect_timeout_secs.unwrap_or(FALLBACK_CONNECT_TIMEOUT_SECS);
+    let mut builder = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(timeout))
+        .connect_timeout(std::time::Duration::from_secs(connect));
+    if no_redirect {
+        builder = builder.redirect(reqwest::redirect::Policy::none());
+    }
+    if let Ok(proxy) = reqwest_proxy::Proxy::all(FAIL_CLOSED_PROXY_URL) {
+        builder = builder.proxy(proxy);
+    }
+    builder
+        .build()
+        .unwrap_or_else(|_| timed_fallback_client(timeout_secs, connect_timeout_secs, no_redirect))
+}
+
 trait AsyncReadWrite: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send {}
 impl<T: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin + Send> AsyncReadWrite for T {}
 
@@ -137,6 +160,32 @@ impl ProxyRuntime {
         builder
     }
 
+    fn explicit_proxy_applies(&self, service_key: &str) -> bool {
+        let cfg = self.snapshot();
+        cfg.has_explicit_proxy() && cfg.should_apply_to_service(service_key)
+    }
+
+    fn client_build_fallback(
+        &self,
+        service_key: &str,
+        error: &reqwest::Error,
+        timeout_secs: Option<u64>,
+        connect_timeout_secs: Option<u64>,
+        no_redirect: bool,
+    ) -> reqwest::Client {
+        if self.explicit_proxy_applies(service_key) {
+            tracing::error!(
+                service_key,
+                "failed to build HTTP client with the explicitly configured proxy: {error}; \
+                 failing closed  -  requests from this client will not bypass the proxy and \
+                 will fail until the proxy configuration is fixed"
+            );
+            return fail_closed_client(timeout_secs, connect_timeout_secs, no_redirect);
+        }
+        tracing::warn!(service_key, "Failed to build proxied client: {error}");
+        timed_fallback_client(timeout_secs, connect_timeout_secs, no_redirect)
+    }
+
     fn proxy_fingerprint(&self, service_key: &str) -> String {
         let cfg = self.snapshot();
         if cfg.has_explicit_proxy() {
@@ -177,8 +226,13 @@ impl ProxyRuntime {
             .apply_to_builder(b, service_key)
             .build()
             .unwrap_or_else(|e| {
-                tracing::warn!(service_key, "Failed to build proxied client: {e}");
-                timed_fallback_client(None, Some(DEFAULT_CONNECT_TIMEOUT_SECS), false)
+                self.client_build_fallback(
+                    service_key,
+                    &e,
+                    None,
+                    Some(DEFAULT_CONNECT_TIMEOUT_SECS),
+                    false,
+                )
             });
         self.set_cached_client(ck, c.clone());
         c
@@ -208,8 +262,13 @@ impl ProxyRuntime {
             .apply_to_builder(b, service_key)
             .build()
             .unwrap_or_else(|e| {
-                tracing::warn!(service_key, "Failed to build proxied timeout client: {e}");
-                timed_fallback_client(Some(timeout_secs), Some(connect_timeout_secs), false)
+                self.client_build_fallback(
+                    service_key,
+                    &e,
+                    Some(timeout_secs),
+                    Some(connect_timeout_secs),
+                    false,
+                )
             });
         self.set_cached_client(ck, c.clone());
         c
@@ -240,6 +299,14 @@ impl ProxyRuntime {
             .apply_to_builder(b, service_key)
             .build()
             .unwrap_or_else(|e| {
+                if self.explicit_proxy_applies(service_key) {
+                    tracing::error!(
+                        service_key,
+                        "failed to build search client with the explicitly configured proxy: {e}; \
+                         failing closed  -  requests from this client will not bypass the proxy"
+                    );
+                    return fail_closed_client(Some(timeout_secs), None, false);
+                }
                 tracing::warn!(service_key, "Failed to build proxied search client: {e}");
                 reqwest::Client::builder()
                     .timeout(std::time::Duration::from_secs(timeout_secs))
@@ -274,11 +341,13 @@ impl ProxyRuntime {
             .apply_to_builder(b, service_key)
             .build()
             .unwrap_or_else(|e| {
-                tracing::warn!(
+                self.client_build_fallback(
                     service_key,
-                    "Failed to build proxied no-redirect client: {e}"
-                );
-                timed_fallback_client(Some(timeout_secs), Some(connect_timeout_secs), true)
+                    &e,
+                    Some(timeout_secs),
+                    Some(connect_timeout_secs),
+                    true,
+                )
             });
         self.set_cached_client(ck, c.clone());
         c
@@ -352,11 +421,13 @@ impl ProxyRuntime {
             .default_headers(header_map);
         let builder = self.apply_to_builder(builder, service_key);
         let c = builder.build().unwrap_or_else(|e| {
-            tracing::warn!(
+            self.client_build_fallback(
                 service_key,
-                "Failed to build proxied timeout client with custom headers: {e}"
-            );
-            timed_fallback_client(Some(timeout_secs), Some(connect_timeout_secs), false)
+                &e,
+                Some(timeout_secs),
+                Some(connect_timeout_secs),
+                false,
+            )
         });
         self.set_cached_client(ck, c.clone());
         c
@@ -405,24 +476,32 @@ impl ProxyRuntime {
             }
             builder
         };
-        let c = self
-            .apply_to_builder(build(), service_key)
-            .build()
-            .or_else(|error| {
-                tracing::warn!(
-                    service_key,
-                    "Failed to build proxied stream client: {error}; retrying without proxy"
-                );
-                build().build()
-            })
-            .unwrap_or_else(|error| {
-                tracing::warn!(service_key, "Failed to build stream client: {error}");
-                reqwest::Client::builder()
-                    .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
-                    .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
-                    .build()
-                    .unwrap_or_else(|_| reqwest::Client::new())
-            });
+        let c = match self.apply_to_builder(build(), service_key).build() {
+            Ok(client) => client,
+            Err(error) => {
+                if self.explicit_proxy_applies(service_key) {
+                    tracing::error!(
+                        service_key,
+                        "failed to build stream client with the explicitly configured proxy: {error}; \
+                         failing closed  -  requests from this client will not bypass the proxy"
+                    );
+                    fail_closed_client(None, Some(connect_timeout_secs), false)
+                } else {
+                    tracing::warn!(
+                        service_key,
+                        "Failed to build proxied stream client: {error}; retrying without proxy"
+                    );
+                    build().build().unwrap_or_else(|error| {
+                        tracing::warn!(service_key, "Failed to build stream client: {error}");
+                        reqwest::Client::builder()
+                            .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
+                            .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
+                            .build()
+                            .unwrap_or_else(|_| reqwest::Client::new())
+                    })
+                }
+            }
+        };
         self.set_cached_client(ck, c.clone());
         c
     }
@@ -507,12 +586,13 @@ impl ProxyRuntime {
         ));
         b = apply_explicit_proxy_to_builder(b, service_key, proxy_url);
         let c = b.build().unwrap_or_else(|e| {
-            tracing::warn!(
+            tracing::error!(
                 service_key,
                 proxy_url,
-                "Failed to build channel proxy client: {e}"
+                "failed to build channel proxy client: {e}; failing closed  -  requests from \
+                 this client will not bypass the configured proxy"
             );
-            timed_fallback_client(timeout_secs, connect_timeout_secs, false)
+            fail_closed_client(timeout_secs, connect_timeout_secs, false)
         });
         self.set_cached_client(ck, c.clone());
         c

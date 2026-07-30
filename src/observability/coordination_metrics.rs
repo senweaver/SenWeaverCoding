@@ -27,6 +27,7 @@ pub struct CoordinationMetrics {
     pub blackboard_delivered: AtomicU64,
     pub blackboard_lagged: AtomicU64,
     pub blackboard_replayed: AtomicU64,
+    pub blackboard_journal_dropped: AtomicU64,
 
     pub delegate_parallel_no_runtime: AtomicU64,
     pub delegate_parallel_no_capability: AtomicU64,
@@ -58,6 +59,9 @@ impl CoordinationMetrics {
             blackboard_delivered: self.blackboard_delivered.load(Ordering::Relaxed),
             blackboard_lagged: self.blackboard_lagged.load(Ordering::Relaxed),
             blackboard_replayed: self.blackboard_replayed.load(Ordering::Relaxed),
+            blackboard_journal_dropped: self
+                .blackboard_journal_dropped
+                .load(Ordering::Relaxed),
             delegate_parallel_no_runtime: self
                 .delegate_parallel_no_runtime
                 .load(Ordering::Relaxed),
@@ -85,6 +89,7 @@ pub struct CoordinationSnapshot {
     pub blackboard_delivered: u64,
     pub blackboard_lagged: u64,
     pub blackboard_replayed: u64,
+    pub blackboard_journal_dropped: u64,
     pub delegate_parallel_no_runtime: u64,
     pub delegate_parallel_no_capability: u64,
     pub delegate_parallel_fallback: u64,
@@ -155,6 +160,10 @@ impl CoordinationSnapshot {
         counter!("sen_blackboard_lagged_total", self.blackboard_lagged);
         counter!("sen_blackboard_replayed_total", self.blackboard_replayed);
         counter!(
+            "sen_blackboard_journal_dropped_total",
+            self.blackboard_journal_dropped
+        );
+        counter!(
             "sen_delegate_parallel_no_runtime_total",
             self.delegate_parallel_no_runtime
         );
@@ -221,6 +230,11 @@ pub fn incr_blackboard_replayed(replayed: u64) {
     global()
         .blackboard_replayed
         .fetch_add(replayed, Ordering::Relaxed);
+}
+pub fn incr_blackboard_journal_dropped() {
+    global()
+        .blackboard_journal_dropped
+        .fetch_add(1, Ordering::Relaxed);
 }
 
 pub fn incr_delegate_parallel_no_runtime() {

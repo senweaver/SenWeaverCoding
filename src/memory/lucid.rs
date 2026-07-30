@@ -390,8 +390,12 @@ impl Memory for LucidMemory {
         self.local.list(category, session_id).await
     }
 
-    async fn forget(&self, key: &str) -> anyhow::Result<bool> {
-        self.local.forget(key).await
+    async fn forget(&self, key: &str, include_global: bool) -> anyhow::Result<bool> {
+        self.local.forget(key, include_global).await
+    }
+
+    async fn forget_everywhere(&self, key: &str) -> anyhow::Result<bool> {
+        self.local.forget_everywhere(key).await
     }
 
     async fn count(&self) -> anyhow::Result<usize> {

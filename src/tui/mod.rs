@@ -280,6 +280,8 @@ pub struct App {
 
     pub pending_delta_started_at: Option<std::time::Instant>,
 
+    pub pending_resize_at: Option<std::time::Instant>,
+
     pub partial_redraw_pending: bool,
 
     pub chat_render_cache: chat::render_cache::ChatRenderCache,
@@ -307,6 +309,8 @@ pub struct App {
     pub resume_outcome_tx: tokio::sync::mpsc::Sender<ResumeOutcome>,
     pub resume_outcome_rx: tokio::sync::mpsc::Receiver<ResumeOutcome>,
     pub resume_in_progress: bool,
+
+    pub subagent_lanes: crate::agent::subagent::timeline::SubagentTimelines,
 }
 
 #[derive(Debug)]
@@ -352,6 +356,7 @@ pub struct ApprovalPrompt {
     pub tool_name: String,
     pub args_summary: String,
     pub arguments: serde_json::Value,
+    pub shown_at: Instant,
 }
 
 #[derive(Debug, Clone)]
@@ -455,7 +460,6 @@ impl ChatMessage {
 
     pub fn from_parts(role: &str, content: String, timestamp: String) -> Self {
         let content_hash = chat::render_cache::fingerprint(&content);
-        chat::render_cache::bump_content_version();
         Self {
             role: role.to_string(),
             content,
@@ -756,6 +760,7 @@ impl App {
 
             dirty: true,
             pending_delta_started_at: None,
+            pending_resize_at: None,
             partial_redraw_pending: false,
             chat_render_cache: chat::render_cache::ChatRenderCache::new(),
             edit_batch_registry: edit_batch_registry::EditBatchRegistry::default(),
@@ -773,6 +778,7 @@ impl App {
             resume_outcome_tx,
             resume_outcome_rx,
             resume_in_progress: false,
+            subagent_lanes: crate::agent::subagent::timeline::SubagentTimelines::default(),
         }
     }
 
@@ -790,12 +796,16 @@ impl App {
 
     fn handle_interrupt_key(&mut self) {
         if self.bridge.is_busy {
-            let _ = self.bridge.send(agent_bridge::UserInput::Cancel);
+            let sent = self.bridge.send(agent_bridge::UserInput::Cancel);
             self.pending_questions.clear();
             self.pending_approvals.clear();
             self.chat_messages.push(ChatMessage::with_role_now(
                 "system",
-                "Cancelling current turn\u{2026}".into(),
+                if sent {
+                    "Cancelling current turn\u{2026}".into()
+                } else {
+                    "Cancel request could not be delivered (agent channel unavailable); press Ctrl+C twice to force exit.".into()
+                },
             ));
             return;
         }
@@ -815,14 +825,20 @@ impl App {
 
     fn handle_exit_key(&mut self) {
         if self.bridge.is_busy {
-            let _ = self.bridge.send(agent_bridge::UserInput::Cancel);
+            let sent = self.bridge.send(agent_bridge::UserInput::Cancel);
             self.pending_questions.clear();
             self.pending_approvals.clear();
+            if sent {
+                self.chat_messages.push(ChatMessage::with_role_now(
+                    "system",
+                    "Cancelling current turn\u{2026}".into(),
+                ));
+                return;
+            }
             self.chat_messages.push(ChatMessage::with_role_now(
                 "system",
-                "Cancelling current turn\u{2026}".into(),
+                "Cancel request could not be delivered (agent channel unavailable); exiting.".into(),
             ));
-            return;
         }
         self.should_quit = true;
     }
@@ -881,10 +897,14 @@ impl App {
             }
             KeyAction::Cancel => {
                 if self.bridge.is_busy {
-                    let _ = self.bridge.send(agent_bridge::UserInput::Cancel);
+                    let sent = self.bridge.send(agent_bridge::UserInput::Cancel);
                     self.chat_messages.push(ChatMessage::with_role_now(
                         "system",
-                        "Cancelling current turn\u{2026}".into(),
+                        if sent {
+                            "Cancelling current turn\u{2026}".into()
+                        } else {
+                            "Cancel request could not be delivered (agent channel unavailable).".into()
+                        },
                     ));
                 }
                 true
@@ -1151,6 +1171,14 @@ impl App {
     }
 
     fn handle_approval_key(&mut self, key: event::KeyEvent) {
+        const APPROVAL_KEY_DEBOUNCE: Duration = Duration::from_millis(200);
+        if self
+            .pending_approvals
+            .front()
+            .is_some_and(|prompt| prompt.shown_at.elapsed() < APPROVAL_KEY_DEBOUNCE)
+        {
+            return;
+        }
         let respond = match key.code {
             KeyCode::Char('y') | KeyCode::Char('Y') => Some(true),
             KeyCode::Char('n') | KeyCode::Char('N') | KeyCode::Esc => Some(false),
@@ -2304,6 +2332,7 @@ impl App {
 
     pub fn handle_agent_event(&mut self, ev: agent_bridge::AgentEvent) {
         let ts = chrono::Local::now().format("%H:%M:%S").to_string();
+        self.subagent_lanes.apply_agent_event(&ev);
         {
             match ev {
                 agent_bridge::AgentEvent::AssistantMessage(text) => {
@@ -2570,6 +2599,7 @@ impl App {
                         tool_name,
                         args_summary,
                         arguments,
+                        shown_at: Instant::now(),
                     });
                 }
                 agent_bridge::AgentEvent::QuestionAsked {
@@ -2662,11 +2692,8 @@ impl App {
                         .and_then(|v| v.as_str())
                         .unwrap_or("")
                         .to_string();
-                    self.chat_messages.push(ChatMessage::from_parts(
-                        "system",
-                        format!("[{agent_id}::{block_kind}] {summary}"),
-                        ts.clone(),
-                    ));
+                    self.event_entries
+                        .push(format!("[{ts}] [{agent_id}::{block_kind}] {summary}"));
                 }
                 agent_bridge::AgentEvent::PlanReady { filename, path } => {
 
@@ -2681,6 +2708,7 @@ impl App {
             }
         }
         self.trim_event_entries();
+        self.trim_chat_messages();
     }
 
     fn trim_event_entries(&mut self) {
@@ -2688,6 +2716,14 @@ impl App {
         if self.event_entries.len() > MAX_EVENT_ENTRIES {
             let excess = self.event_entries.len() - MAX_EVENT_ENTRIES;
             self.event_entries.drain(..excess);
+        }
+    }
+
+    fn trim_chat_messages(&mut self) {
+        if self.chat_messages.len() > MAX_CHAT_MESSAGES {
+            let overflow = self.chat_messages.len() - MAX_CHAT_MESSAGES;
+            self.chat_messages.drain(..overflow);
+            chat::render_cache::bump_content_version();
         }
     }
 
@@ -2930,6 +2966,12 @@ fn draw_chat_partial(f: &mut Frame, app: &mut App) {
     draw_chat(f, app, chunks[1]);
     inline_edit_modal::draw(f, &app.inline_edit_modal, chunks[1]);
     draw_status_bar(f, app, chunks[2]);
+    if app.show_help {
+        draw_help_overlay(f);
+    }
+    if app.command_palette_open {
+        draw_command_palette(f, app);
+    }
     draw_approval_overlay(f, app);
     draw_question_overlay(f, app);
 }
@@ -3450,11 +3492,6 @@ fn borrow_line<'a>(line: &'a Line<'static>) -> Line<'a> {
 const MAX_CHAT_MESSAGES: usize = 2000;
 
 fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
-    if app.chat_messages.len() > MAX_CHAT_MESSAGES {
-        let overflow = app.chat_messages.len() - MAX_CHAT_MESSAGES;
-        app.chat_messages.drain(..overflow);
-    }
-
     let chunks = Layout::default()
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(0), Constraint::Length(3)])
@@ -3474,8 +3511,21 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         h.finish()
     };
     if !app.chat_render_cache.lines_match(lines_fp) {
-        let built = build_chat_lines(&app.chat_messages);
-        app.chat_render_cache.store_lines(lines_fp, built);
+        let version = chat::render_cache::content_version();
+        let msg_count = app.chat_messages.len();
+        if app
+            .chat_render_cache
+            .can_append_incrementally(version, msg_count)
+        {
+            let start = app.chat_render_cache.built_msg_count();
+            let new_lines = build_chat_lines(&app.chat_messages[start..]);
+            app.chat_render_cache
+                .append_lines(lines_fp, new_lines, msg_count);
+        } else {
+            let built = build_chat_lines(&app.chat_messages);
+            app.chat_render_cache
+                .store_lines(lines_fp, built, msg_count, version);
+        }
     }
 
     let mut live_lines: Vec<Line<'static>> = Vec::new();
@@ -3529,6 +3579,12 @@ fn draw_chat(f: &mut Frame, app: &mut App, area: Rect) {
         .collect();
     let live_visual_total: usize = live_rows.iter().sum();
     let total_visual = cached_visual_total + live_visual_total;
+    let prev_total_visual = app.chat_render_cache.last_total_visual();
+    if app.chat_scroll_offset > 0 && prev_total_visual > 0 && total_visual > prev_total_visual {
+        let grown = total_visual - prev_total_visual;
+        app.chat_scroll_offset = (app.chat_scroll_offset + grown)
+            .min(total_visual.saturating_sub(view_height));
+    }
     app.chat_render_cache
         .record_scroll_bounds(total_visual, view_height);
     if app.chat_scroll_offset > total_visual.saturating_sub(view_height) {
@@ -3687,46 +3743,138 @@ fn draw_memory(f: &mut Frame, app: &mut App, area: Rect) {
     f.render_stateful_widget(list, area, &mut app.memory_list_state);
 }
 
-fn draw_channels(f: &mut Frame, _app: &App, area: Rect) {
-    let channel_names = [
-        "CLI", "Telegram", "Discord", "Slack", "Matrix", "WhatsApp", "Email", "IRC", "Lark",
-        "DingTalk", "Signal", "Reddit",
-    ];
+fn draw_channels(f: &mut Frame, app: &App, area: Rect) {
+    let runtime_running = crate::gateway::channel_supervisor::supervisor_running();
 
-    let items: Vec<ListItem> = channel_names
-        .iter()
-        .enumerate()
-        .map(|(i, name)| {
-            let (status, style) = if i == 0 {
-                ("active", theme::success_style())
-            } else {
-                ("not configured", theme::dim())
-            };
-            ListItem::new(Line::from(vec![
-                Span::styled(if i == 0 { " [*] " } else { " [ ] " }, style),
-                Span::styled(*name, theme::normal()),
-                Span::styled(format!(" - {status}"), style),
-            ]))
-        })
-        .collect();
+    let mut items: Vec<ListItem> = Vec::new();
+    items.push(ListItem::new(Line::from(vec![
+        Span::styled(" [*] ", theme::success_style()),
+        Span::styled("CLI/TUI", theme::normal()),
+        Span::styled(" - active (this session)", theme::success_style()),
+    ])));
 
+    for (handle, configured) in app.config.channels_config.channels() {
+        let name = handle.name();
+        let (marker, status, style) = if configured && runtime_running {
+            (" [*] ", "configured - runtime active".to_string(), theme::success_style())
+        } else if configured {
+            (
+                " [~] ",
+                "configured - runtime not started (start the gateway to activate)".to_string(),
+                theme::warning_style(),
+            )
+        } else {
+            (" [ ] ", "not configured".to_string(), theme::dim())
+        };
+        items.push(ListItem::new(Line::from(vec![
+            Span::styled(marker, style),
+            Span::styled(name, theme::normal()),
+            Span::styled(format!(" - {status}"), style),
+        ])));
+    }
+
+    let title = if runtime_running {
+        " Channel Status (channel runtime: running) "
+    } else {
+        " Channel Status (channel runtime: stopped) "
+    };
     let list = List::new(items).block(
         Block::default()
             .borders(Borders::ALL)
-            .title(" Channel Status ")
+            .title(title)
             .title_style(theme::title()),
     );
     f.render_widget(list, area);
+}
+
+fn subagent_lane_lines(app: &App, width: usize) -> Vec<Line<'static>> {
+    use unicode_width::UnicodeWidthStr;
+
+    let lanes = app.subagent_lanes.lanes();
+    if lanes.is_empty() {
+        return vec![Line::from(Span::styled(
+            "No subagents this session. Lanes appear when the agent delegates work or spawns workers.",
+            theme::dim(),
+        ))];
+    }
+    let mut lines = Vec::with_capacity(lanes.len() * 2);
+    for lane in lanes {
+        let status_style = match lane.status {
+            crate::agent::subagent::timeline::LaneStatus::Starting => theme::warning_style(),
+            crate::agent::subagent::timeline::LaneStatus::Running => theme::info_style(),
+            crate::agent::subagent::timeline::LaneStatus::Completed => theme::success_style(),
+            crate::agent::subagent::timeline::LaneStatus::Failed => theme::error_style(),
+        };
+        let elapsed = lane.updated_at.duration_since(lane.started_at).as_secs();
+        let header = format!(
+            "[{}] {} - {} ({}s)",
+            lane.status.label(),
+            lane.agent_id,
+            lane.title,
+            elapsed
+        );
+        lines.push(Line::from(Span::styled(header, status_style)));
+        let detail = lane
+            .final_output
+            .as_deref()
+            .map(|out| {
+                out.lines()
+                    .map(str::trim)
+                    .find(|l| !l.is_empty())
+                    .unwrap_or("")
+                    .to_string()
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| lane.last_activity_line());
+        if !detail.is_empty() {
+            let mut clipped = String::with_capacity(detail.len().min(width * 4));
+            let mut used = 2usize;
+            for c in detail.chars() {
+                let cw = unicode_width::UnicodeWidthChar::width(c).unwrap_or(0);
+                if used + cw > width.saturating_sub(1) {
+                    clipped.push('\u{2026}');
+                    break;
+                }
+                clipped.push(c);
+                used += cw;
+            }
+            debug_assert!(clipped.width() <= width);
+            lines.push(Line::from(vec![
+                Span::styled("  ".to_string(), theme::dim()),
+                Span::styled(clipped, theme::dim()),
+            ]));
+        }
+    }
+    lines
 }
 
 fn draw_agents(f: &mut Frame, app: &App, area: Rect) {
 
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([Constraint::Percentage(50), Constraint::Percentage(50)])
+        .constraints([
+            Constraint::Percentage(40),
+            Constraint::Percentage(30),
+            Constraint::Percentage(30),
+        ])
         .split(area);
-    panels::render_budget(f, chunks[0], &app.budget_view);
-    panels::render_provider_health(f, chunks[1], &app.provider_health_view);
+
+    let lane_width = chunks[0].width.saturating_sub(2) as usize;
+    let lane_lines = subagent_lane_lines(app, lane_width.max(8));
+    let active = app.subagent_lanes.active_count();
+    let total = app.subagent_lanes.lanes().len();
+    let lanes_widget = Paragraph::new(lane_lines)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .title(format!(" Subagent Lanes ({active} active / {total} total) "))
+                .title_style(theme::title()),
+        )
+        .wrap(Wrap { trim: false });
+    f.render_widget(lanes_widget, chunks[0]);
+
+    panels::render_budget(f, chunks[1], &app.budget_view);
+    panels::render_provider_health(f, chunks[2], &app.provider_health_view);
 }
 
 fn draw_events(f: &mut Frame, app: &App, area: Rect) {
@@ -3952,7 +4100,7 @@ fn draw_cost(f: &mut Frame, app: &App, area: Rect) {
         for mc in &cd.model_costs {
             lines.push(Line::from(vec![
                 Span::styled(
-                    format!("{:<24}", truncate_str(&mc.model_name, 24)),
+                    pad_display(&truncate_str(&mc.model_name, 24), 24),
                     theme::info_style(),
                 ),
                 Span::styled(format!("${:<12.6}", mc.cost_usd), theme::normal()),
@@ -3975,15 +4123,38 @@ fn draw_cost(f: &mut Frame, app: &App, area: Rect) {
     f.render_widget(model_block, chunks[1]);
 }
 
-fn truncate_str(s: &str, max: usize) -> String {
-    if s.len() <= max {
+fn truncate_str(s: &str, max_width: usize) -> String {
+    use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+    if UnicodeWidthStr::width(s) <= max_width {
+        return s.to_string();
+    }
+    let budget = max_width.saturating_sub(1);
+    let mut out = String::new();
+    let mut used = 0usize;
+    for c in s.chars() {
+        let cw = UnicodeWidthChar::width(c).unwrap_or(0);
+        if used + cw > budget {
+            break;
+        }
+        out.push(c);
+        used += cw;
+    }
+    out.push('\u{2026}');
+    out
+}
+
+fn pad_display(s: &str, width: usize) -> String {
+    use unicode_width::UnicodeWidthStr;
+    let w = UnicodeWidthStr::width(s);
+    if w >= width {
         s.to_string()
     } else {
-        let mut end = max.saturating_sub(3);
-        while end > 0 && !s.is_char_boundary(end) {
-            end -= 1;
+        let mut out = String::with_capacity(s.len() + (width - w));
+        out.push_str(s);
+        for _ in 0..(width - w) {
+            out.push(' ');
         }
-        format!("{}...", &s[..end])
+        out
     }
 }
 
@@ -4078,6 +4249,7 @@ impl Drop for TerminalGuard {
         let _ = execute!(
             io::stdout(),
             LeaveAlternateScreen,
+            crossterm::cursor::Show,
             DisableMouseCapture,
             DisableBracketedPaste
         );
@@ -4099,6 +4271,7 @@ impl PanicHookGuard {
             let _ = execute!(
                 io::stdout(),
                 LeaveAlternateScreen,
+                crossterm::cursor::Show,
                 DisableMouseCapture,
                 DisableBracketedPaste
             );
@@ -4180,10 +4353,22 @@ async fn run_event_driven_loop(
     let mut last_draw = Instant::now() - min_stream_frame_interval;
     let mut bridge_disconnected = false;
 
+    const RESIZE_DEBOUNCE: Duration = Duration::from_millis(80);
+
     loop {
+        if app
+            .pending_resize_at
+            .is_some_and(|t| t.elapsed() >= RESIZE_DEBOUNCE)
+        {
+            app.pending_resize_at = None;
+            terminal.clear()?;
+            app.partial_redraw_pending = false;
+            app.mark_dirty();
+        }
+        let resize_settling = app.pending_resize_at.is_some();
         let throttle_streaming =
             app.bridge.is_busy && last_draw.elapsed() < min_stream_frame_interval;
-        if app.dirty && !throttle_streaming {
+        if app.dirty && !throttle_streaming && !resize_settling {
             if app.partial_redraw_pending && app.active_tab == Tab::Chat {
 
                 terminal.draw(|f| draw_chat_partial(f, app))?;
@@ -4358,9 +4543,20 @@ async fn run_legacy_loop(
     let tick_rate = Duration::from_secs(1);
     let poll_rate = Duration::from_millis(100);
     let mut last_tick = Instant::now();
+    const RESIZE_DEBOUNCE: Duration = Duration::from_millis(80);
 
     loop {
-        if app.dirty {
+        if app
+            .pending_resize_at
+            .is_some_and(|t| t.elapsed() >= RESIZE_DEBOUNCE)
+        {
+            app.pending_resize_at = None;
+            terminal.clear()?;
+            app.partial_redraw_pending = false;
+            app.mark_dirty();
+        }
+        let resize_settling = app.pending_resize_at.is_some();
+        if app.dirty && !resize_settling {
             terminal.draw(|f| draw(f, app))?;
             app.dirty = false;
             app.partial_redraw_pending = false;
@@ -4371,7 +4567,9 @@ async fn run_legacy_loop(
 
         let animating =
             app.bridge.is_busy || !app.diff_review_state.reverting_entries.is_empty();
-        let timeout = if animating {
+        let timeout = if resize_settling {
+            Duration::from_millis(25)
+        } else if animating {
             poll_rate
         } else {
             tick_rate
@@ -4457,7 +4655,7 @@ fn handle_crossterm_event(
             _ => {}
         },
         Event::Resize(_, _) => {
-            terminal.clear()?;
+            app.pending_resize_at = Some(std::time::Instant::now());
         }
         _ => {}
     }

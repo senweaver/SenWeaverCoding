@@ -51,6 +51,7 @@ import {
   replaceSlashToken,
   resolveSlashUiAction,
 } from './composerUtils'
+import { isCredentialGroup } from '../../api/credentials'
 import { useCredentialsStore } from '../../stores/credentialsStore'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { dockListTabs, type BrowserDockTabInfo } from '../../lib/browserDock'
@@ -177,13 +178,16 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
   const sessionRuntimeSelection = useSessionRuntimeStore((s) => activeTabId ? s.selections[activeTabId] : undefined)
   const openSettingsOverlay = useUIStore((s) => s.openSettingsOverlay)
 
-  const designerSurface = useMemo(
+  const designerSubmodeMeta = useMemo(
     () =>
       codingMode === 'designer'
-        ? designerCatalog.find((s) => s.id === designerSelectedId)?.surface ?? null
+        ? designerCatalog.find((s) => s.id === designerSelectedId) ?? null
         : null,
     [codingMode, designerCatalog, designerSelectedId],
   )
+  const designerSurface = designerSubmodeMeta?.modelPicker
+    ? designerSubmodeMeta.surface ?? null
+    : null
   const designerMediaType = surfaceToModelType(designerSurface)
   const designerMediaModel =
     designerMediaType && designerSelectedId ? designerSelectedModel : ''
@@ -1454,20 +1458,28 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
                       </div>
                     ) : (
                       <div className="flex flex-wrap gap-1.5">
-                        {credentialsList.map((cred) => (
+                        {credentialsList.map((cred) => {
+                          const group = isCredentialGroup(cred)
+                          const fieldCount = cred.fields?.length ?? 0
+                          return (
                           <button
                             key={cred.name}
                             type="button"
                             onClick={() => insertCredentialPlaceholder(cred.name)}
                             className="inline-flex items-center gap-1 px-2 py-0.5 text-[11px] font-mono rounded border border-[var(--color-border)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)] text-[var(--color-text-primary)]"
-                            title={t('credentials.placeholder.insert').replace('{name}', cred.name)}
+                            title={
+                              group && fieldCount > 0
+                                ? `${t('credentials.placeholder.insert').replace('{name}', cred.name)} (${fieldCount})`
+                                : t('credentials.placeholder.insert').replace('{name}', cred.name)
+                            }
                           >
                             <span className="material-symbols-outlined text-[12px] text-[var(--color-text-secondary)]">
-                              key
+                              {group ? 'vpn_key' : 'key'}
                             </span>
                             {cred.name}
                           </button>
-                        ))}
+                          )
+                        })}
                       </div>
                     )}
                   </div>

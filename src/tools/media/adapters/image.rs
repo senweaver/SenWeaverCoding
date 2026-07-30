@@ -13,13 +13,112 @@ pub async fn generate(job: &MediaJob) -> anyhow::Result<Vec<u8>> {
     if registry::is_fal_model(&job.model) {
         return fal_image(job).await;
     }
-    if registry::is_gemini_image_model(&job.model) {
-        return gemini_image(job).await;
+    match job.provider.provider_id.to_ascii_lowercase().as_str() {
+        "openrouter" => openrouter_image(job).await,
+        "gemini" | "google" => gemini_image(job).await,
+        _ if registry::is_gemini_image_model(&job.model)
+            && job.provider.base_url.contains("googleapis.com") =>
+        {
+            gemini_image(job).await
+        }
+        _ if job.source_image.is_some() => openai_image_edit(job).await,
+        _ => openai_image(job).await,
     }
-    if job.source_image.is_some() {
-        return openai_image_edit(job).await;
+}
+
+async fn image_bytes_from_url(client: &reqwest::Client, url: &str) -> anyhow::Result<Vec<u8>> {
+    if let Some(rest) = url.strip_prefix("data:") {
+        let b64 = rest
+            .split_once("base64,")
+            .map(|(_, d)| d)
+            .ok_or_else(|| anyhow!("unsupported non-base64 data url in image response"))?;
+        return base64::engine::general_purpose::STANDARD
+            .decode(b64.trim())
+            .context("failed to decode image data url");
     }
-    openai_image(job).await
+    download_bytes(client, url).await
+}
+
+async fn openrouter_image(job: &MediaJob) -> anyhow::Result<Vec<u8>> {
+    let key = job.require_key()?;
+    let url = format!(
+        "{}/chat/completions",
+        job.provider.base_url.trim_end_matches('/')
+    );
+
+    let mut prompt_text = job.prompt.clone();
+    if job.aspect != "1:1" {
+        prompt_text.push_str(&format!("\n\nAspect ratio: {}", job.aspect));
+    }
+    let mut user_content: Vec<serde_json::Value> = Vec::new();
+    if let Some(source_path) = job.source_image.as_deref() {
+        let source_bytes = read_job_image(source_path, "source image").await?;
+        if job.mask.is_some() {
+            prompt_text = format!(
+                "Edit the first image. The second image is a mask: WHITE areas mark the region to \
+                 change, BLACK areas must stay identical to the original. Apply this edit ONLY \
+                 inside the white mask region, blending edges naturally: {prompt_text}"
+            );
+        } else {
+            prompt_text = format!(
+                "Edit the provided image according to this instruction, preserving everything \
+                 not mentioned: {prompt_text}"
+            );
+        }
+        user_content.push(json!({ "type": "text", "text": prompt_text }));
+        user_content.push(json!({
+            "type": "image_url",
+            "image_url": { "url": data_uri(&source_bytes) }
+        }));
+        if let Some(mask_path) = job.mask.as_deref() {
+            let mask_bytes = read_job_image(mask_path, "mask").await?;
+            user_content.push(json!({
+                "type": "image_url",
+                "image_url": { "url": data_uri(&mask_bytes) }
+            }));
+        }
+    } else {
+        user_content.push(json!({ "type": "text", "text": prompt_text }));
+    }
+
+    let body = json!({
+        "model": job.model,
+        "messages": [{ "role": "user", "content": user_content }],
+        "modalities": ["image", "text"],
+    });
+    let resp = job
+        .client
+        .post(&url)
+        .header("Authorization", format!("Bearer {key}"))
+        .header("Content-Type", "application/json")
+        .json(&body)
+        .send()
+        .await
+        .context("openrouter image request failed")?;
+    let status = resp.status();
+    let value: serde_json::Value = resp
+        .json()
+        .await
+        .context("failed to parse openrouter image response")?;
+    if !status.is_success() {
+        return Err(anyhow!("openrouter image error ({status}): {value}"));
+    }
+    let img_url = value
+        .pointer("/choices/0/message/images/0/image_url/url")
+        .and_then(|v| v.as_str())
+        .or_else(|| {
+            value
+                .pointer("/choices/0/message/images/0/url")
+                .and_then(|v| v.as_str())
+        })
+        .ok_or_else(|| {
+            anyhow!(
+                "no image data in openrouter response (model '{}' may not support image \
+                 output): {value}",
+                job.model
+            )
+        })?;
+    image_bytes_from_url(&job.client, img_url).await
 }
 
 fn sniff_mime(bytes: &[u8]) -> &'static str {

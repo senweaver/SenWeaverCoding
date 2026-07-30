@@ -488,6 +488,7 @@ impl TaskQueue {
 
     pub fn purge_old(&self, max_age: Duration) -> usize {
         let cutoff = Utc::now() - chrono::Duration::from_std(max_age).unwrap_or_default();
+        let mut index = self.capability_index.write();
         let mut tasks = self.tasks.write();
         let before = tasks.len();
         tasks.retain(|_, t| {
@@ -503,7 +504,18 @@ impl TaskQueue {
                 true
             }
         });
-        before - tasks.len()
+        let removed = before - tasks.len();
+        if removed > 0 {
+            index.retain(|_, heap| {
+                let kept: BinaryHeap<PrioritizedTask> = std::mem::take(heap)
+                    .into_iter()
+                    .filter(|p| tasks.contains_key(&p.task_id))
+                    .collect();
+                *heap = kept;
+                !heap.is_empty()
+            });
+        }
+        removed
     }
 }
 

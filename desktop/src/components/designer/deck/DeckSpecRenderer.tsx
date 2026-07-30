@@ -495,7 +495,7 @@ export function DeckSpecRenderer({
   const assetUrl = useCallback(
     (src: string): string | null => {
       if (!rawId || !src) return null
-      return `${workspaceFilesApi.rawUrl(rawId, src)}${refreshToken ? `?v=${refreshToken}` : ''}`
+      return workspaceFilesApi.rawUrl(rawId, src, refreshToken || undefined)
     },
     [rawId, refreshToken],
   )

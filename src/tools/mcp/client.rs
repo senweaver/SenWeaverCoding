@@ -143,7 +143,13 @@ impl McpServer {
 
     async fn reconnect(inner: &mut McpServerInner) -> Result<()> {
         let (transport, tools) = Self::handshake(&inner.config).await?;
-        inner.transport = transport;
+        let mut old_transport = std::mem::replace(&mut inner.transport, transport);
+        if let Err(e) = old_transport.close().await {
+            tracing::debug!(
+                "MCP server `{}` failed to close previous transport during reconnect: {e:#}",
+                inner.config.name
+            );
+        }
         inner.tools = tools;
         inner.next_id.store(3, Ordering::Relaxed);
         tracing::info!(
@@ -486,6 +492,18 @@ impl McpRegistry {
     pub fn tool_names(&self) -> Vec<String> {
         let mut names: Vec<String> = self.tool_index.keys().cloned().collect();
         names.sort();
+        names
+    }
+
+    pub fn has_tool(&self, prefixed_name: &str) -> bool {
+        self.tool_index.contains_key(prefixed_name)
+    }
+
+    pub async fn server_names(&self) -> Vec<String> {
+        let mut names = Vec::with_capacity(self.servers.len());
+        for server in &self.servers {
+            names.push(server.name().await);
+        }
         names
     }
 

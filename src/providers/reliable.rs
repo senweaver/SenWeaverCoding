@@ -755,24 +755,36 @@ impl ReliableProvider {
         }
     }
 
-    fn record_idempotency(
-        &self,
+    fn attempt_idempotency_key(
         provider: &str,
         model: &str,
         messages: &serde_json::Value,
         tools: &serde_json::Value,
-    ) {
-        if !tracing::enabled!(tracing::Level::DEBUG) {
-            return;
-        }
+    ) -> String {
         let key =
-            crate::providers::core::idempotency::fingerprint_json(provider, model, messages, tools);
+            crate::providers::core::idempotency::fingerprint_json(provider, model, messages, tools)
+                .into_inner();
         tracing::debug!(
-            idempotency_key = %key.as_str(),
+            idempotency_key = %key,
             provider,
             model,
             "dispatching provider request"
         );
+        key
+    }
+
+    async fn with_idempotency<F>(
+        provider: &str,
+        model: &str,
+        messages: &serde_json::Value,
+        tools: &serde_json::Value,
+        fut: F,
+    ) -> F::Output
+    where
+        F: std::future::Future,
+    {
+        let key = Self::attempt_idempotency_key(provider, model, messages, tools);
+        crate::providers::core::idempotency::scope_idempotency_key(key, fut).await
     }
 
     fn classify_retry(err: &anyhow::Error) -> crate::providers::core::retry::RetryClass {
@@ -1061,22 +1073,10 @@ impl Provider for ReliableProvider {
     ) -> anyhow::Result<String> {
         let models = self.model_chain(model);
         let mut failures = Vec::new();
-
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            self.record_idempotency(
-                self.providers
-                    .first()
-                    .map(|(n, _)| n.as_str())
-                    .unwrap_or("reliable"),
-                model,
-                &serde_json::json!({
-                    "system": system_prompt,
-                    "message": message,
-                    "temperature": temperature,
-                }),
-                &serde_json::Value::Null,
-            );
-        }
+        let request_value = serde_json::json!({
+            "system": system_prompt,
+            "message": message,
+        });
 
         let outer_cap = self.outer_retry_cap();
         let mut state = RetryState::default();
@@ -1086,9 +1086,14 @@ impl Provider for ReliableProvider {
                 state = RetryState::default();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
-                    match provider
-                        .chat_with_system(system_prompt, message, current_model, temperature)
-                        .await
+                    match Self::with_idempotency(
+                        provider_name,
+                        current_model,
+                        &request_value,
+                        &serde_json::Value::Null,
+                        provider.chat_with_system(system_prompt, message, current_model, temperature),
+                    )
+                    .await
                     {
                         Ok(resp) => {
                             if attempt > 0
@@ -1183,18 +1188,6 @@ impl Provider for ReliableProvider {
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
 
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            self.record_idempotency(
-                self.providers
-                    .first()
-                    .map(|(n, _)| n.as_str())
-                    .unwrap_or("reliable"),
-                model,
-                &serde_json::to_value(&effective_messages).unwrap_or(serde_json::Value::Null),
-                &serde_json::Value::Null,
-            );
-        }
-
         let outer_cap = self.outer_retry_cap();
         let mut state = RetryState::default();
 
@@ -1203,9 +1196,16 @@ impl Provider for ReliableProvider {
                 state = RetryState::default();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
-                    match provider
-                        .chat_with_history(&effective_messages, current_model, temperature)
-                        .await
+                    let messages_value = serde_json::to_value(&effective_messages)
+                        .unwrap_or(serde_json::Value::Null);
+                    match Self::with_idempotency(
+                        provider_name,
+                        current_model,
+                        &messages_value,
+                        &serde_json::Value::Null,
+                        provider.chat_with_history(&effective_messages, current_model, temperature),
+                    )
+                    .await
                     {
                         Ok(resp) => {
                             if attempt > 0
@@ -1324,18 +1324,7 @@ impl Provider for ReliableProvider {
         let mut failures = Vec::new();
         let mut effective_messages = messages.to_vec();
         let mut context_truncated = false;
-
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            self.record_idempotency(
-                self.providers
-                    .first()
-                    .map(|(n, _)| n.as_str())
-                    .unwrap_or("reliable"),
-                model,
-                &serde_json::to_value(&effective_messages).unwrap_or(serde_json::Value::Null),
-                &serde_json::Value::Array(tools.to_vec()),
-            );
-        }
+        let tools_value = serde_json::Value::Array(tools.to_vec());
 
         let outer_cap = self.outer_retry_cap();
         let mut state = RetryState::default();
@@ -1345,9 +1334,16 @@ impl Provider for ReliableProvider {
                 state = RetryState::default();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
-                    match provider
-                        .chat_with_tools(&effective_messages, tools, current_model, temperature)
-                        .await
+                    let messages_value = serde_json::to_value(&effective_messages)
+                        .unwrap_or(serde_json::Value::Null);
+                    match Self::with_idempotency(
+                        provider_name,
+                        current_model,
+                        &messages_value,
+                        &tools_value,
+                        provider.chat_with_tools(&effective_messages, tools, current_model, temperature),
+                    )
+                    .await
                     {
                         Ok(resp) => {
                             if attempt > 0
@@ -1452,18 +1448,10 @@ impl Provider for ReliableProvider {
         let mut failures = Vec::new();
         let mut effective_messages = request.messages.to_vec();
         let mut context_truncated = false;
-
-        if tracing::enabled!(tracing::Level::DEBUG) {
-            self.record_idempotency(
-                self.providers
-                    .first()
-                    .map(|(n, _)| n.as_str())
-                    .unwrap_or("reliable"),
-                model,
-                &serde_json::to_value(&effective_messages).unwrap_or(serde_json::Value::Null),
-                &serde_json::to_value(request.tools).unwrap_or(serde_json::Value::Null),
-            );
-        }
+        let tools_value = request
+            .tools
+            .and_then(|t| serde_json::to_value(t).ok())
+            .unwrap_or(serde_json::Value::Null);
 
         let outer_cap = self.outer_retry_cap();
         let mut state = RetryState::default();
@@ -1471,24 +1459,19 @@ impl Provider for ReliableProvider {
         for current_model in &models {
             for (provider_name, provider) in &self.providers {
                 state = RetryState::default();
-                let idem_key = crate::providers::core::idempotency::fingerprint_json(
-                    provider_name,
-                    current_model,
-                    &serde_json::to_value(&effective_messages).unwrap_or(serde_json::Value::Null),
-                    &request
-                        .tools
-                        .and_then(|t| serde_json::to_value(t).ok())
-                        .unwrap_or(serde_json::Value::Null),
-                )
-                .into_inner();
                 for attempt in 0..=outer_cap {
                     self.gate_rate_limit(provider_name).await;
                     let req = ChatRequest {
                         messages: &effective_messages,
                         tools: request.tools,
                     };
-                    match crate::providers::core::idempotency::scope_idempotency_key(
-                        idem_key.clone(),
+                    let messages_value = serde_json::to_value(&effective_messages)
+                        .unwrap_or(serde_json::Value::Null);
+                    match Self::with_idempotency(
+                        provider_name,
+                        current_model,
+                        &messages_value,
+                        &tools_value,
                         provider.chat(req, current_model, temperature),
                     )
                     .await
@@ -1674,6 +1657,10 @@ impl Provider for ReliableProvider {
                     let total_combos = combos.len();
                     let mut last_failure: Option<String> = None;
                     let mut context_truncation_passes: u32 = 0;
+                    let tools_value = tools_owned
+                        .as_deref()
+                        .and_then(|t| serde_json::to_value(t).ok())
+                        .unwrap_or(serde_json::Value::Null);
 
                     for (combo_idx, (provider_label, provider_arc, current_model)) in
                         combos.into_iter().enumerate()
@@ -1709,12 +1696,26 @@ impl Provider for ReliableProvider {
                                 messages: messages_owned.as_slice(),
                                 tools: tools_owned.as_deref().map(|v| v.as_slice()),
                             };
-                            let mut stream = provider_arc.stream_chat(
-                                req,
+                            let messages_value = serde_json::to_value(&messages_owned)
+                                .unwrap_or(serde_json::Value::Null);
+                            let idem_key = Self::attempt_idempotency_key(
+                                &provider_label,
                                 &current_model,
-                                temperature,
-                                options,
+                                &messages_value,
+                                &tools_value,
                             );
+                            let mut stream =
+                                crate::providers::core::idempotency::scope_idempotency_key_sync(
+                                    idem_key,
+                                    || {
+                                        provider_arc.stream_chat(
+                                            req,
+                                            &current_model,
+                                            temperature,
+                                            options,
+                                        )
+                                    },
+                                );
 
                             let mut made_progress = false;
                             let mut last_err: Option<StreamError> = None;

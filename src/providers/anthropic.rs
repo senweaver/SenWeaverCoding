@@ -829,7 +829,27 @@ impl AnthropicProvider {
             }]))
         };
 
-        (system_prompt, native_messages)
+        (system_prompt, Self::merge_adjacent_same_role_native(native_messages))
+    }
+
+    fn merge_adjacent_same_role_native(messages: Vec<NativeMessage>) -> Vec<NativeMessage> {
+        let mut out: Vec<NativeMessage> = Vec::with_capacity(messages.len());
+        for msg in messages {
+            if let Some(last) = out.last_mut() {
+                if last.role == msg.role {
+                    let next_has_thinking = msg
+                        .content
+                        .iter()
+                        .any(|b| matches!(b, NativeContentOut::Thinking { .. }));
+                    if !next_has_thinking {
+                        last.content.extend(msg.content);
+                        continue;
+                    }
+                }
+            }
+            out.push(msg);
+        }
+        out
     }
 
     fn parse_native_response(response: NativeChatResponse) -> ProviderChatResponse {
@@ -964,27 +984,35 @@ impl AnthropicProvider {
         response: reqwest::Response,
         tx: &tokio::sync::mpsc::Sender<StreamResult<StreamEvent>>,
     ) {
-        use tokio::io::AsyncBufReadExt;
-        use tokio_util::io::StreamReader;
-
-        let byte_stream = response
-            .bytes_stream()
-            .map(|result| result.map_err(std::io::Error::other));
-        let reader = StreamReader::new(byte_stream);
-        let mut lines = reader.lines();
+        let mut byte_stream = response.bytes_stream();
+        let mut parser = crate::providers::core::sse::SseParser::new();
 
         let mut tool_id: Option<String> = None;
         let mut tool_name: Option<String> = None;
         let mut tool_input_json = String::new();
+        let mut tool_args_overflow = false;
+        let mut total_tool_args_bytes: usize = 0;
         let mut made_progress = false;
+        let mut saw_stop_reason = false;
         let mut usage_acc = AnthropicStreamUsage::default();
         let mut thinking_sig_buf = String::new();
+        let mut thinking_sig_overflow = false;
 
-        loop {
-            let line = match lines.next_line().await {
-                Ok(Some(line)) => line,
-                Ok(None) => break,
-                Err(e) => {
+        let mut stream_ended = false;
+        while !stream_ended {
+            match byte_stream.next().await {
+                Some(Ok(bytes)) => {
+                    parser.push(&bytes);
+                    if parser.overflowed() {
+                        let _ = tx
+                            .send(Err(StreamError::Provider(
+                                "anthropic SSE event exceeded size limit; upstream response malformed or truncated".to_string(),
+                            )))
+                            .await;
+                        return;
+                    }
+                }
+                Some(Err(e)) => {
                     let _ = tx
                         .send(Err(StreamError::Provider(format!(
                             "anthropic stream read failed before completion: {e}"
@@ -992,198 +1020,271 @@ impl AnthropicProvider {
                         .await;
                     return;
                 }
-            };
-            let line = line.trim().to_string();
-            let Some(json_str) = line
-                .strip_prefix("data: ")
-                .or_else(|| line.strip_prefix("data:"))
-            else {
-                continue;
-            };
+                None => {
+                    parser.finish();
+                    stream_ended = true;
+                }
+            }
 
-            let event: serde_json::Value = match serde_json::from_str(json_str) {
-                Ok(v) => v,
-                Err(_) => {
-                    tracing::debug!("Skipping malformed SSE event: {}", json_str);
+            while let Some(sse_event) = parser.next_event() {
+                if sse_event.data.trim().is_empty() || sse_event.is_done() {
                     continue;
                 }
-            };
+                let event: serde_json::Value = match serde_json::from_str(&sse_event.data) {
+                    Ok(v) => v,
+                    Err(_) => {
+                        tracing::debug!("Skipping malformed SSE event: {}", sse_event.data);
+                        continue;
+                    }
+                };
 
-            let event_type = event
-                .get("type")
-                .and_then(|t| t.as_str())
-                .unwrap_or_default();
+                let event_type = event
+                    .get("type")
+                    .and_then(|t| t.as_str())
+                    .unwrap_or_default();
 
-            match event_type {
-                "message_start" => {
-                    if let Some(usage) = event.get("message").and_then(|m| m.get("usage")) {
-                        usage_acc.merge(usage);
-                    }
-                }
-                "message_delta" => {
-                    if let Some(usage) = event.get("usage") {
-                        usage_acc.merge(usage);
-                    }
-                    if let Some(reason) = event
-                        .get("delta")
-                        .and_then(|d| d.get("stop_reason"))
-                        .and_then(|r| r.as_str())
-                        .and_then(crate::providers::traits::StopReason::from_wire)
-                    {
-                        let _ = tx.send(Ok(StreamEvent::StopReason(reason))).await;
-                    }
-                }
-                "content_block_start" => {
-                    if let Some(block) = event.get("content_block") {
-                        let block_type = block
-                            .get("type")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or_default();
-                        if block_type == "tool_use" {
-                            if tool_id.is_some() {
-                                let name = tool_name.take().unwrap_or_default();
-                                if !name.trim().is_empty() {
-                                    let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
-                                        tool_id.take(),
-                                        crate::providers::sanitize::ProviderKind::Anthropic,
-                                    );
-                                    let input = std::mem::take(&mut tool_input_json);
-                                    let safe_input = sanitize_tool_call_arguments(input);
-                                    made_progress = true;
-                                    let _ = tx
-                                        .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
-                                            id,
-                                            name,
-                                            arguments: safe_input,
-                                        })))
-                                        .await;
-                                }
-                            }
-                            tool_id = block
-                                .get("id")
-                                .and_then(|v| v.as_str())
-                                .map(ToString::to_string);
-                            tool_name = block
-                                .get("name")
-                                .and_then(|v| v.as_str())
-                                .map(ToString::to_string);
-                            tool_input_json.clear();
+                match event_type {
+                    "message_start" => {
+                        if let Some(usage) = event.get("message").and_then(|m| m.get("usage")) {
+                            usage_acc.merge(usage);
                         }
                     }
-                }
-                "content_block_delta" => {
-                    if let Some(delta) = event.get("delta") {
-                        let delta_type = delta
-                            .get("type")
-                            .and_then(|t| t.as_str())
-                            .unwrap_or_default();
-                        match delta_type {
-                            "text_delta" => {
-                                if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
-                                    if !text.is_empty() {
-                                        made_progress = true;
-                                        if tx
-                                            .send(Ok(StreamEvent::TextDelta(StreamChunk::delta(
-                                                text.to_string(),
-                                            ))))
-                                            .await
-                                            .is_err()
-                                        {
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
-                            "thinking_delta" => {
-                                if let Some(text) =
-                                    delta.get("thinking").and_then(|t| t.as_str())
-                                {
-                                    if !text.is_empty() {
-                                        made_progress = true;
-                                        if tx
-                                            .send(Ok(StreamEvent::TextDelta(
-                                                StreamChunk::reasoning(text.to_string()),
-                                            )))
-                                            .await
-                                            .is_err()
-                                        {
-                                            return;
-                                        }
-                                    }
-                                }
-                            }
-                            "input_json_delta" => {
-                                if let Some(json) =
-                                    delta.get("partial_json").and_then(|j| j.as_str())
-                                {
-                                    tool_input_json.push_str(json);
-                                }
-                            }
-                            "signature_delta" => {
-                                if let Some(sig) =
-                                    delta.get("signature").and_then(|s| s.as_str())
-                                {
-                                    thinking_sig_buf.push_str(sig);
-                                }
-                            }
-                            _ => {}
+                    "message_delta" => {
+                        if let Some(usage) = event.get("usage") {
+                            usage_acc.merge(usage);
                         }
-                    }
-                }
-                "content_block_stop" => {
-                    if !thinking_sig_buf.is_empty() {
-                        let sig = std::mem::take(&mut thinking_sig_buf);
-                        if tx
-                            .send(Ok(StreamEvent::ReasoningSignature(sig)))
-                            .await
-                            .is_err()
+                        if let Some(reason) = event
+                            .get("delta")
+                            .and_then(|d| d.get("stop_reason"))
+                            .and_then(|r| r.as_str())
+                            .and_then(crate::providers::traits::StopReason::from_wire)
                         {
+                            saw_stop_reason = true;
+                            let _ = tx.send(Ok(StreamEvent::StopReason(reason))).await;
+                        }
+                    }
+                    "content_block_start" => {
+                        if let Some(block) = event.get("content_block") {
+                            let block_type = block
+                                .get("type")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or_default();
+                            if block_type == "tool_use" {
+                                if tool_id.is_some()
+                                    || tool_name.is_some()
+                                    || !tool_input_json.is_empty()
+                                {
+                                    let name = tool_name.take().unwrap_or_default();
+                                    if tool_args_overflow {
+                                        let _ = tx
+                                            .send(Err(StreamError::Provider(format!(
+                                                "anthropic tool_use `{name}` input_json exceeded the stream size limit; truncated arguments are not valid JSON (fail-closed)"
+                                            ))))
+                                            .await;
+                                        return;
+                                    } else if !name.trim().is_empty() {
+                                        let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                                            tool_id.take(),
+                                            crate::providers::sanitize::ProviderKind::Anthropic,
+                                        );
+                                        let input = std::mem::take(&mut tool_input_json);
+                                        let safe_input = sanitize_tool_call_arguments(input);
+                                        made_progress = true;
+                                        let _ = tx
+                                            .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
+                                                id,
+                                                name,
+                                                arguments: safe_input,
+                                            })))
+                                            .await;
+                                    }
+                                }
+                                tool_id = block
+                                    .get("id")
+                                    .and_then(|v| v.as_str())
+                                    .map(ToString::to_string);
+                                tool_name = block
+                                    .get("name")
+                                    .and_then(|v| v.as_str())
+                                    .map(ToString::to_string);
+                                tool_input_json.clear();
+                                tool_args_overflow = false;
+                            }
+                        }
+                    }
+                    "content_block_delta" => {
+                        if let Some(delta) = event.get("delta") {
+                            let delta_type = delta
+                                .get("type")
+                                .and_then(|t| t.as_str())
+                                .unwrap_or_default();
+                            match delta_type {
+                                "text_delta" => {
+                                    if let Some(text) = delta.get("text").and_then(|t| t.as_str()) {
+                                        if !text.is_empty() {
+                                            made_progress = true;
+                                            if tx
+                                                .send(Ok(StreamEvent::TextDelta(StreamChunk::delta(
+                                                    text.to_string(),
+                                                ))))
+                                                .await
+                                                .is_err()
+                                            {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                                "thinking_delta" => {
+                                    if let Some(text) =
+                                        delta.get("thinking").and_then(|t| t.as_str())
+                                    {
+                                        if !text.is_empty() {
+                                            made_progress = true;
+                                            if tx
+                                                .send(Ok(StreamEvent::TextDelta(
+                                                    StreamChunk::reasoning(text.to_string()),
+                                                )))
+                                                .await
+                                                .is_err()
+                                            {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                                "input_json_delta" => {
+                                    if let Some(json) =
+                                        delta.get("partial_json").and_then(|j| j.as_str())
+                                    {
+                                        let per_call_room =
+                                            crate::providers::core::openai_sse::MAX_STREAM_TOOL_ARGS_BYTES
+                                                .saturating_sub(tool_input_json.len());
+                                        let total_room =
+                                            crate::providers::core::openai_sse::MAX_STREAM_TOOL_ARGS_TOTAL_BYTES
+                                                .saturating_sub(total_tool_args_bytes);
+                                        let room = per_call_room.min(total_room);
+                                        if json.len() <= room {
+                                            tool_input_json.push_str(json);
+                                            total_tool_args_bytes =
+                                                total_tool_args_bytes.saturating_add(json.len());
+                                        } else if !tool_args_overflow {
+                                            tool_args_overflow = true;
+                                            tracing::warn!(
+                                                target: "providers.anthropic.stream",
+                                                per_call_limit = crate::providers::core::openai_sse::MAX_STREAM_TOOL_ARGS_BYTES,
+                                                total_limit = crate::providers::core::openai_sse::MAX_STREAM_TOOL_ARGS_TOTAL_BYTES,
+                                                "anthropic tool_use input_json exceeded size limit; truncating"
+                                            );
+                                        }
+                                    }
+                                }
+                                "signature_delta" => {
+                                    if let Some(sig) =
+                                        delta.get("signature").and_then(|s| s.as_str())
+                                    {
+                                        let room =
+                                            crate::providers::core::openai_sse::MAX_STREAM_TOOL_ARGS_BYTES
+                                                .saturating_sub(thinking_sig_buf.len());
+                                        if sig.len() <= room {
+                                            thinking_sig_buf.push_str(sig);
+                                        } else if !thinking_sig_overflow {
+                                            thinking_sig_overflow = true;
+                                            tracing::warn!(
+                                                target: "providers.anthropic.stream",
+                                                limit = crate::providers::core::openai_sse::MAX_STREAM_TOOL_ARGS_BYTES,
+                                                "anthropic thinking signature exceeded size limit; truncating"
+                                            );
+                                        }
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                    }
+                    "content_block_stop" => {
+                        if std::mem::take(&mut thinking_sig_overflow) {
+                            thinking_sig_buf.clear();
+                            tracing::warn!(
+                                target: "providers.anthropic.stream",
+                                "dropping truncated thinking signature; a truncated signature is cryptographically invalid and would be rejected when replayed to the API"
+                            );
+                        } else if !thinking_sig_buf.is_empty() {
+                            let sig = std::mem::take(&mut thinking_sig_buf);
+                            if tx
+                                .send(Ok(StreamEvent::ReasoningSignature(sig)))
+                                .await
+                                .is_err()
+                            {
+                                return;
+                            }
+                        }
+                        if tool_id.is_some() || tool_name.is_some() || !tool_input_json.is_empty()
+                        {
+                            let name = tool_name.take().unwrap_or_default();
+                            if std::mem::take(&mut tool_args_overflow) {
+                                let _ = tx
+                                    .send(Err(StreamError::Provider(format!(
+                                        "anthropic tool_use `{name}` input_json exceeded the stream size limit; truncated arguments are not valid JSON (fail-closed)"
+                                    ))))
+                                    .await;
+                                return;
+                            } else if name.trim().is_empty() {
+                                tool_id = None;
+                                tool_input_json.clear();
+                            } else {
+                                let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
+                                    tool_id.take(),
+                                    crate::providers::sanitize::ProviderKind::Anthropic,
+                                );
+                                let input = std::mem::take(&mut tool_input_json);
+                                let safe_input = sanitize_tool_call_arguments(input);
+                                made_progress = true;
+                                let _ = tx
+                                    .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
+                                        id,
+                                        name,
+                                        arguments: safe_input,
+                                    })))
+                                    .await;
+                            }
+                        }
+                    }
+                    "message_stop" => {
+                        if std::mem::take(&mut tool_args_overflow) {
+                            let name = tool_name.take().unwrap_or_default();
+                            let _ = tx
+                                .send(Err(StreamError::Provider(format!(
+                                    "anthropic tool_use `{name}` input_json exceeded the stream size limit; truncated arguments are not valid JSON (fail-closed)"
+                                ))))
+                                .await;
                             return;
                         }
-                    }
-                    if tool_id.is_some() {
-                        let name = tool_name.take().unwrap_or_default();
-                        if name.trim().is_empty() {
-                            tool_id = None;
-                            tool_input_json.clear();
-                        } else {
-                            let id = crate::providers::sanitize::normalize_tool_call_id_for_provider(
-                                tool_id.take(),
-                                crate::providers::sanitize::ProviderKind::Anthropic,
-                            );
-                            let input = std::mem::take(&mut tool_input_json);
-                            let safe_input = sanitize_tool_call_arguments(input);
-                            made_progress = true;
-                            let _ = tx
-                                .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
-                                    id,
-                                    name,
-                                    arguments: safe_input,
-                                })))
-                                .await;
-                        }
-                    }
-                }
-                "message_stop" => {
-                    flush_pending_tool_call(&mut tool_id, &mut tool_name, &mut tool_input_json, tx)
+                        flush_pending_tool_call(
+                            &mut tool_id,
+                            &mut tool_name,
+                            &mut tool_input_json,
+                            tx,
+                        )
                         .await;
-                    if let Some(usage) = usage_acc.into_token_usage() {
-                        let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+                        if let Some(usage) = usage_acc.into_token_usage() {
+                            let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+                        }
+                        let _ = tx.send(Ok(StreamEvent::Final)).await;
+                        return;
                     }
-                    let _ = tx.send(Ok(StreamEvent::Final)).await;
-                    return;
+                    "error" => {
+                        let msg = event
+                            .get("error")
+                            .and_then(|e| e.get("message"))
+                            .and_then(|m| m.as_str())
+                            .unwrap_or("unknown streaming error");
+                        let sanitized = super::sanitize_api_error(msg);
+                        let _ = tx.send(Err(StreamError::Provider(sanitized))).await;
+                        return;
+                    }
+                    _ => {}
                 }
-                "error" => {
-                    let msg = event
-                        .get("error")
-                        .and_then(|e| e.get("message"))
-                        .and_then(|m| m.as_str())
-                        .unwrap_or("unknown streaming error");
-                    let sanitized = super::sanitize_api_error(msg);
-                    let _ = tx.send(Err(StreamError::Provider(sanitized))).await;
-                    return;
-                }
-                _ => {}
             }
         }
 
@@ -1195,13 +1296,19 @@ impl AnthropicProvider {
                 .await;
             return;
         }
-        if !made_progress {
+        if !made_progress && !saw_stop_reason {
             let _ = tx
                 .send(Err(StreamError::Provider(
                     "anthropic stream reached EOF without message_stop and without any text/tool output; connection closed mid-response (truncated)".to_string(),
                 )))
                 .await;
             return;
+        }
+        if !made_progress && saw_stop_reason {
+            tracing::warn!(
+                target: "providers.anthropic.stream",
+                "anthropic stream reported a stop_reason but produced no text/tool output; finishing with an empty response"
+            );
         }
         if let Some(usage) = usage_acc.into_token_usage() {
             let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
@@ -1264,25 +1371,13 @@ fn sanitize_tool_call_arguments(raw: String) -> String {
     match serde_json::from_str::<serde_json::Value>(&raw) {
         Ok(_) => raw,
         Err(err) => {
-            if let Some(repaired) =
-                crate::providers::sanitize::repair_partial_tool_input_json(&raw)
-            {
-                tracing::warn!(
-                    target: "providers.anthropic.stream",
-                    error = %err,
-                    raw_len = raw.len(),
-                    repaired_len = repaired.len(),
-                    "anthropic SSE delivered truncated tool_input JSON; recovered partial arguments via structural repair"
-                );
-                return repaired;
-            }
             tracing::warn!(
                 target: "providers.anthropic.stream",
                 error = %err,
                 raw_len = raw.len(),
-                "anthropic SSE produced unrecoverable tool_input JSON; substituting empty object"
+                "anthropic SSE produced invalid tool_input JSON; preserving it for fail-closed rejection"
             );
-            "{}".to_string()
+            raw
         }
     }
 }
@@ -1360,12 +1455,13 @@ impl Provider for AnthropicProvider {
             stream: None,
         };
 
-        let mut request = self
-            .http_client()
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&request);
+        let mut request = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post(format!("{}/v1/messages", self.base_url)),
+        )
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&request);
 
         request = self.apply_auth(request, credential);
 
@@ -1476,12 +1572,13 @@ impl Provider for AnthropicProvider {
             stream: None,
         };
 
-        let req = self
-            .http_client()
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("anthropic-version", "2023-06-01")
-            .header("content-type", "application/json")
-            .json(&native_request);
+        let req = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post(format!("{}/v1/messages", self.base_url)),
+        )
+        .header("anthropic-version", "2023-06-01")
+        .header("content-type", "application/json")
+        .json(&native_request);
 
         let response = self.apply_auth(req, credential).send().await?;
         if !response.status().is_success() {
@@ -1567,7 +1664,7 @@ impl Provider for AnthropicProvider {
             name: TOOL_NAME.to_string(),
             description: "Emit the structured payload conforming to the requested JSON schema."
                 .to_string(),
-            parameters: schema.clone(),
+            parameters: crate::tools::schema::SchemaCleanr::clean_for_anthropic(schema.clone()),
         };
         let tools = vec![virtual_tool];
         let request = ProviderChatRequest {
@@ -1669,6 +1766,7 @@ impl Provider for AnthropicProvider {
         let reasoning_enabled = self.reasoning_enabled;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(64);
+        let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
 
         let _bg = crate::runtime::spawn_supervised("providers.anthropic.stream", async move {
             let (system_prompt, messages) = match tokio::task::spawn_blocking(move || {
@@ -1751,11 +1849,13 @@ impl Provider for AnthropicProvider {
                 }
             };
 
-            let mut req = client
-                .post(&url)
-                .header("anthropic-version", "2023-06-01")
-                .header("content-type", "application/json")
-                .json(&body);
+            let mut req = crate::providers::core::idempotency::apply_idempotency_header_value(
+                client.post(&url),
+                idempotency_key,
+            )
+            .header("anthropic-version", "2023-06-01")
+            .header("content-type", "application/json")
+            .json(&body);
 
             if is_oauth {
                 req = req

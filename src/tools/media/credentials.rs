@@ -28,7 +28,7 @@ fn default_base_url(provider_id: &str) -> &'static str {
     }
 }
 
-fn env_key_for(provider_id: &str) -> Option<&'static str> {
+pub(crate) fn env_key_for(provider_id: &str) -> Option<&'static str> {
     Some(match provider_id.to_ascii_lowercase().as_str() {
         "openai" | "openai-codex" | "openai-responses" => "OPENAI_API_KEY",
         "anthropic" => "ANTHROPIC_API_KEY",

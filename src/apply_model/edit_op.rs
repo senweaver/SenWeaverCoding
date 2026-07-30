@@ -441,19 +441,47 @@ fn ensure_inside_any(
     allowed_roots: &[PathBuf],
     path: &Path,
 ) -> Result<(), PreconditionError> {
-    let normal = normalize(path);
-    let root = normalize(root);
+    let root = std::fs::canonicalize(root).unwrap_or_else(|_| normalize(root));
+    let candidate = if path.is_absolute() {
+        normalize(path)
+    } else {
+        normalize(&root.join(path))
+    };
+    let Some(normal) = canonicalize_allowing_missing_tail(&candidate) else {
+        return Err(PreconditionError::PathEscape { path: candidate });
+    };
 
     if crate::util::path_is_within(&normal, &root) {
         return Ok(());
     }
     for extra in allowed_roots {
-        let extra = normalize(extra);
+        let extra = std::fs::canonicalize(extra).unwrap_or_else(|_| normalize(extra));
         if crate::util::path_is_within(&normal, &extra) {
             return Ok(());
         }
     }
     Err(PreconditionError::PathEscape { path: normal })
+}
+
+fn canonicalize_allowing_missing_tail(path: &Path) -> Option<PathBuf> {
+    let mut existing = path.to_path_buf();
+    let mut suffix: Vec<std::ffi::OsString> = Vec::new();
+    loop {
+        match std::fs::canonicalize(&existing) {
+            Ok(mut canonical) => {
+                for part in suffix.iter().rev() {
+                    canonical.push(part);
+                }
+                return Some(canonical);
+            }
+            Err(_) => {
+                let parent = existing.parent()?;
+                let name = existing.file_name()?.to_os_string();
+                suffix.push(name);
+                existing = parent.to_path_buf();
+            }
+        }
+    }
 }
 
 fn normalize(path: &Path) -> PathBuf {

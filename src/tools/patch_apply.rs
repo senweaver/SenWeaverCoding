@@ -568,20 +568,19 @@ impl Tool for PatchApplyTool {
                 let planned_paths: Vec<std::path::PathBuf> =
                     patch_files.iter().map(|f| f.path.clone()).collect();
                 let _resource_guards = if action == "apply" {
-                    match crate::session::acquire_many_file_writes_for_current_session(
+                    match crate::session::acquire_many_file_write_guards(
                         planned_paths.clone(),
                     )
                     .await
                     {
-                        Some(Ok(g)) => Some(g),
-                        Some(Err(e)) => {
+                        Ok(g) => g,
+                        Err(e) => {
                             return Ok(ToolResult {
                                 success: false,
                                 output: String::new(),
                                 error: Some(format!("{e}")),
                             });
                         }
-                        None => None,
                     }
                 } else {
                     None

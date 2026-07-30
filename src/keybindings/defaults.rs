@@ -57,7 +57,7 @@ pub fn default_bindings() -> Vec<KeyBinding> {
         },
         KeyBinding {
             key: "v".to_string(),
-            modifiers: vec![KeyModifier::Ctrl],
+            modifiers: vec![KeyModifier::Ctrl, KeyModifier::Alt],
             action: KeyAction::ToggleVim,
             description: "Toggle vim mode".to_string(),
             when: None,

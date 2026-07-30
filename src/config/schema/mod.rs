@@ -679,6 +679,9 @@ pub struct Config {
     pub mcp: McpConfig,
 
     #[serde(default)]
+    pub mcp_server: crate::config::domain::mcp_server::McpServerSettings,
+
+    #[serde(default)]
     pub nodes: NodesConfig,
 
     #[serde(default)]
@@ -1228,6 +1231,11 @@ pub fn classify_model_type(model_id: &str) -> Vec<String> {
         || has("kontext")
         || has("seedream")
         || has("image-generation")
+        || has("gpt-image")
+        || has("-image-preview")
+        || has("janus")
+        || has("recraft")
+        || id.ends_with("-image")
     {
         return vec!["image-generation".to_string()];
     }
@@ -2456,7 +2464,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub isolated: bool,
 
-    #[serde(default, serialize_with = "crate::config::redact::redact_vec_string")]
+    #[serde(default)]
     pub paired_tokens: Vec<String>,
 
     #[serde(default = "default_pair_rate_limit")]
@@ -2492,10 +2500,7 @@ pub struct GatewayConfig {
     #[serde(default)]
     pub tls: Option<GatewayTlsConfig>,
 
-    #[serde(
-        default,
-        serialize_with = "crate::config::redact::redact_optional_string"
-    )]
+    #[serde(default)]
     pub signing_secret: Option<String>,
 }
 
@@ -5143,29 +5148,17 @@ pub enum SandboxBackend {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ResourceLimitsConfig {
 
-    #[serde(default = "default_max_memory_mb")]
-    pub max_memory_mb: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_memory_mb: Option<u32>,
 
-    #[serde(default = "default_max_cpu_time_seconds")]
-    pub max_cpu_time_seconds: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_cpu_time_seconds: Option<u64>,
 
-    #[serde(default = "default_max_subprocesses")]
-    pub max_subprocesses: u32,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_subprocesses: Option<u32>,
 
     #[serde(default = "default_memory_monitoring_enabled")]
     pub memory_monitoring: bool,
-}
-
-fn default_max_memory_mb() -> u32 {
-    512
-}
-
-fn default_max_cpu_time_seconds() -> u64 {
-    60
-}
-
-fn default_max_subprocesses() -> u32 {
-    10
 }
 
 fn default_memory_monitoring_enabled() -> bool {
@@ -5175,9 +5168,9 @@ fn default_memory_monitoring_enabled() -> bool {
 impl Default for ResourceLimitsConfig {
     fn default() -> Self {
         Self {
-            max_memory_mb: default_max_memory_mb(),
-            max_cpu_time_seconds: default_max_cpu_time_seconds(),
-            max_subprocesses: default_max_subprocesses(),
+            max_memory_mb: None,
+            max_cpu_time_seconds: None,
+            max_subprocesses: None,
             memory_monitoring: default_memory_monitoring_enabled(),
         }
     }
@@ -5737,6 +5730,7 @@ impl Default for Config {
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
             mcp: McpConfig::default(),
+            mcp_server: crate::config::domain::mcp_server::McpServerSettings::default(),
             nodes: NodesConfig::default(),
             workspace: WorkspaceConfig::default(),
             notion: NotionConfig::default(),
@@ -5783,6 +5777,23 @@ impl Default for Config {
 fn default_config_and_workspace_dirs() -> Result<(PathBuf, PathBuf)> {
     let config_dir = default_config_dir()?;
     Ok((config_dir.clone(), config_dir.join("workspace")))
+}
+
+pub fn resolved_sen_dir_sync() -> PathBuf {
+    match default_config_and_workspace_dirs() {
+        Ok((default_sen_dir, default_workspace_dir)) => {
+            resolve_runtime_config_dirs_sync(&default_sen_dir, &default_workspace_dir).0
+        }
+        Err(err) => {
+            tracing::warn!(
+                error = %err,
+                "default config dirs unresolved; using %TEMP% fallback for sen dir"
+            );
+            std::env::temp_dir()
+                .join("SenAgentOS")
+                .join(".senweavercoding")
+        }
+    }
 }
 
 const ACTIVE_WORKSPACE_STATE_FILE: &str = "active_workspace.toml";
@@ -6506,6 +6517,62 @@ impl Config {
         true
     }
 
+    fn strip_redacted_secret_artifacts(&mut self) {
+        let mut stripped: Vec<&'static str> = Vec::new();
+        if self
+            .gateway
+            .paired_tokens
+            .iter()
+            .any(|token| crate::config::redact::is_redacted(token))
+        {
+            self.gateway.paired_tokens = crate::config::redact::strip_redacted_from_vec(
+                std::mem::take(&mut self.gateway.paired_tokens),
+            );
+            stripped.push("gateway.paired_tokens");
+        }
+        if self
+            .gateway
+            .signing_secret
+            .as_deref()
+            .is_some_and(crate::config::redact::is_redacted)
+        {
+            self.gateway.signing_secret = None;
+            stripped.push("gateway.signing_secret");
+        }
+        if self
+            .reliability
+            .api_keys
+            .iter()
+            .any(|key| crate::config::redact::is_redacted(key))
+        {
+            self.reliability.api_keys = crate::config::redact::strip_redacted_from_vec(
+                std::mem::take(&mut self.reliability.api_keys),
+            );
+            stripped.push("reliability.api_keys");
+        }
+        let mut agent_keys_stripped = false;
+        for agent in self.agents.values_mut() {
+            if agent
+                .api_key
+                .as_deref()
+                .is_some_and(crate::config::redact::is_redacted)
+            {
+                agent.api_key = None;
+                agent_keys_stripped = true;
+            }
+        }
+        if agent_keys_stripped {
+            stripped.push("agents.*.api_key");
+        }
+        if !stripped.is_empty() {
+            tracing::warn!(
+                fields = ?stripped,
+                "Removed redacted placeholder values left in config.toml by earlier saves; \
+                 re-enter or re-pair the affected credentials"
+            );
+        }
+    }
+
     pub async fn load_or_init() -> Result<Self> {
         let (default_sen_dir, default_workspace_dir) =
             default_config_and_workspace_dirs().unwrap_or_else(|err| {
@@ -7056,6 +7123,8 @@ impl Config {
                 decrypt_secret(&store, &mut config.jira.api_token, "config.jira.api_token")?;
             }
 
+            config.strip_redacted_secret_artifacts();
+
             config.apply_env_overrides_tracked();
             if let Err(err) = config.validate() {
                 tracing::warn!(
@@ -7177,6 +7246,8 @@ impl Config {
 
         config.cost.merge_default_prices();
         config.migrate_legacy_low_caps();
+
+        config.strip_redacted_secret_artifacts();
 
         config.apply_env_overrides_tracked();
         if let Err(e) = config.validate() {

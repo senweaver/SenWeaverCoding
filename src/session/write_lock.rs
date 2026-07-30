@@ -73,12 +73,22 @@ impl SessionWriteLock {
             f.write_all(contents.as_bytes())?;
             let _ = f.sync_all();
         }
-        if let Err(e) = std::fs::rename(&tmp, lock_path) {
+        if let Err(e) = crate::util::atomic_replace_file(&tmp, lock_path) {
             let _ = std::fs::remove_file(&tmp);
             return Err(e);
         }
         let we_won = read_lock_pid(lock_path) == Some(std::process::id());
-        if we_won {
+        if !we_won {
+            tracing::warn!(
+                lock = %lock_path.display(),
+                "lost stale-lock takeover race to another process; backing off"
+            );
+            return Ok(None);
+        }
+        let jitter_ms = 50 + u64::from(std::process::id()) % 100;
+        std::thread::sleep(Duration::from_millis(jitter_ms));
+        let confirmed = read_lock_pid(lock_path) == Some(std::process::id());
+        if confirmed {
             Ok(Some(Self {
                 path: lock_path.to_path_buf(),
                 touch_failures: AtomicU64::new(0),
@@ -87,7 +97,7 @@ impl SessionWriteLock {
         } else {
             tracing::warn!(
                 lock = %lock_path.display(),
-                "lost stale-lock takeover race to another process; backing off"
+                "stale-lock takeover overwritten by another process during confirmation window; backing off"
             );
             Ok(None)
         }

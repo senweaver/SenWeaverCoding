@@ -3,7 +3,7 @@
 // Licensed under the MIT License.
 
 import type { ClientMessage, ServerMessage } from '../types/chat'
-import { getBaseUrl, withAuthToken } from './client'
+import { getAuthToken, getBaseUrl } from './client'
 
 type MessageHandler = (msg: ServerMessage) => void
 type ConnectListener = (sessionId: string) => void
@@ -39,6 +39,15 @@ function isCriticalMessage(message: ClientMessage): boolean {
   if (t.startsWith('debug_')) return true
   if (t.startsWith('approval_')) return true
   return false
+}
+
+function encodeWebSocketToken(token: string): string {
+  const bytes = new TextEncoder().encode(token)
+  let binary = ''
+  for (const byte of bytes) {
+    binary += String.fromCharCode(byte)
+  }
+  return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
 }
 
 function messageByteLength(message: ClientMessage): number {
@@ -80,36 +89,34 @@ type Connection = {
 class WebSocketManager {
   private connections = new Map<string, Connection>()
   private connectListeners = new Set<ConnectListener>()
-  private runtimeConfigResolvers = new Map<string, Array<() => void>>()
+  private runtimeConfigResolvers = new Map<string, (success: boolean) => void>()
   private preRegisteredHandlers = new Map<string, Set<MessageHandler>>()
 
-  notifyRuntimeConfigUpdated(sessionId: string) {
-    const resolvers = this.runtimeConfigResolvers.get(sessionId)
-    if (!resolvers) return
-    this.runtimeConfigResolvers.delete(sessionId)
-    for (const resolve of resolvers) {
-      resolve()
-    }
+  notifyRuntimeConfigUpdated(sessionId: string, requestId: string, success = true) {
+    const key = `${sessionId}\u0000${requestId}`
+    const resolver = this.runtimeConfigResolvers.get(key)
+    if (!resolver) return
+    this.runtimeConfigResolvers.delete(key)
+    resolver(success)
   }
 
-  waitForRuntimeConfigUpdated(sessionId: string, timeoutMs = 5000): Promise<void> {
+  waitForRuntimeConfigUpdated(
+    sessionId: string,
+    requestId: string,
+    timeoutMs = 5000,
+  ): Promise<boolean> {
     return new Promise((resolve, reject) => {
+      const key = `${sessionId}\u0000${requestId}`
       const timer = setTimeout(() => {
-        const pending = this.runtimeConfigResolvers.get(sessionId)
-        if (!pending) return
-        this.runtimeConfigResolvers.set(
-          sessionId,
-          pending.filter((entry) => entry !== resolver),
-        )
+        if (this.runtimeConfigResolvers.get(key) !== resolver) return
+        this.runtimeConfigResolvers.delete(key)
         reject(new Error('runtime config sync timeout'))
       }, timeoutMs)
-      const resolver = () => {
+      const resolver = (success: boolean) => {
         clearTimeout(timer)
-        resolve()
+        resolve(success)
       }
-      const existing = this.runtimeConfigResolvers.get(sessionId) ?? []
-      existing.push(resolver)
-      this.runtimeConfigResolvers.set(sessionId, existing)
+      this.runtimeConfigResolvers.set(key, resolver)
     })
   }
 
@@ -119,14 +126,16 @@ class WebSocketManager {
     options?: { persist?: boolean },
   ): Promise<boolean> {
     const persist = options?.persist ?? true
-    const wait = this.waitForRuntimeConfigUpdated(sessionId)
+    const requestId = crypto.randomUUID()
+    const wait = this.waitForRuntimeConfigUpdated(sessionId, requestId)
     this.send(sessionId, {
       type: 'set_runtime_config',
+      requestId,
       persist,
       providerId: selection.providerId,
       modelId: selection.modelId,
     })
-    return wait.then(() => true).catch(() => false)
+    return wait.catch(() => false)
   }
 
   isConnected(sessionId: string): boolean {
@@ -229,7 +238,12 @@ class WebSocketManager {
     const pathPrefix = options?.pathPrefix ?? existing?.pathPrefix ?? '/ws'
     let ws: WebSocket
     try {
-      ws = new WebSocket(withAuthToken(`${wsUrl}${pathPrefix}/${sessionId}`))
+      const token = getAuthToken()
+      ws = token
+        ? new WebSocket(`${wsUrl}${pathPrefix}/${sessionId}`, [
+            `bearer64.${encodeWebSocketToken(token)}`,
+          ])
+        : new WebSocket(`${wsUrl}${pathPrefix}/${sessionId}`)
     } catch (err) {
       console.warn('[wsManager] WebSocket constructor threw', err)
       const placeholder = existing ?? this.createEmptyConnection()

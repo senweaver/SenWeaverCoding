@@ -19,7 +19,7 @@ const MAX_OUTPUT_BYTES: usize = 1_048_576;
 
 const DEFAULT_LLM_OUTPUT_CAP: usize = 32_768;
 
-fn workspace_build_lock_enabled() -> bool {
+pub(crate) fn workspace_build_lock_enabled() -> bool {
     crate::util::get_runtime_var("SEN_WORKSPACE_BUILD_LOCK")
         .map(|v| {
             let t = v.trim();
@@ -31,7 +31,7 @@ fn workspace_build_lock_enabled() -> bool {
         .unwrap_or(true)
 }
 
-fn extract_shell_write_targets(command: &str) -> Vec<String> {
+pub(crate) fn extract_shell_write_targets(command: &str) -> Vec<String> {
     let mut targets = Vec::new();
     let tokens: Vec<String> = tokenize_shell_words(command);
 
@@ -122,7 +122,7 @@ fn tokenize_shell_words(command: &str) -> Vec<String> {
     out
 }
 
-fn command_is_build_like(command: &str) -> bool {
+pub(crate) fn command_is_build_like(command: &str) -> bool {
     let lower = command.to_ascii_lowercase();
     const NEEDLES: &[&str] = &[
         "cargo build",
@@ -230,6 +230,16 @@ impl ShellTool {
         self.job_limits = limits;
         self
     }
+
+    pub fn with_resource_limits(
+        self,
+        resources: &crate::config::schema::ResourceLimitsConfig,
+    ) -> Self {
+        let merged = self
+            .job_limits
+            .map(|limits| limits.with_resource_overrides(resources));
+        self.with_job_limits(merged)
+    }
 }
 
 const BACKGROUND_STREAM_CAP: usize = 1_048_576;
@@ -242,14 +252,20 @@ async fn stream_background_output<R>(
 ) where
     R: tokio::io::AsyncRead + Unpin,
 {
-    use tokio::io::{AsyncBufReadExt, BufReader};
+    use tokio::io::BufReader;
     let mut buffered = BufReader::new(reader);
     let mut line_bytes: Vec<u8> = Vec::new();
     let mut emitted = 0usize;
     let mut truncated = false;
     loop {
         line_bytes.clear();
-        match buffered.read_until(b'\n', &mut line_bytes).await {
+        match super::foreground::read_line_capped(
+            &mut buffered,
+            &mut line_bytes,
+            BACKGROUND_STREAM_CAP,
+        )
+        .await
+        {
             Ok(0) => break,
             Ok(n) => {
                 if truncated {
@@ -289,32 +305,19 @@ async fn stream_background_output<R>(
 }
 
 async fn spawn_background(
-    mut cmd: tokio::process::Command,
+    cmd: tokio::process::Command,
     command_text: &str,
     job_limits: Option<JobLimits>,
 ) -> anyhow::Result<ToolResult> {
     let (job_guard, mut child): (Option<JobObjectGuard>, tokio::process::Child) =
-        if let Some(limits) = job_limits {
-            match spawn_in_job(cmd, limits).await {
-                Ok((g, c)) => (Some(g), c),
-                Err(e) => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("Failed to spawn background command: {e}")),
-                    });
-                }
-            }
-        } else {
-            match cmd.spawn() {
-                Ok(c) => (None, c),
-                Err(e) => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("Failed to spawn background command: {e}")),
-                    });
-                }
+        match spawn_with_job_limits(cmd, job_limits).await {
+            Ok(pair) => pair,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("Failed to spawn background command: {e}")),
+                });
             }
         };
 
@@ -531,6 +534,83 @@ pub(crate) fn collect_allowed_shell_env_vars(security: &SecurityPolicy) -> Vec<S
     out
 }
 
+pub(crate) fn validate_shell_write_targets(
+    security: &SecurityPolicy,
+    command: &str,
+) -> Option<String> {
+    let ws = security.workspace_dir();
+    for target in extract_shell_write_targets(command) {
+        let resolved = if std::path::Path::new(&target).is_absolute() {
+            std::path::PathBuf::from(&target)
+        } else {
+            ws.join(&target)
+        };
+        if !crate::security::sandbox::sandbox_allows_path(&resolved) {
+            return Some(format!(
+                "Shell write target '{target}' is outside the sandbox workspace \
+                 confinement. Add it to [autonomy].allowed_roots, or disable \
+                 [security.sandbox].confine_filesystem to permit it."
+            ));
+        }
+    }
+    None
+}
+
+pub(crate) fn prepare_isolated_command(
+    cmd: &mut tokio::process::Command,
+    security: &SecurityPolicy,
+    sandbox: &dyn Sandbox,
+) -> std::io::Result<()> {
+    sandbox.wrap_command(cmd.as_std_mut())?;
+    if security.should_filter_shell_env() {
+        cmd.env_clear();
+        for var in collect_allowed_shell_env_vars(security) {
+            if let Ok(val) = std::env::var(&var) {
+                cmd.env(&var, val);
+            }
+        }
+    } else {
+        let passthrough: HashSet<&str> = security
+            .shell_env_passthrough
+            .iter()
+            .map(|s| s.as_str())
+            .collect();
+        for (key, _) in std::env::vars_os() {
+            if let Some(k) = key.to_str() {
+                if is_sensitive_env_var(k) && !passthrough.contains(k) {
+                    cmd.env_remove(k);
+                }
+            }
+        }
+    }
+    for (k, v) in crate::python_env::activation_env(&security.workspace_dir()) {
+        cmd.env(k, v);
+    }
+    cmd.env_remove("PYTHONHOME");
+    cmd.stdout(std::process::Stdio::piped());
+    cmd.stderr(std::process::Stdio::piped());
+    cmd.stdin(std::process::Stdio::null());
+    cmd.kill_on_drop(true);
+    #[cfg(unix)]
+    {
+        cmd.process_group(0);
+    }
+    Ok(())
+}
+
+pub(crate) async fn spawn_with_job_limits(
+    mut cmd: tokio::process::Command,
+    job_limits: Option<JobLimits>,
+) -> std::io::Result<(Option<JobObjectGuard>, tokio::process::Child)> {
+    match job_limits {
+        Some(limits) => {
+            let (guard, child) = spawn_in_job(cmd, limits).await?;
+            Ok((Some(guard), child))
+        }
+        None => Ok((None, cmd.spawn()?)),
+    }
+}
+
 #[async_trait]
 impl Tool for ShellTool {
     fn name(&self) -> &str {
@@ -607,134 +687,15 @@ impl Tool for ShellTool {
             .get("command")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' parameter"))?;
-        let approved = crate::agent::loop_::current_tool_runtime_approved();
 
-        if self.security.is_rate_limited() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded: too many actions in the last hour".into()),
-            });
-        }
-
-        let risk_level = match self.security.validate_command_execution(command, approved) {
-            Ok(risk) => risk,
-            Err(reason) => {
-                crate::security::record_command_execution(
-                    "agent", command, "denied", approved, false, false, 0,
-                );
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(reason),
-                });
-            }
-        };
-
-        if let Some(path) = self.security.forbidden_path_argument(command) {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Path blocked by security policy: {path}")),
-            });
-        }
-
-        {
-            let ws = self.security.workspace_dir();
-            for target in extract_shell_write_targets(command) {
-                let resolved = if std::path::Path::new(&target).is_absolute() {
-                    std::path::PathBuf::from(&target)
-                } else {
-                    ws.join(&target)
-                };
-                if !crate::security::sandbox::sandbox_allows_path(&resolved) {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!(
-                            "Shell write target '{target}' is outside the sandbox workspace \
-                             confinement. Add it to [autonomy].allowed_roots, or disable \
-                             [security.sandbox].confine_filesystem to permit it."
-                        )),
-                    });
-                }
-            }
-        }
-
-        if !self.security.record_action() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded: action budget exhausted".into()),
-            });
-        }
-
-        crate::security::record_command_execution(
-            "agent",
+        let _preflight = match crate::tools::shell::preflight::acquire_shell_execution_clearance(
+            &self.security,
             command,
-            risk_level.as_str(),
-            approved,
-            true,
-            true,
-            0,
-        );
-
-        let _resource_guard = match crate::session::acquire_shell_for_current_session().await {
-            Some(Ok(g)) => Some(g),
-            Some(Err(e)) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("{e}")),
-                });
-            }
-            None => None,
-        };
-
-        let _workspace_guard = if workspace_build_lock_enabled()
-            && command_is_build_like(command)
+        )
+        .await
         {
-            match crate::session::acquire_workspace_exclusive_for_current_session().await {
-                Some(Ok(g)) => Some(g),
-                Some(Err(e)) => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("{e}")),
-                    });
-                }
-                None => None,
-            }
-        } else {
-            None
-        };
-
-        let _shell_write_guards = {
-            let ws = self.security.workspace_dir();
-            let mut paths: Vec<std::path::PathBuf> = Vec::new();
-            for target in extract_shell_write_targets(command) {
-                let p = if std::path::Path::new(&target).is_absolute() {
-                    std::path::PathBuf::from(&target)
-                } else {
-                    ws.join(&target)
-                };
-                paths.push(p);
-            }
-            if paths.is_empty() {
-                None
-            } else {
-                match crate::session::acquire_many_file_writes_for_current_session(paths).await {
-                    Some(Ok(guards)) => Some(guards),
-                    Some(Err(e)) => {
-                        return Ok(ToolResult {
-                            success: false,
-                            output: String::new(),
-                            error: Some(format!("{e}")),
-                        });
-                    }
-                    None => None,
-                }
-            }
+            Ok(guards) => guards,
+            Err(result) => return Ok(result),
         };
 
         let mut cmd = match self
@@ -751,47 +712,8 @@ impl Tool for ShellTool {
             }
         };
 
-        self.sandbox
-            .wrap_command(cmd.as_std_mut())
+        prepare_isolated_command(&mut cmd, &self.security, self.sandbox.as_ref())
             .map_err(|e| anyhow::anyhow!("Sandbox error: {}", e))?;
-
-        if self.security.should_filter_shell_env() {
-            cmd.env_clear();
-
-            for var in collect_allowed_shell_env_vars(&self.security) {
-                if let Ok(val) = std::env::var(&var) {
-                    cmd.env(&var, val);
-                }
-            }
-        } else {
-            let passthrough: HashSet<&str> = self
-                .security
-                .shell_env_passthrough
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
-            for (key, _) in std::env::vars_os() {
-                if let Some(k) = key.to_str() {
-                    if is_sensitive_env_var(k) && !passthrough.contains(k) {
-                        cmd.env_remove(k);
-                    }
-                }
-            }
-        }
-
-        for (k, v) in crate::python_env::activation_env(&self.security.workspace_dir()) {
-            cmd.env(k, v);
-        }
-        cmd.env_remove("PYTHONHOME");
-
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        cmd.stdin(std::process::Stdio::null());
-        cmd.kill_on_drop(true);
-        #[cfg(unix)]
-        {
-            cmd.process_group(0);
-        }
 
         let background = args
             .get("background")
@@ -833,20 +755,8 @@ impl Tool for ShellTool {
             },
         );
 
-        let spawn_result: std::io::Result<(Option<JobObjectGuard>, tokio::process::Child)> =
-            if let Some(limits) = job_limits {
-                match spawn_in_job(cmd, limits).await {
-                    Ok((g, c)) => Ok((Some(g), c)),
-                    Err(e) => Err(e),
-                }
-            } else {
-                match cmd.spawn() {
-                    Ok(c) => Ok((None, c)),
-                    Err(e) => Err(e),
-                }
-            };
-        let (_job_guard, child): (Option<JobObjectGuard>, tokio::process::Child) =
-            match spawn_result {
+        let (job_guard, child): (Option<JobObjectGuard>, tokio::process::Child) =
+            match spawn_with_job_limits(cmd, job_limits).await {
                 Ok(pair) => pair,
                 Err(e) => {
                 let error_text = format!("Failed to execute command: {e}");
@@ -874,6 +784,7 @@ impl Tool for ShellTool {
 
         let outcome = super::foreground::run_foreground_streamed_inner(
             child,
+            job_guard,
             &mirror_id,
             mirror_session_id.as_deref(),
             mirror_started,

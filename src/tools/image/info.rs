@@ -6,7 +6,6 @@ use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
 use std::fmt::Write;
-use std::path::Path;
 use std::sync::Arc;
 
 const MAX_IMAGE_BYTES: u64 = 5_242_880;
@@ -147,8 +146,6 @@ impl Tool for ImageInfoTool {
             .and_then(serde_json::Value::as_bool)
             .unwrap_or(false);
 
-        let path = Path::new(path_str);
-
         if !self.security.is_path_allowed(path_str) {
             return Ok(ToolResult {
                 success: false,
@@ -158,6 +155,9 @@ impl Tool for ImageInfoTool {
                 )),
             });
         }
+
+        let full_path = self.security.resolve_tool_path(path_str);
+        let path = full_path.as_path();
 
         if !path.exists() {
             return Ok(ToolResult {

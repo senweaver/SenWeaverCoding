@@ -70,12 +70,49 @@ pub fn diagnose(config: &Config) -> Vec<DiagResult> {
 
     check_config_semantics(config, &mut items);
     check_workspace(config, &mut items);
+    check_sandbox(config, &mut items);
     check_daemon_state(config, &mut items);
     check_environment(&mut items);
     check_cli_tools(&mut items);
     check_token_saver(config, &mut items);
 
     items.into_iter().map(DiagItem::into_result).collect()
+}
+
+fn check_sandbox(config: &Config, items: &mut Vec<DiagItem>) {
+    let cat = "sandbox";
+    let sandbox =
+        crate::security::create_sandbox(&config.security, Some(config.workspace_dir.as_path()));
+    match crate::security::active_sandbox_status() {
+        Some(status) if status.requested_but_failed => {
+            items.push(DiagItem::error(
+                cat,
+                format!(
+                    "requested backend \"{}\" is unavailable  -  shell execution is blocked \
+                     (fail-closed); install the backend or set [security.sandbox].backend to \
+                     \"auto\"/\"none\"",
+                    status.requested
+                ),
+            ));
+        }
+        Some(status) => {
+            items.push(DiagItem::ok(
+                cat,
+                format!(
+                    "backend requested \"{}\", effective \"{}\" ({})",
+                    status.requested,
+                    status.effective,
+                    sandbox.description()
+                ),
+            ));
+        }
+        None => {
+            items.push(DiagItem::warn(
+                cat,
+                format!("sandbox status unavailable (effective: {})", sandbox.name()),
+            ));
+        }
+    }
 }
 
 fn check_token_saver(config: &Config, items: &mut Vec<DiagItem>) {

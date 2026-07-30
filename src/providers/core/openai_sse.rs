@@ -10,8 +10,8 @@ use futures_util::{StreamExt, stream};
 use serde::Deserialize;
 
 const MAX_STREAM_TOOL_CALLS: usize = 1024;
-const MAX_STREAM_TOOL_ARGS_BYTES: usize = 64 * 1024 * 1024;
-const MAX_STREAM_TOOL_ARGS_TOTAL_BYTES: usize = 256 * 1024 * 1024;
+pub(crate) const MAX_STREAM_TOOL_ARGS_BYTES: usize = 64 * 1024 * 1024;
+pub(crate) const MAX_STREAM_TOOL_ARGS_TOTAL_BYTES: usize = 256 * 1024 * 1024;
 
 #[derive(Debug, Deserialize)]
 pub struct StreamChunkResponse {

@@ -89,14 +89,40 @@ pub fn audit_open_skill_markdown(path: &Path, repo_root: &Path) -> Result<SkillA
     Ok(report)
 }
 
+const MAX_SCAN_DEPTH: usize = 32;
+const MAX_SCAN_ENTRIES: usize = 50_000;
+
 fn collect_paths_depth_first(root: &Path) -> Result<Vec<PathBuf>> {
-    let mut stack = vec![root.to_path_buf()];
+    let mut stack = vec![(root.to_path_buf(), 0usize)];
     let mut out = Vec::new();
+    let mut visited_dirs: std::collections::HashSet<PathBuf> =
+        std::collections::HashSet::new();
 
-    while let Some(current) = stack.pop() {
+    while let Some((current, depth)) = stack.pop() {
         out.push(current.clone());
+        if out.len() > MAX_SCAN_ENTRIES {
+            bail!(
+                "Skill directory contains too many entries (>{MAX_SCAN_ENTRIES}); aborting audit"
+            );
+        }
 
-        if !current.is_dir() {
+        let metadata = fs::symlink_metadata(&current)
+            .with_context(|| format!("failed to read metadata for {}", current.display()))?;
+        if metadata.file_type().is_symlink() || !metadata.is_dir() {
+            continue;
+        }
+
+        if depth >= MAX_SCAN_DEPTH {
+            bail!(
+                "Skill directory nesting exceeds {MAX_SCAN_DEPTH} levels at {}; aborting audit",
+                current.display()
+            );
+        }
+
+        let canonical = current
+            .canonicalize()
+            .with_context(|| format!("failed to canonicalize {}", current.display()))?;
+        if !visited_dirs.insert(canonical) {
             continue;
         }
 
@@ -110,7 +136,7 @@ fn collect_paths_depth_first(root: &Path) -> Result<Vec<PathBuf>> {
 
         children.sort();
         for child in children.into_iter().rev() {
-            stack.push(child);
+            stack.push((child, depth + 1));
         }
     }
 
@@ -403,11 +429,15 @@ fn has_script_suffix(raw: &str) -> bool {
 }
 
 fn has_shell_shebang(path: &Path) -> bool {
-    let Ok(content) = fs::read(path) else {
+    use std::io::Read;
+    let Ok(file) = fs::File::open(path) else {
         return false;
     };
-    let prefix = &content[..content.len().min(128)];
-    let shebang_line = String::from_utf8_lossy(prefix)
+    let mut prefix: Vec<u8> = Vec::with_capacity(128);
+    if file.take(128).read_to_end(&mut prefix).is_err() {
+        return false;
+    }
+    let shebang_line = String::from_utf8_lossy(&prefix)
         .lines()
         .next()
         .unwrap_or_default()

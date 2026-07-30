@@ -90,18 +90,24 @@ impl PendingGatewayApprovals {
     fn claim(&mut self, id: &str, session_id: Option<&str>) -> bool {
         let now = Instant::now();
         self.maybe_sweep(now);
-        match self.entries.remove(id) {
-            Some(entry) if now.duration_since(entry.created).as_secs() < PENDING_APPROVAL_TTL_SECS => {
-                match (entry.session_id.as_deref(), session_id) {
-                    (Some(expected), Some(actual)) => expected == actual,
-                    (Some(_), None) => false,
-                    (None, None) => true,
-                    (None, Some(_)) => false,
-                }
-            }
-            Some(_) => false,
-            None => false,
+        let Some(entry) = self.entries.get(id) else {
+            return false;
+        };
+        if now.duration_since(entry.created).as_secs() >= PENDING_APPROVAL_TTL_SECS {
+            self.entries.remove(id);
+            return false;
         }
+        let session_matches = match (entry.session_id.as_deref(), session_id) {
+            (Some(expected), Some(actual)) => expected == actual,
+            (Some(_), None) => false,
+            (None, None) => true,
+            (None, Some(_)) => false,
+        };
+        if !session_matches {
+            return false;
+        }
+        self.entries.remove(id);
+        true
     }
 
     fn drop_entry(&mut self, id: &str) -> bool {
@@ -595,7 +601,7 @@ impl ApprovalManager {
             }
         }
 
-        let summary = summarize_args(args);
+        let summary = summarize_args_for_audit(tool_name, args);
         let entry = ApprovalLogEntry {
             timestamp: Utc::now().to_rfc3339(),
             tool_name: tool_name.to_string(),
@@ -702,7 +708,7 @@ fn prompt_cli_interactive(request: &ApprovalRequest) -> ApprovalResponse {
         return ApprovalResponse::No;
     }
 
-    let summary = summarize_args(&request.arguments);
+    let summary = summarize_args_for_audit(&request.tool_name, &request.arguments);
     eprintln!();
     eprintln!("🔧 Agent wants to execute: {}", request.tool_name);
     eprintln!("   {summary}");
@@ -756,6 +762,39 @@ fn command_prefix(command: &str) -> Option<String> {
         }
     }
     Some(prog_base)
+}
+
+fn summarize_args_for_audit(tool_name: &str, args: &serde_json::Value) -> String {
+    let sanitized =
+        crate::services::governance::credential_vault::redact_args_optional(args);
+    if tool_name == "shell" {
+        if let serde_json::Value::Object(map) = &sanitized {
+            if let Some(cmd) = map.get("command").and_then(|v| v.as_str()) {
+                let mut parts = vec![format!("command: {}", summarize_shell_command(cmd))];
+                for (k, v) in map.iter().filter(|(k, _)| k.as_str() != "command") {
+                    let val = match v {
+                        serde_json::Value::String(s) => truncate_for_summary(s, 40),
+                        other => truncate_for_summary(&other.to_string(), 40),
+                    };
+                    parts.push(format!("{k}: {val}"));
+                }
+                return parts.join(", ");
+            }
+        }
+    }
+    summarize_args(&sanitized)
+}
+
+fn summarize_shell_command(command: &str) -> String {
+    let trimmed = command.trim();
+    let mut tokens = trimmed.split_whitespace();
+    let program = tokens.next().unwrap_or("");
+    let rest = tokens.collect::<Vec<&str>>().join(" ");
+    if rest.is_empty() {
+        program.to_string()
+    } else {
+        format!("{program} {}", truncate_for_summary(&rest, 60))
+    }
 }
 
 fn summarize_args(args: &serde_json::Value) -> String {

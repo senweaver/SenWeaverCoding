@@ -901,6 +901,9 @@ pub fn enforce_context_budget_native_with_window(
         .saturating_add(safety_margin)
         .min(window.saturating_sub(512).max(512));
     let max_input = window.saturating_sub(reserve).max(512);
+    let calibration = crate::agent::token::budget::calibration_factor_for(model).max(0.25) * 1.05;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let max_input = ((max_input as f64 / calibration).floor() as usize).max(512);
 
     let total = estimate_total_tokens(&messages);
     if total <= max_input {

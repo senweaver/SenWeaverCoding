@@ -290,7 +290,7 @@ impl Memory for QdrantMemory {
             session_id: session_id.map(str::to_string),
         };
 
-        let _ = self.forget(key).await;
+        let _ = self.forget(key, true).await;
 
         let upsert_body = serde_json::json!({
             "points": [{
@@ -559,16 +559,32 @@ impl Memory for QdrantMemory {
         Ok(entries)
     }
 
-    async fn forget(&self, key: &str) -> Result<bool> {
+    async fn forget(&self, key: &str, include_global: bool) -> Result<bool> {
         self.ensure_initialized().await?;
 
-        let delete_body = serde_json::json!({
-            "filter": {
-                "must": [{
-                    "key": "key",
-                    "match": { "value": key }
-                }]
+        let mut must = vec![serde_json::json!({
+            "key": "key",
+            "match": { "value": key }
+        })];
+        if !include_global {
+            let current_session = crate::session::current_session_context()
+                .map(|c| c.session_id)
+                .filter(|s| !s.is_empty());
+            match current_session {
+                Some(sid) => must.push(serde_json::json!({
+                    "should": [
+                        { "key": "session_id", "match": { "value": sid } },
+                        { "is_empty": { "key": "session_id" } }
+                    ]
+                })),
+                None => must.push(serde_json::json!({
+                    "is_empty": { "key": "session_id" }
+                })),
             }
+        }
+
+        let delete_body = serde_json::json!({
+            "filter": { "must": must }
         });
 
         let resp = self

@@ -12,9 +12,6 @@ use dashmap::DashMap;
 
 static CALIBRATION: LazyLock<DashMap<String, u64>> = LazyLock::new(DashMap::new);
 
-static ACTIVE_FAMILY: LazyLock<arc_swap::ArcSwap<String>> =
-    LazyLock::new(|| arc_swap::ArcSwap::from_pointee("default".to_string()));
-
 pub fn family_from_model(model: &str) -> String {
     let id = model.rsplit('/').next().unwrap_or(model).to_ascii_lowercase();
     const FAMILIES: &[&str] = &[
@@ -36,18 +33,9 @@ pub fn record_usage_calibration(model: &str, estimated_tokens: usize, reported_t
     let family = family_from_model(model);
     let prev = CALIBRATION.get(&family).map(|v| *v as f64).unwrap_or(1000.0);
     let base_estimate = (estimated_tokens as f64).max(1.0);
-    let target_millis = ((reported_tokens as f64) / base_estimate * 1000.0).clamp(500.0, 2000.0);
-    let next = (prev * 0.8 + target_millis * 0.2).clamp(500.0, 2000.0);
-    CALIBRATION.insert(family.clone(), next as u64);
-    ACTIVE_FAMILY.store(Arc::new(family));
-}
-
-fn calibration_factor() -> f64 {
-    let family = ACTIVE_FAMILY.load();
-    CALIBRATION
-        .get(family.as_str())
-        .map(|v| *v as f64 / 1000.0)
-        .unwrap_or(1.0)
+    let target_millis = ((reported_tokens as f64) / base_estimate * 1000.0).clamp(250.0, 4000.0);
+    let next = (prev * 0.8 + target_millis * 0.2).clamp(250.0, 4000.0);
+    CALIBRATION.insert(family, next as u64);
 }
 
 pub fn calibration_factor_for(model: &str) -> f64 {
@@ -75,9 +63,10 @@ pub fn estimate_history_tokens_calibrated(
 }
 
 #[must_use]
-pub fn estimate_tokens_calibrated(text: &str) -> usize {
+pub fn estimate_tokens_calibrated(text: &str, model: &str) -> usize {
     let base = crate::providers::traits::estimate_content_tokens(text).saturating_add(4);
-    let scaled = (base as f64 * calibration_factor()).round() as usize;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let scaled = (base as f64 * calibration_factor_for(model)).round() as usize;
     scaled.max(1)
 }
 
@@ -234,7 +223,9 @@ impl TokenBudgetManager {
     }
 
     pub fn estimate_tokens(text: &str) -> usize {
-        estimate_tokens_calibrated(text)
+        crate::providers::traits::estimate_content_tokens(text)
+            .saturating_add(4)
+            .max(1)
     }
 
     pub fn estimate_messages_tokens(messages: &[impl AsRef<str>]) -> usize {

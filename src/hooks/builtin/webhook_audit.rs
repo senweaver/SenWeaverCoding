@@ -262,7 +262,10 @@ impl HookHandler for WebhookAuditHook {
                 entry
             };
             match raw {
-                Some(a) => truncate_args(a, self.config.max_args_bytes),
+                Some(a) => truncate_args(
+                    crate::services::governance::credential_vault::redact_args_optional(&a),
+                    self.config.max_args_bytes,
+                ),
                 None => Value::Null,
             }
         } else {
@@ -272,13 +275,17 @@ impl HookHandler for WebhookAuditHook {
         #[allow(clippy::cast_possible_truncation)]
         let duration_ms = duration.as_millis() as u64;
 
+        let redacted_error = result.error.as_deref().map(
+            crate::services::governance::credential_vault::redact_for_audit_optional,
+        );
+
         let payload = serde_json::json!({
             "event": "tool_call",
             "timestamp": chrono::Utc::now().to_rfc3339(),
             "tool": tool,
             "success": result.success,
             "duration_ms": duration_ms,
-            "error": result.error,
+            "error": redacted_error,
             "args": args_value,
         });
 

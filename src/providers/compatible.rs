@@ -1067,10 +1067,7 @@ impl OpenAiCompatibleProvider {
         req: reqwest::RequestBuilder,
         credential: &str,
     ) -> reqwest::RequestBuilder {
-        let req = match crate::providers::core::idempotency::current_idempotency_key() {
-            Some(key) if !key.is_empty() => req.header("Idempotency-Key", key),
-            _ => req,
-        };
+        let req = crate::providers::core::idempotency::apply_idempotency_header(req);
         match &self.auth_header {
             AuthStyle::Bearer => req.header("Authorization", format!("Bearer {credential}")),
             AuthStyle::XApiKey => req.header("x-api-key", credential),
@@ -2485,7 +2482,9 @@ impl Provider for OpenAiCompatibleProvider {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "structured_output",
-                    "schema": schema,
+                    "schema": crate::tools::schema::SchemaCleanr::prepare_for_strict_output(
+                        schema.clone(),
+                    ),
                     "strict": true
                 }
             },

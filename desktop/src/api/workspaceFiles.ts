@@ -68,13 +68,20 @@ export const workspaceFilesApi = {
     )
   },
 
-  rawUrl(rawId: string, relPath: string): string {
+  rawUrl(rawId: string, relPath: string, version?: number): string {
     const segs = relPath
       .split('/')
       .filter(Boolean)
       .map((s) => encodeURIComponent(s))
       .join('/')
-    return withAuthToken(`${getBaseUrl()}/api/workspace/raw/${encodeURIComponent(rawId)}/${segs}`)
+    const trail = segs.length && relPath.endsWith('/') ? '/' : ''
+    let url = withAuthToken(
+      `${getBaseUrl()}/api/workspace/raw/${encodeURIComponent(rawId)}/${segs}${trail}`,
+    )
+    if (version) {
+      url += `${url.includes('?') ? '&' : '?'}v=${version}`
+    }
+    return url
   },
 
   writeFile(opts: {

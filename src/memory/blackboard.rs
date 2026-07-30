@@ -121,11 +121,37 @@ pub enum BlackboardError {
 }
 
 const CHANGE_CHANNEL_CAPACITY: usize = 4096;
+const JOURNAL_WRITE_QUEUE_CAPACITY: usize = 8192;
+const TOMBSTONE_TTL: Duration = Duration::from_secs(3600);
+const MAX_IN_MEMORY_CHANGES: usize = 4096;
+const JOURNAL_ROTATE_BYTES: u64 = 32 * 1024 * 1024;
+
+#[derive(Debug, Clone)]
+struct Tombstone {
+    version: u64,
+    deleted_at: Instant,
+}
+
+impl Tombstone {
+    fn is_expired(&self) -> bool {
+        self.deleted_at.elapsed() >= TOMBSTONE_TTL
+    }
+}
+
+pub struct ReplaySlice {
+    pub changes: Vec<BlackboardChange>,
+    pub complete: bool,
+}
+
+struct JournalBuffer {
+    changes: Vec<BlackboardChange>,
+    evicted_through: u64,
+}
 
 pub struct BlackboardJournal {
-    writer: Option<std::sync::mpsc::Sender<Vec<u8>>>,
+    writer: Option<std::sync::mpsc::SyncSender<Vec<u8>>>,
     path: PathBuf,
-    in_memory: parking_lot::Mutex<Vec<BlackboardChange>>,
+    in_memory: parking_lot::Mutex<JournalBuffer>,
 }
 
 impl BlackboardJournal {
@@ -133,14 +159,26 @@ impl BlackboardJournal {
         std::fs::create_dir_all(dir)?;
         let path = dir.join(format!("{session}.jsonl"));
 
-        let mut in_memory: Vec<BlackboardChange> = Vec::new();
-        if let Ok(text) = std::fs::read_to_string(&path) {
-            for line in text.lines() {
+        let mut kept: std::collections::VecDeque<BlackboardChange> =
+            std::collections::VecDeque::with_capacity(MAX_IN_MEMORY_CHANGES.min(1024));
+        let mut evicted_through = 0u64;
+        if let Ok(file) = std::fs::File::open(&path) {
+            use std::io::BufRead;
+            let reader = std::io::BufReader::new(file);
+            for line in reader.lines() {
+                let Ok(line) = line else {
+                    break;
+                };
                 if line.trim().is_empty() {
                     continue;
                 }
-                if let Ok(rec) = serde_json::from_str::<BlackboardChange>(line) {
-                    in_memory.push(rec);
+                if let Ok(rec) = serde_json::from_str::<BlackboardChange>(&line) {
+                    if kept.len() >= MAX_IN_MEMORY_CHANGES {
+                        if let Some(dropped) = kept.pop_front() {
+                            evicted_through = evicted_through.max(dropped.seq);
+                        }
+                    }
+                    kept.push_back(rec);
                 }
             }
         }
@@ -159,22 +197,58 @@ impl BlackboardJournal {
 
         let writer = match lock {
             Some(lock) => {
+                let oversized = std::fs::metadata(&path)
+                    .map(|m| m.len() > JOURNAL_ROTATE_BYTES)
+                    .unwrap_or(false);
+                if oversized {
+                    let mut tail = String::new();
+                    for rec in &kept {
+                        if let Ok(line) = serde_json::to_string(rec) {
+                            tail.push_str(&line);
+                            tail.push('\n');
+                        }
+                    }
+                    if let Err(e) = std::fs::write(&path, tail) {
+                        warn!(
+                            path = %path.display(),
+                            "blackboard journal open-time compaction failed: {e}"
+                        );
+                    }
+                }
                 let file = std::fs::OpenOptions::new()
                     .create(true)
                     .append(true)
                     .open(&path)?;
-                let (writer, rx) = std::sync::mpsc::channel::<Vec<u8>>();
+                let (writer, rx) =
+                    std::sync::mpsc::sync_channel::<Vec<u8>>(JOURNAL_WRITE_QUEUE_CAPACITY);
+                let thread_path = path.clone();
                 let spawned = std::thread::Builder::new()
                     .name("blackboard-journal".to_string())
                     .spawn(move || {
                         use std::io::Write;
                         let mut file = file;
+                        let mut approx_size = file.metadata().map(|m| m.len()).unwrap_or(0);
                         let mut last_touch = Instant::now();
                         loop {
                             match rx.recv_timeout(Duration::from_secs(30)) {
                                 Ok(bytes) => {
                                     if let Err(e) = file.write_all(&bytes) {
                                         warn!("blackboard journal append failed: {e}");
+                                    } else {
+                                        approx_size =
+                                            approx_size.saturating_add(bytes.len() as u64);
+                                    }
+                                    if approx_size > JOURNAL_ROTATE_BYTES {
+                                        match compact_journal_file(&thread_path, &mut file) {
+                                            Ok(len) => approx_size = len,
+                                            Err(e) => {
+                                                warn!(
+                                                    path = %thread_path.display(),
+                                                    "blackboard journal compaction failed: {e}"
+                                                );
+                                                approx_size = 0;
+                                            }
+                                        }
                                     }
                                     if last_touch.elapsed() >= Duration::from_secs(5) {
                                         lock.touch();
@@ -212,7 +286,10 @@ impl BlackboardJournal {
         Ok(Self {
             writer,
             path,
-            in_memory: parking_lot::Mutex::new(in_memory),
+            in_memory: parking_lot::Mutex::new(JournalBuffer {
+                changes: kept.into_iter().collect(),
+                evicted_through,
+            }),
         })
     }
 
@@ -220,34 +297,112 @@ impl BlackboardJournal {
         &self.path
     }
 
+    pub fn persists(&self) -> bool {
+        self.writer.is_some()
+    }
+
     pub fn append(&self, change: &BlackboardChange) {
         if let Some(writer) = self.writer.as_ref() {
             if let Ok(mut line) = serde_json::to_string(change) {
                 line.push('\n');
-                let _ = writer.send(line.into_bytes());
+                match writer.try_send(line.into_bytes()) {
+                    Ok(()) => {}
+                    Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                        coordination_metrics::incr_blackboard_journal_dropped();
+                        warn!(
+                            path = %self.path.display(),
+                            seq = change.seq,
+                            "blackboard journal write queue full; dropping journal record"
+                        );
+                    }
+                    Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                        coordination_metrics::incr_blackboard_journal_dropped();
+                    }
+                }
             }
         }
-        const MAX_IN_MEMORY_CHANGES: usize = 4096;
         let mut buf = self.in_memory.lock();
-        buf.push(change.clone());
-        if buf.len() > MAX_IN_MEMORY_CHANGES {
-            let drop_count = buf.len() - MAX_IN_MEMORY_CHANGES;
-            buf.drain(0..drop_count);
+        buf.changes.push(change.clone());
+        if buf.changes.len() > MAX_IN_MEMORY_CHANGES {
+            let drop_count = buf.changes.len() - MAX_IN_MEMORY_CHANGES;
+            let dropped_max = buf
+                .changes
+                .iter()
+                .take(drop_count)
+                .map(|c| c.seq)
+                .max()
+                .unwrap_or(0);
+            buf.evicted_through = buf.evicted_through.max(dropped_max);
+            buf.changes.drain(0..drop_count);
         }
     }
 
-    pub fn replay_since(&self, since: u64) -> Vec<BlackboardChange> {
-        self.in_memory
-            .lock()
+    pub fn replay_since(&self, since: u64) -> ReplaySlice {
+        let buf = self.in_memory.lock();
+        let mut changes: Vec<BlackboardChange> = buf
+            .changes
             .iter()
             .filter(|c| c.seq > since)
             .cloned()
-            .collect()
+            .collect();
+        let complete = since >= buf.evicted_through;
+        drop(buf);
+        changes.sort_by_key(|c| c.seq);
+        ReplaySlice { changes, complete }
     }
+
+    pub fn read_file_since(&self, since: u64) -> std::io::Result<Vec<BlackboardChange>> {
+        use std::io::BufRead;
+        let file = std::fs::File::open(&self.path)?;
+        let reader = std::io::BufReader::new(file);
+        let mut out = Vec::new();
+        for line in reader.lines() {
+            let line = line?;
+            if line.trim().is_empty() {
+                continue;
+            }
+            if let Ok(rec) = serde_json::from_str::<BlackboardChange>(&line) {
+                if rec.seq > since {
+                    out.push(rec);
+                }
+            }
+        }
+        out.sort_by_key(|c| c.seq);
+        Ok(out)
+    }
+}
+
+fn compact_journal_file(path: &Path, file: &mut std::fs::File) -> std::io::Result<u64> {
+    use std::io::Write;
+    let content = std::fs::read_to_string(path)?;
+    let max_bytes = (JOURNAL_ROTATE_BYTES / 2) as usize;
+    let mut kept: Vec<&str> = Vec::new();
+    let mut bytes = 0usize;
+    for line in content.lines().rev() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let add = line.len() + 1;
+        if kept.len() >= MAX_IN_MEMORY_CHANGES || bytes + add > max_bytes {
+            break;
+        }
+        kept.push(line);
+        bytes += add;
+    }
+    let mut tail = String::with_capacity(bytes);
+    for line in kept.iter().rev() {
+        tail.push_str(line);
+        tail.push('\n');
+    }
+    file.set_len(0)?;
+    file.write_all(tail.as_bytes())?;
+    file.flush()?;
+    Ok(tail.len() as u64)
 }
 
 pub struct Blackboard {
     entries: ShardedMap<BlackboardEntry>,
+    tombstones: ShardedMap<Tombstone>,
     change_sender: broadcast::Sender<BlackboardChange>,
     seq: AtomicU64,
     journal: Option<Arc<BlackboardJournal>>,
@@ -262,6 +417,7 @@ impl Blackboard {
         let (change_sender, _rx) = broadcast::channel(CHANGE_CHANNEL_CAPACITY);
         Self {
             entries: ShardedMap::new(),
+            tombstones: ShardedMap::new(),
             change_sender,
             seq: AtomicU64::new(0),
             journal: None,
@@ -275,8 +431,16 @@ impl Blackboard {
             match BlackboardJournal::open(&dir, session.as_ref()) {
                 Ok(journal) => {
 
-                    let records = journal.in_memory.lock().clone();
-                    let last_seq = records.iter().map(|c| c.seq).max().unwrap_or(0);
+                    let (records, evicted_through) = {
+                        let buf = journal.in_memory.lock();
+                        (buf.changes.clone(), buf.evicted_through)
+                    };
+                    let last_seq = records
+                        .iter()
+                        .map(|c| c.seq)
+                        .max()
+                        .unwrap_or(0)
+                        .max(evicted_through);
                     bb.hydrate_from_changes(&records);
                     bb.seq = AtomicU64::new(last_seq);
                     bb.journal = Some(Arc::new(journal));
@@ -307,7 +471,10 @@ impl Blackboard {
                     let namespace = change.namespace.clone();
                     let agent = change.agent.clone();
                     let version = change.version;
-                    self.entries.with_shard_mut(&key, |shard| {
+                    let applied = self.entries.with_shard_mut(&key, |shard| {
+                        if shard.get(&key).is_some_and(|e| e.version >= version) {
+                            return false;
+                        }
                         let entry = BlackboardEntry {
                             key: key.clone(),
                             value: value.clone(),
@@ -320,11 +487,41 @@ impl Blackboard {
                             ttl_start: ttl.map(|_| Instant::now()),
                         };
                         shard.insert(key.clone(), entry);
+                        true
                     });
-                    restored += 1;
+                    if applied {
+                        self.tombstones.compute(&key, |shard| {
+                            if shard.get(&key).is_some_and(|t| t.version <= version) {
+                                shard.remove(&key);
+                            }
+                        });
+                        restored += 1;
+                    }
                 }
                 ChangeKind::Deleted => {
-                    self.entries.remove(&change.key);
+                    let key = change.key.clone();
+                    let version = change.version;
+                    let removed = self.entries.with_shard_mut(&key, |shard| {
+                        if shard.get(&key).is_some_and(|e| e.version >= version) {
+                            return false;
+                        }
+                        shard.remove(&key);
+                        true
+                    });
+                    if removed {
+                        self.tombstones.compute(&key, |shard| {
+                            let stale = shard.get(&key).is_some_and(|t| t.version >= version);
+                            if !stale {
+                                shard.insert(
+                                    key.clone(),
+                                    Tombstone {
+                                        version,
+                                        deleted_at: Instant::now(),
+                                    },
+                                );
+                            }
+                        });
+                    }
                 }
             }
         }
@@ -372,7 +569,7 @@ impl Blackboard {
         let now = Utc::now();
         let value_for_journal = value.clone();
 
-        let (version, kind) = self.entries.with_shard_mut(&key, |shard| {
+        let (version, kind, seq) = self.entries.with_shard_mut(&key, |shard| {
             if let Some(existing) = shard.get_mut(&key) {
                 existing.value = value;
                 existing.owner = agent.clone();
@@ -384,13 +581,15 @@ impl Blackboard {
                 } else {
                     existing.ttl_start = existing.ttl.map(|_| Instant::now());
                 }
-                (existing.version, ChangeKind::Updated)
+                let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+                (existing.version, ChangeKind::Updated, seq)
             } else {
+                let version = self.take_tombstone_version(&key) + 1;
                 let entry = BlackboardEntry {
                     key: key.clone(),
                     value,
                     owner: agent.clone(),
-                    version: 1,
+                    version,
                     created_at: now,
                     updated_at: now,
                     namespace: namespace.clone(),
@@ -398,7 +597,8 @@ impl Blackboard {
                     ttl_start: ttl.map(|_| Instant::now()),
                 };
                 shard.insert(key.clone(), entry);
-                (1, ChangeKind::Created)
+                let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+                (version, ChangeKind::Created, seq)
             }
         });
 
@@ -408,13 +608,28 @@ impl Blackboard {
             kind,
             agent,
             version,
-            seq: 0,
+            seq,
             value: None,
             ttl_ms: None,
         };
         self.publish_change(change, Some(value_for_journal), ttl);
         debug!(key = %key, version, "blackboard write");
         version
+    }
+
+    fn take_tombstone_version(&self, key: &str) -> u64 {
+        match self.tombstones.remove(key) {
+            Some(t) if !t.is_expired() => t.version,
+            _ => 0,
+        }
+    }
+
+    fn tombstone_version(&self, key: &str) -> u64 {
+        self.tombstones
+            .get_cloned(key)
+            .filter(|t| !t.is_expired())
+            .map(|t| t.version)
+            .unwrap_or(0)
     }
 
     pub fn tool_cache_key(session_id: &str, tool_name: &str, fingerprint: &str) -> String {
@@ -457,9 +672,12 @@ impl Blackboard {
         let now = Utc::now();
         let value_for_journal = value.clone();
 
-        let cas_result: Result<(u64, ChangeKind), BlackboardError> =
+        let cas_result: Result<(u64, ChangeKind, u64), BlackboardError> =
             self.entries.with_shard_mut(&key, |shard| {
-                let current_version = shard.get(&key).map(|e| e.version).unwrap_or(0);
+                let current_version = shard
+                    .get(&key)
+                    .map(|e| e.version)
+                    .unwrap_or_else(|| self.tombstone_version(&key));
                 if current_version != expected_version {
                     return Err(BlackboardError::VersionConflict {
                         key: key.clone(),
@@ -476,11 +694,12 @@ impl Blackboard {
                     existing.ttl_start = existing.ttl.map(|_| Instant::now());
                     (existing.version, ChangeKind::Updated)
                 } else {
+                    let version = current_version + 1;
                     let entry = BlackboardEntry {
                         key: key.clone(),
                         value,
                         owner: agent.clone(),
-                        version: 1,
+                        version,
                         created_at: now,
                         updated_at: now,
                         namespace: namespace.clone(),
@@ -488,12 +707,14 @@ impl Blackboard {
                         ttl_start: None,
                     };
                     shard.insert(key.clone(), entry);
-                    (1, ChangeKind::Created)
+                    self.tombstones.remove(&key);
+                    (version, ChangeKind::Created)
                 };
-                Ok((version, kind))
+                let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+                Ok((version, kind, seq))
             });
 
-        let (version, kind) = cas_result?;
+        let (version, kind, seq) = cas_result?;
 
         let change = BlackboardChange {
             key: key.clone(),
@@ -501,7 +722,7 @@ impl Blackboard {
             kind,
             agent,
             version,
-            seq: 0,
+            seq,
             value: None,
             ttl_ms: None,
         };
@@ -529,15 +750,28 @@ impl Blackboard {
 
     pub fn delete(&self, key: &str, agent: &str) -> bool {
         let key = ensure_session_scoped_key(key.to_string());
-        let removed_opt = self.entries.remove(&key);
-        if let Some(removed) = removed_opt {
+        let removed_opt = self.entries.with_shard_mut(&key, |shard| {
+            shard.remove(&key).map(|removed| {
+                let version = removed.version + 1;
+                self.tombstones.insert(
+                    key.clone(),
+                    Tombstone {
+                        version,
+                        deleted_at: Instant::now(),
+                    },
+                );
+                let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
+                (removed.namespace, version, seq)
+            })
+        });
+        if let Some((namespace, version, seq)) = removed_opt {
             let change = BlackboardChange {
                 key: key.clone(),
-                namespace: removed.namespace,
+                namespace,
                 kind: ChangeKind::Deleted,
                 agent: agent.to_string(),
-                version: removed.version + 1,
-                seq: 0,
+                version,
+                seq,
                 value: None,
                 ttl_ms: None,
             };
@@ -551,12 +785,10 @@ impl Blackboard {
 
     fn publish_change(
         &self,
-        mut change: BlackboardChange,
+        change: BlackboardChange,
         journal_value: Option<serde_json::Value>,
         journal_ttl: Option<Duration>,
     ) {
-        let seq = self.seq.fetch_add(1, Ordering::SeqCst) + 1;
-        change.seq = seq;
         if let Some(journal) = self.journal.as_ref() {
             let mut record = change.clone();
             record.value = journal_value;
@@ -611,11 +843,18 @@ impl Blackboard {
 
     pub fn subscribe_from(&self, since: u64) -> BlackboardStream {
         let receiver = self.change_sender.subscribe();
-        let backlog = self
-            .journal
-            .as_ref()
-            .map(|j| j.replay_since(since))
-            .unwrap_or_default();
+        let current = self.next_seq();
+        let (backlog, needs_backfill, pending_gap) = match self.journal.as_ref() {
+            Some(journal) => {
+                let slice = journal.replay_since(since);
+                if slice.complete {
+                    (slice.changes, false, 0)
+                } else {
+                    (Vec::new(), true, current.saturating_sub(since))
+                }
+            }
+            None => (Vec::new(), false, current.saturating_sub(since)),
+        };
         if !backlog.is_empty() {
             coordination_metrics::incr_blackboard_replayed(backlog.len() as u64);
         }
@@ -624,6 +863,8 @@ impl Blackboard {
             journal: self.journal.clone(),
             cursor: since,
             backlog: backlog.into_iter(),
+            needs_backfill,
+            pending_gap,
         }
     }
 
@@ -633,14 +874,20 @@ impl Blackboard {
 
     pub fn evict_expired(&self) -> usize {
         let removed = self.entries.retain(|_, e| !e.is_expired());
-        if removed > 0 {
-            debug!(removed, "evicted expired blackboard entries");
+        let tombstones_removed = self.tombstones.retain(|_, t| !t.is_expired());
+        if removed > 0 || tombstones_removed > 0 {
+            debug!(
+                removed,
+                tombstones_removed,
+                "evicted expired blackboard entries and tombstones"
+            );
         }
         removed
     }
 
     pub fn clear(&self) {
         self.entries.clear();
+        self.tombstones.clear();
     }
 
     pub fn len(&self) -> usize {
@@ -670,48 +917,124 @@ impl Default for Blackboard {
     }
 }
 
+#[derive(Debug, Clone)]
+pub enum BlackboardStreamItem {
+    Change(BlackboardChange),
+    Gap { missed: u64 },
+}
+
 pub struct BlackboardStream {
     receiver: broadcast::Receiver<BlackboardChange>,
     journal: Option<Arc<BlackboardJournal>>,
     cursor: u64,
     backlog: std::vec::IntoIter<BlackboardChange>,
+    needs_backfill: bool,
+    pending_gap: u64,
 }
 
 impl BlackboardStream {
 
-    pub async fn recv(&mut self) -> Option<BlackboardChange> {
+    pub async fn recv(&mut self) -> Option<BlackboardStreamItem> {
+        if self.needs_backfill {
+            self.needs_backfill = false;
+            let missed_hint = self.pending_gap;
+            self.pending_gap = 0;
+            if let Some(item) = self.replay_missed(missed_hint).await {
+                return Some(item);
+            }
+        }
+        if self.pending_gap > 0 {
+            let missed = self.pending_gap;
+            self.pending_gap = 0;
+            return Some(self.emit_gap(missed));
+        }
         if let Some(next) = self.backlog.next() {
             self.cursor = self.cursor.max(next.seq);
             coordination_metrics::incr_blackboard_delivered();
-            return Some(next);
+            return Some(BlackboardStreamItem::Change(next));
         }
         loop {
             match self.receiver.recv().await {
                 Ok(change) => {
                     self.cursor = self.cursor.max(change.seq);
                     coordination_metrics::incr_blackboard_delivered();
-                    return Some(change);
+                    return Some(BlackboardStreamItem::Change(change));
                 }
                 Err(broadcast::error::RecvError::Closed) => return None,
                 Err(broadcast::error::RecvError::Lagged(n)) => {
                     coordination_metrics::incr_blackboard_lagged(n);
-                    if let Some(journal) = self.journal.as_ref() {
-                        let missed = journal.replay_since(self.cursor);
-                        if !missed.is_empty() {
-                            coordination_metrics::incr_blackboard_replayed(missed.len() as u64);
-                            self.backlog = missed.into_iter();
-                            if let Some(next) = self.backlog.next() {
-                                self.cursor = self.cursor.max(next.seq);
-                                coordination_metrics::incr_blackboard_delivered();
-                                return Some(next);
-                            }
-                        }
+                    match self.replay_missed(n).await {
+                        Some(item) => return Some(item),
+                        None => continue,
                     }
-
-                    continue;
                 }
             }
         }
+    }
+
+    async fn replay_missed(&mut self, missed_hint: u64) -> Option<BlackboardStreamItem> {
+        let Some(journal) = self.journal.clone() else {
+            return Some(self.emit_gap(missed_hint));
+        };
+        let slice = journal.replay_since(self.cursor);
+        if slice.complete {
+            return self.deliver_replayed(slice.changes);
+        }
+        if !journal.persists() {
+            return Some(self.emit_gap(missed_hint));
+        }
+        let cursor = self.cursor;
+        let journal_for_read = journal.clone();
+        let file_result =
+            tokio::task::spawn_blocking(move || journal_for_read.read_file_since(cursor)).await;
+        match file_result {
+            Ok(Ok(mut merged)) => {
+                merged.extend(slice.changes);
+                merged.sort_by_key(|c| c.seq);
+                merged.dedup_by_key(|c| c.seq);
+                let mut expected = cursor + 1;
+                for change in &merged {
+                    if change.seq != expected {
+                        return Some(self.emit_gap(missed_hint));
+                    }
+                    expected += 1;
+                }
+                self.deliver_replayed(merged)
+            }
+            Ok(Err(e)) => {
+                warn!(
+                    path = %journal.path().display(),
+                    error = %e,
+                    "blackboard journal file read failed during lag recovery"
+                );
+                Some(self.emit_gap(missed_hint))
+            }
+            Err(_) => Some(self.emit_gap(missed_hint)),
+        }
+    }
+
+    fn deliver_replayed(
+        &mut self,
+        changes: Vec<BlackboardChange>,
+    ) -> Option<BlackboardStreamItem> {
+        if changes.is_empty() {
+            return None;
+        }
+        coordination_metrics::incr_blackboard_replayed(changes.len() as u64);
+        self.backlog = changes.into_iter();
+        let next = self.backlog.next()?;
+        self.cursor = self.cursor.max(next.seq);
+        coordination_metrics::incr_blackboard_delivered();
+        Some(BlackboardStreamItem::Change(next))
+    }
+
+    fn emit_gap(&self, missed: u64) -> BlackboardStreamItem {
+        warn!(
+            missed,
+            cursor = self.cursor,
+            "blackboard subscriber lost changes that cannot be replayed; consumers must re-read the keys they depend on"
+        );
+        BlackboardStreamItem::Gap { missed }
     }
 
     pub fn cursor(&self) -> u64 {

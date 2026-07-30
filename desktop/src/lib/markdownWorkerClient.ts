@@ -4,39 +4,72 @@
 
 import { parseMarkdown, type ParsedMarkdown } from './markdownParse'
 
-const CACHE_CAP = 300
+const CACHE_MAX_ENTRIES = 300
+const CACHE_MAX_BYTES = 16 * 1024 * 1024
+const PENDING_MAX = 64
+const PENDING_TIMEOUT_MS = 10_000
 
-const cache = new Map<string, ParsedMarkdown>()
+type CacheEntry = { value: ParsedMarkdown; bytes: number }
+
+const cache = new Map<string, CacheEntry>()
+let cacheTotalBytes = 0
 
 let worker: Worker | null = null
 let workerFailed = false
 let nextRequestId = 1
-const pending = new Map<
-  number,
-  { resolve: (result: ParsedMarkdown) => void; content: string }
->()
 
-function cacheGet(content: string): ParsedMarkdown | undefined {
-  const value = cache.get(content)
-  if (value !== undefined) {
-    cache.delete(content)
-    cache.set(content, value)
-  }
-  return value
+type PendingEntry = {
+  resolve: (result: ParsedMarkdown) => void
+  reject: (error: Error) => void
+  content: string
+  key: string
+  timer: ReturnType<typeof setTimeout>
 }
 
-function cachePut(content: string, value: ParsedMarkdown): void {
-  if (cache.has(content)) cache.delete(content)
-  cache.set(content, value)
-  if (cache.size > CACHE_CAP) {
-    const oldest = cache.keys().next().value
-    if (oldest !== undefined) cache.delete(oldest)
+const pending = new Map<number, PendingEntry>()
+
+function contentKey(content: string): string {
+  let h1 = 5381
+  let h2 = 52711
+  for (let i = 0; i < content.length; i++) {
+    const code = content.charCodeAt(i)
+    h1 = Math.imul(h1, 33) ^ code
+    h2 = Math.imul(h2, 31) ^ code
+  }
+  return `${(h1 >>> 0).toString(36)}-${(h2 >>> 0).toString(36)}-${content.length.toString(36)}`
+}
+
+function cacheGet(key: string): ParsedMarkdown | undefined {
+  const entry = cache.get(key)
+  if (entry === undefined) return undefined
+  cache.delete(key)
+  cache.set(key, entry)
+  return entry.value
+}
+
+function cachePut(key: string, value: ParsedMarkdown, bytes: number): void {
+  const existing = cache.get(key)
+  if (existing !== undefined) {
+    cacheTotalBytes -= existing.bytes
+    cache.delete(key)
+  }
+  cache.set(key, { value, bytes })
+  cacheTotalBytes += bytes
+  while (
+    (cache.size > CACHE_MAX_ENTRIES || cacheTotalBytes > CACHE_MAX_BYTES) &&
+    cache.size > 1
+  ) {
+    const oldestKey = cache.keys().next().value
+    if (oldestKey === undefined) break
+    const oldest = cache.get(oldestKey)
+    if (oldest !== undefined) cacheTotalBytes -= oldest.bytes
+    cache.delete(oldestKey)
   }
 }
 
-function parseFallback(content: string): ParsedMarkdown {
+function parseFallback(content: string, key: string): ParsedMarkdown {
   const result = parseMarkdown(content)
-  cachePut(content, result)
+  cachePut(key, result, content.length * 2)
   return result
 }
 
@@ -44,8 +77,19 @@ function drainPendingViaFallback(): void {
   const entries = Array.from(pending.values())
   pending.clear()
   for (const entry of entries) {
-    entry.resolve(parseFallback(entry.content))
+    clearTimeout(entry.timer)
+    entry.resolve(parseFallback(entry.content, entry.key))
   }
+}
+
+function restartWorkerAfterTimeout(): void {
+  const stalled = worker
+  worker = null
+  try {
+    stalled?.terminate()
+  } catch {
+  }
+  drainPendingViaFallback()
 }
 
 function ensureWorker(): Worker | null {
@@ -62,11 +106,12 @@ function ensureWorker(): Worker | null {
       const entry = pending.get(id)
       if (!entry) return
       pending.delete(id)
+      clearTimeout(entry.timer)
       if (ok && result) {
-        cachePut(entry.content, result)
+        cachePut(entry.key, result, entry.content.length * 2)
         entry.resolve(result)
       } else {
-        entry.resolve(parseFallback(entry.content))
+        entry.resolve(parseFallback(entry.content, entry.key))
       }
     }
     worker.onerror = () => {
@@ -84,17 +129,27 @@ function ensureWorker(): Worker | null {
 }
 
 export function getCachedMarkdown(content: string): ParsedMarkdown | undefined {
-  return cacheGet(content)
+  return cacheGet(contentKey(content))
 }
 
 export function parseMarkdownAsync(content: string): Promise<ParsedMarkdown> {
-  const cached = cacheGet(content)
+  const key = contentKey(content)
+  const cached = cacheGet(key)
   if (cached) return Promise.resolve(cached)
   const w = ensureWorker()
-  if (!w) return Promise.resolve(parseFallback(content))
-  return new Promise((resolve) => {
+  if (!w) return Promise.resolve(parseFallback(content, key))
+  if (pending.size >= PENDING_MAX) return Promise.resolve(parseFallback(content, key))
+  const request = new Promise<ParsedMarkdown>((resolve, reject) => {
     const id = nextRequestId++
-    pending.set(id, { resolve, content })
+    const timer = setTimeout(() => {
+      const entry = pending.get(id)
+      if (!entry) return
+      pending.delete(id)
+      entry.reject(new Error('markdown worker request timed out'))
+      restartWorkerAfterTimeout()
+    }, PENDING_TIMEOUT_MS)
+    pending.set(id, { resolve, reject, content, key, timer })
     w.postMessage({ id, content })
   })
+  return request.catch(() => parseFallback(content, key))
 }

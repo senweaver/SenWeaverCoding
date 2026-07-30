@@ -18,6 +18,8 @@ pub struct JobLimits {
     pub kill_on_close: bool,
 
     pub wall_time: Option<Duration>,
+
+    pub cpu_time: Option<Duration>,
 }
 
 impl Default for JobLimits {
@@ -29,6 +31,7 @@ impl Default for JobLimits {
             cpu_rate_percent: Some(80),
             kill_on_close: true,
             wall_time: Some(Duration::from_secs(10 * 60)),
+            cpu_time: None,
         }
     }
 }
@@ -43,7 +46,26 @@ impl JobLimits {
             cpu_rate_percent: None,
             kill_on_close: true,
             wall_time: None,
+            cpu_time: None,
         }
+    }
+
+    pub fn with_resource_overrides(
+        mut self,
+        resources: &crate::config::schema::ResourceLimitsConfig,
+    ) -> Self {
+        if let Some(mb) = resources.max_memory_mb.filter(|v| *v > 0) {
+            let bytes = u64::from(mb).saturating_mul(1024 * 1024);
+            self.process_memory_bytes = Some(bytes);
+            self.job_memory_bytes = Some(bytes.saturating_mul(2));
+        }
+        if let Some(count) = resources.max_subprocesses.filter(|v| *v > 0) {
+            self.max_processes = Some(count);
+        }
+        if let Some(secs) = resources.max_cpu_time_seconds.filter(|v| *v > 0) {
+            self.cpu_time = Some(Duration::from_secs(secs));
+        }
+        self
     }
 
     pub fn validated(self) -> std::io::Result<Self> {
@@ -76,7 +98,8 @@ mod imp {
         JOBOBJECT_CPU_RATE_CONTROL_INFORMATION_0, JOBOBJECT_EXTENDED_LIMIT_INFORMATION,
         JOB_OBJECT_CPU_RATE_CONTROL_ENABLE, JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP,
         JOB_OBJECT_LIMIT, JOB_OBJECT_LIMIT_ACTIVE_PROCESS, JOB_OBJECT_LIMIT_JOB_MEMORY,
-        JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE, JOB_OBJECT_LIMIT_PROCESS_MEMORY,
+        JOB_OBJECT_LIMIT_JOB_TIME, JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE,
+        JOB_OBJECT_LIMIT_PROCESS_MEMORY,
     };
 
     pub struct JobObjectGuard {
@@ -126,6 +149,11 @@ mod imp {
             if let Some(count) = limits.max_processes {
                 flags |= JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
                 info.BasicLimitInformation.ActiveProcessLimit = count;
+            }
+            if let Some(cpu) = limits.cpu_time {
+                flags |= JOB_OBJECT_LIMIT_JOB_TIME;
+                info.BasicLimitInformation.PerJobUserTimeLimit =
+                    (cpu.as_nanos() / 100).min(i64::MAX as u128) as i64;
             }
 
             info.BasicLimitInformation.LimitFlags = flags;
@@ -200,19 +228,116 @@ mod imp {
         }
     }
 
+    fn resume_process_threads(pid: u32) -> std::io::Result<()> {
+        use windows::Win32::System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD,
+            THREADENTRY32,
+        };
+        use windows::Win32::System::Threading::{OpenThread, ResumeThread, THREAD_SUSPEND_RESUME};
+
+        #[allow(unsafe_code)]
+        unsafe {
+            let bad_length =
+                windows::Win32::Foundation::ERROR_BAD_LENGTH.to_hresult();
+            let mut attempts = 0u32;
+            let snapshot = loop {
+                match CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0) {
+                    Ok(snapshot) => break snapshot,
+                    Err(e) if e.code() == bad_length && attempts < 5 => {
+                        attempts += 1;
+                        std::thread::sleep(std::time::Duration::from_millis(5 * attempts as u64));
+                    }
+                    Err(e) => {
+                        return Err(std::io::Error::other(format!(
+                            "CreateToolhelp32Snapshot failed: {e}"
+                        )));
+                    }
+                }
+            };
+            let mut entry = THREADENTRY32 {
+                dwSize: std::mem::size_of::<THREADENTRY32>() as u32,
+                ..Default::default()
+            };
+            let mut resumed = 0usize;
+            let mut has_entry = Thread32First(snapshot, &mut entry).is_ok();
+            while has_entry {
+                if entry.th32OwnerProcessID == pid {
+                    match OpenThread(THREAD_SUSPEND_RESUME, false, entry.th32ThreadID) {
+                        Ok(thread) => {
+                            let result = ResumeThread(thread);
+                            let _ = CloseHandle(thread);
+                            if result == u32::MAX {
+                                let _ = CloseHandle(snapshot);
+                                return Err(std::io::Error::other(format!(
+                                    "ResumeThread failed for thread {} of process {pid}",
+                                    entry.th32ThreadID
+                                )));
+                            }
+                            resumed += 1;
+                        }
+                        Err(e) => {
+                            let _ = CloseHandle(snapshot);
+                            return Err(std::io::Error::other(format!(
+                                "OpenThread failed for thread {} of process {pid}: {e}",
+                                entry.th32ThreadID
+                            )));
+                        }
+                    }
+                }
+                has_entry = Thread32Next(snapshot, &mut entry).is_ok();
+            }
+            let _ = CloseHandle(snapshot);
+            if resumed == 0 {
+                return Err(std::io::Error::other(format!(
+                    "no suspended threads found to resume for process {pid}"
+                )));
+            }
+            Ok(())
+        }
+    }
+
     pub async fn spawn_in_job(
         mut cmd: tokio::process::Command,
         limits: JobLimits,
     ) -> std::io::Result<(JobObjectGuard, tokio::process::Child)> {
-        let job = JobObjectGuard::create(limits)?;
+        use windows::Win32::System::Threading::CREATE_SUSPENDED;
 
-        let child = cmd.spawn()?;
-        if let Some(raw) = child.raw_handle() {
-            let process_handle = HANDLE(raw as *mut std::ffi::c_void);
-            job.assign(process_handle).inspect_err(|err| {
-                tracing::warn!(error = %err, "failed to attach child to job object");
-            })?;
-        }
+        let job = JobObjectGuard::create(limits)?;
+        cmd.creation_flags(crate::util::CREATE_NO_WINDOW | CREATE_SUSPENDED.0);
+        let mut child = cmd.spawn()?;
+        let Some(pid) = child.id() else {
+            let _ = child.kill().await;
+            return Err(std::io::Error::other(
+                "child process id unavailable; cannot resume suspended process inside job object",
+            ));
+        };
+        let Some(raw) = child.raw_handle() else {
+            let _ = child.kill().await;
+            return Err(std::io::Error::other(
+                "child process handle unavailable; cannot attach process to job object",
+            ));
+        };
+        let raw_handle_value = raw as usize;
+        let attach_result = tokio::task::spawn_blocking(move || {
+            let process_handle = HANDLE(raw_handle_value as *mut std::ffi::c_void);
+            job.assign(process_handle)?;
+            resume_process_threads(pid)?;
+            Ok::<JobObjectGuard, std::io::Error>(job)
+        })
+        .await;
+        let job = match attach_result {
+            Ok(Ok(job)) => job,
+            Ok(Err(err)) => {
+                let _ = child.kill().await;
+                return Err(err);
+            }
+            Err(join_err) => {
+                let _ = child.kill().await;
+                return Err(std::io::Error::other(format!(
+                    "job object attach task failed: {join_err}"
+                )));
+            }
+        };
         Ok((job, child))
     }
 }

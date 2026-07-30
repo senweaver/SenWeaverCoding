@@ -424,6 +424,56 @@ impl AppState {
     }
 }
 
+#[derive(Debug, Clone)]
+pub struct EmbeddedGatewayPristine {
+    pub gateway_host: String,
+    pub gateway_port: u16,
+    pub gateway_require_pairing: bool,
+    pub gateway_allow_public_bind: bool,
+    pub gateway_paired_tokens: Vec<String>,
+    pub gateway_trust_forwarded_headers: bool,
+    pub gateway_path_prefix: Option<String>,
+    pub tunnel_provider: String,
+}
+
+static EMBEDDED_GATEWAY_PRISTINE: parking_lot::RwLock<Option<EmbeddedGatewayPristine>> =
+    parking_lot::RwLock::new(None);
+
+pub fn capture_embedded_gateway_pristine(config: &Config) {
+    *EMBEDDED_GATEWAY_PRISTINE.write() = Some(EmbeddedGatewayPristine {
+        gateway_host: config.gateway.host.clone(),
+        gateway_port: config.gateway.port,
+        gateway_require_pairing: config.gateway.require_pairing,
+        gateway_allow_public_bind: config.gateway.allow_public_bind,
+        gateway_paired_tokens: config.gateway.paired_tokens.clone(),
+        gateway_trust_forwarded_headers: config.gateway.trust_forwarded_headers,
+        gateway_path_prefix: config.gateway.path_prefix.clone(),
+        tunnel_provider: config.tunnel.provider.clone(),
+    });
+}
+
+pub fn embedded_gateway_pristine() -> Option<EmbeddedGatewayPristine> {
+    EMBEDDED_GATEWAY_PRISTINE.read().clone()
+}
+
+pub async fn persist_config(snapshot: &Config) -> Result<()> {
+    match embedded_gateway_pristine() {
+        Some(pristine) => {
+            let mut restored = snapshot.clone();
+            restored.gateway.host = pristine.gateway_host;
+            restored.gateway.port = pristine.gateway_port;
+            restored.gateway.require_pairing = pristine.gateway_require_pairing;
+            restored.gateway.allow_public_bind = pristine.gateway_allow_public_bind;
+            restored.gateway.paired_tokens = pristine.gateway_paired_tokens;
+            restored.gateway.trust_forwarded_headers = pristine.gateway_trust_forwarded_headers;
+            restored.gateway.path_prefix = pristine.gateway_path_prefix;
+            restored.tunnel.provider = pristine.tunnel_provider;
+            restored.save().await
+        }
+        None => snapshot.save().await,
+    }
+}
+
 fn build_runtime_provider_from_cfg(cfg: &Config) -> Option<(Arc<dyn Provider>, String)> {
     let resolved_default_provider = providers::resolve_runtime_provider_name(
         cfg.default_provider.as_deref().unwrap_or("openrouter"),
@@ -463,7 +513,7 @@ fn build_runtime_provider_from_cfg(cfg: &Config) -> Option<(Arc<dyn Provider>, S
                 "provider_unconfigured",
                 format!(
                     "default provider '{resolved_default_provider}' failed to build: {err}. \
-                     Configure Settings → Providers before chatting."
+                     Configure Settings →Providers before chatting."
                 ),
             );
             Arc::from(providers::unconfigured::UnconfiguredProvider::new(format!(
@@ -504,6 +554,9 @@ async fn run_gateway_inner(
 ) -> Result<()> {
     desktop::bridge::install_remote_controllers();
     if desktop::bridge::bridge_mode() {
+        if embedded_gateway_pristine().is_none() {
+            capture_embedded_gateway_pristine(&config);
+        }
         config.gateway.require_pairing = false;
         config.gateway.allow_public_bind = false;
         config.gateway.trust_forwarded_headers = false;
@@ -513,6 +566,33 @@ async fn run_gateway_inner(
             "desktop bridge mode: applied loopback-only gateway overrides (pairing disabled)"
         );
     }
+    if is_public_bind(host)
+        && config.tunnel.provider == "none"
+        && !config.gateway.allow_public_bind
+    {
+        anyhow::bail!(
+            "refusing to bind gateway to public address {host}: configure a tunnel or set \
+             [gateway] allow_public_bind = true explicitly"
+        );
+    }
+    let tls_acceptor = match &config.gateway.tls {
+        Some(tls_cfg) if tls_cfg.enabled => {
+            let has_mtls = tls_cfg.client_auth.as_ref().is_some_and(|ca| ca.enabled);
+            if has_mtls {
+                tracing::info!("TLS enabled with mutual TLS (mTLS) client verification");
+            } else {
+                tracing::info!("TLS enabled (no client certificate requirement)");
+            }
+            Some(tls::build_tls_acceptor(tls_cfg).map_err(|err| {
+                anyhow::anyhow!(
+                    "gateway TLS is enabled but the acceptor could not be built from cert {} and key {}: {err}",
+                    tls_cfg.cert_path,
+                    tls_cfg.key_path
+                )
+            })?)
+        }
+        _ => None,
+    };
     if with_scheduler && config.cron.enabled {
         let scheduler_cfg = config.clone();
         crate::runtime::task_manager::spawn_supervised_restartable(
@@ -586,15 +666,6 @@ async fn run_gateway_inner(
     }
 
     if is_public_bind(host) && config.tunnel.provider == "none" {
-        if !config.gateway.allow_public_bind {
-            tracing::warn!(
-                "Binding to {host}: gateway will be exposed to all network interfaces.\n\
-                 Suggestion: use --host 127.0.0.1 (default), configure a tunnel, or set\n\
-                 [gateway] allow_public_bind = true in config.toml to silence this warning.\n\
-                 Docker/VM: if you are running inside a container or VM, this is expected."
-            );
-        }
-
         if !config.gateway.require_pairing {
             tracing::error!(
                 "SECURITY: gateway is binding to public address {host} with [gateway] require_pairing = false. \
@@ -611,7 +682,7 @@ async fn run_gateway_inner(
         );
         let snapshot = config.clone();
 
-        if let Err(e) = snapshot.save().await {
+        if let Err(e) = crate::gateway::persist_config(&snapshot).await {
             tracing::warn!(
                 error = %e,
                 "gateway startup: failed to persist sanitized config; will retry on next mutation"
@@ -844,7 +915,7 @@ async fn run_gateway_inner(
                     "provider_unconfigured",
                     format!(
                         "default provider '{resolved_default_provider}' failed to start: {err}. \
-                         Configure Settings → Providers before chatting."
+                         Configure Settings →Providers before chatting."
                     ),
                 );
                 Arc::from(providers::unconfigured::UnconfiguredProvider::new(format!(
@@ -2040,6 +2111,21 @@ async fn run_gateway_inner(
                 .put(desktop::routes::handle_agent_runtime_put),
         )
         .route(
+            "/api/network-settings",
+            get(desktop::system_settings::handle_network_settings_get)
+                .put(desktop::system_settings::handle_network_settings_put),
+        )
+        .route(
+            "/api/security-settings",
+            get(desktop::system_settings::handle_security_settings_get)
+                .put(desktop::system_settings::handle_security_settings_put),
+        )
+        .route(
+            "/api/service-tokens",
+            get(desktop::system_settings::handle_service_tokens_get)
+                .put(desktop::system_settings::handle_service_tokens_put),
+        )
+        .route(
             "/api/web-search",
             get(desktop::routes::handle_web_search_get)
                 .put(desktop::routes::handle_web_search_put),
@@ -2639,32 +2725,6 @@ async fn run_gateway_inner(
         loopback_auth::enforce,
     ));
 
-    let tls_acceptor = match &config.gateway.tls {
-        Some(tls_cfg) if tls_cfg.enabled => {
-            let has_mtls = tls_cfg.client_auth.as_ref().is_some_and(|ca| ca.enabled);
-            if has_mtls {
-                tracing::info!("TLS enabled with mutual TLS (mTLS) client verification");
-            } else {
-                tracing::info!("TLS enabled (no client certificate requirement)");
-            }
-            match tls::build_tls_acceptor(tls_cfg) {
-                Ok(acceptor) => Some(acceptor),
-                Err(err) => {
-                    tracing::warn!(
-                        cert_path = %tls_cfg.cert_path,
-                        key_path = %tls_cfg.key_path,
-                        error = %err,
-                        "gateway startup: TLS acceptor build failed (likely missing or unreadable cert/key); \
-                         continuing without TLS so the desktop can still reach the local gateway. \
-                         Provide valid cert paths in [gateway.tls] and restart to re-enable TLS"
-                    );
-                    None
-                }
-            }
-        }
-        _ => None,
-    };
-
     crate::health::mark_component_ok("gateway");
 
     if let Some(tls_acceptor) = tls_acceptor {
@@ -2673,6 +2733,7 @@ async fn run_gateway_inner(
         let mut app = app;
 
         let mut shutdown_signal = shutdown_rx;
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
                 conn = listener.accept() => {
@@ -2698,9 +2759,8 @@ async fn run_gateway_inner(
                     };
 
                     let remote_addr_clone = remote_addr;
-                    let _conn_task = crate::runtime::spawn_supervised(
-                        format!("gateway.tls_connection.{}", remote_addr_clone),
-                        async move {
+                    let mut connection_shutdown = shutdown_signal.clone();
+                    connections.spawn(async move {
                             let tls_stream = match tls_acceptor.accept(tcp_stream).await {
                                 Ok(s) => s,
                                 Err(e) => {
@@ -2715,22 +2775,53 @@ async fn run_gateway_inner(
                                     tower::Service::call(&mut svc, req).await
                                 }
                             });
-                            if let Err(e) = hyper_util::server::conn::auto::Builder::new(
+                            let builder = hyper_util::server::conn::auto::Builder::new(
                                 hyper_util::rt::TokioExecutor::new(),
-                            )
-                            .serve_connection(io, hyper_svc)
-                            .await
-                            {
-                                tracing::debug!("connection error from {remote_addr_clone}: {e}");
+                            );
+                            let connection = builder.serve_connection(io, hyper_svc);
+                            tokio::pin!(connection);
+                            tokio::select! {
+                                result = &mut connection => {
+                                    if let Err(e) = result {
+                                        tracing::debug!("connection error from {remote_addr_clone}: {e}");
+                                    }
+                                }
+                                _ = connection_shutdown.changed() => {
+                                    connection.as_mut().graceful_shutdown();
+                                    if tokio::time::timeout(
+                                        std::time::Duration::from_secs(6),
+                                        &mut connection,
+                                    )
+                                    .await
+                                    .is_err()
+                                    {
+                                        tracing::debug!(
+                                            "TLS connection graceful shutdown timed out for {remote_addr_clone}"
+                                        );
+                                    }
+                                }
                             }
-                        },
-                    );
+                        });
                 }
                 _ = shutdown_signal.changed() => {
                     tracing::info!("\u{1F6D1} SenWeaverCoding Gateway shutting down...");
                     break;
                 }
+                result = connections.join_next(), if !connections.is_empty() => {
+                    if let Some(Err(error)) = result {
+                        tracing::debug!(error = %error, "gateway TLS connection task failed");
+                    }
+                }
             }
+        }
+        if tokio::time::timeout(std::time::Duration::from_secs(7), async {
+            while connections.join_next().await.is_some() {}
+        })
+        .await
+        .is_err()
+        {
+            connections.abort_all();
+            while connections.join_next().await.is_some() {}
         }
     } else {
 

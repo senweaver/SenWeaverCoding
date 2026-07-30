@@ -27,7 +27,7 @@ impl Tool for MemoryForgetTool {
     }
 
     fn description(&self) -> &str {
-        "Remove a memory by key. Use to delete outdated facts or sensitive data. Returns whether the memory was found and removed."
+        "Remove a memory by key. Use to delete outdated facts or sensitive data. By default this removes memories owned by the current agent scope: entries stored in this session plus shared entries created with memory_store. Set global=true to also remove entries stored by other sessions in the same scope. Returns whether the memory was found and removed."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -37,6 +37,10 @@ impl Tool for MemoryForgetTool {
                 "key": {
                     "type": "string",
                     "description": "The key of the memory to forget"
+                },
+                "global": {
+                    "type": "boolean",
+                    "description": "Also remove memories with this key stored by other sessions in the same scope. Defaults to false."
                 }
             },
             "required": ["key"]
@@ -48,6 +52,10 @@ impl Tool for MemoryForgetTool {
             .get("key")
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'key' parameter"))?;
+        let include_global = args
+            .get("global")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
 
         if let Err(error) = self
             .security
@@ -60,7 +68,7 @@ impl Tool for MemoryForgetTool {
             });
         }
 
-        match self.memory.forget(key).await {
+        match self.memory.forget(key, include_global).await {
             Ok(true) => {
                 crate::agent::profile::runtime_hooks::publish_memory_event("forget", Some(key));
                 Ok(ToolResult {
@@ -69,9 +77,17 @@ impl Tool for MemoryForgetTool {
                     error: None,
                 })
             }
-            Ok(false) => Ok(ToolResult {
+            Ok(false) if include_global => Ok(ToolResult {
                 success: true,
                 output: format!("No memory found with key: {key}"),
+                error: None,
+            }),
+            Ok(false) => Ok(ToolResult {
+                success: true,
+                output: format!(
+                    "No memory found with key: {key} in the current scope. If it was stored by \
+                     another session, call memory_forget again with global=true."
+                ),
                 error: None,
             }),
             Err(e) => Ok(ToolResult {

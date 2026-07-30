@@ -5,6 +5,8 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../../stores/chatStore'
+import { useSessionStore } from '../../stores/sessionStore'
+import { useWorkspaceFilesStore } from '../../stores/workspaceFilesStore'
 import { useTranslation } from '../../i18n'
 import { Modal } from '../shared/Modal'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
@@ -26,6 +28,25 @@ function cleanWinPath(path: string): string {
   if (path.startsWith('\\\\?\\UNC\\')) return '\\\\' + path.slice('\\\\?\\UNC\\'.length)
   if (path.startsWith('\\\\?\\')) return path.slice('\\\\?\\'.length)
   return path
+}
+
+function absPathToRel(workDir: string, absPath: string): string | null {
+  const root = cleanWinPath(workDir).replace(/\\/g, '/').replace(/\/+$/, '')
+  const file = cleanWinPath(absPath).replace(/\\/g, '/')
+  if (!root || !file) return null
+  const rootLower = root.toLowerCase()
+  const fileLower = file.toLowerCase()
+  if (fileLower === rootLower) return ''
+  const prefix = `${rootLower}/`
+  if (!fileLower.startsWith(prefix)) return null
+  return file.slice(root.length + 1)
+}
+
+function sameWorkspaceRoot(a: string | null | undefined, b: string | null | undefined): boolean {
+  if (!a || !b) return false
+  const na = cleanWinPath(a).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  const nb = cleanWinPath(b).replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+  return na === nb
 }
 
 const docxDiagramsProcessed = new Set<string>()
@@ -73,6 +94,11 @@ export function CuratorCard({
       }
     }),
   )
+  const workDir = useSessionStore((s) => {
+    if (!sessionId) return null
+    const entry = s.sessions.find((item) => item.id === sessionId)
+    return entry?.workDir?.trim() || null
+  })
   const execState = useMemo<CuratorExecutionState>(() => {
     if (!sessionId || !curatorInputs.messages) return 'idle'
     return selectCuratorCardExecutionState(
@@ -157,10 +183,67 @@ export function CuratorCard({
     }
   }
 
+  async function handleOpenFinalMd() {
+    const abs = cleanWinPath(finalMdPath)
+    if (!abs) {
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('files.outsideWorkspace'),
+        duration: 5000,
+      })
+      return
+    }
+    if (!workDir) {
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('files.workspaceMissing'),
+        duration: 5000,
+      })
+      return
+    }
+    const relPath = absPathToRel(workDir, abs)
+    if (relPath === null || relPath === '') {
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('files.outsideWorkspace'),
+        duration: 5000,
+      })
+      return
+    }
+    try {
+      const files = useWorkspaceFilesStore.getState()
+      if (!sameWorkspaceRoot(files.root, workDir)) {
+        files.setRoot(workDir)
+      }
+      useUIStore.getState().setRightSidebarOpen(true)
+      await files.selectFile(relPath)
+      const after = useWorkspaceFilesStore.getState()
+      const buf = after.files[`${after.root ?? ''}::${relPath}`]
+      if (buf?.error) {
+        useUIStore.getState().addToast({
+          type: 'error',
+          message: t('files.errorLoading', { message: buf.error }),
+          duration: 5000,
+        })
+      }
+    } catch (err) {
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('files.errorLoading', {
+          message: err instanceof Error ? err.message : String(err),
+        }),
+        duration: 5000,
+      })
+    }
+  }
+
   const subtitle = `${template} · ${slug}`
   const finalMdDisplay = cleanWinPath(finalMdPath)
   const implBlueprintDisplay = cleanWinPath(implBlueprintPath)
   const docxDisplay = docxPath ? cleanWinPath(docxPath) : undefined
+  const headerName =
+    (finalMdDisplay || implBlueprintDisplay).split(/[\\/]/).slice(-1)[0] || 'final.md'
+  const bodyTrimmed = body.trim()
 
   const [diagramState, setDiagramState] = useState<'idle' | 'rendering' | 'done'>('idle')
   const diagramRanRef = useRef(false)
@@ -207,12 +290,15 @@ export function CuratorCard({
           <span className="material-symbols-outlined text-[14px] text-[var(--color-curator-accent)]">
             auto_stories
           </span>
-          <span
-            className="font-[var(--font-mono)] text-[11px] text-[var(--color-text-secondary)] truncate"
+          <button
+            type="button"
+            onClick={() => void handleOpenFinalMd()}
+            disabled={!finalMdDisplay}
+            className="min-w-0 font-[var(--font-mono)] text-[11px] text-[var(--color-text-secondary)] truncate hover:text-[var(--color-curator-accent)] hover:underline cursor-pointer bg-transparent border-0 p-0 text-left disabled:cursor-default disabled:hover:no-underline disabled:hover:text-[var(--color-text-secondary)]"
             title={finalMdDisplay || implBlueprintDisplay}
           >
-            {(finalMdDisplay || implBlueprintDisplay).split(/[\\/]/).slice(-1)[0] || 'final.md'}
-          </span>
+            {headerName}
+          </button>
           <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[var(--color-curator-accent-container)] text-[var(--color-on-curator-accent-container)]">
             curator
           </span>
@@ -234,22 +320,11 @@ export function CuratorCard({
             {title}
           </div>
           <div className="text-[11px] text-[var(--color-text-tertiary)] mt-0.5">{subtitle}</div>
-          <div className="mt-2 text-[11px] text-[var(--color-text-secondary)] space-y-0.5">
-            <div className="truncate" title={finalMdDisplay}>
-              <span className="opacity-70">final.md:</span>{' '}
-              <code className="text-[10px]">{finalMdDisplay}</code>
+          {bodyTrimmed ? (
+            <div className="mt-2 max-h-[18rem] overflow-y-auto rounded-md border border-[var(--color-outline-variant)]/25 bg-[var(--color-surface)]/40 px-2.5 py-2 text-[12px] leading-relaxed text-[var(--color-text-secondary)]">
+              <MarkdownRenderer content={body} />
             </div>
-            <div className="truncate" title={implBlueprintDisplay}>
-              <span className="opacity-70">impl_blueprint.md:</span>{' '}
-              <code className="text-[10px]">{implBlueprintDisplay}</code>
-            </div>
-            {docxDisplay && (
-              <div className="truncate" title={docxDisplay}>
-                <span className="opacity-70">final.docx:</span>{' '}
-                <code className="text-[10px]">{docxDisplay}</code>
-              </div>
-            )}
-          </div>
+          ) : null}
           {isFailed && (
             <div className="mt-2 rounded-md border border-[var(--color-error)]/40 bg-[var(--color-error)]/10 px-2 py-1.5">
               <div className="text-[11px] font-medium text-[var(--color-error)]">

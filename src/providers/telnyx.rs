@@ -45,11 +45,9 @@ impl TelnyxProvider {
     }
 
     fn build_client(timeout_secs: u64) -> Client {
-        Client::builder()
-            .timeout(std::time::Duration::from_secs(timeout_secs.max(1)))
-            .connect_timeout(std::time::Duration::from_secs(10))
-            .build()
-            .unwrap_or_else(|_| Client::new())
+        crate::services::require_services()
+            .proxy_runtime()
+            .build_client_with_timeouts("provider.telnyx", timeout_secs.max(1), 10)
     }
 
     #[must_use]

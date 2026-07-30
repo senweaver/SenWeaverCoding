@@ -39,6 +39,11 @@ import {
 import { GlobalModelsPanel } from './GlobalModelsPanel'
 import { ProviderModelsPanel } from './ProviderModelsPanel'
 import { ModelDiscoveryPanel } from '../components/settings/ModelDiscoveryPanel'
+import {
+  NetworkProxySection,
+  AutomationSection,
+  SecuritySandboxSection,
+} from '../components/settings/SystemSettingsSections'
 import { usePluginStore } from '../stores/pluginStore'
 import { useUIStore, type SettingsTab } from '../stores/uiStore'
 import { useLanStore } from '../stores/lanStore'
@@ -2080,6 +2085,12 @@ function GeneralSettings() {
       <LanUserGroupSection />
 
       <SettingsSyncSection />
+
+      <NetworkProxySection />
+
+      <AutomationSection />
+
+      <SecuritySandboxSection />
 
     </div>
   )

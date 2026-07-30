@@ -150,10 +150,22 @@ struct FileRegionLockEntry {
     exclusive: bool,
     acquired_at: Instant,
     ttl: Duration,
+    liveness: std::sync::Weak<()>,
 }
 
 impl FileRegionLockEntry {
     fn is_expired(&self) -> bool {
+        if self.liveness.strong_count() > 0 {
+            if self.acquired_at.elapsed() >= self.ttl {
+                trace!(
+                    holder = %self.holder,
+                    start = self.range.start,
+                    end = self.range.end,
+                    "region lock past TTL but holder token still alive; lease extended"
+                );
+            }
+            return false;
+        }
         self.acquired_at.elapsed() >= self.ttl
     }
     fn overlaps(&self, range: &Range<usize>) -> bool {
@@ -175,6 +187,7 @@ struct RegionTokenState {
     range: Range<usize>,
     holder: AgentId,
     exclusive: bool,
+    _keepalive: Arc<()>,
 }
 
 impl RegionLockToken {
@@ -262,8 +275,15 @@ pub struct BufferLock {
 
 impl Drop for BufferLock {
     fn drop(&mut self) {
-        let released = self.manager.locks.write().remove(&self.resource);
-        if released.is_some() {
+        if self.agent_id.is_empty() {
+            return;
+        }
+        let mut locks = self.manager.locks.write();
+        let owned = locks
+            .get(&self.resource)
+            .is_some_and(|entry| entry.owner == self.agent_id);
+        if owned {
+            locks.remove(&self.resource);
             debug!(resource = %self.resource, agent = %self.agent_id, "BufferLock dropped - lock released");
         }
     }
@@ -599,6 +619,7 @@ impl LockManager {
                 }
                 if hit.is_none() {
                     let id = self.next_token_id.fetch_add(1, Ordering::Relaxed);
+                    let keepalive = Arc::new(());
                     entries.push(FileRegionLockEntry {
                         id,
                         range: range.clone(),
@@ -606,6 +627,7 @@ impl LockManager {
                         exclusive: true,
                         acquired_at: Instant::now(),
                         ttl,
+                        liveness: Arc::downgrade(&keepalive),
                     });
                     self.clear_wait_edges(agent_id);
                     coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Ok);
@@ -624,6 +646,7 @@ impl LockManager {
                             range,
                             holder: agent_id.to_string(),
                             exclusive: true,
+                            _keepalive: keepalive,
                         }),
                     });
                 }
@@ -720,6 +743,7 @@ impl LockManager {
                 }
                 if hit.is_none() {
                     let id = self.next_token_id.fetch_add(1, Ordering::Relaxed);
+                    let keepalive = Arc::new(());
                     entries.push(FileRegionLockEntry {
                         id,
                         range: range.clone(),
@@ -727,6 +751,7 @@ impl LockManager {
                         exclusive: false,
                         acquired_at: Instant::now(),
                         ttl,
+                        liveness: Arc::downgrade(&keepalive),
                     });
                     self.clear_wait_edges(agent_id);
                     coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Ok);
@@ -738,6 +763,7 @@ impl LockManager {
                             range,
                             holder: agent_id.to_string(),
                             exclusive: false,
+                            _keepalive: keepalive,
                         }),
                     });
                 }
@@ -827,7 +853,33 @@ impl LockManager {
         }
 
         let mut regions = self.file_regions.write();
-        let entries = regions.entry(state.path.clone()).or_default();
+        let Some(entries) = regions.get_mut(&state.path) else {
+            coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Conflict);
+            warn!(
+                path = %state.path.display(),
+                holder = %state.holder,
+                "upgrade_to_exclusive: region lock entry no longer present; lock was lost"
+            );
+            return Err(LockError::Conflict {
+                path: state.path.clone(),
+                holder: String::new(),
+                range: state.range.clone(),
+            });
+        };
+        entries.retain(|e| !e.is_expired());
+        if !entries.iter().any(|e| e.id == state.id) {
+            coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Conflict);
+            warn!(
+                path = %state.path.display(),
+                holder = %state.holder,
+                "upgrade_to_exclusive: region lock entry no longer present; lock was lost"
+            );
+            return Err(LockError::Conflict {
+                path: state.path.clone(),
+                holder: String::new(),
+                range: state.range.clone(),
+            });
+        }
         for existing in entries.iter() {
             if existing.id == state.id {
                 continue;
@@ -873,16 +925,22 @@ impl LockManager {
         if !state.exclusive {
             return Ok(());
         }
-        let mut regions = self.file_regions.write();
-        if let Some(entries) = regions.get_mut(&state.path) {
-            for existing in entries.iter_mut() {
-                if existing.id == state.id {
-                    existing.exclusive = false;
+        {
+            let mut regions = self.file_regions.write();
+            if let Some(entries) = regions.get_mut(&state.path) {
+                for existing in entries.iter_mut() {
+                    if existing.id == state.id {
+                        existing.exclusive = false;
+                    }
                 }
             }
         }
         if let Some(s) = token.state.as_mut() {
             s.exclusive = false;
+        }
+        {
+            let _guard = self.region_release_mutex.lock();
+            self.region_release_cv.notify_all();
         }
         Ok(())
     }
@@ -897,9 +955,13 @@ impl LockManager {
                 }
             }
         }
-        self.region_release_cv.notify_all();
+        {
+            let _guard = self.region_release_mutex.lock();
+            self.region_release_cv.notify_all();
+        }
         coordination_metrics::incr_lockmgr_release();
     }
+
 
     fn add_wait_edge(&self, requester: &str, blocker: &str) {
         let mut g = self.wait_graph.write();

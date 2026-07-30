@@ -864,9 +864,10 @@ impl Provider for OpenRouterProvider {
             reasoning: self.reasoning_param_for_model(model),
         };
 
-        let response = self
-            .http_client()
-            .post("https://openrouter.ai/api/v1/chat/completions")
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post("https://openrouter.ai/api/v1/chat/completions"),
+        )
             .header("Authorization", format!("Bearer {credential}"))
             .header(
                 "HTTP-Referer",
@@ -960,9 +961,10 @@ impl Provider for OpenRouterProvider {
             reasoning: self.reasoning_param_for_model(model),
         };
 
-        let response = self
-            .http_client()
-            .post("https://openrouter.ai/api/v1/chat/completions")
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post("https://openrouter.ai/api/v1/chat/completions"),
+        )
             .header("Authorization", format!("Bearer {credential}"))
             .header(
                 "HTTP-Referer",
@@ -1076,9 +1078,10 @@ impl Provider for OpenRouterProvider {
             reasoning: self.reasoning_param_for_model(model),
         };
 
-        let response = self
-            .http_client()
-            .post("https://openrouter.ai/api/v1/chat/completions")
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post("https://openrouter.ai/api/v1/chat/completions"),
+        )
             .header("Authorization", format!("Bearer {credential}"))
             .header(
                 "HTTP-Referer",
@@ -1232,9 +1235,10 @@ impl Provider for OpenRouterProvider {
             reasoning: self.reasoning_param_for_model(model),
         };
 
-        let response = self
-            .http_client()
-            .post("https://openrouter.ai/api/v1/chat/completions")
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post("https://openrouter.ai/api/v1/chat/completions"),
+        )
             .header("Authorization", format!("Bearer {credential}"))
             .header(
                 "HTTP-Referer",
@@ -1312,7 +1316,15 @@ impl Provider for OpenRouterProvider {
             )
         })?;
 
-        let api_messages: Vec<Message> = messages
+        let sanitized_messages =
+            crate::providers::sanitize::sanitize_messages_before_send_for_trait(
+                self,
+                messages.to_vec(),
+                model,
+                self.reserved_output_tokens(model),
+                Some(self.context_window_for(model)),
+            );
+        let api_messages: Vec<Message> = sanitized_messages
             .iter()
             .map(|m| Message {
                 role: m.role.clone(),
@@ -1324,7 +1336,9 @@ impl Provider for OpenRouterProvider {
             "type": "json_schema",
             "json_schema": {
                 "name": "structured_output",
-                "schema": schema,
+                "schema": crate::tools::schema::SchemaCleanr::prepare_for_strict_output(
+                    schema.clone(),
+                ),
                 "strict": true
             }
         });
@@ -1339,9 +1353,10 @@ impl Provider for OpenRouterProvider {
             reasoning: self.reasoning_param_for_model(model),
         };
 
-        let response = self
-            .http_client()
-            .post("https://openrouter.ai/api/v1/chat/completions")
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post("https://openrouter.ai/api/v1/chat/completions"),
+        )
             .header("Authorization", format!("Bearer {credential}"))
             .header(
                 "HTTP-Referer",
@@ -1365,7 +1380,13 @@ impl Provider for OpenRouterProvider {
                     "reasoning parameter rejected by upstream ({sanitized}); blacklisting model and retrying without reasoning"
                 );
                 Self::blacklist_reasoning(model);
-                return Box::pin(self.chat_structured(messages, schema, model, temperature)).await;
+                return Box::pin(self.chat_structured(
+                    &sanitized_messages,
+                    schema,
+                    model,
+                    temperature,
+                ))
+                .await;
             }
             anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
         }
@@ -1464,12 +1485,15 @@ impl Provider for OpenRouterProvider {
         let options_owned = options;
         let retry_messages: Vec<ChatMessage> = request.messages.to_vec();
         let retry_tools: Option<Vec<ToolSpec>> = request.tools.map(|t| t.to_vec());
+        let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
 
         let _ = crate::runtime::spawn_supervised(
             "providers.openrouter.stream_chat",
             async move {
-                let response = client
-                    .post("https://openrouter.ai/api/v1/chat/completions")
+                let response = crate::providers::core::idempotency::apply_idempotency_header_value(
+                    client.post("https://openrouter.ai/api/v1/chat/completions"),
+                    idempotency_key,
+                )
                     .header("Authorization", format!("Bearer {credential}"))
                     .header(
                         "HTTP-Referer",
@@ -1599,12 +1623,15 @@ impl Provider for OpenRouterProvider {
         let options_owned = options;
         let system_prompt_owned = system_prompt.map(ToString::to_string);
         let message_owned = message.to_string();
+        let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
 
         let _ = crate::runtime::spawn_supervised(
             "providers.openrouter.stream_chat_with_system",
             async move {
-                let response = client
-                    .post("https://openrouter.ai/api/v1/chat/completions")
+                let response = crate::providers::core::idempotency::apply_idempotency_header_value(
+                    client.post("https://openrouter.ai/api/v1/chat/completions"),
+                    idempotency_key,
+                )
                     .header("Authorization", format!("Bearer {credential}"))
                     .header(
                         "HTTP-Referer",
@@ -1733,12 +1760,15 @@ impl Provider for OpenRouterProvider {
         let temperature_owned = temperature;
         let options_owned = options;
         let retry_messages: Vec<ChatMessage> = messages.to_vec();
+        let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
 
         let _ = crate::runtime::spawn_supervised(
             "providers.openrouter.stream_chat_with_history",
             async move {
-                let response = client
-                    .post("https://openrouter.ai/api/v1/chat/completions")
+                let response = crate::providers::core::idempotency::apply_idempotency_header_value(
+                    client.post("https://openrouter.ai/api/v1/chat/completions"),
+                    idempotency_key,
+                )
                     .header("Authorization", format!("Bearer {credential}"))
                     .header(
                         "HTTP-Referer",

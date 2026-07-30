@@ -16,7 +16,7 @@ pub struct ReliabilityConfig {
     #[serde(default)]
     pub fallback_providers: Vec<String>,
 
-    #[serde(default, serialize_with = "crate::config::redact::redact_vec_string")]
+    #[serde(default)]
     pub api_keys: Vec<String>,
 
     #[serde(default)]

@@ -491,7 +491,9 @@ pub fn default_tools_with_runtime(
         ),
         Box::new(GlobSearchTool::new(security.clone())),
         Box::new(
-            GlobEditTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
+            GlobEditTool::new(security.clone())
+                .with_ops_applier(shared_ops.clone())
+                .with_edit_history(shared_edit_history.clone()),
         ),
         Box::new(
             LspRenameTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
@@ -534,6 +536,35 @@ pub fn dedupe_tool_specs(specs: &[ToolSpec]) -> Vec<ToolSpec> {
         );
     }
     deduped
+}
+
+pub fn dedupe_tool_registry(tools: &mut Vec<Box<dyn Tool>>) {
+    let mut seen: std::collections::HashSet<String> =
+        std::collections::HashSet::with_capacity(tools.len());
+    let mut duplicates: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+    tools.retain(|tool| {
+        let name = tool.name().to_string();
+        if seen.insert(name.clone()) {
+            true
+        } else {
+            *duplicates.entry(name).or_insert(0) += 1;
+            false
+        }
+    });
+    if !duplicates.is_empty() {
+        let summary = duplicates
+            .iter()
+            .map(|(name, extra)| format!("{name} (+{extra})"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        tracing::warn!(
+            target: "tools.dedupe",
+            output_len = tools.len(),
+            duplicates = %summary,
+            "dropped duplicate tool registrations (first registration wins)"
+        );
+    }
 }
 
 pub fn register_skill_tools(
@@ -686,8 +717,9 @@ pub fn all_tools_with_runtime(
 
     let mut tool_arcs: Vec<Arc<dyn Tool>> = vec![
         Arc::new(
-            ShellTool::new_with_sandbox(security.clone(), runtime, sandbox)
-                .with_timeout_secs(root_config.shell_tool.timeout_secs),
+            ShellTool::new_with_sandbox(security.clone(), runtime, sandbox.clone())
+                .with_timeout_secs(root_config.shell_tool.timeout_secs)
+                .with_resource_limits(&root_config.security.resources),
         ),
         Arc::new(background::status::BackgroundStatusTool::new()),
         Arc::new(background::logs::BackgroundLogsTool::new()),
@@ -967,7 +999,9 @@ pub fn all_tools_with_runtime(
     ];
 
     tool_arcs.push(Arc::new(
-        GlobEditTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
+        GlobEditTool::new(security.clone())
+            .with_ops_applier(shared_ops.clone())
+            .with_edit_history(shared_edit_history.clone()),
     ));
     tool_arcs.push(Arc::new(
         LspRenameTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
@@ -982,7 +1016,10 @@ pub fn all_tools_with_runtime(
     tool_arcs.push(Arc::new(WritePlanTool::new()));
 
     #[cfg(target_os = "windows")]
-    tool_arcs.push(Arc::new(PowerShellTool::new(security.clone())));
+    tool_arcs.push(Arc::new(
+        PowerShellTool::new(security.clone(), sandbox.clone())
+            .with_resource_limits(&root_config.security.resources),
+    ));
     tool_arcs.push(Arc::new(WorktreeEnterTool::new(security.clone())));
     tool_arcs.push(Arc::new(WorktreeExitTool::new(security.clone())));
 
@@ -1361,16 +1398,12 @@ pub fn all_tools_with_runtime(
     if root_config.image_gen.enabled {
         tool_arcs.push(Arc::new(ImageGenTool::new(
             security.clone(),
-            workspace_dir.to_path_buf(),
             root_config.image_gen.default_model.clone(),
             root_config.image_gen.api_key_env.clone(),
         )));
     }
 
-    tool_arcs.push(Arc::new(MediaGenTool::new(
-        security.clone(),
-        workspace_dir.to_path_buf(),
-    )));
+    tool_arcs.push(Arc::new(MediaGenTool::new(security.clone())));
     tool_arcs.push(Arc::new(DesignSystemReadTool::new()));
     tool_arcs.push(Arc::new(DesignerSkillReadTool::new()));
     tool_arcs.push(Arc::new(DesignerTemplateReadTool::new()));

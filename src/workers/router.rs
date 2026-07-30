@@ -13,7 +13,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::session::event::SessionEvent;
 use crate::workers::events::{WorkerMeta, WorkerSummary};
-use crate::workers::persistence::{WorkerEventLog, find_worker_root, list_meta, read_meta};
+use crate::workers::persistence::{find_worker_root, list_meta, read_meta, replay_worker_events};
 use crate::workers::supervisor::{candidate_worker_roots, global_supervisor};
 
 #[derive(Debug, Deserialize)]
@@ -51,10 +51,7 @@ pub fn router() -> Router {
         .route("/api/workers/{id}", get(handle_get))
         .route("/api/workers/{id}/cancel", post(handle_cancel))
         .route("/api/workers/{id}/events", get(handle_events))
-        .route(
-            "/ws/worker/{id}",
-            get(crate::workers::ws::handle_ws_worker),
-        )
+        .route("/ws/worker/{id}", get(crate::workers::ws::handle_ws_worker))
 }
 
 async fn handle_list(Query(q): Query<ListQuery>) -> impl IntoResponse {
@@ -217,14 +214,14 @@ async fn handle_events(Path(id): Path<String>) -> impl IntoResponse {
                 .or_else(|| find_worker_root(&roots, &id))
                 .or_else(|| roots.first().cloned())
                 .unwrap_or_else(|| std::path::PathBuf::from("."));
-            WorkerEventLog::open(&root, &id).and_then(|log| log.replay())
+            replay_worker_events(&root, &id)
         })
         .await
         .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
     };
 
     let events = match events {
-        Ok(evts) => evts,
+        Ok(evts) => evts.into_iter().map(|record| record.event).collect(),
         Err(err) => {
             return (
                 StatusCode::INTERNAL_SERVER_ERROR,

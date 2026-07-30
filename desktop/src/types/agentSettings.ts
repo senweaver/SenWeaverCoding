@@ -155,6 +155,7 @@ export type AgentRuntimePatch = {
   perTurnTokenHardCap?: number
   maxSubagents?: number
   parallelToolMaxConcurrency?: number
+  subagentLimit?: SubagentLimitConfig
   subagentCallTimeoutSecs?: number
   fastApplyModel?: string | null
   fastApplyTemperature?: number

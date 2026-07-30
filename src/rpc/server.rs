@@ -180,6 +180,21 @@ pub struct RpcServer {
     ctx: Arc<RpcCtx>,
 }
 
+pub fn resolve_rpc_auth_token(config: &RpcConfig) -> Option<String> {
+    if let Some(token) = crate::util::get_runtime_var("SEN_RPC_TOKEN") {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    config
+        .auth_token
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
 fn host_is_loopback(host: &str) -> bool {
     let h = host.trim();
     if h.eq_ignore_ascii_case("localhost") || h == "127.0.0.1" || h == "::1" {
@@ -523,21 +538,21 @@ impl RpcServer {
         use std::net::SocketAddr;
 
         info!("RPC: running in HTTP mode on {}:{}", host, port);
-        let token_present = crate::util::get_runtime_var("SEN_RPC_TOKEN")
-            .map(|s| !s.trim().is_empty())
-            .unwrap_or(false);
+        let token_present = resolve_rpc_auth_token(&self.ctx.config.rpc).is_some();
         if !host_is_loopback(host) && !token_present {
             anyhow::bail!(
-                "RPC HTTP transport refused: host '{host}' is not loopback and SEN_RPC_TOKEN is \
-                 not set. Bind to 127.0.0.1, or set SEN_RPC_TOKEN to expose it with Bearer auth."
+                "RPC HTTP transport refused: host '{host}' is not loopback and no auth token is \
+                 configured (SEN_RPC_TOKEN or rpc.auth_token). Bind to 127.0.0.1, or set a token \
+                 to expose it with Bearer auth."
             );
         }
         if !token_present {
             tracing::warn!(
                 "SECURITY: RPC HTTP transport is running WITHOUT authentication \
-                 (SEN_RPC_TOKEN not set) on loopback; mutating methods (session/*, tool/exec, \
-                 memory/store, blackboard writes) are REFUSED until a token is configured. \
-                 Set SEN_RPC_TOKEN to enable them behind Bearer auth."
+                 (neither SEN_RPC_TOKEN nor rpc.auth_token set) on loopback; mutating methods \
+                 (session/*, tool/exec, memory/store, memory/recall, blackboard writes) are \
+                 REFUSED until a token is configured. Set SEN_RPC_TOKEN or rpc.auth_token to \
+                 enable them behind Bearer auth."
             );
         }
 
@@ -548,10 +563,7 @@ impl RpcServer {
             headers: axum::http::HeaderMap,
             Json(body): Json<serde_json::Value>,
         ) -> impl IntoResponse {
-            if let Some(expected) = crate::util::get_runtime_var("SEN_RPC_TOKEN")
-                .map(|s| s.trim().to_string())
-                .filter(|s| !s.is_empty())
-            {
+            if let Some(expected) = resolve_rpc_auth_token(&ctx.config.rpc) {
                 let presented = headers
                     .get(axum::http::header::AUTHORIZATION)
                     .and_then(|v| v.to_str().ok())
@@ -573,9 +585,7 @@ impl RpcServer {
                     );
                 }
             }
-            let token_configured = crate::util::get_runtime_var("SEN_RPC_TOKEN")
-                .map(|s| !s.trim().is_empty())
-                .unwrap_or(false);
+            let token_configured = resolve_rpc_auth_token(&ctx.config.rpc).is_some();
             const MUTATING_METHODS: &[&str] = &[
                 "session/new",
                 "session/prompt",
@@ -584,6 +594,7 @@ impl RpcServer {
                 "session/kill",
                 "tool/exec",
                 "memory/store",
+                "memory/recall",
                 "blackboard/put",
                 "blackboard/watch",
                 "blackboard/unwatch",
@@ -609,7 +620,7 @@ impl RpcServer {
                                     "code": -32007,
                                     "message": format!(
                                         "Method '{}' is disabled on the unauthenticated RPC HTTP transport. \
-                                         Set SEN_RPC_TOKEN and send it as a Bearer token to enable mutating methods.",
+                                         Set SEN_RPC_TOKEN or rpc.auth_token and send it as a Bearer token to enable mutating methods.",
                                         req.method
                                     ),
                                 },

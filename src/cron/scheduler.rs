@@ -623,17 +623,40 @@ async fn run_agent_job(
 }
 
 async fn finalize_cron_worktree(info: &crate::workers::WorktreeInfo, merge: bool) -> String {
-    if merge && !crate::workers::worktree::parent_workspace_is_dirty(&info.base).await {
-        match crate::workers::worktree::commit_and_merge_worker(info).await {
-            Ok(msg) => format!("branch `{}`: {msg}", info.branch),
-            Err(err) => format!("branch `{}`: {err}", info.branch),
+    let base_lock = crate::workers::worktree::base_merge_lock(&info.base);
+    let _base_guard = base_lock.lock().await;
+    if merge {
+        match crate::workers::worktree::parent_workspace_is_dirty(&info.base).await {
+            Ok(false) => {
+                return match crate::workers::worktree::commit_and_merge_worker(info).await {
+                    Ok(msg) => format!("branch `{}`: {msg}", info.branch),
+                    Err(err) => format!("branch `{}`: {err}", info.branch),
+                };
+            }
+            Ok(true) => {
+                let salvage = crate::workers::worktree::salvage_worktree(info).await;
+                return format!(
+                    "branch `{}`: parent workspace has uncommitted changes; merge skipped; {}",
+                    info.branch, salvage.note
+                );
+            }
+            Err(err) => {
+                let salvage = crate::workers::worktree::salvage_worktree(info).await;
+                return format!(
+                    "branch `{}`: could not verify the parent workspace state ({err}); merge \
+                     skipped and treated as dirty; {}",
+                    info.branch, salvage.note
+                );
+            }
         }
+    }
+    let salvage = crate::workers::worktree::salvage_worktree(info).await;
+    if salvage.retained {
+        format!("branch `{}`: {}", info.branch, salvage.note)
     } else {
-        let _ = crate::workers::worktree::commit_worker_changes(info).await;
-        let note = crate::workers::worktree::remove_worktree_keep_branch(info).await;
         format!(
-            "branch `{}` preserved{note} — merge with `git merge {}`",
-            info.branch, info.branch
+            "branch `{}`: {} — merge with `git merge {}`",
+            info.branch, salvage.note, info.branch
         )
     }
 }

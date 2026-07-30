@@ -2,9 +2,9 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant, SystemTime};
 
@@ -95,12 +95,19 @@ pub enum AcquireError {
     Shutdown,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct SnapshotRecord {
+    mtime: SystemTime,
+    written: bool,
+}
+
 #[derive(Default)]
 struct Inner {
     holders: HashMap<(String, ResourceKind), Holder>,
     waiters: HashMap<(String, ResourceKind), VecDeque<Pending>>,
-    read_snapshots: HashMap<(String, String, PathBuf), SystemTime>,
+    read_snapshots: HashMap<(String, String, PathBuf), SnapshotRecord>,
     snapshot_counts: HashMap<(String, String), usize>,
+    snapshot_evicted_sessions: HashSet<(String, String)>,
     os_locks: HashMap<(String, ResourceKind), crate::session::os_lock::OsAdvisoryLock>,
 }
 
@@ -138,18 +145,13 @@ impl WorkspaceResourceManager {
         session_id: &str,
         title: &str,
     ) -> Result<ResourceGuard, AcquireError> {
+        let kind = normalize_kind(kind);
         let effective_workspace = scope_key_for(workspace_key, &kind, session_id);
         let key = (effective_workspace.clone(), kind.clone());
 
         let (acquired_immediately, rx_opt) = {
             let mut inner = self.inner.lock();
-            let stale = inner.holders.get(&key).is_some_and(|h| {
-                !h.confirmed && h.claim_deadline.is_some_and(|d| Instant::now() > d)
-            });
-            if stale {
-                inner.holders.remove(&key);
-                promote_next_waiter_locked(&mut inner, &key);
-            }
+            reclaim_expired_claim_locked(&mut inner, &key);
             let same_session_held = inner
                 .holders
                 .get(&key)
@@ -262,10 +264,11 @@ impl WorkspaceResourceManager {
     pub async fn acquire_many(
         self: &Arc<Self>,
         workspace_key: &str,
-        mut kinds: Vec<ResourceKind>,
+        kinds: Vec<ResourceKind>,
         session_id: &str,
         title: &str,
     ) -> Result<Vec<ResourceGuard>, AcquireError> {
+        let mut kinds: Vec<ResourceKind> = kinds.into_iter().map(normalize_kind).collect();
         kinds.sort_by_key(|a| a.sort_key());
         kinds.dedup();
         let mut guards = Vec::with_capacity(kinds.len());
@@ -290,14 +293,24 @@ impl WorkspaceResourceManager {
             session_id.to_string(),
             snapshot_path_key(path),
         );
-        let mut inner = self.inner.lock();
-        if inner.read_snapshots.insert(key, mtime).is_none() {
-            *inner
-                .snapshot_counts
-                .entry((workspace_key.to_string(), session_id.to_string()))
-                .or_insert(0) += 1;
+        let mut guard = self.inner.lock();
+        let inner = &mut *guard;
+        match inner.read_snapshots.entry(key) {
+            std::collections::hash_map::Entry::Occupied(mut e) => {
+                e.get_mut().mtime = mtime;
+            }
+            std::collections::hash_map::Entry::Vacant(e) => {
+                e.insert(SnapshotRecord {
+                    mtime,
+                    written: false,
+                });
+                *inner
+                    .snapshot_counts
+                    .entry((workspace_key.to_string(), session_id.to_string()))
+                    .or_insert(0) += 1;
+            }
         }
-        enforce_snapshot_cap(&mut inner, workspace_key, session_id);
+        enforce_snapshot_cap(inner, workspace_key, session_id);
     }
 
     pub fn record_write(&self, workspace_key: &str, session_id: &str, path: &Path) {
@@ -308,7 +321,17 @@ impl WorkspaceResourceManager {
             snapshot_path_key(path),
         );
         let mut inner = self.inner.lock();
-        if inner.read_snapshots.insert(snap_key, mtime).is_none() {
+        if inner
+            .read_snapshots
+            .insert(
+                snap_key,
+                SnapshotRecord {
+                    mtime,
+                    written: true,
+                },
+            )
+            .is_none()
+        {
             *inner
                 .snapshot_counts
                 .entry((workspace_key.to_string(), session_id.to_string()))
@@ -323,6 +346,9 @@ impl WorkspaceResourceManager {
             .read_snapshots
             .retain(|(_, sid, _), _| sid != session_id);
         inner.snapshot_counts.retain(|(_, sid), _| sid != session_id);
+        inner
+            .snapshot_evicted_sessions
+            .retain(|(_, sid)| sid != session_id);
     }
 
     pub fn waiters_snapshot_for_session(
@@ -381,14 +407,26 @@ impl WorkspaceResourceManager {
             snapshot_path_key(path),
         );
         let last_seen = inner.read_snapshots.get(&snap_key).copied();
+        let evicted_before = last_seen.is_none()
+            && inner
+                .snapshot_evicted_sessions
+                .contains(&(workspace_key.to_string(), session_id.to_string()));
         drop(inner);
-        let Some(last_seen) = last_seen else {
+        let Some(record) = last_seen else {
+            if evicted_before {
+                tracing::debug!(
+                    path = %path.display(),
+                    workspace = %workspace_key,
+                    session = %session_id,
+                    "stale check has no snapshot for this file and this session experienced snapshot eviction; staleness cannot be detected"
+                );
+            }
             return false;
         };
         let Some(current) = fs_mtime(path) else {
             return false;
         };
-        current > last_seen
+        current > record.mtime
     }
 
     pub fn cancel_waiters_for_session(self: &Arc<Self>, session_id: &str) {
@@ -408,6 +446,15 @@ impl WorkspaceResourceManager {
                 inner.waiters.remove(&key);
             }
         }
+        let orphaned_claim = inner
+            .holders
+            .get(&key)
+            .is_some_and(|h| !h.confirmed && h.session_id == session_id);
+        if orphaned_claim {
+            inner.holders.remove(&key);
+            promote_next_waiter_locked(&mut inner, &key);
+        }
+        reclaim_expired_claim_locked(&mut inner, &key);
     }
 
     async fn ensure_cross_process_lock(
@@ -564,6 +611,16 @@ impl Drop for ResourceGuard {
     }
 }
 
+fn reclaim_expired_claim_locked(inner: &mut Inner, key: &(String, ResourceKind)) {
+    let stale = inner.holders.get(key).is_some_and(|h| {
+        !h.confirmed && h.claim_deadline.is_some_and(|d| Instant::now() > d)
+    });
+    if stale {
+        inner.holders.remove(key);
+        promote_next_waiter_locked(inner, key);
+    }
+}
+
 fn promote_next_waiter_locked(inner: &mut Inner, key: &(String, ResourceKind)) {
     let mut promoted: Option<(String, String)> = None;
     let mut queue_empty = false;
@@ -616,6 +673,15 @@ fn snapshot_path_key(path: &Path) -> PathBuf {
     PathBuf::from(normalize_lock_path(path))
 }
 
+fn normalize_kind(kind: ResourceKind) -> ResourceKind {
+    match kind {
+        ResourceKind::FileWrite { path } => ResourceKind::FileWrite {
+            path: snapshot_path_key(&path),
+        },
+        other => other,
+    }
+}
+
 fn scope_key_for(workspace_key: &str, kind: &ResourceKind, session_id: &str) -> String {
     match kind {
         ResourceKind::FileWrite { path } => {
@@ -640,15 +706,20 @@ fn enforce_snapshot_cap(inner: &mut Inner, workspace_key: &str, session_id: &str
     if count <= MAX_SNAPSHOTS_PER_SESSION {
         return;
     }
-    let mut session_entries: Vec<(PathBuf, SystemTime)> = inner
+    let mut session_entries: Vec<(PathBuf, bool, SystemTime)> = inner
         .read_snapshots
         .iter()
         .filter(|((ws, sid, _), _)| ws == workspace_key && sid == session_id)
-        .map(|((_, _, path), mtime)| (path.clone(), *mtime))
+        .map(|((_, _, path), record)| (path.clone(), record.written, record.mtime))
         .collect();
-    session_entries.sort_by_key(|(_, mtime)| *mtime);
+    session_entries.sort_by_key(|(_, written, mtime)| (*written, *mtime));
     let evict = session_entries.len().saturating_sub(MAX_SNAPSHOTS_PER_SESSION / 2);
-    for (path, _) in session_entries.into_iter().take(evict) {
+    if evict > 0 {
+        inner
+            .snapshot_evicted_sessions
+            .insert(counter_key.clone());
+    }
+    for (path, _, _) in session_entries.into_iter().take(evict) {
         inner
             .read_snapshots
             .remove(&(workspace_key.to_string(), session_id.to_string(), path));
@@ -738,18 +809,41 @@ pub async fn acquire_file_write_for_current_session(
 
 pub const NO_SESSION_WORKSPACE_KEY: &str = "__no_session__";
 
+static NO_SESSION_ACQUIRER_SEQ: AtomicU64 = AtomicU64::new(0);
+
+fn synthetic_no_session_lock_identity() -> String {
+    match tokio::task::try_id() {
+        Some(task_id) => format!(
+            "{}::{}::task::{}",
+            NO_SESSION_WORKSPACE_KEY,
+            std::process::id(),
+            task_id
+        ),
+        None => format!(
+            "{}::{}::seq::{}",
+            NO_SESSION_WORKSPACE_KEY,
+            std::process::id(),
+            NO_SESSION_ACQUIRER_SEQ.fetch_add(1, Ordering::Relaxed)
+        ),
+    }
+}
+
+fn lock_identity() -> (String, String, String) {
+    match current_session_context() {
+        Some(ctx) => (ctx.workspace_key, ctx.session_id, ctx.title),
+        None => (
+            NO_SESSION_WORKSPACE_KEY.to_string(),
+            synthetic_no_session_lock_identity(),
+            "no-session".to_string(),
+        ),
+    }
+}
+
 pub async fn acquire_file_write_locked(
     path: &Path,
 ) -> Option<Result<ResourceGuard, AcquireError>> {
     let manager = global_workspace_resources()?;
-    let (workspace_key, session_id, title) = match current_session_context() {
-        Some(ctx) => (ctx.workspace_key, ctx.session_id, ctx.title),
-        None => (
-            NO_SESSION_WORKSPACE_KEY.to_string(),
-            NO_SESSION_WORKSPACE_KEY.to_string(),
-            "no-session".to_string(),
-        ),
-    };
+    let (workspace_key, session_id, title) = lock_identity();
     Some(
         manager
             .acquire(
@@ -764,18 +858,58 @@ pub async fn acquire_file_write_locked(
     )
 }
 
-pub async fn acquire_many_file_writes_for_current_session(
+pub async fn acquire_file_write_guard(
+    path: &Path,
+) -> Result<Option<ResourceGuard>, AcquireError> {
+    match acquire_file_write_locked(path).await {
+        Some(Ok(guard)) => Ok(Some(guard)),
+        Some(Err(e)) => Err(e),
+        None => {
+            tracing::warn!(
+                path = %path.display(),
+                "no workspace resource manager installed; proceeding to write without a file write lock"
+            );
+            Ok(None)
+        }
+    }
+}
+
+pub async fn acquire_many_file_write_guards(
+    paths: Vec<PathBuf>,
+) -> Result<Option<Vec<ResourceGuard>>, AcquireError> {
+    let total = paths.len();
+    let described: String = paths
+        .iter()
+        .take(8)
+        .map(|p| p.display().to_string())
+        .collect::<Vec<_>>()
+        .join(", ");
+    match acquire_many_file_writes_locked(paths).await {
+        Some(Ok(guards)) => Ok(Some(guards)),
+        Some(Err(e)) => Err(e),
+        None => {
+            tracing::warn!(
+                paths = %described,
+                total,
+                "no workspace resource manager installed; proceeding to write without file write locks"
+            );
+            Ok(None)
+        }
+    }
+}
+
+pub async fn acquire_many_file_writes_locked(
     paths: Vec<PathBuf>,
 ) -> Option<Result<Vec<ResourceGuard>, AcquireError>> {
-    let ctx = current_session_context()?;
     let manager = global_workspace_resources()?;
+    let (workspace_key, session_id, title) = lock_identity();
     let kinds = paths
         .into_iter()
         .map(|p| ResourceKind::FileWrite { path: p })
         .collect();
     Some(
         manager
-            .acquire_many(&ctx.workspace_key, kinds, &ctx.session_id, &ctx.title)
+            .acquire_many(&workspace_key, kinds, &session_id, &title)
             .await,
     )
 }
@@ -826,45 +960,47 @@ pub async fn acquire_workspace_exclusive_for_current_session(
     )
 }
 
+fn snapshot_identity() -> (String, String) {
+    match current_session_context() {
+        Some(ctx) => (ctx.workspace_key, ctx.session_id),
+        None => (
+            NO_SESSION_WORKSPACE_KEY.to_string(),
+            NO_SESSION_WORKSPACE_KEY.to_string(),
+        ),
+    }
+}
+
 pub fn record_read_for_current_session(path: &Path) {
-    let Some(ctx) = current_session_context() else {
-        return;
-    };
     let Some(manager) = global_workspace_resources() else {
         return;
     };
-    manager.record_read(&ctx.workspace_key, &ctx.session_id, path);
+    let (workspace_key, session_id) = snapshot_identity();
+    manager.record_read(&workspace_key, &session_id, path);
 }
 
 pub fn record_write_for_current_session(path: &Path) {
     crate::agent::designer::record_artifact_if_designer(path);
-    let Some(ctx) = current_session_context() else {
-        return;
-    };
     let Some(manager) = global_workspace_resources() else {
         return;
     };
-    manager.record_write(&ctx.workspace_key, &ctx.session_id, path);
+    let (workspace_key, session_id) = snapshot_identity();
+    manager.record_write(&workspace_key, &session_id, path);
 }
 
 pub fn is_stale_for_current_session(path: &Path) -> bool {
-    let Some(ctx) = current_session_context() else {
-        return false;
-    };
     let Some(manager) = global_workspace_resources() else {
         return false;
     };
-    manager.is_stale_for(&ctx.workspace_key, &ctx.session_id, path)
+    let (workspace_key, session_id) = snapshot_identity();
+    manager.is_stale_for(&workspace_key, &session_id, path)
 }
 
 pub fn has_read_in_current_session(path: &Path) -> bool {
-    let Some(ctx) = current_session_context() else {
-        return true;
-    };
     let Some(manager) = global_workspace_resources() else {
         return true;
     };
-    manager.has_read(&ctx.workspace_key, &ctx.session_id, path)
+    let (workspace_key, session_id) = snapshot_identity();
+    manager.has_read(&workspace_key, &session_id, path)
 }
 
 pub fn stale_file_error_message(path: &Path) -> String {

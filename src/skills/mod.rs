@@ -16,7 +16,6 @@ mod audit;
 #[cfg(feature = "skill-creation")]
 pub mod creator;
 #[cfg(feature = "skill-creation")]
-pub mod improver;
 pub mod testing;
 
 const OPEN_SKILLS_REPO_URL: &str = "https://github.com/besoeasy/open-skills";
@@ -27,6 +26,11 @@ const CLAWHUB_DOMAIN: &str = "clawhub.ai";
 const CLAWHUB_WWW_DOMAIN: &str = "www.clawhub.ai";
 const CLAWHUB_DOWNLOAD_API: &str = "https://clawhub.ai/api/v1/download";
 const MAX_CLAWHUB_ZIP_BYTES: u64 = 50 * 1024 * 1024;
+const MAX_CLAWHUB_UNPACKED_BYTES: u64 = 200 * 1024 * 1024;
+const MAX_CLAWHUB_ENTRY_BYTES: u64 = 64 * 1024 * 1024;
+const MAX_CLAWHUB_ZIP_ENTRIES: usize = 4096;
+const SKILL_PROMPT_PER_SKILL_BYTES: usize = 24 * 1024;
+const SKILL_PROMPT_TOTAL_BYTES: usize = 96 * 1024;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Skill {
@@ -931,72 +935,114 @@ pub fn skills_to_prompt_with_mode(
         ),
     };
 
+    let render_skill_block =
+        |skill: &Skill, expand_full: bool, location_relative: bool, degraded: bool| -> String {
+            let mut block = String::new();
+            let _ = writeln!(block, "  <skill>");
+            write_xml_text_element(&mut block, 4, "name", &skill.name);
+            write_xml_text_element(&mut block, 4, "description", &skill.description);
+            let location = render_skill_location(skill, workspace_dir, location_relative);
+            write_xml_text_element(&mut block, 4, "location", &location);
+            if skill.always_apply {
+                write_xml_text_element(&mut block, 4, "always_apply", "true");
+            }
+            if degraded {
+                write_xml_text_element(
+                    &mut block,
+                    4,
+                    "instructions_omitted",
+                    &format!(
+                        "Full instructions omitted to keep the prompt within budget; call \
+                         read_skill(name=\"{}\") or read the file at <location> before using this skill.",
+                        skill.name
+                    ),
+                );
+            }
+
+            if expand_full && !skill.prompts.is_empty() {
+                let _ = writeln!(block, "    <instructions>");
+                for instruction in &skill.prompts {
+                    write_xml_text_element(&mut block, 6, "instruction", instruction);
+                }
+                let _ = writeln!(block, "    </instructions>");
+            }
+
+            if expand_full && !skill.tools.is_empty() {
+                let registered: Vec<_> = skill
+                    .tools
+                    .iter()
+                    .filter(|t| matches!(t.kind.as_str(), "shell" | "script" | "http"))
+                    .collect();
+                let unregistered: Vec<_> = skill
+                    .tools
+                    .iter()
+                    .filter(|t| !matches!(t.kind.as_str(), "shell" | "script" | "http"))
+                    .collect();
+
+                if !registered.is_empty() {
+                    let _ = writeln!(
+                        block,
+                        "    <callable_tools hint=\"These are registered as callable tool specs. Invoke them directly by name ({{}}.{{}}) instead of using shell.\">"
+                    );
+                    for tool in &registered {
+                        let _ = writeln!(block, "      <tool>");
+                        write_xml_text_element(
+                            &mut block,
+                            8,
+                            "name",
+                            &format!("{}.{}", skill.name, tool.name),
+                        );
+                        write_xml_text_element(&mut block, 8, "description", &tool.description);
+                        let _ = writeln!(block, "      </tool>");
+                    }
+                    let _ = writeln!(block, "    </callable_tools>");
+                }
+
+                if !unregistered.is_empty() {
+                    let _ = writeln!(block, "    <tools>");
+                    for tool in &unregistered {
+                        let _ = writeln!(block, "      <tool>");
+                        write_xml_text_element(&mut block, 8, "name", &tool.name);
+                        write_xml_text_element(&mut block, 8, "description", &tool.description);
+                        write_xml_text_element(&mut block, 8, "kind", &tool.kind);
+                        let _ = writeln!(block, "      </tool>");
+                    }
+                    let _ = writeln!(block, "    </tools>");
+                }
+            }
+
+            let _ = writeln!(block, "  </skill>");
+            block
+        };
+
+    let mut expanded_bytes_used: usize = 0;
     for skill in skills {
         let expand_full = !mode_is_compact || skill.always_apply;
         let location_relative = mode_is_compact && !skill.always_apply;
 
-        let _ = writeln!(prompt, "  <skill>");
-        write_xml_text_element(&mut prompt, 4, "name", &skill.name);
-        write_xml_text_element(&mut prompt, 4, "description", &skill.description);
-        let location = render_skill_location(skill, workspace_dir, location_relative);
-        write_xml_text_element(&mut prompt, 4, "location", &location);
-        if skill.always_apply {
-            write_xml_text_element(&mut prompt, 4, "always_apply", "true");
-        }
-
-        if expand_full && !skill.prompts.is_empty() {
-            let _ = writeln!(prompt, "    <instructions>");
-            for instruction in &skill.prompts {
-                write_xml_text_element(&mut prompt, 6, "instruction", instruction);
-            }
-            let _ = writeln!(prompt, "    </instructions>");
-        }
-
-        if expand_full && !skill.tools.is_empty() {
-            let registered: Vec<_> = skill
-                .tools
-                .iter()
-                .filter(|t| matches!(t.kind.as_str(), "shell" | "script" | "http"))
-                .collect();
-            let unregistered: Vec<_> = skill
-                .tools
-                .iter()
-                .filter(|t| !matches!(t.kind.as_str(), "shell" | "script" | "http"))
-                .collect();
-
-            if !registered.is_empty() {
-                let _ = writeln!(
-                    prompt,
-                    "    <callable_tools hint=\"These are registered as callable tool specs. Invoke them directly by name ({{}}.{{}}) instead of using shell.\">"
+        let block = if expand_full {
+            let expanded = render_skill_block(skill, true, location_relative, false);
+            let over_per_skill = expanded.len() > SKILL_PROMPT_PER_SKILL_BYTES;
+            let over_total =
+                expanded_bytes_used.saturating_add(expanded.len()) > SKILL_PROMPT_TOTAL_BYTES;
+            if over_per_skill || over_total {
+                tracing::warn!(
+                    skill = %skill.name,
+                    rendered_bytes = expanded.len(),
+                    per_skill_budget = SKILL_PROMPT_PER_SKILL_BYTES,
+                    total_budget = SKILL_PROMPT_TOTAL_BYTES,
+                    total_used = expanded_bytes_used,
+                    "skill prompt injection over budget; degrading to compact listing"
                 );
-                for tool in &registered {
-                    let _ = writeln!(prompt, "      <tool>");
-                    write_xml_text_element(
-                        &mut prompt,
-                        8,
-                        "name",
-                        &format!("{}.{}", skill.name, tool.name),
-                    );
-                    write_xml_text_element(&mut prompt, 8, "description", &tool.description);
-                    let _ = writeln!(prompt, "      </tool>");
-                }
-                let _ = writeln!(prompt, "    </callable_tools>");
+                render_skill_block(skill, false, true, true)
+            } else {
+                expanded_bytes_used += expanded.len();
+                expanded
             }
-
-            if !unregistered.is_empty() {
-                let _ = writeln!(prompt, "    <tools>");
-                for tool in &unregistered {
-                    let _ = writeln!(prompt, "      <tool>");
-                    write_xml_text_element(&mut prompt, 8, "name", &tool.name);
-                    write_xml_text_element(&mut prompt, 8, "description", &tool.description);
-                    write_xml_text_element(&mut prompt, 8, "kind", &tool.kind);
-                    let _ = writeln!(prompt, "      </tool>");
-                }
-                let _ = writeln!(prompt, "    </tools>");
-            }
-        }
-
-        let _ = writeln!(prompt, "  </skill>");
+        } else {
+            render_skill_block(skill, false, location_relative, false)
+        };
+        prompt.push_str(&block);
     }
 
     prompt.push_str("</available_skills>");
@@ -1447,6 +1493,15 @@ fn install_clawhub_skill_source(
     let cursor = Cursor::new(bytes);
     let mut archive = ZipArchive::new(cursor).context("downloaded content is not a valid zip")?;
 
+    if archive.len() > MAX_CLAWHUB_ZIP_ENTRIES {
+        let _ = std::fs::remove_dir_all(&installed_dir);
+        anyhow::bail!(
+            "ClawhHub zip rejected: too many entries ({} > {MAX_CLAWHUB_ZIP_ENTRIES})",
+            archive.len()
+        );
+    }
+
+    let mut total_unpacked: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i)?;
         let raw_name = entry.name().to_string();
@@ -1471,9 +1526,31 @@ fn install_clawhub_skill_source(
             std::fs::create_dir_all(parent)?;
         }
 
+        let entry_budget = MAX_CLAWHUB_ENTRY_BYTES
+            .min(MAX_CLAWHUB_UNPACKED_BYTES.saturating_sub(total_unpacked));
         let mut out_file = std::fs::File::create(&out_path)
             .with_context(|| format!("failed to create extracted file: {}", out_path.display()))?;
-        std::io::copy(&mut entry, &mut out_file)?;
+        let written = {
+            use std::io::Read;
+            let mut limited = (&mut entry).take(entry_budget.saturating_add(1));
+            std::io::copy(&mut limited, &mut out_file)?
+        };
+        if written > entry_budget {
+            drop(out_file);
+            let _ = std::fs::remove_dir_all(&installed_dir);
+            anyhow::bail!(
+                "ClawhHub zip rejected: entry `{raw_name}` exceeds the uncompressed size budget \
+                 (entry limit {MAX_CLAWHUB_ENTRY_BYTES} bytes, total limit {MAX_CLAWHUB_UNPACKED_BYTES} bytes)"
+            );
+        }
+        total_unpacked = total_unpacked.saturating_add(written);
+        if total_unpacked > MAX_CLAWHUB_UNPACKED_BYTES {
+            drop(out_file);
+            let _ = std::fs::remove_dir_all(&installed_dir);
+            anyhow::bail!(
+                "ClawhHub zip rejected: uncompressed content exceeds {MAX_CLAWHUB_UNPACKED_BYTES} bytes"
+            );
+        }
     }
 
     let has_manifest =
@@ -1497,12 +1574,13 @@ fn install_clawhub_skill_source(
     }
 }
 
-#[allow(clippy::too_many_lines)]
+#[cfg(feature = "skill-creation")]
 enum SkillTestOutcome {
     NoTests(String),
     Results(Vec<testing::SkillTestResult>),
 }
 
+#[allow(clippy::too_many_lines)]
 pub async fn handle_command(
     command: crate::SkillCommands,
     config: &crate::config::Config,
@@ -1654,6 +1732,14 @@ pub async fn handle_command(
             );
             Ok(())
         }
+        #[cfg(not(feature = "skill-creation"))]
+        crate::SkillCommands::Test { name, verbose } => {
+            let _ = (name, verbose);
+            anyhow::bail!(
+                "Skill testing is unavailable: this build was compiled without the 'skill-creation' feature."
+            );
+        }
+        #[cfg(feature = "skill-creation")]
         crate::SkillCommands::Test { name, verbose } => {
             let skills_path = skills_dir(workspace_dir);
             let outcome = tokio::task::spawn_blocking(move || -> Result<SkillTestOutcome> {

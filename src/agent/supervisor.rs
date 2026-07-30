@@ -167,13 +167,24 @@ impl Supervisor {
         let mut rx = broadcaster.subscribe();
         Some(
             crate::runtime::spawn_supervised("supervisor.health_subscriber", async move {
-                while let Ok(signal) = rx.recv().await {
-                    let key = signal.key();
-                    let mut guard = set.write();
-                    if signal.is_unhealthy() {
-                        guard.insert(key, signal);
-                    } else {
-                        guard.remove(&key);
+                loop {
+                    match rx.recv().await {
+                        Ok(signal) => {
+                            let key = signal.key();
+                            let mut guard = set.write();
+                            if signal.is_unhealthy() {
+                                guard.insert(key, signal);
+                            } else {
+                                guard.remove(&key);
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(
+                                skipped,
+                                "supervisor health subscriber lagged behind broadcaster; continuing"
+                            );
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
                     }
                 }
             })
@@ -251,6 +262,34 @@ impl Supervisor {
                 self.record_event(give_up);
                 error!(agent_id = %agent_id, "Supervisor: giving up on agent restart");
             }
+        }
+
+        let sustained = Duration::from_secs(
+            self.config.heartbeat_timeout_secs.saturating_mul(3).max(60),
+        );
+        let recovered: Vec<AgentId> = {
+            let history = self.restart_history.read();
+            if history.is_empty() {
+                Vec::new()
+            } else {
+                let stale: std::collections::HashSet<&AgentId> = stale_ids.iter().collect();
+                self.registry
+                    .all()
+                    .into_iter()
+                    .filter(|a| {
+                        !stale.contains(&a.id)
+                            && matches!(a.state, AgentState::Idle | AgentState::Active)
+                            && history
+                                .get(&a.id)
+                                .map(|r| r.count > 0 && r.last_restart.elapsed() >= sustained)
+                                .unwrap_or(false)
+                    })
+                    .map(|a| a.id)
+                    .collect()
+            }
+        };
+        for agent_id in recovered {
+            self.mark_recovered(&agent_id);
         }
 
         events

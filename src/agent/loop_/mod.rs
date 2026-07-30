@@ -285,6 +285,22 @@ pub(crate) fn resolve_compaction_context_window(model: &str) -> usize {
     }
 }
 
+pub(crate) fn resolve_history_pruning_config(
+    config: &crate::config::Config,
+    model: &str,
+) -> crate::agent::history::pruner::HistoryPrunerConfig {
+    let mut prune_cfg = config.agent.history_pruning.clone();
+    if prune_cfg.max_tokens == 0 {
+        let window = resolve_compaction_context_window(model);
+        let compress_ratio = config.agent.context_compression.threshold_ratio;
+        let prune_ratio = (compress_ratio + 0.1).clamp(0.95, 0.98);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let derived = (window as f64 * prune_ratio) as usize;
+        prune_cfg.max_tokens = derived.max(8_000);
+    }
+    prune_cfg
+}
+
 fn truncate_tool_args_for_progress(name: &str, args: &serde_json::Value, max_len: usize) -> String {
     let hint = match name {
         "shell" => args.get("command").and_then(|v| v.as_str()),
@@ -839,7 +855,7 @@ async fn auto_finalize_incomplete_plan_steps(
             let _ = tx
                 .send(DraftEvent::ToolCall {
                     name: "update_plan".to_string(),
-                    args: args.clone(),
+                    args: crate::services::governance::credential_vault::redact_args_optional(&args),
                     tool_call_id: Some(tool_call_id.clone()),
                 })
                 .await;
@@ -855,7 +871,7 @@ async fn auto_finalize_incomplete_plan_steps(
             let _ = tx
                 .send(DraftEvent::ToolResult {
                     name: "update_plan".to_string(),
-                    output: output.clone(),
+                    output: scrub_credentials(&output),
                     success,
                     tool_call_id: Some(tool_call_id.clone()),
                 })
@@ -1357,6 +1373,7 @@ async fn call_provider_chat(
     temperature: f64,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<crate::providers::ChatResponse> {
+    acquire_llm_rate_limit(cancellation_token).await?;
     let chat_future = provider.chat(
         ChatRequest {
             messages,
@@ -1376,10 +1393,73 @@ async fn call_provider_chat(
     }
 }
 
+pub(crate) async fn acquire_llm_rate_limit(
+    cancellation_token: Option<&CancellationToken>,
+) -> Result<()> {
+    let Some(services) = crate::services::try_get_services() else {
+        return Ok(());
+    };
+    let mut logged = false;
+    while !services.rate_limiter.try_acquire("llm").await {
+        if !logged {
+            logged = true;
+            if let Some(message) = services.rate_limiter.message("llm").await {
+                tracing::warn!("{}", message.message);
+            }
+        }
+        let retry_ms = services
+            .rate_limiter
+            .status("llm")
+            .await
+            .and_then(|status| status.retry_after_ms)
+            .unwrap_or(100)
+            .clamp(10, 10_000);
+        let sleep = tokio::time::sleep(Duration::from_millis(retry_ms));
+        match cancellation_token {
+            Some(token) => {
+                tokio::select! {
+                    biased;
+                    () = token.cancelled() => return Err(tool_loop_cancelled()),
+                    () = sleep => {}
+                }
+            }
+            None => sleep.await,
+        }
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct StreamProgressProbe {
     made_progress: bool,
     partial_usage: Option<crate::providers::TokenUsage>,
+    failed_attempts_usage: Option<crate::providers::TokenUsage>,
+}
+
+fn merge_token_counts(a: Option<u64>, b: Option<u64>) -> Option<u64> {
+    match (a, b) {
+        (None, None) => None,
+        (x, y) => Some(x.unwrap_or(0).saturating_add(y.unwrap_or(0))),
+    }
+}
+
+fn accumulate_billable_usage(
+    total: &mut Option<crate::providers::TokenUsage>,
+    attempt: crate::providers::TokenUsage,
+) {
+    match total {
+        Some(acc) => {
+            acc.input_tokens = merge_token_counts(acc.input_tokens, attempt.input_tokens);
+            acc.output_tokens = merge_token_counts(acc.output_tokens, attempt.output_tokens);
+            acc.cached_input_tokens =
+                merge_token_counts(acc.cached_input_tokens, attempt.cached_input_tokens);
+            acc.cache_creation_input_tokens = merge_token_counts(
+                acc.cache_creation_input_tokens,
+                attempt.cache_creation_input_tokens,
+            );
+        }
+        None => *total = Some(attempt),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1394,6 +1474,7 @@ async fn consume_provider_streaming_response(
     idle_timeout: Option<Duration>,
     progress: &mut StreamProgressProbe,
 ) -> Result<StreamedChatOutcome> {
+    acquire_llm_rate_limit(cancellation_token).await?;
     let cancel_for_provider = cancellation_token.cloned();
     let mut provider_stream =
         crate::providers::reliable::scope_stream_cancel_token_sync(cancel_for_provider, || {
@@ -1472,7 +1553,9 @@ async fn consume_provider_streaming_response(
                     if tx
                         .send(DraftEvent::ToolCall {
                             name: name.clone(),
-                            args: parsed_args,
+                            args: crate::services::governance::credential_vault::redact_args_optional(
+                                &parsed_args,
+                            ),
                             tool_call_id: None,
                         })
                         .await
@@ -1492,7 +1575,7 @@ async fn consume_provider_streaming_response(
                     if tx
                         .send(DraftEvent::ToolResult {
                             name: name.clone(),
-                            output: output.clone(),
+                            output: scrub_credentials(&output),
                             success: true,
                             tool_call_id: None,
                         })
@@ -1575,6 +1658,9 @@ async fn consume_provider_streaming_response(
                 outcome.thinking_signature_blocks = 0;
                 outcome.tool_calls.clear();
                 outcome.pre_executed.clear();
+                if let Some(attempt_usage) = outcome.usage.take() {
+                    accumulate_billable_usage(&mut progress.failed_attempts_usage, attempt_usage);
+                }
                 outcome.stop_reason = None;
                 marker_window.clear();
                 suppress_forwarding = false;
@@ -1963,7 +2049,10 @@ async fn execute_one_tool(
         "tool call start"
     );
 
-    let args_summary = truncate_with_ellipsis(&call_arguments.to_string(), 300);
+    let args_summary = truncate_with_ellipsis(
+        &scrub_credentials(&call_arguments.to_string()),
+        300,
+    );
     observer.record_event(&ObserverEvent::ToolCallStart {
         tool: call_name.to_string(),
         arguments: Some(args_summary),
@@ -2501,22 +2590,15 @@ async fn run_self_consistency_resampling(
             let sem = semaphore.clone();
             async move {
                 let _permit = sem.acquire_owned().await.ok()?;
-                let chat_future = provider.chat(
-                    ChatRequest {
-                        messages,
-                        tools: request_tools,
-                    },
+                let outcome = call_provider_chat(
+                    provider,
+                    messages,
+                    request_tools,
                     model,
                     temperature,
-                );
-                let outcome = if let Some(token) = cancellation_token {
-                    tokio::select! {
-                        () = token.cancelled() => return None,
-                        result = chat_future => result,
-                    }
-                } else {
-                    chat_future.await
-                };
+                    cancellation_token,
+                )
+                .await;
                 match outcome {
                     Ok(resp) => {
 
@@ -2615,6 +2697,7 @@ async fn execute_tools_parallel(
             let tool_call_id = call.tool_call_id.clone();
             let pre_cleared = guardrails_pre_cleared.get(call_idx).copied().unwrap_or(false);
             let call_approved = runtime_approved.get(call_idx).copied().unwrap_or(false);
+            let tool_name = call.name.clone();
             async move {
                 let _permit = match sem.acquire_owned().await {
                     Ok(p) => p,
@@ -2622,8 +2705,9 @@ async fn execute_tools_parallel(
                         return Err(anyhow::anyhow!("semaphore closed: {e}"));
                     }
                 };
-                CURRENT_TOOL_RUNTIME_APPROVED
-                    .scope(call_approved, CURRENT_TOOL_CALL_ID.scope(tool_call_id, async {
+                let scoped = CURRENT_TOOL_RUNTIME_APPROVED.scope(
+                    call_approved,
+                    CURRENT_TOOL_CALL_ID.scope(tool_call_id, async {
                         execute_one_tool(
                             &call.name,
                             call.arguments.clone(),
@@ -2638,8 +2722,17 @@ async fn execute_tools_parallel(
                             pre_cleared,
                         )
                         .await
-                    }))
-                    .await
+                    }),
+                );
+                match std::panic::AssertUnwindSafe(scoped).catch_unwind().await {
+                    Ok(result) => result,
+                    Err(payload) => {
+                        let msg = crate::runtime::panic_message(&payload);
+                        Err(anyhow::anyhow!(
+                            "tool '{tool_name}' dispatch panicked: {msg}"
+                        ))
+                    }
+                }
             }
         })
         .collect();
@@ -3252,6 +3345,9 @@ pub(crate) async fn run_unified_loop_impl(
     let mut evaluator_retries = 0u32;
     let mut verify_retries = 0u32;
 
+    let mut llm_resilience_attempt: u32 = 0;
+    let mut llm_resilience_spent = Duration::ZERO;
+
     let mut compression_retry_floor: Option<usize> = None;
 
     let mut pacing_break_reason: Option<crate::agent::executor_core::PacingExceeded> = None;
@@ -3594,13 +3690,24 @@ pub(crate) async fn run_unified_loop_impl(
                 (provider, provider_name, model)
             };
 
+        let tools_overhead_tokens = if use_native_tools {
+            serde_json::to_string(tool_specs)
+                .map(|serialized| {
+                    crate::agent::token::budget::estimate_tokens_calibrated(&serialized, model)
+                })
+                .unwrap_or(0)
+        } else {
+            0
+        };
+
         if let Some(svc) = crate::services::try_get_services() {
             let cfg_snapshot = svc.config();
             let compression_cfg = cfg_snapshot.agent.context_compression.clone();
             let context_window = resolve_compaction_context_window(model);
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let compression_threshold =
-                (context_window as f64 * compression_cfg.threshold_ratio) as usize;
+            let compression_threshold = ((context_window as f64
+                * compression_cfg.threshold_ratio) as usize)
+                .saturating_sub(tools_overhead_tokens);
             let estimated_tokens =
                 crate::agent::token::budget::estimate_history_tokens_calibrated(history, model);
             let over_threshold = estimated_tokens > compression_threshold;
@@ -3613,7 +3720,8 @@ pub(crate) async fn run_unified_loop_impl(
                 let compressor = crate::agent::context::compressor::ContextCompressor::new(
                     compression_cfg,
                     context_window,
-                );
+                )
+                .with_tool_overhead_tokens(tools_overhead_tokens);
                 let preserved_fn: Box<crate::agent::context::compressor::PreservedIndexFn> =
                     Box::new(current_turn_preserved_indices);
                 if let Some(ref tx) = on_delta {
@@ -3881,35 +3989,6 @@ pub(crate) async fn run_unified_loop_impl(
             }
         }
 
-        if let Some(svc) = crate::services::try_get_services() {
-            if !svc.rate_limiter.try_acquire("llm").await {
-                if let Some(msg) = svc.rate_limiter.message("llm").await {
-                    tracing::warn!("{}", msg.message);
-                    if let Some(retry_ms) = svc
-                        .rate_limiter
-                        .status("llm")
-                        .await
-                        .and_then(|s| s.retry_after_ms)
-                    {
-                        let sleep =
-                            tokio::time::sleep(std::time::Duration::from_millis(retry_ms.min(10_000)));
-                        match cancellation_token.as_ref() {
-                            Some(token) => {
-                                tokio::select! {
-                                    biased;
-                                    _ = token.cancelled() => {
-                                        return Err(tool_loop_cancelled());
-                                    }
-                                    _ = sleep => {}
-                                }
-                            }
-                            None => sleep.await,
-                        }
-                    }
-                }
-            }
-        }
-
         let request_tools = if use_native_tools {
             Some(tool_specs)
         } else {
@@ -3927,8 +4006,6 @@ pub(crate) async fn run_unified_loop_impl(
         );
         let mut streamed_live_deltas = false;
 
-        let mut llm_resilience_attempt: u32 = 0;
-        let llm_resilience_started_at = std::time::Instant::now();
         let mut emergency_compress_attempts: u32 = 0;
         let mut emergency_context_window: Option<usize> = None;
         const MAX_EMERGENCY_COMPRESS_ATTEMPTS: u32 = 4;
@@ -3964,6 +4041,13 @@ pub(crate) async fn run_unified_loop_impl(
             match consume_result
             {
                 Ok(streamed) => {
+                    if let Some(failed) = stream_probe.failed_attempts_usage.take() {
+                        let _ = record_tool_loop_cost_usage(
+                            active_provider_name,
+                            active_model,
+                            &failed,
+                        );
+                    }
                     streamed_live_deltas = streamed.forwarded_live_deltas;
 
                     for rec in &streamed.pre_executed {
@@ -4013,6 +4097,13 @@ pub(crate) async fn run_unified_loop_impl(
                         .is_some_and(|t| t.is_cancelled())
                     {
                         return Err(tool_loop_cancelled());
+                    }
+                    if let Some(failed) = stream_probe.failed_attempts_usage.take() {
+                        let _ = record_tool_loop_cost_usage(
+                            active_provider_name,
+                            active_model,
+                            &failed,
+                        );
                     }
                     if let Some(partial) = stream_probe.partial_usage.take() {
                         let _ = record_tool_loop_cost_usage(
@@ -4084,6 +4175,7 @@ pub(crate) async fn run_unified_loop_impl(
             }
         } else {
 
+            acquire_llm_rate_limit(cancellation_token.as_ref()).await?;
             let chat_future = active_provider.chat(
                 ChatRequest {
                     messages: &prepared_messages.messages,
@@ -4163,7 +4255,8 @@ pub(crate) async fn run_unified_loop_impl(
                                         crate::agent::context::compressor::ContextCompressor::new(
                                             compression_cfg,
                                             context_window,
-                                        );
+                                        )
+                                        .with_tool_overhead_tokens(tools_overhead_tokens);
                                     if let Some(h) = hooks {
                                         h.fire_pre_compact("error", 0).await;
                                     }
@@ -4220,7 +4313,7 @@ pub(crate) async fn run_unified_loop_impl(
                     }
                     llm_resilience_attempt += 1;
                     if llm_resilience_attempt > LLM_RESILIENCE_MAX_RETRIES
-                        || llm_resilience_started_at.elapsed() >= LLM_RESILIENCE_MAX_TOTAL
+                        || llm_resilience_spent >= LLM_RESILIENCE_MAX_TOTAL
                     {
                         break 'llm_attempt Err(e);
                     }
@@ -4254,6 +4347,7 @@ pub(crate) async fn run_unified_loop_impl(
                             .await;
                     }
                     let sleep_dur = Duration::from_millis(backoff_ms);
+                    llm_resilience_spent += sleep_dur;
                     if let Some(token) = cancellation_token.as_ref() {
                         tokio::select! {
                             biased;
@@ -4303,23 +4397,33 @@ pub(crate) async fn run_unified_loop_impl(
                 if let Some(usage) = resp.usage.as_ref() {
                     let input_tokens = usage.input_tokens.unwrap_or(0);
                     let output_tokens = usage.output_tokens.unwrap_or(0);
+                    let cached_tokens = usage.cached_input_tokens.unwrap_or(0);
+                    let cache_creation_tokens =
+                        usage.cache_creation_input_tokens.unwrap_or(0);
                     if input_tokens + output_tokens > 0 {
-                        if input_tokens > 0 {
+                        let separate_cache_fields =
+                            crate::agent::reward::cost_tracking::usage_reports_separate_cache_fields(
+                                provider_name,
+                                usage,
+                            );
+                        let reported_prompt_tokens = if separate_cache_fields {
+                            input_tokens + cached_tokens + cache_creation_tokens
+                        } else {
+                            input_tokens
+                        };
+                        if reported_prompt_tokens > 0 {
                             let estimated_input = crate::providers::traits::estimate_total_tokens(
                                 &prepared_messages.messages,
                             );
                             crate::agent::token::budget::record_usage_calibration(
                                 model,
                                 estimated_input,
-                                input_tokens,
+                                reported_prompt_tokens,
                             );
                         }
                         if let Some(opt) = crate::agent::token::optimizer::global_optimizer() {
                             opt.record_api_usage(input_tokens as usize, output_tokens as usize);
                         }
-                        let cached_tokens = usage.cached_input_tokens.unwrap_or(0);
-                        let cache_creation_tokens =
-                            usage.cache_creation_input_tokens.unwrap_or(0);
                         let cost_usd = recorded_cost.map(|(_, cost)| cost).unwrap_or_else(|| {
                             let prices = TOOL_LOOP_COST_TRACKING_CONTEXT
                                 .try_with(Clone::clone)
@@ -4329,8 +4433,9 @@ pub(crate) async fn run_unified_loop_impl(
                                 .unwrap_or_default();
                             let pricing = lookup_model_pricing(&prices, provider_name, model);
                             let anthropic_family =
-                                crate::agent::reward::cost_tracking::provider_uses_separate_cache_fields(
+                                crate::agent::reward::cost_tracking::usage_reports_separate_cache_fields(
                                     provider_name,
+                                    usage,
                                 );
                             let fresh_input = if anthropic_family {
                                 input_tokens
@@ -5796,7 +5901,9 @@ pub(crate) async fn run_unified_loop_impl(
                 let _ = tx
                     .send(DraftEvent::ToolCall {
                         name: tool_name.clone(),
-                        args: tool_args.clone(),
+                        args: crate::services::governance::credential_vault::redact_args_optional(
+                            &tool_args,
+                        ),
                         tool_call_id: call.tool_call_id.clone(),
                     })
                     .await;
@@ -5893,19 +6000,20 @@ pub(crate) async fn run_unified_loop_impl(
                 let progress_msg = if outcome.success {
                     format!("\u{2705} {} ({secs}s)\n", call.name)
                 } else if let Some(ref reason) = outcome.error_reason {
-                    if reason.chars().count() > 200 {
+                    let safe_reason = scrub_credentials(reason);
+                    if safe_reason.chars().count() > 200 {
                         tracing::debug!(
                             target: "loop.tool_error_truncated",
                             tool = %call.name,
                             seconds = secs,
-                            reason_full = %reason,
+                            reason_full = %safe_reason,
                             "tool error reason truncated for progress draft; full content logged at debug",
                         );
                     }
                     format!(
                         "\u{274c} {} ({secs}s): {}\n",
                         call.name,
-                        truncate_with_ellipsis(reason, 200)
+                        truncate_with_ellipsis(&safe_reason, 200)
                     )
                 } else {
                     format!("\u{274c} {} ({secs}s)\n", call.name)
@@ -5916,7 +6024,7 @@ pub(crate) async fn run_unified_loop_impl(
                 let _ = tx
                     .send(DraftEvent::ToolResult {
                         name: call.name.clone(),
-                        output: outcome.output.clone(),
+                        output: scrub_credentials(&outcome.output),
                         success: outcome.success,
                         tool_call_id: call.tool_call_id.clone(),
                     })
@@ -5972,12 +6080,15 @@ pub(crate) async fn run_unified_loop_impl(
                     call.name.as_str(),
                 )
             {
+                const POST_EDIT_CHECK_BUDGET: Duration = Duration::from_secs(8);
+                let post_edit_deadline = std::time::Instant::now() + POST_EDIT_CHECK_BUDGET;
                 match tokio::time::timeout(
-                    Duration::from_secs(3),
+                    POST_EDIT_CHECK_BUDGET,
                     crate::agent::verification::post_edit::post_edit_check(
                         &call.name,
                         &call.arguments,
                         &outcome.output,
+                        post_edit_deadline,
                     ),
                 )
                 .await
@@ -5989,9 +6100,10 @@ pub(crate) async fn run_unified_loop_impl(
                     }
                     Ok(None) => {}
                     Err(_) => {
+                        batch_edit_diagnostics_dirty = true;
                         tracing::debug!(
                             tool = %call.name,
-                            "post-edit check timed out; skipping diagnostics append"
+                            "post-edit check timed out; diagnostics treated as dirty (no verified progress)"
                         );
                     }
                 }
@@ -6634,39 +6746,7 @@ pub(crate) fn build_tool_instructions_filtered(
     instructions
 }
 
-struct CodingModeRestoreGuard {
-    previous: Option<crate::agent::coding_mode::CodingMode>,
-}
-
-impl CodingModeRestoreGuard {
-    fn new(next: Option<crate::agent::coding_mode::CodingMode>) -> Self {
-        let previous = match next {
-            Some(ov) => match crate::services::try_get_services() {
-                Some(svc) => {
-                    let prev = *svc.coding_mode.read();
-                    *svc.coding_mode.write() = ov;
-                    Some(prev)
-                }
-                None => None,
-            },
-            None => None,
-        };
-        Self { previous }
-    }
-}
-
-impl Drop for CodingModeRestoreGuard {
-    fn drop(&mut self) {
-        let Some(prev) = self.previous else {
-            return;
-        };
-        if let Some(svc) = crate::services::try_get_services() {
-            *svc.coding_mode.write() = prev;
-        }
-    }
-}
-
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: Config,
     message: Option<String>,
@@ -6679,6 +6759,35 @@ pub async fn run(
     allowed_tools: Option<Vec<String>>,
     coding_mode_override: Option<crate::agent::coding_mode::CodingMode>,
 ) -> Result<String> {
+    let fut = run_impl(
+        config,
+        message,
+        provider_override,
+        model_override,
+        temperature,
+        peripheral_overrides,
+        interactive,
+        session_state_file,
+        allowed_tools,
+    );
+    match coding_mode_override {
+        Some(mode) => crate::agent::coding_mode::scope_coding_mode(mode, fut).await,
+        None => fut.await,
+    }
+}
+
+#[allow(clippy::too_many_lines, clippy::too_many_arguments)]
+async fn run_impl(
+    config: Config,
+    message: Option<String>,
+    provider_override: Option<String>,
+    model_override: Option<String>,
+    temperature: f64,
+    peripheral_overrides: Vec<String>,
+    interactive: bool,
+    session_state_file: Option<PathBuf>,
+    allowed_tools: Option<Vec<String>>,
+) -> Result<String> {
 
     let observer: Arc<dyn Observer> = crate::agent::cli_runtime::build_observer(&config);
     let runtime: Arc<dyn runtime::RuntimeAdapter> =
@@ -6688,8 +6797,6 @@ pub async fn run(
     let _ = crate::services::init_services(
         crate::services::container::ServiceContainerConfig::default(),
     );
-
-    let _coding_mode_guard = CodingModeRestoreGuard::new(coding_mode_override);
 
     if let Some(svc) = crate::services::try_get_services() {
         svc.set_max_context_tokens(config.agent.max_context_tokens);
@@ -6893,6 +7000,29 @@ pub async fn run(
                             )
                             .await;
                             mgr.set_server_tools(&srv, tools).await;
+                            match reg.list_resources(Some(&srv)).await {
+                                Ok(resources) => {
+                                    let manager_resources: Vec<
+                                        crate::services::mcp_manager::McpResource,
+                                    > = resources
+                                        .into_iter()
+                                        .map(|r| crate::services::mcp_manager::McpResource {
+                                            uri: r.uri,
+                                            name: r.name,
+                                            description: r.description,
+                                            mime_type: r.mime_type,
+                                            server_name: srv.clone(),
+                                        })
+                                        .collect();
+                                    mgr.set_server_resources(&srv, manager_resources).await;
+                                }
+                                Err(e) => {
+                                    tracing::debug!(
+                                        server = %srv,
+                                        "MCP resources/list unavailable during sync: {e:#}"
+                                    );
+                                }
+                            }
                         }
                     });
                 }
@@ -7405,9 +7535,11 @@ pub async fn run(
         ];
 
         if config.agent.history_pruning.enabled {
+            let prune_cfg = resolve_history_pruning_config(&config, &model_name);
             let _stats = crate::agent::history::pruner::prune_history(
                 &mut history,
-                &config.agent.history_pruning,
+                &prune_cfg,
+                &model_name,
             );
         }
 
@@ -7709,9 +7841,11 @@ pub async fn run(
                 build_cli_turn_companion(&effective_input, &expanded_input, &context);
 
             if config.agent.history_pruning.enabled {
+                let prune_cfg = resolve_history_pruning_config(&config, &model_name);
                 let stats = crate::agent::history::pruner::prune_history(
                     &mut history,
-                    &config.agent.history_pruning,
+                    &prune_cfg,
+                    &model_name,
                 );
                 if stats.dropped_messages > 0 || stats.collapsed_pairs > 0 {
                     tracing::debug!(

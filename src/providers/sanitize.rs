@@ -134,19 +134,10 @@ pub fn normalize_tool_call_arguments(function_name: &str, arguments: String) -> 
     if serde_json::from_str::<Value>(&arguments).is_ok() {
         return arguments;
     }
-    if let Some(repaired) = repair_partial_tool_input_json(&arguments) {
-        tracing::warn!(
-            function = %function_name,
-            arguments_len = arguments.len(),
-            repaired_len = repaired.len(),
-            "tool-call arguments were truncated; recovered partial arguments via structural repair"
-        );
-        return repaired;
-    }
     tracing::error!(
         function = %function_name,
-        arguments = %arguments,
-        "Invalid JSON in tool-call arguments, using empty object"
+        arguments_len = arguments.len(),
+        "Invalid JSON in tool-call arguments, preserving malformed input for fail-closed rejection"
     );
     crate::observability::runtime_trace::record_event(
         "tool_args_degraded",
@@ -155,13 +146,13 @@ pub fn normalize_tool_call_arguments(function_name: &str, arguments: String) -> 
         None,
         None,
         Some(false),
-        Some("tool-call arguments unparseable; degraded to empty object"),
+        Some("tool-call arguments unparseable; preserved for fail-closed rejection"),
         serde_json::json!({
             "function": function_name,
             "arguments_len": arguments.len(),
         }),
     );
-    "{}".to_string()
+    arguments
 }
 
 #[inline]
@@ -335,7 +326,177 @@ pub fn normalize_chat_messages_for_provider_ext(
         ProviderKind::Anthropic => coerce_orphan_tool_messages_for_anthropic(reasoning_normalized),
         _ => coerce_orphan_tool_messages_in_chat_messages(reasoning_normalized),
     };
-    repair_dangling_tool_pairs_for_provider(no_orphans, kind)
+    let repaired = repair_dangling_tool_pairs_for_provider(no_orphans, kind);
+    merge_consecutive_same_role(repaired)
+}
+
+pub fn merge_consecutive_same_role(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    let mut merged: usize = 0;
+    for msg in messages {
+        let same_role_adjacent = matches!(msg.role.as_str(), "user" | "assistant")
+            && out.last().is_some_and(|p| p.role == msg.role);
+        if !same_role_adjacent {
+            out.push(msg);
+            continue;
+        }
+        let prev_idx = out.len() - 1;
+        if try_merge_same_role_pair(&mut out[prev_idx], &msg) {
+            merged += 1;
+        } else {
+            out.push(msg);
+        }
+    }
+    if merged > 0 {
+        tracing::info!(
+            target: "providers.sanitize",
+            merged,
+            "merged consecutive same-role messages before send (provider wire alternation safety)"
+        );
+    }
+    out
+}
+
+fn parse_assistant_envelope(content: &str) -> Option<serde_json::Map<String, Value>> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with('{') {
+        return None;
+    }
+    let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) else {
+        return None;
+    };
+    let is_envelope = obj.contains_key("tool_calls")
+        || obj.contains_key("content")
+        || obj.contains_key("reasoning_content");
+    if is_envelope { Some(obj) } else { None }
+}
+
+fn envelope_has_tool_calls(env: Option<&serde_json::Map<String, Value>>) -> bool {
+    env.and_then(|obj| obj.get("tool_calls"))
+        .and_then(Value::as_array)
+        .map(|arr| !arr.is_empty())
+        .unwrap_or(false)
+}
+
+fn message_has_signed_thinking(
+    msg: &ChatMessage,
+    env: Option<&serde_json::Map<String, Value>>,
+) -> bool {
+    let meta_signed = msg
+        .metadata
+        .get("thinking_signature")
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    let env_signed = env
+        .and_then(|obj| obj.get("thinking_signature"))
+        .and_then(Value::as_str)
+        .is_some_and(|s| !s.trim().is_empty());
+    meta_signed || env_signed
+}
+
+fn join_nonempty_texts(a: &str, b: &str) -> String {
+    let a = a.trim_end();
+    let b = b.trim_start();
+    if a.is_empty() {
+        return b.to_string();
+    }
+    if b.is_empty() {
+        return a.to_string();
+    }
+    format!("{a}\n\n{b}")
+}
+
+fn try_merge_same_role_pair(prev: &mut ChatMessage, next: &ChatMessage) -> bool {
+    if prev.role == "user" {
+        if prev.content.trim_start().starts_with('[') || next.content.trim_start().starts_with('[')
+        {
+            return false;
+        }
+        prev.content = join_nonempty_texts(&prev.content, &next.content);
+        return true;
+    }
+
+    let prev_env = parse_assistant_envelope(&prev.content);
+    let next_env = parse_assistant_envelope(&next.content);
+
+    if envelope_has_tool_calls(prev_env.as_ref())
+        || prev
+            .metadata
+            .get("tool_calls")
+            .and_then(Value::as_array)
+            .map(|arr| !arr.is_empty())
+            .unwrap_or(false)
+    {
+        return false;
+    }
+    if message_has_signed_thinking(next, next_env.as_ref()) {
+        return false;
+    }
+
+    let prev_text = match prev_env.as_ref() {
+        Some(obj) => obj
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string(),
+        None => prev.content.clone(),
+    };
+
+    if envelope_has_tool_calls(next_env.as_ref()) {
+        if message_has_signed_thinking(prev, prev_env.as_ref()) {
+            return false;
+        }
+        let Some(mut obj) = next_env else {
+            return false;
+        };
+        let existing = obj
+            .get("content")
+            .and_then(Value::as_str)
+            .unwrap_or("")
+            .to_string();
+        obj.insert(
+            "content".to_string(),
+            Value::String(join_nonempty_texts(&prev_text, &existing)),
+        );
+        let mut replacement = next.clone();
+        replacement.content = Value::Object(obj).to_string();
+        *prev = replacement;
+        return true;
+    }
+
+    let next_text = match next_env.as_ref() {
+        Some(obj) => {
+            let body = obj
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            let reasoning = obj
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            match body.or(reasoning) {
+                Some(t) => t.to_string(),
+                None => return true,
+            }
+        }
+        None => next.content.clone(),
+    };
+
+    match prev_env {
+        Some(mut obj) => {
+            obj.insert(
+                "content".to_string(),
+                Value::String(join_nonempty_texts(&prev_text, &next_text)),
+            );
+            prev.content = Value::Object(obj).to_string();
+        }
+        None => {
+            prev.content = join_nonempty_texts(&prev_text, &next_text);
+        }
+    }
+    true
 }
 
 pub fn flatten_reasoning_envelopes_for_wire(messages: Vec<ChatMessage>) -> Vec<ChatMessage> {
@@ -704,27 +865,30 @@ pub fn coerce_orphan_tool_messages_in_chat_messages(
 ) -> Vec<ChatMessage> {
     let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
     let mut coerced: usize = 0;
+    let mut pending_ids = HashSet::new();
 
     for msg in messages {
         if msg.role != "tool" {
+            pending_ids.clear();
+            if msg.role == "assistant" {
+                pending_ids.extend(
+                    extract_assistant_tool_call_ids(&msg.content)
+                        .unwrap_or_default()
+                        .into_iter(),
+                );
+            }
             out.push(msg);
             continue;
         }
 
-        let preceded_ok = match out.last() {
-            Some(last) if last.role == "tool" => true,
-            Some(last) if last.role == "assistant" => {
-                extract_assistant_tool_call_ids(&last.content)
-                    .map(|ids| !ids.is_empty())
-                    .unwrap_or(false)
-            }
-            _ => false,
-        };
+        let id = extract_tool_call_id_from_tool_message(&msg.content);
+        let preceded_ok = id
+            .as_ref()
+            .is_some_and(|tool_call_id| pending_ids.remove(tool_call_id));
 
         if preceded_ok {
             out.push(msg);
         } else {
-            let id = extract_tool_call_id_from_tool_message(&msg.content);
             coerced += 1;
             out.push(recover_orphan_tool_as_user(&msg, id.as_deref()));
         }
@@ -746,29 +910,32 @@ pub fn coerce_orphan_tool_messages_for_anthropic(
     let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
     let mut absorbed: usize = 0;
     let mut dropped: usize = 0;
+    let mut pending_ids = HashSet::new();
 
     for msg in messages {
         if msg.role != "tool" {
+            pending_ids.clear();
+            if msg.role == "assistant" {
+                pending_ids.extend(
+                    extract_assistant_tool_call_ids(&msg.content)
+                        .unwrap_or_default()
+                        .into_iter(),
+                );
+            }
             out.push(msg);
             continue;
         }
 
-        let preceded_ok = match out.last() {
-            Some(last) if last.role == "tool" => true,
-            Some(last) if last.role == "assistant" => {
-                extract_assistant_tool_call_ids(&last.content)
-                    .map(|ids| !ids.is_empty())
-                    .unwrap_or(false)
-            }
-            _ => false,
-        };
+        let id = extract_tool_call_id_from_tool_message(&msg.content);
+        let preceded_ok = id
+            .as_ref()
+            .is_some_and(|tool_call_id| pending_ids.remove(tool_call_id));
 
         if preceded_ok {
             out.push(msg);
             continue;
         }
 
-        let id = extract_tool_call_id_from_tool_message(&msg.content);
         let body = extract_tool_body_from_envelope(&msg.content);
         let id_text = id.as_deref().unwrap_or("unknown");
         let absorbed_text = format!(
@@ -839,12 +1006,6 @@ fn recover_orphan_tool_as_user(msg: &ChatMessage, tool_call_id: Option<&str>) ->
          {inner_body}",
     );
     ChatMessage::user(recovered)
-}
-
-pub fn repair_dangling_tool_pairs_in_chat_messages(
-    messages: Vec<ChatMessage>,
-) -> Vec<ChatMessage> {
-    repair_dangling_tool_pairs_for_provider(messages, ProviderKind::OpenAi)
 }
 
 pub fn repair_dangling_tool_pairs_for_provider(

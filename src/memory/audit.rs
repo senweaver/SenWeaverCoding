@@ -172,10 +172,28 @@ impl<M: Memory> Memory for AuditedMemory<M> {
         self.inner.list(category, session_id).await
     }
 
-    async fn forget(&self, key: &str) -> anyhow::Result<bool> {
-        self.log_audit(AuditOp::Forget, Some(key), None, None, None)
-            .await;
-        self.inner.forget(key).await
+    async fn forget(&self, key: &str, include_global: bool) -> anyhow::Result<bool> {
+        self.log_audit(
+            AuditOp::Forget,
+            Some(key),
+            None,
+            None,
+            Some(&format!("include_global={include_global}")),
+        )
+        .await;
+        self.inner.forget(key, include_global).await
+    }
+
+    async fn forget_everywhere(&self, key: &str) -> anyhow::Result<bool> {
+        self.log_audit(
+            AuditOp::Forget,
+            Some(key),
+            None,
+            None,
+            Some("scope=everywhere"),
+        )
+        .await;
+        self.inner.forget_everywhere(key).await
     }
 
     async fn count(&self) -> anyhow::Result<usize> {

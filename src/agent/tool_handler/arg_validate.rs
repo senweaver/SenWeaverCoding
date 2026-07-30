@@ -70,14 +70,32 @@ pub fn validate_args_against_schema(
                 continue;
             };
             if value.is_null() {
+                let nullable = decl
+                    .get("nullable")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false)
+                    || expected == "null";
+                if !nullable {
+                    type_errors.push(format!(
+                        "'{key}' should be {expected} but got null (field is not nullable)"
+                    ));
+                }
                 continue;
             }
             let structurally_ok = match expected {
                 "array" => value.is_array(),
                 "object" => value.is_object(),
-                "string" | "boolean" | "integer" | "number" => {
-                    !value.is_array() && !value.is_object()
-                }
+                "string" => value.is_string(),
+                "boolean" => value.is_boolean(),
+                "integer" => value
+                    .as_number()
+                    .map(|n| {
+                        n.is_i64()
+                            || n.is_u64()
+                            || n.as_f64().is_some_and(|f| f.is_finite() && f.fract() == 0.0)
+                    })
+                    .unwrap_or(false),
+                "number" => value.is_number(),
                 _ => true,
             };
             if !structurally_ok {

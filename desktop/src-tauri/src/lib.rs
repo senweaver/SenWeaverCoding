@@ -103,12 +103,7 @@ fn locate_sen_binary() -> Option<PathBuf> {
 }
 
 fn generate_bridge_token() -> String {
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    let pid = u128::from(std::process::id());
-    format!("{:x}{:x}", nanos ^ (pid << 64), pid)
+    senweavercoding::auth::oauth_common::random_base64url(32)
 }
 
 fn try_start_isolated_gateway(
@@ -2718,6 +2713,7 @@ fn apply_embedded_gateway_overrides(
     host: &str,
     port: u16,
 ) {
+    senweavercoding::gateway::capture_embedded_gateway_pristine(config);
     if config.gateway.require_pairing {
         tracing::warn!(
             "[sen-desktop] desktop GUI mode is overriding gateway.require_pairing=true to false; \

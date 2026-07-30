@@ -134,7 +134,30 @@ pub fn detect_locale() -> String {
             }
         }
     }
+    #[cfg(windows)]
+    {
+        if let Some(locale) = windows_user_locale() {
+            return locale;
+        }
+    }
     "en".to_string()
+}
+
+#[cfg(windows)]
+fn windows_user_locale() -> Option<String> {
+    use windows_sys::Win32::Globalization::GetUserDefaultLocaleName;
+    let mut buf = [0u16; 85];
+    let len = unsafe { GetUserDefaultLocaleName(buf.as_mut_ptr(), buf.len() as i32) };
+    if len <= 1 {
+        return None;
+    }
+    let name = String::from_utf16_lossy(&buf[..(len as usize).saturating_sub(1)]);
+    let locale = normalize_locale(name.trim());
+    if locale.is_empty() || locale == "C" || locale == "POSIX" {
+        None
+    } else {
+        Some(locale)
+    }
 }
 
 fn normalize_locale(raw: &str) -> String {

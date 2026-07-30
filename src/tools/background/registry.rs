@@ -252,6 +252,33 @@ pub fn kill(id: &str) -> bool {
     false
 }
 
+pub fn kill_all() -> usize {
+    let mut killed = 0usize;
+    {
+        let mut guard = registry()
+            .foreground
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        for (_, entries) in guard.drain() {
+            for entry in entries {
+                let _ = entry.kill_tx.send(());
+                killed += 1;
+            }
+        }
+    }
+    let mut guard = registry()
+        .children
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    for handle in guard.values_mut() {
+        if let Some(tx) = handle.kill_tx.take() {
+            let _ = tx.send(());
+            killed += 1;
+        }
+    }
+    killed
+}
+
 pub(crate) fn register_foreground(
     session_id: String,
     connection_id: Option<String>,

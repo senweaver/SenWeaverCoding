@@ -51,11 +51,32 @@ impl CredentialKind {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CredentialFieldMeta {
+    pub key: String,
+    pub kind: CredentialKind,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct CredentialMeta {
     pub name: String,
     pub kind: CredentialKind,
     pub created_at: i64,
     pub updated_at: i64,
+    #[serde(default = "default_shape_single")]
+    pub shape: String,
+    #[serde(default)]
+    pub fields: Vec<CredentialFieldMeta>,
+}
+
+fn default_shape_single() -> String {
+    "single".to_string()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct CredentialField {
+    pub key: String,
+    pub kind: CredentialKind,
+    pub value: String,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -63,8 +84,52 @@ struct CredentialEntry {
     name: String,
     kind: CredentialKind,
     value: String,
+    #[serde(default)]
+    fields: Vec<CredentialField>,
     created_at: i64,
     updated_at: i64,
+}
+
+impl CredentialEntry {
+    fn is_group(&self) -> bool {
+        !self.fields.is_empty()
+    }
+
+    fn to_meta(&self) -> CredentialMeta {
+        if self.is_group() {
+            CredentialMeta {
+                name: self.name.clone(),
+                kind: CredentialKind::Other,
+                created_at: self.created_at,
+                updated_at: self.updated_at,
+                shape: "group".to_string(),
+                fields: self
+                    .fields
+                    .iter()
+                    .map(|f| CredentialFieldMeta {
+                        key: f.key.clone(),
+                        kind: f.kind,
+                    })
+                    .collect(),
+            }
+        } else {
+            CredentialMeta {
+                name: self.name.clone(),
+                kind: self.kind,
+                created_at: self.created_at,
+                updated_at: self.updated_at,
+                shape: "single".to_string(),
+                fields: Vec::new(),
+            }
+        }
+    }
+
+    fn field_value(&self, key: &str) -> Option<&str> {
+        self.fields
+            .iter()
+            .find(|f| f.key == key)
+            .map(|f| f.value.as_str())
+    }
 }
 
 #[derive(Default, Clone, Debug, Serialize, Deserialize)]
@@ -268,8 +333,9 @@ impl CredentialVault {
             VaultPayload::default()
         };
 
-        let placeholder_re = Regex::new(r"\$\{cred\.([A-Za-z0-9_-]+)\}")
-            .context("compiling credential placeholder regex")?;
+        let placeholder_re =
+            Regex::new(r"\$\{cred\.([A-Za-z0-9_-]+)(?:\.([A-Za-z0-9_-]+))?\}")
+                .context("compiling credential placeholder regex")?;
         let redact_re = placeholder_re.clone();
 
         let vault = Arc::new(Self {
@@ -325,16 +391,7 @@ impl CredentialVault {
 
     pub fn list(&self) -> Vec<CredentialMeta> {
         let state = self.state.read();
-        let mut out: Vec<CredentialMeta> = state
-            .entries
-            .values()
-            .map(|e| CredentialMeta {
-                name: e.name.clone(),
-                kind: e.kind,
-                created_at: e.created_at,
-                updated_at: e.updated_at,
-            })
-            .collect();
+        let mut out: Vec<CredentialMeta> = state.entries.values().map(|e| e.to_meta()).collect();
         out.sort_by(|a, b| a.name.cmp(&b.name));
         out
     }
@@ -347,11 +404,13 @@ impl CredentialVault {
     }
 
     pub fn get(&self, name: &str) -> Option<String> {
-        self.state
-            .read()
-            .entries
-            .get(name)
-            .map(|e| e.value.clone())
+        let state = self.state.read();
+        let entry = state.entries.get(name)?;
+        if entry.is_group() {
+            None
+        } else {
+            Some(entry.value.clone())
+        }
     }
 
     pub fn put(&self, name: &str, kind: CredentialKind, value: &str) -> Result<CredentialMeta> {
@@ -364,23 +423,47 @@ impl CredentialVault {
             .and_modify(|e| {
                 e.kind = kind;
                 e.value = value.to_string();
+                e.fields.clear();
                 e.updated_at = now;
             })
             .or_insert_with(|| CredentialEntry {
                 name: name.to_string(),
                 kind,
                 value: value.to_string(),
+                fields: Vec::new(),
                 created_at: now,
                 updated_at: now,
             })
             .clone();
         self.write_locked(&state)?;
-        Ok(CredentialMeta {
-            name: entry.name,
-            kind: entry.kind,
-            created_at: entry.created_at,
-            updated_at: entry.updated_at,
-        })
+        Ok(entry.to_meta())
+    }
+
+    pub fn put_group(&self, name: &str, fields: Vec<CredentialField>) -> Result<CredentialMeta> {
+        validate_name(name)?;
+        validate_group_fields(&fields)?;
+        let mut state = self.state.write();
+        let now = current_ts();
+        let entry = state
+            .entries
+            .entry(name.to_string())
+            .and_modify(|e| {
+                e.kind = CredentialKind::Other;
+                e.value = String::new();
+                e.fields = fields.clone();
+                e.updated_at = now;
+            })
+            .or_insert_with(|| CredentialEntry {
+                name: name.to_string(),
+                kind: CredentialKind::Other,
+                value: String::new(),
+                fields: fields.clone(),
+                created_at: now,
+                updated_at: now,
+            })
+            .clone();
+        self.write_locked(&state)?;
+        Ok(entry.to_meta())
     }
 
     pub fn delete(&self, name: &str) -> Result<bool> {
@@ -392,6 +475,29 @@ impl CredentialVault {
         Ok(removed)
     }
 
+    fn lookup_placeholder(
+        &self,
+        name: &str,
+        field: Option<&str>,
+        ephemeral: &HashMap<String, String>,
+        state: &VaultPayload,
+    ) -> Option<String> {
+        if field.is_none() {
+            if let Some(value) = ephemeral.get(name) {
+                return Some(value.clone());
+            }
+        }
+        let entry = state.entries.get(name)?;
+        if let Some(field_key) = field {
+            return entry.field_value(field_key).map(|v| v.to_string());
+        }
+        if entry.is_group() {
+            None
+        } else {
+            Some(entry.value.clone())
+        }
+    }
+
     pub fn resolve_placeholders(&self, input: &str) -> String {
         if !input.contains("${cred.") {
             return input.to_string();
@@ -401,20 +507,51 @@ impl CredentialVault {
         let re = &self.placeholder_re;
         re.replace_all(input, |caps: &regex::Captures<'_>| {
             let name = &caps[1];
-            if let Some(value) = ephemeral_lookup.get(name) {
-                return value.clone();
-            }
-            match state.entries.get(name) {
-                Some(e) => e.value.clone(),
-                None => caps.get(0).map(|m| m.as_str().to_string()).unwrap_or_default(),
+            let field = caps.get(2).map(|m| m.as_str());
+            match self.lookup_placeholder(name, field, &ephemeral_lookup, &state) {
+                Some(value) => value,
+                None => caps
+                    .get(0)
+                    .map(|m| m.as_str().to_string())
+                    .unwrap_or_default(),
             }
         })
         .into_owned()
     }
 
+    fn resolve_exact_group_object(&self, input: &str) -> Option<serde_json::Value> {
+        let trimmed = input.trim();
+        let caps = self.placeholder_re.captures(trimmed)?;
+        if caps.get(0).map(|m| m.as_str()) != Some(trimmed) {
+            return None;
+        }
+        if caps.get(2).is_some() {
+            return None;
+        }
+        let name = caps.get(1)?.as_str();
+        let state = self.state.read();
+        let entry = state.entries.get(name)?;
+        if !entry.is_group() {
+            return None;
+        }
+        let mut map = serde_json::Map::with_capacity(entry.fields.len());
+        for field in &entry.fields {
+            map.insert(
+                field.key.clone(),
+                serde_json::Value::String(field.value.clone()),
+            );
+        }
+        Some(serde_json::Value::Object(map))
+    }
+
     pub fn resolve_json(&self, value: &serde_json::Value) -> serde_json::Value {
         match value {
-            serde_json::Value::String(s) => serde_json::Value::String(self.resolve_placeholders(s)),
+            serde_json::Value::String(s) => {
+                if let Some(obj) = self.resolve_exact_group_object(s) {
+                    return obj;
+                }
+                serde_json::Value::String(self.resolve_placeholders(s))
+            }
             serde_json::Value::Array(arr) => serde_json::Value::Array(
                 arr.iter().map(|v| self.resolve_json(v)).collect(),
             ),
@@ -436,7 +573,12 @@ impl CredentialVault {
         let redacted = if input.contains("${cred.") {
             self.redact_re
                 .replace_all(input, |caps: &regex::Captures<'_>| {
-                    format!("[CRED:{}]", &caps[1])
+                    let name = &caps[1];
+                    if let Some(field) = caps.get(2) {
+                        format!("[CRED:{}.{}]", name, field.as_str())
+                    } else {
+                        format!("[CRED:{name}]")
+                    }
                 })
                 .into_owned()
         } else {
@@ -448,16 +590,27 @@ impl CredentialVault {
         {
             let state = self.state.read();
             for entry in state.entries.values() {
-                if entry.value.is_empty() {
-                    continue;
+                if entry.is_group() {
+                    for field in &entry.fields {
+                        if field.value.is_empty() {
+                            continue;
+                        }
+                        if should_skip_short_plaintext(field.kind, &field.value) {
+                            continue;
+                        }
+                        patterns.push(field.value.clone());
+                        replacements.push(format!("[CRED:{}.{}]", entry.name, field.key));
+                    }
+                } else {
+                    if entry.value.is_empty() {
+                        continue;
+                    }
+                    if should_skip_short_plaintext(entry.kind, &entry.value) {
+                        continue;
+                    }
+                    patterns.push(entry.value.clone());
+                    replacements.push(format!("[CRED:{}]", entry.name));
                 }
-                if matches!(entry.kind, CredentialKind::Username | CredentialKind::Url)
-                    && entry.value.len() < 4
-                {
-                    continue;
-                }
-                patterns.push(entry.value.clone());
-                replacements.push(format!("[CRED:{}]", entry.name));
             }
         }
         for (name, value) in current_session_ephemeral_entries() {
@@ -525,6 +678,37 @@ fn validate_name(name: &str) -> Result<()> {
     Ok(())
 }
 
+fn should_skip_short_plaintext(kind: CredentialKind, value: &str) -> bool {
+    matches!(kind, CredentialKind::Username | CredentialKind::Url) && value.len() < 4
+}
+
+fn validate_field_key(key: &str) -> Result<()> {
+    validate_name(key).map_err(|err| anyhow::anyhow!("field key invalid: {err}"))
+}
+
+fn validate_group_fields(fields: &[CredentialField]) -> Result<()> {
+    if fields.is_empty() {
+        return Err(anyhow::anyhow!("credential group must have at least one field"));
+    }
+    let mut seen = std::collections::HashSet::new();
+    for field in fields {
+        validate_field_key(&field.key)?;
+        if field.value.is_empty() {
+            return Err(anyhow::anyhow!(
+                "credential field '{}' value must not be empty",
+                field.key
+            ));
+        }
+        if !seen.insert(field.key.clone()) {
+            return Err(anyhow::anyhow!(
+                "duplicate credential field key '{}'",
+                field.key
+            ));
+        }
+    }
+    Ok(())
+}
+
 static GLOBAL_VAULT: OnceLock<Arc<CredentialVault>> = OnceLock::new();
 
 pub fn init_credential_vault(workspace_anchor: &Path) -> Result<Arc<CredentialVault>> {
@@ -549,17 +733,103 @@ pub fn try_get_credential_vault() -> Option<Arc<CredentialVault>> {
     GLOBAL_VAULT.get().cloned()
 }
 
+const SENSITIVE_KEY_MARKERS: &[&str] = &[
+    "key",
+    "token",
+    "secret",
+    "password",
+    "authorization",
+    "credential",
+];
+
+pub fn is_sensitive_key(key: &str) -> bool {
+    let lower = key.to_ascii_lowercase();
+    SENSITIVE_KEY_MARKERS.iter().any(|m| lower.contains(m))
+}
+
+static STATIC_REDACT_RES: OnceLock<Vec<(Regex, &'static str)>> = OnceLock::new();
+
+fn static_redact_res() -> &'static [(Regex, &'static str)] {
+    STATIC_REDACT_RES.get_or_init(|| {
+        [
+            (
+                r"(?i)\bbearer\s+[A-Za-z0-9\-._~+/]{8,}={0,2}",
+                "Bearer [REDACTED]",
+            ),
+            (r"\bsk-[A-Za-z0-9_-]{16,}", "[REDACTED]"),
+            (r"\bgh[pousr]_[A-Za-z0-9]{20,}", "[REDACTED]"),
+            (r"\bgithub_pat_[A-Za-z0-9_]{20,}", "[REDACTED]"),
+            (r"\bxox[baprs]-[A-Za-z0-9-]{10,}", "[REDACTED]"),
+            (r"\bAKIA[0-9A-Z]{16}\b", "[REDACTED]"),
+            (r"\bAIza[0-9A-Za-z_-]{35}", "[REDACTED]"),
+            (
+                r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{5,}",
+                "[REDACTED]",
+            ),
+            (
+                r#"(?i)\b(api[_-]?key|access[_-]?key|secret[_-]?key|client[_-]?secret|private[_-]?key|secret|token|password|passwd|pwd|authorization|credential)\b\s*[=:]\s*("[^"]+"|'[^']+'|[^\s,;&"']+)"#,
+                "${1}=[REDACTED]",
+            ),
+        ]
+        .iter()
+        .filter_map(|(pattern, replacement)| {
+            Regex::new(pattern).ok().map(|re| (re, *replacement))
+        })
+        .collect()
+    })
+}
+
+pub fn redact_sensitive_text(input: &str) -> String {
+    if input.is_empty() {
+        return String::new();
+    }
+    let mut out = std::borrow::Cow::Borrowed(input);
+    for (re, replacement) in static_redact_res() {
+        if re.is_match(out.as_ref()) {
+            let replaced = re.replace_all(out.as_ref(), *replacement).into_owned();
+            out = std::borrow::Cow::Owned(replaced);
+        }
+    }
+    out.into_owned()
+}
+
+pub fn redact_value_static(value: &serde_json::Value) -> serde_json::Value {
+    match value {
+        serde_json::Value::String(s) => {
+            serde_json::Value::String(redact_sensitive_text(s))
+        }
+        serde_json::Value::Array(arr) => {
+            serde_json::Value::Array(arr.iter().map(redact_value_static).collect())
+        }
+        serde_json::Value::Object(map) => {
+            let mut new_map = serde_json::Map::with_capacity(map.len());
+            for (k, v) in map.iter() {
+                if is_sensitive_key(k) && v.is_string() {
+                    new_map.insert(
+                        k.clone(),
+                        serde_json::Value::String("[REDACTED]".to_string()),
+                    );
+                } else {
+                    new_map.insert(k.clone(), redact_value_static(v));
+                }
+            }
+            serde_json::Value::Object(new_map)
+        }
+        other => other.clone(),
+    }
+}
+
 pub fn redact_for_audit_optional(input: &str) -> String {
     match try_get_credential_vault() {
-        Some(v) => v.redact_for_audit(input),
-        None => input.to_string(),
+        Some(v) => redact_sensitive_text(&v.redact_for_audit(input)),
+        None => redact_sensitive_text(input),
     }
 }
 
 pub fn redact_args_optional(value: &serde_json::Value) -> serde_json::Value {
     match try_get_credential_vault() {
-        Some(v) => v.redact_args(value),
-        None => value.clone(),
+        Some(v) => redact_value_static(&v.redact_args(value)),
+        None => redact_value_static(value),
     }
 }
 

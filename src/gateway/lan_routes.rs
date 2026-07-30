@@ -453,12 +453,14 @@ pub async fn handle_ws_lan(
         return reject;
     }
     if state.exposed || state.pairing.require_pairing() {
-        let token = extract_ws_token(&headers, params.token.as_deref()).unwrap_or("");
-        let authed = if state.exposed {
-            state.pairing.is_authenticated_strict(token)
-        } else {
-            state.pairing.is_authenticated(token)
-        };
+        let tokens = crate::gateway::ws::websocket_tokens(&headers, params.token.as_deref());
+        let authed = tokens.iter().any(|token| {
+            if state.exposed {
+                state.pairing.is_authenticated_strict(token)
+            } else {
+                state.pairing.is_authenticated(token)
+            }
+        });
         if !authed {
             return (StatusCode::UNAUTHORIZED, "Unauthorized").into_response();
         }
@@ -500,18 +502,6 @@ async fn forward_lan_events(
             }
         }
     }
-}
-
-fn extract_ws_token<'a>(headers: &'a HeaderMap, query_token: Option<&'a str>) -> Option<&'a str> {
-    if let Some(token) = query_token {
-        if !token.is_empty() {
-            return Some(token);
-        }
-    }
-    headers
-        .get(axum::http::header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .map(|v| v.trim_start_matches("Bearer ").trim())
 }
 
 fn bad_request(message: &str) -> axum::response::Response {

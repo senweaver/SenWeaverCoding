@@ -133,7 +133,11 @@ pub trait Memory: Send + Sync {
         session_id: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryEntry>>;
 
-    async fn forget(&self, key: &str) -> anyhow::Result<bool>;
+    async fn forget(&self, key: &str, include_global: bool) -> anyhow::Result<bool>;
+
+    async fn forget_everywhere(&self, key: &str) -> anyhow::Result<bool> {
+        self.forget(key, true).await
+    }
 
     async fn purge_namespace(&self, _namespace: &str) -> anyhow::Result<usize> {
         anyhow::bail!("purge_namespace not supported by this memory backend")

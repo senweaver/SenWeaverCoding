@@ -40,11 +40,16 @@ impl Default for SubagentLimitConfig {
 
 #[derive(Clone)]
 pub struct SubagentLimiter {
-    active: Arc<AtomicUsize>,
-    max_concurrent: Arc<AtomicUsize>,
+    state: Arc<LimiterState>,
     queue_excess: bool,
     lineage: Arc<Mutex<LineageTable>>,
-    released: Arc<tokio::sync::Notify>,
+}
+
+struct LimiterState {
+    semaphore: Arc<tokio::sync::Semaphore>,
+    max_concurrent: AtomicUsize,
+    deficit: AtomicUsize,
+    active: AtomicUsize,
 }
 
 #[derive(Default)]
@@ -91,14 +96,31 @@ pub enum QueuedAcquireError {
 }
 
 pub struct SubagentPermit {
-    active: Arc<AtomicUsize>,
-    released: Arc<tokio::sync::Notify>,
+    inner: Option<tokio::sync::OwnedSemaphorePermit>,
+    state: Arc<LimiterState>,
 }
 
 impl Drop for SubagentPermit {
     fn drop(&mut self) {
-        self.active.fetch_sub(1, Ordering::SeqCst);
-        self.released.notify_waiters();
+        self.state.active.fetch_sub(1, Ordering::SeqCst);
+        let Some(permit) = self.inner.take() else {
+            return;
+        };
+        loop {
+            let deficit = self.state.deficit.load(Ordering::SeqCst);
+            if deficit == 0 {
+                return;
+            }
+            if self
+                .state
+                .deficit
+                .compare_exchange(deficit, deficit - 1, Ordering::SeqCst, Ordering::SeqCst)
+                .is_ok()
+            {
+                permit.forget();
+                return;
+            }
+        }
     }
 }
 
@@ -121,36 +143,75 @@ impl SubagentLimiter {
     pub fn new(config: &SubagentLimitConfig) -> Self {
         let max = clamp_max_concurrent(config.max_concurrent);
         Self {
-            active: Arc::new(AtomicUsize::new(0)),
-            max_concurrent: Arc::new(AtomicUsize::new(max)),
+            state: Arc::new(LimiterState {
+                semaphore: Arc::new(tokio::sync::Semaphore::new(max)),
+                max_concurrent: AtomicUsize::new(max),
+                deficit: AtomicUsize::new(0),
+                active: AtomicUsize::new(0),
+            }),
             queue_excess: config.queue_excess,
             lineage: Arc::new(Mutex::new(LineageTable::default())),
-            released: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
     pub fn set_max_concurrent(&self, max_concurrent: usize) {
-        self.max_concurrent
-            .store(clamp_max_concurrent(max_concurrent), Ordering::SeqCst);
-        self.released.notify_waiters();
+        let new_max = clamp_max_concurrent(max_concurrent);
+        let old_max = self.state.max_concurrent.swap(new_max, Ordering::SeqCst);
+        if new_max > old_max {
+            let mut grow = new_max - old_max;
+            loop {
+                let deficit = self.state.deficit.load(Ordering::SeqCst);
+                if deficit == 0 || grow == 0 {
+                    break;
+                }
+                let take = deficit.min(grow);
+                if self
+                    .state
+                    .deficit
+                    .compare_exchange(
+                        deficit,
+                        deficit - take,
+                        Ordering::SeqCst,
+                        Ordering::SeqCst,
+                    )
+                    .is_ok()
+                {
+                    grow -= take;
+                }
+            }
+            if grow > 0 {
+                self.state.semaphore.add_permits(grow);
+            }
+        } else if new_max < old_max {
+            let shrink = old_max - new_max;
+            let forgotten = self.state.semaphore.forget_permits(shrink);
+            if forgotten < shrink {
+                self.state
+                    .deficit
+                    .fetch_add(shrink - forgotten, Ordering::SeqCst);
+            }
+        }
+    }
+
+    fn grant(&self, permit: tokio::sync::OwnedSemaphorePermit) -> SubagentPermit {
+        self.state.active.fetch_add(1, Ordering::SeqCst);
+        SubagentPermit {
+            inner: Some(permit),
+            state: Arc::clone(&self.state),
+        }
     }
 
     pub fn try_acquire(&self) -> PermitResult {
-        let max = self.max_concurrent.load(Ordering::SeqCst);
-        let current = self.active.fetch_add(1, Ordering::SeqCst);
-        if current < max {
-            PermitResult::Granted(SubagentPermit {
-                active: Arc::clone(&self.active),
-                released: Arc::clone(&self.released),
-            })
-        } else {
-            self.active.fetch_sub(1, Ordering::SeqCst);
-            if self.queue_excess {
-                PermitResult::Queued
-            } else {
-                PermitResult::Rejected {
-                    active: current,
-                    max,
+        match Arc::clone(&self.state.semaphore).try_acquire_owned() {
+            Ok(permit) => PermitResult::Granted(self.grant(permit)),
+            Err(_) => {
+                if self.queue_excess {
+                    PermitResult::Queued
+                } else {
+                    PermitResult::Rejected {
+                        active: self.active_count(),
+                        max: self.max_concurrent(),
+                    }
                 }
             }
         }
@@ -161,46 +222,48 @@ impl SubagentLimiter {
         cancel: &CancellationToken,
         deadline: Option<std::time::Instant>,
     ) -> Result<SubagentPermit, QueuedAcquireError> {
-        loop {
-            match self.try_acquire() {
-                PermitResult::Granted(p) => return Ok(p),
-                PermitResult::Rejected { active, max } => {
-                    return Err(QueuedAcquireError::Rejected { active, max });
-                }
-                PermitResult::Queued => {}
+        match self.try_acquire() {
+            PermitResult::Granted(p) => return Ok(p),
+            PermitResult::Rejected { active, max } => {
+                return Err(QueuedAcquireError::Rejected { active, max });
             }
-            let notified = self.released.notified();
-            if let PermitResult::Granted(p) = self.try_acquire() {
-                return Ok(p);
+            PermitResult::Queued => {}
+        }
+        let acquire = Arc::clone(&self.state.semaphore).acquire_owned();
+        tokio::pin!(acquire);
+        let deadline_sleep = async {
+            match deadline {
+                Some(d) => tokio::time::sleep_until(tokio::time::Instant::from_std(d)).await,
+                None => std::future::pending::<()>().await,
             }
-            let sleep_cap = std::time::Duration::from_millis(500);
-            tokio::select! {
-                biased;
-                _ = cancel.cancelled() => return Err(QueuedAcquireError::Cancelled),
-                _ = notified => {}
-                _ = tokio::time::sleep(sleep_cap) => {}
-            }
-            if let Some(d) = deadline
-                && std::time::Instant::now() > d
-            {
-                return Err(QueuedAcquireError::DeadlineExceeded {
+        };
+        tokio::select! {
+            biased;
+            _ = cancel.cancelled() => Err(QueuedAcquireError::Cancelled),
+            () = deadline_sleep => Err(QueuedAcquireError::DeadlineExceeded {
+                active: self.active_count(),
+                max: self.max_concurrent(),
+            }),
+            acquired = &mut acquire => match acquired {
+                Ok(permit) => Ok(self.grant(permit)),
+                Err(_) => Err(QueuedAcquireError::Rejected {
                     active: self.active_count(),
                     max: self.max_concurrent(),
-                });
-            }
+                }),
+            },
         }
     }
 
     pub fn active_count(&self) -> usize {
-        self.active.load(Ordering::SeqCst)
+        self.state.active.load(Ordering::SeqCst)
     }
 
     pub fn max_concurrent(&self) -> usize {
-        self.max_concurrent.load(Ordering::SeqCst)
+        self.state.max_concurrent.load(Ordering::SeqCst)
     }
 
     pub fn is_at_capacity(&self) -> bool {
-        self.active_count() >= self.max_concurrent.load(Ordering::SeqCst)
+        self.state.semaphore.available_permits() == 0
     }
 
     pub fn register(
@@ -212,6 +275,18 @@ impl SubagentLimiter {
         let agent_id = agent_id.into();
         {
             let mut lineage = self.lineage.lock();
+            let parent_id = match parent_id {
+                Some(p) if p == agent_id || lineage_path_reaches(&lineage, &p, &agent_id) => {
+                    tracing::warn!(
+                        target: "agent.subagent_limiter",
+                        agent_id = %agent_id,
+                        parent_id = %p,
+                        "rejected lineage parent link that would create a cycle; registering as root"
+                    );
+                    None
+                }
+                other => other,
+            };
             lineage
                 .parents
                 .insert(agent_id.clone(), parent_id.clone());
@@ -302,6 +377,8 @@ impl SubagentLimiter {
 
     fn collect_descendants(&self, agent_id: &str) -> Vec<String> {
         let lineage = self.lineage.lock();
+        let mut visited: HashSet<String> = HashSet::new();
+        visited.insert(agent_id.to_string());
         let mut out: Vec<String> = Vec::new();
         let mut frontier: Vec<String> = lineage
             .children
@@ -309,13 +386,35 @@ impl SubagentLimiter {
             .map(|c| c.iter().cloned().collect())
             .unwrap_or_default();
         while let Some(next) = frontier.pop() {
+            if !visited.insert(next.clone()) {
+                continue;
+            }
             if let Some(next_children) = lineage.children.get(&next) {
                 for c in next_children {
-                    frontier.push(c.clone());
+                    if !visited.contains(c) {
+                        frontier.push(c.clone());
+                    }
                 }
             }
             out.push(next);
         }
         out
+    }
+}
+
+fn lineage_path_reaches(lineage: &LineageTable, from: &str, target: &str) -> bool {
+    let mut visited: HashSet<&str> = HashSet::new();
+    let mut cursor = from;
+    loop {
+        if cursor == target {
+            return true;
+        }
+        if !visited.insert(cursor) {
+            return false;
+        }
+        match lineage.parents.get(cursor).and_then(|p| p.as_deref()) {
+            Some(parent) => cursor = parent,
+            None => return false,
+        }
     }
 }

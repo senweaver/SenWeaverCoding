@@ -185,9 +185,7 @@ impl SymbolGraph {
         let dir = root.join(".sen");
         fs::create_dir_all(&dir)?;
         let target = dir.join("symbol_graph.json");
-        let tmp = dir.join("symbol_graph.json.tmp");
-        fs::write(&tmp, body)?;
-        fs::rename(&tmp, &target)?;
+        crate::util::atomic_write(&target, body)?;
         Ok(target)
     }
 
@@ -471,22 +469,39 @@ impl SymbolGraph {
             .collect();
 
         const MAX_CALLER_RESCAN: usize = 512;
-        let mut caller_rel: HashSet<PathBuf> = HashSet::new();
-        for e in &self.edges {
-            if dirty_rel.contains(&e.to.file) && !dirty_rel.contains(&e.from.file) {
-                caller_rel.insert(e.from.file.clone());
+        let caller_rel: HashSet<PathBuf> = {
+            let mut callers = HashSet::new();
+            for e in &self.edges {
+                if dirty_rel.contains(&e.to.file) && !dirty_rel.contains(&e.from.file) {
+                    callers.insert(e.from.file.clone());
+                }
+            }
+            callers
+        };
+        if caller_rel.len() > MAX_CALLER_RESCAN {
+            if let Ok(rebuilt) = SymbolGraph::build(root) {
+                *self = rebuilt;
+                return;
             }
         }
-        if caller_rel.len() > MAX_CALLER_RESCAN {
-            tracing::debug!(
-                target: "code_intel.symbol_graph",
-                callers = caller_rel.len(),
-                cap = MAX_CALLER_RESCAN,
-                "capping caller re-scan for symbol-graph partial rebuild"
-            );
-            let capped: HashSet<PathBuf> =
-                caller_rel.into_iter().take(MAX_CALLER_RESCAN).collect();
-            caller_rel = capped;
+
+        let old_dirty_names: HashSet<String> = self
+            .symbols
+            .iter()
+            .filter(|entry| dirty_rel.contains(&entry.id.file))
+            .map(|entry| entry.id.name.clone())
+            .collect();
+        let mut new_dirty_names = HashSet::new();
+        for path in changed {
+            if let Ok(entries) = extract_outline(path, None) {
+                new_dirty_names.extend(entries.into_iter().map(|entry| entry.name));
+            }
+        }
+        if old_dirty_names != new_dirty_names {
+            if let Ok(rebuilt) = SymbolGraph::build(root) {
+                *self = rebuilt;
+                return;
+            }
         }
 
         let mut rescan_rel: HashSet<PathBuf> = dirty_rel.clone();
@@ -498,7 +513,12 @@ impl SymbolGraph {
             .retain(|e| !rescan_rel.contains(&e.from.file) && !removed_rel.contains(&e.to.file));
 
         let mut per_file: Vec<(PathBuf, String, Vec<OutlineEntry>)> = Vec::new();
-        let mut test_syms: HashSet<SymbolId> = HashSet::new();
+        let mut test_syms: HashSet<SymbolId> = self
+            .symbols
+            .iter()
+            .filter(|entry| entry.is_test)
+            .map(|entry| entry.id.clone())
+            .collect();
         for abs_path in changed {
             let rel = to_rel(abs_path);
             let Ok(src) = fs::read_to_string(abs_path) else {

@@ -162,6 +162,7 @@ pub async fn handle_ws_canvas(
         return reject;
     }
 
+    let ws = crate::gateway::ws::with_websocket_auth_protocol(ws, &headers);
     ws.on_upgrade(move |socket| handle_canvas_socket(socket, state, id))
         .into_response()
 }

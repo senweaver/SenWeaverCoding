@@ -23,7 +23,7 @@ export type ClientMessage =
     }
   | { type: 'set_permission_mode'; mode: PermissionMode }
   | { type: 'set_coding_mode'; mode: CodingModeId; scope?: 'session' | 'global'; confirmed?: boolean }
-  | ({ type: 'set_runtime_config'; persist?: boolean } & RuntimeSelection)
+  | ({ type: 'set_runtime_config'; persist?: boolean; requestId?: string } & RuntimeSelection)
   | { type: 'set_pii_config'; data: { enabled: boolean; disabledKinds: string[] } }
   | { type: 'stop_generation' }
   | { type: 'cancel_tool'; sessionId?: string; toolUseId?: string }

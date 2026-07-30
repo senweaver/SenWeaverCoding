@@ -78,6 +78,10 @@ pub async fn generate_title(
         tools: None,
     };
 
+    if let Err(error) = crate::agent::loop_::acquire_llm_rate_limit(None).await {
+        tracing::debug!("Auto-title rate-limit wait failed: {error}");
+        return None;
+    }
     match provider.chat(request, model, 0.3).await {
         Ok(response) => {
             let raw = response.text.as_deref().unwrap_or("").trim().to_string();

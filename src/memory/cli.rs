@@ -197,7 +197,7 @@ async fn handle_clear(
 
     let mut deleted = 0usize;
     for entry in &entries {
-        if mem.forget(&entry.key).await? {
+        if mem.forget_everywhere(&entry.key).await? {
             deleted += 1;
         }
     }
@@ -250,7 +250,7 @@ async fn handle_clear_key(mem: &dyn Memory, key: &str, yes: bool) -> Result<()> 
         }
     }
 
-    if mem.forget(&target).await? {
+    if mem.forget_everywhere(&target).await? {
         println!("{} Deleted key: {target}", style("✓").green().bold());
     }
 

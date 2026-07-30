@@ -50,6 +50,7 @@ type TreeRow =
   | { kind: 'create'; parentRelPath: string; depth: number }
   | { kind: 'dirError'; relPath: string; message: string; depth: number }
   | { kind: 'dirEmpty'; relPath: string; depth: number }
+  | { kind: 'dirLoading'; relPath: string; depth: number }
 
 function treeRowKey(row: TreeRow): string {
   switch (row.kind) {
@@ -61,6 +62,8 @@ function treeRowKey(row: TreeRow): string {
       return `error:${row.relPath}`
     case 'dirEmpty':
       return `empty:${row.relPath}`
+    case 'dirLoading':
+      return `loading:${row.relPath}`
   }
 }
 
@@ -77,6 +80,8 @@ export function FileTree({ workDir, onSelect }: Props) {
   const rootError = useWorkspaceFilesStore((s) => s.rootError)
   const refreshAll = useWorkspaceFilesStore((s) => s.refreshAll)
   const loadDirectory = useWorkspaceFilesStore((s) => s.loadDirectory)
+  const retryDirectory = useWorkspaceFilesStore((s) => s.retryDirectory)
+  const ensureDirectoryLoaded = useWorkspaceFilesStore((s) => s.ensureDirectoryLoaded)
   const selectedRelPath = useWorkspaceFilesStore((s) => s.selectedRelPath)
   const renameAction = useWorkspaceFilesStore((s) => s.rename)
   const removeAction = useWorkspaceFilesStore((s) => s.remove)
@@ -542,6 +547,18 @@ export function FileTree({ workDir, onSelect }: Props) {
   const canOpenTerminal = useMemo(() => isTauriRuntime(), [])
 
   const dirsForFlat = useWorkspaceFilesStore((s) => s.dirs)
+
+  useEffect(() => {
+    if (!root) return
+    const prefix = `${root}::`
+    for (const key of Object.keys(dirsForFlat)) {
+      if (!key.startsWith(prefix)) continue
+      const rel = key.slice(prefix.length)
+      if (!rel) continue
+      ensureDirectoryLoaded(rel)
+    }
+  }, [dirsForFlat, ensureDirectoryLoaded, root])
+
   const treeRows = useMemo<TreeRow[]>(() => {
     if (!root) return []
     const rows: TreeRow[] = []
@@ -573,6 +590,14 @@ export function FileTree({ workDir, onSelect }: Props) {
             kind: 'dirError',
             relPath: entry.relPath,
             message: dir.error,
+            depth: depth + 1,
+          })
+          if (!dir.loaded) continue
+        }
+        if (dir?.loading && !dir.loaded) {
+          rows.push({
+            kind: 'dirLoading',
+            relPath: entry.relPath,
             depth: depth + 1,
           })
           continue
@@ -839,11 +864,31 @@ export function FileTree({ workDir, onSelect }: Props) {
           )
         case 'dirError':
           return (
+            <button
+              type="button"
+              className="flex w-full items-center gap-1.5 px-2 py-1 text-left text-[11px] text-[var(--color-danger)] hover:bg-[var(--color-danger)]/10"
+              style={{ paddingLeft: `${row.depth * 12 + 4}px` }}
+              onClick={() => {
+                void retryDirectory(row.relPath)
+              }}
+            >
+              <span className="truncate">{row.message}</span>
+              <span className="flex-shrink-0 underline">{t('files.tree.retry')}</span>
+            </button>
+          )
+        case 'dirLoading':
+          return (
             <div
-              className="px-2 py-1 text-[11px] text-[var(--color-text-tertiary)]"
+              className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-[var(--color-text-tertiary)]"
               style={{ paddingLeft: `${row.depth * 12 + 4}px` }}
             >
-              {row.message}
+              <span
+                aria-hidden="true"
+                className="material-symbols-outlined text-[12px] animate-spin"
+              >
+                progress_activity
+              </span>
+              <span>{t('files.tree.loadingDir')}</span>
             </div>
           )
         case 'dirEmpty':
@@ -852,7 +897,7 @@ export function FileTree({ workDir, onSelect }: Props) {
               className="px-2 py-1 text-[11px] text-[var(--color-text-tertiary)] italic"
               style={{ paddingLeft: `${row.depth * 12 + 4}px` }}
             >
-              ·
+              {t('files.empty')}
             </div>
           )
       }
@@ -867,6 +912,7 @@ export function FileTree({ workDir, onSelect }: Props) {
       handleRenameSubmit,
       handleSelect,
       renameTarget,
+      retryDirectory,
       selectedRelPath,
       t,
     ],

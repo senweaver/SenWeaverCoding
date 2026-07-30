@@ -4,6 +4,7 @@
 
 use axum::http::{HeaderMap, StatusCode, Uri, header};
 use axum::response::IntoResponse;
+use base64::Engine as _;
 use std::path::Path;
 use std::sync::OnceLock;
 
@@ -12,6 +13,19 @@ use super::AppState;
 pub const TOKEN_ENV: &str = "SEN_GATEWAY_TOKEN";
 pub const TOKEN_HEADER: &str = "x-sen-gateway-token";
 pub const TOKEN_FILE_NAME: &str = "gateway.token";
+
+pub fn decode_websocket_bearer_protocol(protocol: &str) -> Option<String> {
+    if let Some(token) = protocol.strip_prefix("bearer64.") {
+        let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(token)
+            .ok()?;
+        return String::from_utf8(bytes).ok().filter(|value| !value.is_empty());
+    }
+    protocol
+        .strip_prefix("bearer.")
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
 
 pub fn loopback_token() -> &'static str {
     static TOKEN: OnceLock<String> = OnceLock::new();
@@ -39,7 +53,7 @@ pub fn persist_token_file(config_dir: &Path) {
     {
         return;
     }
-    if let Err(err) = std::fs::write(&path, token) {
+    if let Err(err) = crate::util::atomic_write(&path, token.as_bytes()) {
         tracing::warn!(
             path = %path.display(),
             error = %err,
@@ -113,7 +127,7 @@ pub fn request_matches(headers: &HeaderMap, query_token: Option<&str>) -> bool {
             protos
                 .split(',')
                 .map(str::trim)
-                .find_map(|p| p.strip_prefix("bearer."))
+                .find_map(decode_websocket_bearer_protocol)
         })
     {
         if t == expected {
@@ -151,9 +165,6 @@ pub async fn enforce(
     request: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
-    if state.exposed || state.pairing.require_pairing() {
-        return next.run(request).await;
-    }
     if request.method() == axum::http::Method::OPTIONS {
         return next.run(request).await;
     }
@@ -162,34 +173,51 @@ pub async fn enforce(
         return next.run(request).await;
     }
     let qt = query_token(request.uri()).map(str::to_string);
-    if request_matches(request.headers(), qt.as_deref()) {
+    if !state.exposed && request_matches(request.headers(), qt.as_deref()) {
         return next.run(request).await;
     }
-    let bearer = request
+    let mut credentials = Vec::new();
+    if let Some(bearer) = request
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|auth| auth.strip_prefix("Bearer "))
-        .unwrap_or("");
-    if !bearer.is_empty() && state.pairing.is_authenticated_strict(bearer) {
-        return next.run(request).await;
+        .filter(|value| !value.is_empty())
+    {
+        credentials.push(bearer.to_string());
     }
     if let Some(t) = qt.as_deref() {
-        if state.pairing.is_authenticated_strict(t) {
-            return next.run(request).await;
+        credentials.push(t.to_string());
+    }
+    if let Some(protocols) = request
+        .headers()
+        .get("sec-websocket-protocol")
+        .and_then(|value| value.to_str().ok())
+    {
+        for protocol in protocols.split(',').map(str::trim) {
+            if let Some(token) = decode_websocket_bearer_protocol(protocol) {
+                credentials.push(token);
+            }
         }
+    }
+    if credentials
+        .iter()
+        .any(|credential| state.pairing.is_authenticated_strict(credential))
+    {
+        return next.run(request).await;
     }
     tracing::debug!(
         target: "gateway.security",
         path = %request.uri().path(),
-        "rejected local gateway request without a valid loopback token"
+        exposed = state.exposed,
+        pairing_required = state.pairing.require_pairing(),
+        "rejected gateway request without valid authentication"
     );
     (
         StatusCode::UNAUTHORIZED,
         axum::Json(serde_json::json!({
-            "error": "Unauthorized - this local gateway requires its loopback token. Send \
-                      Authorization: Bearer <token>, the X-Sen-Gateway-Token header, or \
-                      ?token=<token>; the token is in <config dir>/gateway.token"
+            "error": "Unauthorized - send a valid Bearer token, X-Sen-Gateway-Token header, \
+                      or WebSocket bearer subprotocol"
         })),
     )
         .into_response()

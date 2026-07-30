@@ -10,6 +10,8 @@ use serde_json::json;
 use crate::services::mcp_manager::McpServerStatus;
 use crate::tools::mcp::client::McpRegistry;
 
+const MAX_RESOURCE_TEXT_BYTES: usize = 65_536;
+
 pub struct McpResourcesReadTool {
     registry: Option<Arc<McpRegistry>>,
 }
@@ -114,27 +116,7 @@ impl Tool for McpResourcesReadTool {
             });
         }
 
-        let Some(meta) = server_info.resources.iter().find(|r| r.uri == uri) else {
-            let known_uris: Vec<&str> = server_info
-                .resources
-                .iter()
-                .map(|r| r.uri.as_str())
-                .collect();
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "Resource URI '{}' not found on server '{}'. Known resources: {}",
-                    uri,
-                    server,
-                    if known_uris.is_empty() {
-                        "(none)".to_string()
-                    } else {
-                        known_uris.join(", ")
-                    }
-                )),
-            });
-        };
+        let meta = server_info.resources.iter().find(|r| r.uri == uri);
 
         let registry = self
             .registry
@@ -145,14 +127,17 @@ impl Tool for McpResourcesReadTool {
             match registry.read_resource(server, uri).await {
                 Ok(contents) => {
                     let output = serde_json::to_string_pretty(&json!({
-                        "uri": meta.uri,
-                        "name": meta.name,
-                        "server": meta.server_name,
+                        "uri": uri,
+                        "name": meta.map(|m| m.name.clone()),
+                        "server": server,
                         "contents": contents.iter().map(|c| {
                             json!({
                                 "uri": c.uri,
                                 "mimeType": c.mime_type,
-                                "text": c.text,
+                                "text": c.text.as_ref().map(|t| {
+                                    crate::util::truncate_head_tail(t, MAX_RESOURCE_TEXT_BYTES, 70)
+                                        .unwrap_or_else(|| t.clone())
+                                }),
                                 "blob": c.blob.as_ref().map(|b| {
                                     if b.len() > 200 {
                                         format!("{}... ({} chars, base64)", crate::util::truncate_str_bytes(b, 200), b.len())
@@ -171,28 +156,41 @@ impl Tool for McpResourcesReadTool {
                         error: None,
                     })
                 }
-                Err(e) => Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!(
-                        "Failed to read resource '{}' from server '{}': {e:#}",
-                        uri, server
-                    )),
-                }),
+                Err(e) => {
+                    let known_uris: Vec<&str> = server_info
+                        .resources
+                        .iter()
+                        .map(|r| r.uri.as_str())
+                        .collect();
+                    Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "Failed to read resource '{}' from server '{}': {e:#}. Known resources: {}",
+                            uri,
+                            server,
+                            if known_uris.is_empty() {
+                                "(none)".to_string()
+                            } else {
+                                known_uris.join(", ")
+                            }
+                        )),
+                    })
+                }
             }
         } else {
             Ok(ToolResult {
                 success: false,
                 output: serde_json::to_string_pretty(&json!({
-                    "uri": meta.uri,
-                    "name": meta.name,
-                    "description": meta.description,
-                    "mime_type": meta.mime_type,
-                    "server": meta.server_name,
+                    "uri": uri,
+                    "name": meta.map(|m| m.name.clone()),
+                    "description": meta.and_then(|m| m.description.clone()),
+                    "mime_type": meta.and_then(|m| m.mime_type.clone()),
+                    "server": server,
                 }))
                 .unwrap_or_default(),
                 error: Some(format!(
-                    "Resource '{}' exists on server '{}' but live content reading \
+                    "Live content reading of resource '{}' on server '{}' \
                      requires an McpRegistry, which was not injected into this tool.",
                     uri, server
                 )),

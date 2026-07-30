@@ -10,7 +10,7 @@ fn default_enabled() -> bool {
 }
 
 fn default_max_tokens() -> usize {
-    64_000
+    0
 }
 
 fn default_keep_recent() -> usize {
@@ -56,11 +56,21 @@ pub struct PruneStats {
     pub dropped_messages: usize,
 }
 
-fn estimate_tokens(messages: &[ChatMessage]) -> usize {
-    messages
-        .iter()
-        .map(crate::providers::traits::estimate_message_tokens)
-        .sum()
+const PRUNE_NOTICE_PREFIX: &str = "[context notice]";
+
+fn prune_notice_message(removed: usize) -> ChatMessage {
+    ChatMessage::user(&format!(
+        "{PRUNE_NOTICE_PREFIX} {removed} earlier message(s) were removed because the \
+         conversation exceeded the context budget; their content is no longer available."
+    ))
+}
+
+fn calibrated_message_tokens(message: &ChatMessage, factor: f64) -> usize {
+    let raw = crate::providers::traits::estimate_message_tokens(message);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        ((raw as f64 * 1.05) * factor).round() as usize
+    }
 }
 
 fn is_native_tool_pair(assistant: &ChatMessage, tool: &ChatMessage) -> bool {
@@ -111,9 +121,13 @@ fn group_is_protected(messages: &[ChatMessage], start: usize, end: usize, keep_r
     (start..end).any(|idx| messages[idx].role == "system")
 }
 
-pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConfig) -> PruneStats {
+pub fn prune_history(
+    messages: &mut Vec<ChatMessage>,
+    config: &HistoryPrunerConfig,
+    model: &str,
+) -> PruneStats {
     let messages_before = messages.len();
-    if !config.enabled || messages.is_empty() {
+    if !config.enabled || config.max_tokens == 0 || messages.is_empty() {
         return PruneStats {
             messages_before,
             messages_after: messages_before,
@@ -122,7 +136,9 @@ pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConf
         };
     }
 
-    let mut total_tokens = estimate_tokens(messages);
+    let factor = crate::agent::token::budget::calibration_factor_for(model);
+    let mut total_tokens =
+        crate::agent::token::budget::estimate_history_tokens_calibrated(messages, model);
     if total_tokens <= config.max_tokens {
         return PruneStats {
             messages_before,
@@ -158,10 +174,10 @@ pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConf
             if is_native_tool_pair(&messages[i], &messages[i + 1]) {
                 let mut collapsed_any = false;
                 for message in messages.iter_mut().take(run_end).skip(i + 1) {
-                    let before = crate::providers::traits::estimate_message_tokens(message);
+                    let before = calibrated_message_tokens(message, factor);
                     if truncate_native_tool_result(message) {
                         collapsed_any = true;
-                        let after = crate::providers::traits::estimate_message_tokens(message);
+                        let after = calibrated_message_tokens(message, factor);
                         total_tokens = total_tokens.saturating_sub(before.saturating_sub(after));
                     }
                 }
@@ -173,7 +189,7 @@ pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConf
             }
 
             let group_tokens: usize = (i..run_end)
-                .map(|idx| crate::providers::traits::estimate_message_tokens(&messages[idx]))
+                .map(|idx| calibrated_message_tokens(&messages[idx], factor))
                 .sum();
             let first_tool = &messages[i + 1].content;
             let truncated: String = first_tool.chars().take(100).collect();
@@ -183,13 +199,9 @@ pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConf
             } else {
                 format!("{original_text}\n[Tool result: {truncated}...]")
             };
-            messages[i] = ChatMessage {
-                role: "assistant".to_string(),
-                content: summary,
-                metadata: Default::default(),
-            };
+            messages[i].content = summary;
             messages.drain(i + 1..run_end);
-            let kept = crate::providers::traits::estimate_message_tokens(&messages[i]);
+            let kept = calibrated_message_tokens(&messages[i], factor);
             total_tokens = total_tokens.saturating_sub(group_tokens.saturating_sub(kept));
             collapsed_pairs += 1;
             i += 1;
@@ -212,7 +224,7 @@ pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConf
                 continue;
             }
             let group_tokens: usize = (i..end)
-                .map(|idx| crate::providers::traits::estimate_message_tokens(&messages[idx]))
+                .map(|idx| calibrated_message_tokens(&messages[idx], factor))
                 .sum();
             for flag in drop_flags.iter_mut().take(end).skip(i) {
                 *flag = true;
@@ -222,9 +234,33 @@ pub fn prune_history(messages: &mut Vec<ChatMessage>, config: &HistoryPrunerConf
             i = end;
         }
         if dropped_messages > 0 {
-            let mut keep_iter = drop_flags.into_iter();
-            messages.retain(|_| !keep_iter.next().unwrap_or(false));
+            let mut rebuilt: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+            let mut run = 0usize;
+            for (message, dropped) in messages.drain(..).zip(drop_flags.into_iter()) {
+                if dropped {
+                    run += 1;
+                    continue;
+                }
+                if run > 0 {
+                    rebuilt.push(prune_notice_message(run));
+                    run = 0;
+                }
+                rebuilt.push(message);
+            }
+            if run > 0 {
+                rebuilt.push(prune_notice_message(run));
+            }
+            *messages = rebuilt;
+            tracing::warn!(
+                target: "agent.history.pruner",
+                dropped = dropped_messages,
+                "history pruner removed earlier messages over the context budget; placeholder notices inserted"
+            );
         }
+    }
+
+    if collapsed_pairs > 0 || dropped_messages > 0 {
+        crate::agent::context::compressor::repair_tool_pairs(messages);
     }
 
     PruneStats {

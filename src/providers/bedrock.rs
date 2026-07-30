@@ -611,7 +611,21 @@ impl BedrockProvider {
         } else {
             Some(system_blocks)
         };
-        (system, converse_messages)
+        (system, Self::merge_adjacent_same_role(converse_messages))
+    }
+
+    fn merge_adjacent_same_role(messages: Vec<ConverseMessage>) -> Vec<ConverseMessage> {
+        let mut out: Vec<ConverseMessage> = Vec::with_capacity(messages.len());
+        for msg in messages {
+            if let Some(last) = out.last_mut() {
+                if last.role == msg.role {
+                    last.content.extend(msg.content);
+                    continue;
+                }
+            }
+            out.push(msg);
+        }
+        out
     }
 
     fn extract_tool_call_id(content: &str) -> Option<String> {
@@ -978,6 +992,10 @@ impl Provider for BedrockProvider {
             prompt_caching: true,
             responses_api: false,
         }
+    }
+
+    fn message_format_kind(&self) -> crate::providers::sanitize::ProviderKind {
+        crate::providers::sanitize::ProviderKind::Anthropic
     }
 
     fn supports_native_tools(&self) -> bool {

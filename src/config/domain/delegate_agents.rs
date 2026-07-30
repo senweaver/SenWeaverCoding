@@ -15,11 +15,7 @@ pub struct DelegateAgentConfig {
     #[serde(default)]
     pub system_prompt: Option<String>,
 
-    #[serde(
-        default,
-        serialize_with = "crate::config::redact::redact_optional_string",
-        deserialize_with = "crate::config::redact::deserialize_optional_string"
-    )]
+    #[serde(default)]
     pub api_key: Option<String>,
 
     #[serde(default)]

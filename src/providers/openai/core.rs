@@ -658,10 +658,13 @@ impl OpenAiProvider {
         let count_tokens = options.count_tokens;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
+        let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
 
         let _ = crate::runtime::spawn_supervised("providers.openai.stream_chunks", async move {
-            let response = match client
-                .post(&url)
+            let response = match crate::providers::core::idempotency::apply_idempotency_header_value(
+                client.post(&url),
+                idempotency_key,
+            )
                 .header("Authorization", format!("Bearer {credential}"))
                 .header("Accept", "text/event-stream")
                 .json(&request)
@@ -740,13 +743,14 @@ impl Provider for OpenAiProvider {
             stream_options: None,
         };
 
-        let response = self
-            .http_client()
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {credential}"))
-            .json(&request)
-            .send()
-            .await?;
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post(format!("{}/chat/completions", self.base_url)),
+        )
+        .header("Authorization", format!("Bearer {credential}"))
+        .json(&request)
+        .send()
+        .await?;
 
         if !response.status().is_success() {
             return Err(super::super::api_error("OpenAI", response).await);
@@ -809,13 +813,14 @@ impl Provider for OpenAiProvider {
             prediction: current_prediction_param(),
         };
 
-        let response = self
-            .http_client()
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {credential}"))
-            .json(&native_request)
-            .send()
-            .await?;
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post(format!("{}/chat/completions", self.base_url)),
+        )
+        .header("Authorization", format!("Bearer {credential}"))
+        .json(&native_request)
+        .send()
+        .await?;
 
         if !response.status().is_success() {
             return Err(super::super::api_error("OpenAI", response).await);
@@ -900,13 +905,14 @@ impl Provider for OpenAiProvider {
             prediction: current_prediction_param(),
         };
 
-        let response = self
-            .http_client()
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {credential}"))
-            .json(&native_request)
-            .send()
-            .await?;
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post(format!("{}/chat/completions", self.base_url)),
+        )
+        .header("Authorization", format!("Bearer {credential}"))
+        .json(&native_request)
+        .send()
+        .await?;
 
         if !response.status().is_success() {
             return Err(super::super::api_error("OpenAI", response).await);
@@ -951,18 +957,29 @@ impl Provider for OpenAiProvider {
 
         let adjusted_temperature = Self::adjust_temperature_for_model(model, temperature);
 
+        let sanitized_messages =
+            crate::providers::sanitize::sanitize_messages_before_send_for_provider(
+                messages.to_vec(),
+                model,
+                self.max_tokens.unwrap_or(0) as usize,
+                None,
+                crate::providers::sanitize::ProviderKind::OpenAi,
+            );
+
+        let strict_schema =
+            crate::tools::schema::SchemaCleanr::prepare_for_strict_output(schema.clone());
         let response_format = serde_json::json!({
             "type": "json_schema",
             "json_schema": {
                 "name": "structured_output",
-                "schema": schema,
+                "schema": strict_schema,
                 "strict": true
             }
         });
 
         let mut body = serde_json::json!({
             "model": model,
-            "messages": Self::convert_messages(messages),
+            "messages": Self::convert_messages(&sanitized_messages),
             "temperature": adjusted_temperature,
             "response_format": response_format,
         });
@@ -976,13 +993,14 @@ impl Provider for OpenAiProvider {
             }
         }
 
-        let response = self
-            .http_client()
-            .post(format!("{}/chat/completions", self.base_url))
-            .header("Authorization", format!("Bearer {credential}"))
-            .json(&body)
-            .send()
-            .await?;
+        let response = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client()
+                .post(format!("{}/chat/completions", self.base_url)),
+        )
+        .header("Authorization", format!("Bearer {credential}"))
+        .json(&body)
+        .send()
+        .await?;
 
         if !response.status().is_success() {
             return Err(super::super::api_error("OpenAI", response).await);
@@ -1078,10 +1096,13 @@ impl Provider for OpenAiProvider {
         let count_tokens = options.count_tokens;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
+        let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
 
         let _ = crate::runtime::spawn_supervised("providers.openai.stream_chat", async move {
-            let response = match client
-                .post(&url)
+            let response = match crate::providers::core::idempotency::apply_idempotency_header_value(
+                client.post(&url),
+                idempotency_key,
+            )
                 .header("Authorization", format!("Bearer {credential}"))
                 .header("Accept", "text/event-stream")
                 .json(&native_request)

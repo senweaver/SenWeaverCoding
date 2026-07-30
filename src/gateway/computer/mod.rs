@@ -149,12 +149,14 @@ pub async fn handle_ws_computer(
         return reject;
     }
     if state.exposed || state.pairing.require_pairing() {
-        let token = super::ws::extract_ws_token(&headers, None).unwrap_or("");
-        let authed = if state.exposed {
-            state.pairing.is_authenticated_strict(token)
-        } else {
-            state.pairing.is_authenticated(token)
-        };
+        let tokens = super::ws::websocket_tokens(&headers, None);
+        let authed = tokens.iter().any(|token| {
+            if state.exposed {
+                state.pairing.is_authenticated_strict(token)
+            } else {
+                state.pairing.is_authenticated(token)
+            }
+        });
         if !authed {
             return (
                 axum::http::StatusCode::UNAUTHORIZED,
@@ -164,6 +166,7 @@ pub async fn handle_ws_computer(
         }
     }
 
+    let ws = super::ws::with_websocket_auth_protocol(ws, &headers);
     ws.on_upgrade(move |socket| handle_socket(socket, state, run_id))
         .into_response()
 }

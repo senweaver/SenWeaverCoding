@@ -10,7 +10,7 @@ use axum::{
 };
 use serde::{Deserialize, Serialize};
 
-const MASKED_SECRET: &str = "***MASKED***";
+pub(in crate::gateway) const MASKED_SECRET: &str = "***MASKED***";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum GatewayAuthLevel {
@@ -334,7 +334,7 @@ pub async fn handle_api_config_put(
             .into_response();
     }
 
-    if let Err(e) = new_config.save().await {
+    if let Err(e) = crate::gateway::persist_config(&new_config).await {
         tracing::error!("Config PUT: save failed: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -601,7 +601,7 @@ pub async fn handle_api_channels_put(
             .into_response();
     }
 
-    if let Err(e) = config.save().await {
+    if let Err(e) = crate::gateway::persist_config(&config).await {
         tracing::error!("Provider PUT: save failed: {e}");
         return (
             StatusCode::INTERNAL_SERVER_ERROR,
@@ -667,7 +667,7 @@ pub async fn handle_api_provider_put(
             .into_response();
     }
 
-    if let Err(e) = config.save().await {
+    if let Err(e) = crate::gateway::persist_config(&config).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, {
             tracing::error!("Failed to save config: {e}");
             Json(serde_json::json!({"error": "Failed to save configuration"}))
@@ -762,7 +762,7 @@ pub async fn handle_api_skills_put(
             .into_response();
     }
 
-    if let Err(e) = config.save().await {
+    if let Err(e) = crate::gateway::persist_config(&config).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, {
             tracing::error!("Failed to save config: {e}");
             Json(serde_json::json!({"error": "Failed to save configuration"}))
@@ -1057,7 +1057,7 @@ pub async fn handle_api_cron_settings_patch(
         config.cron.max_run_history = u32::try_from(v).unwrap_or(u32::MAX);
     }
 
-    if let Err(e) = config.save().await {
+    if let Err(e) = crate::gateway::persist_config(&config).await {
         return (StatusCode::INTERNAL_SERVER_ERROR, {
             tracing::error!("Failed to save config: {e}");
             Json(serde_json::json!({"error": "Failed to save configuration"}))
@@ -1253,7 +1253,7 @@ pub async fn handle_api_memory_delete(
         return e.into_response();
     }
 
-    match state.mem.forget(&key).await {
+    match state.mem.forget_everywhere(&key).await {
         Ok(deleted) => {
             Json(serde_json::json!({"status": "ok", "deleted": deleted})).into_response()
         }
@@ -1410,6 +1410,43 @@ fn mask_vec_secrets(values: &mut [String]) {
     }
 }
 
+fn proxy_url_has_embedded_credentials(url: &str) -> bool {
+    let Some((_, rest)) = url.split_once("://") else {
+        return false;
+    };
+    rest.contains('@')
+}
+
+fn mask_proxy_url_if_credentialed(value: &mut Option<String>) {
+    if value
+        .as_deref()
+        .is_some_and(|s| !s.is_empty() && !is_masked_secret(s) && proxy_url_has_embedded_credentials(s))
+    {
+        *value = Some(MASKED_SECRET.to_string());
+    }
+}
+
+fn mask_map_secret_values(map: &mut std::collections::HashMap<String, String>) {
+    for value in map.values_mut() {
+        if !value.is_empty() && !is_masked_secret(value) {
+            *value = MASKED_SECRET.to_string();
+        }
+    }
+}
+
+fn restore_map_secret_values(
+    incoming: &mut std::collections::HashMap<String, String>,
+    current: &std::collections::HashMap<String, String>,
+) {
+    for (key, value) in incoming.iter_mut() {
+        if is_masked_secret(value) {
+            if let Some(existing) = current.get(key) {
+                *value = existing.clone();
+            }
+        }
+    }
+}
+
 #[allow(clippy::ref_option)]
 fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Config {
     let mut masked = config.clone();
@@ -1417,6 +1454,7 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
     mask_optional_secret(&mut masked.api_key);
     mask_vec_secrets(&mut masked.reliability.api_keys);
     mask_vec_secrets(&mut masked.gateway.paired_tokens);
+    mask_optional_secret(&mut masked.gateway.signing_secret);
     mask_optional_secret(&mut masked.composio.api_key);
     mask_optional_secret(&mut masked.web_search.brave_api_key);
     mask_optional_secret(&mut masked.storage.provider.config.db_url);
@@ -1437,6 +1475,18 @@ fn mask_sensitive_fields(config: &crate::config::Config) -> crate::config::Confi
     for route in &mut masked.embedding_routes {
         mask_optional_secret(&mut route.api_key);
     }
+    for provider in masked.model_providers.values_mut() {
+        mask_optional_secret(&mut provider.api_key);
+    }
+    mask_proxy_url_if_credentialed(&mut masked.proxy.http_proxy);
+    mask_proxy_url_if_credentialed(&mut masked.proxy.https_proxy);
+    mask_proxy_url_if_credentialed(&mut masked.proxy.all_proxy);
+    for server in &mut masked.mcp.servers {
+        mask_map_secret_values(&mut server.env);
+        mask_map_secret_values(&mut server.headers);
+    }
+    mask_optional_secret(&mut masked.rpc.auth_token);
+    mask_optional_secret(&mut masked.mcp_server.sse_token);
 
     if let Some(telegram) = masked.channels_config.telegram.as_mut() {
         mask_required_secret(&mut telegram.bot_token);
@@ -1661,6 +1711,10 @@ fn restore_masked_sensitive_fields(
         &mut incoming.gateway.paired_tokens,
         &current.gateway.paired_tokens,
     );
+    restore_optional_secret(
+        &mut incoming.gateway.signing_secret,
+        &current.gateway.signing_secret,
+    );
     restore_vec_secrets(
         &mut incoming.reliability.api_keys,
         &current.reliability.api_keys,
@@ -1698,6 +1752,30 @@ fn restore_masked_sensitive_fields(
     }
     restore_model_route_api_keys(&mut incoming.model_routes, &current.model_routes);
     restore_embedding_route_api_keys(&mut incoming.embedding_routes, &current.embedding_routes);
+    for (name, provider) in &mut incoming.model_providers {
+        if let Some(current_provider) = current.model_providers.get(name) {
+            restore_optional_secret(&mut provider.api_key, &current_provider.api_key);
+        }
+    }
+    restore_optional_secret(&mut incoming.proxy.http_proxy, &current.proxy.http_proxy);
+    restore_optional_secret(&mut incoming.proxy.https_proxy, &current.proxy.https_proxy);
+    restore_optional_secret(&mut incoming.proxy.all_proxy, &current.proxy.all_proxy);
+    for incoming_server in &mut incoming.mcp.servers {
+        if let Some(current_server) = current
+            .mcp
+            .servers
+            .iter()
+            .find(|s| s.name == incoming_server.name)
+        {
+            restore_map_secret_values(&mut incoming_server.env, &current_server.env);
+            restore_map_secret_values(&mut incoming_server.headers, &current_server.headers);
+        }
+    }
+    restore_optional_secret(&mut incoming.rpc.auth_token, &current.rpc.auth_token);
+    restore_optional_secret(
+        &mut incoming.mcp_server.sse_token,
+        &current.mcp_server.sse_token,
+    );
 
     if let (Some(incoming_ch), Some(current_ch)) = (
         incoming.channels_config.telegram.as_mut(),

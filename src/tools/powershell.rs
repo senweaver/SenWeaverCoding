@@ -2,6 +2,8 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 use super::traits::{Tool, ToolResult};
+use crate::security::job_object::{JobLimits, JobObjectGuard};
+use crate::security::traits::Sandbox;
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
@@ -20,11 +22,32 @@ fn truncate_output(s: &mut String, cap: usize, marker: &str) {
 
 pub struct PowerShellTool {
     security: Arc<SecurityPolicy>,
+    sandbox: Arc<dyn Sandbox>,
+    job_limits: Option<JobLimits>,
 }
 
 impl PowerShellTool {
-    pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        Self { security }
+    pub fn new(security: Arc<SecurityPolicy>, sandbox: Arc<dyn Sandbox>) -> Self {
+        let job_limits = if sandbox.name() == "windows-job-object" {
+            Some(JobLimits::default())
+        } else {
+            None
+        };
+        Self {
+            security,
+            sandbox,
+            job_limits,
+        }
+    }
+
+    pub fn with_resource_limits(
+        mut self,
+        resources: &crate::config::schema::ResourceLimitsConfig,
+    ) -> Self {
+        self.job_limits = self
+            .job_limits
+            .map(|limits| limits.with_resource_overrides(resources));
+        self
     }
 }
 
@@ -69,14 +92,6 @@ impl Tool for PowerShellTool {
             });
         }
 
-        if self.security.is_rate_limited() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded".into()),
-            });
-        }
-
         let command = args
             .get("command")
             .and_then(|v| v.as_str())
@@ -89,47 +104,19 @@ impl Tool for PowerShellTool {
             .unwrap_or(120)
             .min(600);
 
-        match self.security.validate_command_execution(command, false) {
-            Ok(_) => {}
-            Err(reason) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(reason),
-                });
-            }
-        }
-
-        if let Some(path) = self.security.forbidden_path_argument(command) {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("Path blocked by security policy: {path}")),
-            });
-        }
-
-        if !self.security.record_action() {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some("Rate limit exceeded: action budget exhausted".into()),
-            });
-        }
-
-        let _resource_guard = match crate::session::acquire_shell_for_current_session().await {
-            Some(Ok(g)) => Some(g),
-            Some(Err(e)) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(format!("{e}")),
-                });
-            }
-            None => None,
+        let _preflight = match crate::tools::shell::preflight::acquire_shell_execution_clearance(
+            &self.security,
+            command,
+        )
+        .await
+        {
+            Ok(guards) => guards,
+            Err(result) => return Ok(result),
         };
 
         let mut cmd = crate::util::hidden_async_command("powershell");
         cmd.args(["-NoProfile", "-NonInteractive", "-Command", command]);
+        cmd.current_dir(self.security.workspace_dir());
 
         if let Some(dir) = working_dir {
             let full_dir = self.security.resolve_tool_path(dir);
@@ -153,39 +140,12 @@ impl Tool for PowerShellTool {
             cmd.current_dir(resolved);
         }
 
-        if self.security.should_filter_shell_env() {
-            cmd.env_clear();
-            for var in crate::tools::shell::core::collect_allowed_shell_env_vars(&self.security) {
-                if let Ok(val) = std::env::var(&var) {
-                    cmd.env(&var, val);
-                }
-            }
-        } else {
-            let passthrough: std::collections::HashSet<&str> = self
-                .security
-                .shell_env_passthrough
-                .iter()
-                .map(|s| s.as_str())
-                .collect();
-            for (key, _) in std::env::vars_os() {
-                if let Some(k) = key.to_str() {
-                    if crate::tools::shell::core::is_sensitive_env_var(k)
-                        && !passthrough.contains(k)
-                    {
-                        cmd.env_remove(k);
-                    }
-                }
-            }
-        }
-
-        for (k, v) in crate::python_env::activation_env(&self.security.workspace_dir()) {
-            cmd.env(k, v);
-        }
-        cmd.env_remove("PYTHONHOME");
-        cmd.stdout(std::process::Stdio::piped());
-        cmd.stderr(std::process::Stdio::piped());
-        cmd.stdin(std::process::Stdio::null());
-        cmd.kill_on_drop(true);
+        crate::tools::shell::core::prepare_isolated_command(
+            &mut cmd,
+            &self.security,
+            self.sandbox.as_ref(),
+        )
+        .map_err(|e| anyhow::anyhow!("Sandbox error: {}", e))?;
 
         let mirror_id = format!(
             "ps-{}",
@@ -206,9 +166,10 @@ impl Tool for PowerShellTool {
             },
         );
 
-        let child = match cmd.spawn() {
-            Ok(c) => c,
-            Err(e) => {
+        let (job_guard, child): (Option<JobObjectGuard>, tokio::process::Child) =
+            match crate::tools::shell::core::spawn_with_job_limits(cmd, self.job_limits).await {
+                Ok(pair) => pair,
+                Err(e) => {
                 let error_text = format!("Failed to execute PowerShell: {e}");
                 crate::tools::shell::core::emit_mirror_chunks(
                     &mirror_id,
@@ -232,12 +193,15 @@ impl Tool for PowerShellTool {
             }
         };
 
-        let outcome = crate::tools::shell::foreground::run_foreground_streamed(
+        let outcome = crate::tools::shell::foreground::run_foreground_streamed_inner(
             child,
+            job_guard,
             &mirror_id,
             mirror_session_id.as_deref(),
             mirror_started,
             std::time::Duration::from_secs(timeout),
+            None,
+            command,
         )
         .await;
 

@@ -612,14 +612,14 @@ fn session_writer_loop(
             write_degraded.store(true, Ordering::Relaxed);
         }
     }
-    let _ = writer.flush();
+    let _ = writer.flush().and_then(|()| writer.get_ref().sync_data());
     drop(lock);
 }
 
 fn flush_with_retry(writer: &mut BufWriter<File>, write_failures: &AtomicU64) -> bool {
     let mut attempt = 0;
     loop {
-        match writer.flush() {
+        match writer.flush().and_then(|()| writer.get_ref().sync_data()) {
             Ok(()) => return true,
             Err(e) => {
                 attempt += 1;

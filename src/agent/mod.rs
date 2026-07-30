@@ -49,7 +49,7 @@ pub mod repl_command;
 pub mod scheduler;
 pub mod self_assess;
 pub mod skill_evolution;
-pub mod subagent_limiter;
+pub mod subagent;
 pub mod suggestions;
 pub mod supervisor;
 pub mod task_orchestrator;

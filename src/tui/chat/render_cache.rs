@@ -75,6 +75,10 @@ pub struct ChatRenderCache {
     visual_prefix: Vec<usize>,
 
     visual_valid: bool,
+
+    built_msg_count: usize,
+
+    built_version: u64,
 }
 
 pub fn wrapped_row_count(line: &Line<'_>, width: usize) -> usize {
@@ -98,12 +102,51 @@ impl ChatRenderCache {
         self.lines_valid && self.lines_fingerprint == fingerprint
     }
 
-    pub fn store_lines(&mut self, fingerprint: u64, lines: Vec<Line<'static>>) {
+    pub fn store_lines(
+        &mut self,
+        fingerprint: u64,
+        lines: Vec<Line<'static>>,
+        msg_count: usize,
+        version: u64,
+    ) {
         self.lines_fingerprint = fingerprint;
         self.lines_valid = true;
         self.lines = lines;
         self.viewport_valid = false;
         self.visual_valid = false;
+        self.built_msg_count = msg_count;
+        self.built_version = version;
+    }
+
+    pub fn can_append_incrementally(&self, version: u64, msg_count: usize) -> bool {
+        self.lines_valid && self.built_version == version && msg_count >= self.built_msg_count
+    }
+
+    pub fn built_msg_count(&self) -> usize {
+        self.built_msg_count
+    }
+
+    pub fn append_lines(
+        &mut self,
+        fingerprint: u64,
+        new_lines: Vec<Line<'static>>,
+        msg_count: usize,
+    ) {
+        self.lines_fingerprint = fingerprint;
+        self.lines_valid = true;
+        if self.visual_valid && self.visual_prefix.len() == self.lines.len() + 1 {
+            let width = self.wrap_width.max(1);
+            let mut acc = self.cached_visual_total();
+            for line in &new_lines {
+                acc = acc.saturating_add(wrapped_row_count(line, width));
+                self.visual_prefix.push(acc);
+            }
+        } else {
+            self.visual_valid = false;
+        }
+        self.lines.extend(new_lines);
+        self.built_msg_count = msg_count;
+        self.viewport_valid = false;
     }
 
     pub fn ensure_visual_metrics(&mut self, width: usize) {
@@ -166,5 +209,9 @@ impl ChatRenderCache {
 
     pub fn max_scroll_offset(&self) -> usize {
         self.total_lines.saturating_sub(self.view_height)
+    }
+
+    pub fn last_total_visual(&self) -> usize {
+        self.total_lines
     }
 }

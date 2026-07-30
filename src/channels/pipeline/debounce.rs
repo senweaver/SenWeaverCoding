@@ -4,24 +4,39 @@
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
 use crate::runtime::TaskHandle;
 
+const MAX_DEBOUNCE_MESSAGES: usize = 64;
+const MAX_WINDOW_MULTIPLIER: u32 = 5;
+
 pub enum DebounceResult {
 
-    Pending(tokio::sync::oneshot::Receiver<String>),
+    Aggregated(tokio::sync::oneshot::Receiver<String>),
+
+    Coalesced(tokio::sync::oneshot::Receiver<String>),
 
     Passthrough(String),
 }
 
 struct DebouncerEntry {
     messages: Vec<String>,
+    first_at: Instant,
     timer_handle: Arc<Mutex<Option<TaskHandle>>>,
 
-    result_tx: Option<tokio::sync::oneshot::Sender<String>>,
+    result_txs: Vec<tokio::sync::oneshot::Sender<String>>,
+}
+
+impl DebouncerEntry {
+    fn flush(self) {
+        let combined = self.messages.join("\n");
+        for tx in self.result_txs {
+            let _ = tx.send(combined.clone());
+        }
+    }
 }
 
 pub struct MessageDebouncer {
@@ -51,14 +66,22 @@ impl MessageDebouncer {
         let key = sender_key.to_owned();
 
         if let Some(entry) = entries.get_mut(&key) {
-
             if let Some(h) = entry.timer_handle.lock().await.take() {
                 h.abort();
             }
             entry.messages.push(message.to_owned());
 
             let (tx, rx) = tokio::sync::oneshot::channel();
-            entry.result_tx = Some(tx);
+            entry.result_txs.push(tx);
+
+            let max_age = self.window.saturating_mul(MAX_WINDOW_MULTIPLIER);
+            if entry.messages.len() >= MAX_DEBOUNCE_MESSAGES || entry.first_at.elapsed() >= max_age
+            {
+                if let Some(entry) = entries.remove(&key) {
+                    entry.flush();
+                }
+                return DebounceResult::Coalesced(rx);
+            }
 
             let key_clone = key.clone();
             let entries_ref = Arc::clone(&self.entries);
@@ -69,7 +92,7 @@ impl MessageDebouncer {
             });
             *entry.timer_handle.lock().await = Some(handle);
 
-            DebounceResult::Pending(rx)
+            DebounceResult::Coalesced(rx)
         } else {
             let (tx, rx) = tokio::sync::oneshot::channel();
 
@@ -85,12 +108,13 @@ impl MessageDebouncer {
                 key,
                 DebouncerEntry {
                     messages: vec![message.to_owned()],
+                    first_at: Instant::now(),
                     timer_handle: Arc::new(Mutex::new(Some(handle))),
-                    result_tx: Some(tx),
+                    result_txs: vec![tx],
                 },
             );
 
-            DebounceResult::Pending(rx)
+            DebounceResult::Aggregated(rx)
         }
     }
 }
@@ -98,9 +122,6 @@ impl MessageDebouncer {
 async fn fire_debounced(entries: &Mutex<HashMap<String, DebouncerEntry>>, key: &str) {
     let mut map = entries.lock().await;
     if let Some(entry) = map.remove(key) {
-        let combined = entry.messages.join("\n");
-        if let Some(tx) = entry.result_tx {
-            let _ = tx.send(combined);
-        }
+        entry.flush();
     }
 }

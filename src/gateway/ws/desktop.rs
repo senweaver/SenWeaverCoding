@@ -100,6 +100,7 @@ pub async fn handle_ws_desktop(
             .into_response();
     };
 
+    let ws = super::with_websocket_auth_protocol(ws, &headers);
     ws.on_upgrade(move |socket| handle_socket(socket, state, session_id, conn_guard))
         .into_response()
 }
@@ -295,7 +296,7 @@ async fn handle_socket(
         (cfg.clone(), changed)
     };
     if config_sanitized {
-        if let Err(e) = config.save().await {
+        if let Err(e) = crate::gateway::persist_config(&config).await {
             tracing::warn!(
                 target: "ws_desktop_persist",
                 error = %e,
@@ -1337,6 +1338,10 @@ async fn handle_socket(
                 .await;
             }
             "set_runtime_config" => {
+                let request_id = parsed
+                    .get("requestId")
+                    .and_then(|value| value.as_str())
+                    .map(str::to_string);
 
                 let provider = parsed
                     .get("providerId")
@@ -1355,66 +1360,100 @@ async fn handle_socket(
                     .get("persist")
                     .and_then(|v| v.as_bool())
                     .unwrap_or(true);
+                let mut succeeded = provider.is_some() && model.is_some();
 
-                if let (Some(p), Some(m)) = (provider.as_ref(), model.as_ref()) {
-                    agent.signal_runtime_model_switch(p.clone(), m.clone());
-                }
+                let mut candidate = { state.config.lock().clone() };
 
-                if persist {
-                    let snapshot = {
-                        let mut cfg = state.config.lock();
-
-                        if let Some(p) = provider.as_deref() {
-                            if let Some(profile) = cfg.model_providers.get(p).cloned() {
-                                crate::gateway::desktop::routes::apply_active_profile_to_top_level(
-                                    &mut cfg, p, &profile,
-                                );
-                            } else {
-                                cfg.default_provider = Some(p.to_string());
-                            }
-                        }
-                        if let Some(m) = model.as_ref() {
-                            cfg.default_model = Some(m.clone());
-                        }
-                        cfg.clone()
-                    };
-
-                    if let Err(e) = snapshot.save().await {
-                        tracing::warn!(
-                            target: "ws_desktop_runtime_config",
-                            error = %e,
-                            "set_runtime_config: failed to persist composer-initiated runtime config to disk; \
-                             change remains effective in-memory only until restart"
+                if let Some(p) = provider.as_deref() {
+                    if let Some(profile) = candidate.model_providers.get(p).cloned() {
+                        crate::gateway::desktop::routes::apply_active_profile_to_top_level(
+                            &mut candidate, p, &profile,
                         );
-                        let _ = send_json(
-                            &outbound_tx,
-                            &serde_json::json!({
-                                "type": "system_notification",
-                                "subtype": "runtime_config_persist_failed",
-                                "message": format!("{e:#}"),
-                            }),
-                        )
-                        .await;
+                    } else {
+                        candidate.default_provider = Some(p.to_string());
                     }
-
-                    state.push_live_config(snapshot);
-                    state.rebuild_runtime_from_config_async().await;
+                }
+                if let Some(m) = model.as_ref() {
+                    candidate.default_model = Some(m.clone());
                 }
 
-                if let Err(e) = agent.apply_runtime_config_now().await {
+                if let Err(e) = candidate.validate() {
+                    succeeded = false;
                     tracing::warn!(
                         target: "ws_desktop_runtime_config",
                         error = %e,
-                        "set_runtime_config: failed to apply runtime config to session agent"
+                        "set_runtime_config: merged runtime config failed full validation; \
+                         keeping previous config active"
                     );
+                    let _ = send_json(
+                        &outbound_tx,
+                        &serde_json::json!({
+                            "type": "system_notification",
+                            "subtype": "runtime_config_validation_failed",
+                            "level": "error",
+                            "message": format!("{e:#}"),
+                            "data": {
+                                "requestId": request_id.as_deref(),
+                            },
+                        }),
+                    )
+                    .await;
+                } else {
+                    if let (Some(p), Some(m)) = (provider.as_ref(), model.as_ref()) {
+                        agent.signal_runtime_model_switch(p.clone(), m.clone());
+                    }
+
+                    if persist {
+                        *state.config.lock() = candidate.clone();
+
+                        if let Err(e) = crate::gateway::persist_config(&candidate).await {
+                            succeeded = false;
+                            tracing::warn!(
+                                target: "ws_desktop_runtime_config",
+                                error = %e,
+                                "set_runtime_config: failed to persist composer-initiated runtime config to disk; \
+                                 change remains effective in-memory only until restart"
+                            );
+                            let _ = send_json(
+                                &outbound_tx,
+                                &serde_json::json!({
+                                    "type": "system_notification",
+                                    "subtype": "runtime_config_persist_failed",
+                                    "level": "warning",
+                                    "message": format!("{e:#}"),
+                                    "data": {
+                                        "requestId": request_id.as_deref(),
+                                    },
+                                }),
+                            )
+                            .await;
+                        }
+
+                        state.push_live_config(candidate);
+                        state.rebuild_runtime_from_config_async().await;
+                    }
+
+                    if let Err(e) = agent.apply_runtime_config_now().await {
+                        succeeded = false;
+                        tracing::warn!(
+                            target: "ws_desktop_runtime_config",
+                            error = %e,
+                            "set_runtime_config: failed to apply runtime config to session agent"
+                        );
+                    }
                 }
                 let _ = send_json(
                     &outbound_tx,
                     &serde_json::json!({
                         "type": "system_notification",
-                        "subtype": "runtime_config_updated",
+                        "subtype": if succeeded {
+                            "runtime_config_updated"
+                        } else {
+                            "runtime_config_apply_failed"
+                        },
                         "data": {
                             "persisted": persist,
+                            "requestId": request_id.as_deref(),
                         },
                     }),
                 )
@@ -3683,6 +3722,7 @@ async fn run_turn(
     let mut last_tool_use_id_for_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut accumulated_text = String::new();
+    let mut streamed_turn_error: Option<String> = None;
     let started = std::time::Instant::now();
 
     let user_message_index: i64 = if let Some(ref backend) = state.session_backend {
@@ -4339,7 +4379,10 @@ async fn run_turn(
                             .fire_notification("error", &message_for_notify)
                             .await;
                     });
-                    send_error(outbound, &message, "TURN_ERROR").await;
+                    let code =
+                        crate::agent::error_classify::classify_turn_error_code(&message);
+                    send_error(outbound, &message, code).await;
+                    streamed_turn_error = Some(message);
                 }
                 TurnEvent::PiiSanitized { report } => {
                     let mut counts = serde_json::Map::new();
@@ -4712,7 +4755,16 @@ async fn run_turn(
                 }
                 enqueue_persist(state, session_key, rows).await;
             }
-            send_error(outbound, &msg, code).await;
+            let already_streamed = streamed_turn_error
+                .as_deref()
+                .map(str::trim)
+                .is_some_and(|prev| {
+                    let now = msg.trim();
+                    prev == now || prev.contains(now) || now.contains(prev)
+                });
+            if !already_streamed {
+                send_error(outbound, &msg, code).await;
+            }
             if let Some((event, greeting)) = crate::buddy::lifecycle_event(&buddy_cfg, "error") {
                 let _ = send_json(
                     outbound,

@@ -3,9 +3,10 @@
 // Licensed under the MIT License.
 
 import { useMemo, useState } from 'react'
-import { useTranslation } from '../i18n'
+import { useTranslation, type TranslationKey } from '../i18n'
 import { Button } from '../components/shared/Button'
 import type { SavedProvider, UpdateProviderInput } from '../types/provider'
+import { modelTypeLabelKey, modelTypesForId } from '../utils/modelTypes'
 
 export function ProviderModelsPanel({
   provider,
@@ -69,9 +70,19 @@ export function ProviderModelsPanel({
               key={modelId}
               className="flex items-center justify-between gap-2 px-3 py-1.5 rounded-md bg-[var(--color-surface-container-low)] border border-[var(--color-border)]"
             >
-              <span className="text-xs font-mono text-[var(--color-text-primary)] truncate min-w-0">
-                {modelId}
-              </span>
+              <div className="flex items-center flex-wrap gap-x-2 gap-y-1 min-w-0 flex-1">
+                <span className="text-xs font-mono text-[var(--color-text-primary)] truncate min-w-0">
+                  {modelId}
+                </span>
+                {modelTypesForId(provider, modelId).map((type) => (
+                  <span
+                    key={type}
+                    className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[var(--color-surface-container-high)] text-[var(--color-text-tertiary)] leading-none flex-shrink-0"
+                  >
+                    {t(modelTypeLabelKey(type) as TranslationKey)}
+                  </span>
+                ))}
+              </div>
               <button
                 type="button"
                 onClick={() => void handleRemove(modelId)}

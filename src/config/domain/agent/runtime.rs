@@ -27,7 +27,7 @@ pub struct AgentRuntimeExtras {
     pub parallel_tool_max_concurrency: u32,
 
     #[serde(default)]
-    pub subagent_limit: crate::agent::subagent_limiter::SubagentLimitConfig,
+    pub subagent_limit: crate::agent::subagent::limiter::SubagentLimitConfig,
 
     #[serde(default = "default_subagent_call_timeout_secs")]
     pub subagent_call_timeout_secs: u64,
@@ -127,7 +127,7 @@ impl Default for AgentRuntimeExtras {
             per_turn_token_hard_cap: default_per_turn_token_hard_cap(),
             max_subagents: default_max_subagents(),
             parallel_tool_max_concurrency: default_parallel_tool_max_concurrency(),
-            subagent_limit: crate::agent::subagent_limiter::SubagentLimitConfig::default(),
+            subagent_limit: crate::agent::subagent::limiter::SubagentLimitConfig::default(),
             subagent_call_timeout_secs: default_subagent_call_timeout_secs(),
             fast_apply_model: None,
             fast_apply_temperature: default_fast_apply_temperature(),

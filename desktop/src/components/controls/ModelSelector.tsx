@@ -213,6 +213,10 @@ export function ModelSelector({
     [baseModels, typeLookup, requiredType],
   )
 
+  const controlledValue = isControlled ? (value ?? '').trim() : ''
+  const controlledIsAuto =
+    isControlled && (controlledValue === '' || controlledValue.toLowerCase() === 'auto')
+
   const selectedModel = isControlled
     ? baseModels.find((model) => model.id === value) || null
     : storeModel
@@ -278,14 +282,20 @@ export function ModelSelector({
       }
     : null
 
-  const noConfiguredModels = isRuntimeScoped
-    ? providerChoices.length === 0
-    : filteredAvailableModels.length === 0
+  const noConfiguredModels = isControlled
+    ? false
+    : isRuntimeScoped
+      ? providerChoices.length === 0
+      : filteredAvailableModels.length === 0
   const buttonModelLabel = noConfiguredModels
     ? t('model.unconfiguredPlaceholder')
-    : isRuntimeScoped
-      ? selectedRuntimeModel?.name ?? t('model.selectModel')
-      : selectedModel?.name ?? t('model.selectModel')
+    : isControlled
+      ? controlledIsAuto
+        ? t('model.autoDefault')
+        : selectedModel?.name ?? controlledValue
+      : isRuntimeScoped
+        ? selectedRuntimeModel?.name ?? t('model.selectModel')
+        : selectedModel?.name ?? t('model.selectModel')
   const buttonProviderLabel = noConfiguredModels
     ? null
     : isRuntimeScoped
@@ -419,12 +429,42 @@ export function ModelSelector({
                 ))}
               </div>
               )
-            ) : filteredAvailableModels.length === 0 ? (
+            ) : filteredAvailableModels.length === 0 && !isControlled ? (
               <div className="rounded-lg border border-dashed border-[var(--color-border)] px-3 py-5 text-center text-xs text-[var(--color-text-tertiary)]">
                 {t('settings.providers.empty')}
               </div>
             ) : (
               <div className="space-y-0.5">
+                {isControlled && (
+                  <button
+                    onClick={() => {
+                      onChange?.('auto')
+                      setOpen(false)
+                    }}
+                    className={`
+                      w-full rounded-lg px-2.5 py-2 text-left transition-colors
+                      ${controlledIsAuto
+                        ? 'bg-[var(--color-primary-fixed)] border border-[var(--color-brand)]/20'
+                        : 'hover:bg-[var(--color-surface-hover)]'
+                      }
+                    `}
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className={`flex h-4 w-4 flex-shrink-0 items-center justify-center rounded-full border-2 ${
+                        controlledIsAuto ? 'border-[var(--color-brand)]' : 'border-[var(--color-outline)]'
+                      }`}>
+                        {controlledIsAuto && (
+                          <div className="h-2 w-2 rounded-full bg-[var(--color-brand)]" />
+                        )}
+                      </div>
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-[13px] font-semibold text-[var(--color-text-primary)]">
+                          {t('model.autoDefault')}
+                        </div>
+                      </div>
+                    </div>
+                  </button>
+                )}
                 {filteredAvailableModels.map((model) => {
                   const isSelected = model.id === selectedModel?.id
                   return (

@@ -383,11 +383,11 @@ impl CopilotProvider {
             stream: None,
         };
 
-        let mut req = self
-            .http_client()
-            .post(&url)
-            .header("Authorization", format!("Bearer {token}"))
-            .json(&request);
+        let mut req = crate::providers::core::idempotency::apply_idempotency_header(
+            self.http_client().post(&url),
+        )
+        .header("Authorization", format!("Bearer {token}"))
+        .json(&request);
 
         for (header, value) in &Self::COPILOT_HEADERS {
             req = req.header(*header, *value);
@@ -830,6 +830,7 @@ impl Provider for CopilotProvider {
             crate::providers::traits::StreamResult<StreamEvent>,
         >(100);
 
+        let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
         crate::runtime::spawn_supervised("providers.copilot.stream", async move {
             let (token, endpoint) = match provider.get_api_key().await {
                 Ok(v) => v,
@@ -852,11 +853,12 @@ impl Provider for CopilotProvider {
                 tools: native_tools,
                 stream: Some(true),
             };
-            let mut req = provider
-                .stream_http_client()
-                .post(&url)
-                .header("Authorization", format!("Bearer {token}"))
-                .json(&body);
+            let mut req = crate::providers::core::idempotency::apply_idempotency_header_value(
+                provider.stream_http_client().post(&url),
+                idempotency_key,
+            )
+            .header("Authorization", format!("Bearer {token}"))
+            .json(&body);
             for (header, value) in &Self::COPILOT_HEADERS {
                 req = req.header(*header, *value);
             }

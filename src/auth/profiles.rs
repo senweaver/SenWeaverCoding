@@ -442,6 +442,16 @@ impl AuthProfilesStore {
             )
         })?;
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(
+                &tmp_path,
+                std::fs::Permissions::from_mode(0o600),
+            )
+            .await;
+        }
+
         fs::rename(&tmp_path, &self.path).await.with_context(|| {
             format!(
                 "Failed to replace auth profile store at {}",

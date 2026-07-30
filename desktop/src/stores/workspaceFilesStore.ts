@@ -121,6 +121,20 @@ export type MonacoModelHandle = {
   ): unknown | null
   getLanguageId(): string
   isDisposed?(): boolean
+  dispose?(): void
+}
+
+function scheduleModelDispose(models: MonacoModelHandle[]): void {
+  if (models.length === 0) return
+  setTimeout(() => {
+    for (const model of models) {
+      try {
+        if (model.isDisposed?.()) continue
+        model.dispose?.()
+      } catch {
+      }
+    }
+  }, 0)
 }
 
 type Key = string
@@ -208,7 +222,9 @@ export type WorkspaceFilesState = {
   setRoot: (root: string | null) => void
   refreshRoot: () => Promise<void>
   refreshAll: () => Promise<void>
-  loadDirectory: (relPath: string) => Promise<void>
+  loadDirectory: (relPath: string, opts?: { force?: boolean }) => Promise<void>
+  retryDirectory: (relPath: string) => Promise<void>
+  ensureDirectoryLoaded: (relPath: string) => void
   setExpanded: (relPath: string, expanded: boolean) => void
   toggleExpanded: (relPath: string) => Promise<void>
 
@@ -309,6 +325,8 @@ const emptyDir: DirState = {
   expanded: false,
   children: [],
 }
+
+const dirLoadEpoch: Record<string, number> = {}
 
 const PERSIST_VERSION = 1
 const PERSIST_DEBOUNCE_MS = 500
@@ -446,6 +464,12 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
   setRoot: (root) => {
     const current = get().root
     if (current === root) return
+    if (current) {
+      const oldPrefix = `${current}::`
+      for (const key of Object.keys(dirLoadEpoch)) {
+        if (key.startsWith(oldPrefix)) delete dirLoadEpoch[key]
+      }
+    }
     if (watcherDispose) {
       watcherDispose()
       watcherDispose = null
@@ -468,6 +492,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     } catch (err) {
       console.warn('[workspaceFiles] clearDiagnostics failed on setRoot', err)
     }
+    scheduleModelDispose(Object.values(get().monacoModels))
     const restoredDirs = root ? loadExpandedFromLocalStorage(root) : {}
     set({
       root,
@@ -541,13 +566,16 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     set({ rootLoading: true, rootError: undefined })
     try {
       const tree = await workspaceFilesApi.tree({ root, depth: 1 })
+      if (get().root !== root) return
       set({
         rootEntries: tree.entries,
         rootLoaded: true,
         rootLoading: false,
         truncated: tree.truncated,
+        rootError: undefined,
       })
     } catch (err) {
+      if (get().root !== root) return
       set({
         rootLoading: false,
         rootError: err instanceof Error ? err.message : String(err),
@@ -568,7 +596,8 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       const rel = key.slice(prefix.length)
       if (!rel) continue
       const dir = dirs[key]
-      if (dir?.loaded || dir?.loading || dir?.expanded) rels.push(rel)
+      if (dir?.loading) continue
+      if (dir?.loaded || dir?.expanded) rels.push(rel)
     }
     rels.sort((a, b) => a.length - b.length)
     const queue = [...rels]
@@ -585,14 +614,25 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     await Promise.all(workers)
   },
 
-  loadDirectory: async (relPath: string) => {
+  loadDirectory: async (relPath: string, opts) => {
     const root = get().root
     if (!root) return
     const key = k(root, relPath)
     const existing = get().dirs[key] ?? emptyDir
-    if (existing.loaded || existing.loading) return
+    if (!opts?.force && (existing.loaded || existing.loading)) return
+    const epoch = (dirLoadEpoch[key] ?? 0) + 1
+    dirLoadEpoch[key] = epoch
     set((s) => ({
-      dirs: { ...s.dirs, [key]: { ...existing, loading: true, error: undefined } },
+      dirs: {
+        ...s.dirs,
+        [key]: {
+          ...(s.dirs[key] ?? emptyDir),
+          loading: true,
+          expanded: true,
+          error: undefined,
+          ...(opts?.force ? { loaded: false } : {}),
+        },
+      },
     }))
     try {
       const tree = await workspaceFilesApi.tree({
@@ -600,30 +640,56 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         path: relPath,
         depth: 1,
       })
+      if (get().root !== root) return
+      if (dirLoadEpoch[key] !== epoch) return
       set((s) => {
+        const current = s.dirs[key] ?? emptyDir
         const nextDirs = {
           ...s.dirs,
           [key]: {
             loaded: true,
             loading: false,
-            expanded: true,
+            expanded: current.expanded,
             children: tree.entries,
+            error: undefined,
           },
         }
         schedulePersistExpanded(root, nextDirs)
         return { dirs: nextDirs }
       })
     } catch (err) {
-      set((s) => ({
-        dirs: {
-          ...s.dirs,
-          [key]: {
-            ...(s.dirs[key] ?? emptyDir),
-            loading: false,
-            error: err instanceof Error ? err.message : String(err),
+      if (get().root !== root) return
+      if (dirLoadEpoch[key] !== epoch) return
+      set((s) => {
+        const current = s.dirs[key] ?? emptyDir
+        return {
+          dirs: {
+            ...s.dirs,
+            [key]: {
+              ...current,
+              loading: false,
+              loaded: false,
+              error: err instanceof Error ? err.message : String(err),
+            },
           },
-        },
-      }))
+        }
+      })
+    }
+  },
+
+  retryDirectory: async (relPath: string) => {
+    await get().loadDirectory(relPath, { force: true })
+  },
+
+  ensureDirectoryLoaded: (relPath: string) => {
+    const root = get().root
+    if (!root) return
+    const key = k(root, relPath)
+    const dir = get().dirs[key]
+    if (!dir) return
+    if (dir.error) return
+    if (dir.expanded && !dir.loaded && !dir.loading) {
+      void get().loadDirectory(relPath)
     }
   },
 
@@ -633,10 +699,11 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     const key = k(root, relPath)
     const prev = get().dirs[key]
     set((s) => {
+      const current = s.dirs[key] ?? emptyDir
       const nextDirs = {
         ...s.dirs,
         [key]: {
-          ...(s.dirs[key] ?? emptyDir),
+          ...current,
           expanded,
         },
       }
@@ -645,6 +712,8 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     })
     if (expanded && prev?.loaded && !prev.loading) {
       void reloadLoadedDir(get, set, root, relPath)
+    } else if (expanded && !prev?.loaded && !prev?.loading) {
+      void get().loadDirectory(relPath)
     }
   },
 
@@ -653,21 +722,39 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     if (!root) return
     const key = k(root, relPath)
     const dir = get().dirs[key] ?? emptyDir
-    if (!dir.loaded && !dir.loading) {
+    if (dir.loading) return
+    if (!dir.loaded) {
+      if (dir.expanded) {
+        set((s) => {
+          const current = s.dirs[key] ?? emptyDir
+          const nextDirs = {
+            ...s.dirs,
+            [key]: { ...current, expanded: false },
+          }
+          schedulePersistExpanded(root, nextDirs)
+          return { dirs: nextDirs }
+        })
+        return
+      }
       await get().loadDirectory(relPath)
       return
     }
     const willExpand = !dir.expanded
     set((s) => {
+      const current = s.dirs[key] ?? emptyDir
+      if (current.loading) return {}
       const nextDirs = {
         ...s.dirs,
-        [key]: { ...dir, expanded: willExpand },
+        [key]: { ...current, expanded: willExpand },
       }
       schedulePersistExpanded(root, nextDirs)
       return { dirs: nextDirs }
     })
-    if (willExpand && dir.loaded && !dir.loading) {
-      void reloadLoadedDir(get, set, root, relPath)
+    if (willExpand) {
+      const after = get().dirs[key]
+      if (after?.loaded && !after.loading) {
+        void reloadLoadedDir(get, set, root, relPath)
+      }
     }
   },
 
@@ -756,6 +843,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
   closeTab: (relPath: string) => {
     const root = get().root
     const key = k(root, relPath)
+    const model = get().monacoModels[relPath]
     set((s) => {
       const tabs = s.openTabs.filter((t) => t !== relPath)
       let nextActive = s.activeTab
@@ -779,12 +867,16 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         aiModifiedAt: stripKey(s.aiModifiedAt, relPath),
         externalChanged: stripKey(s.externalChanged, relPath),
         lastSeenContent: stripKey(s.lastSeenContent, relPath),
+        monacoModels: stripKey(s.monacoModels, relPath),
+        tabViewStates: stripKey(s.tabViewStates, relPath),
       }
     })
+    if (model) scheduleModelDispose([model])
   },
 
   closeAllTabs: () => {
     const root = get().root
+    const models = Object.values(get().monacoModels)
     set((s) => {
       const files = { ...s.files }
       for (const relPath of s.openTabs) {
@@ -798,24 +890,34 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         aiModifiedAt: {},
         externalChanged: {},
         lastSeenContent: {},
+        monacoModels: {},
+        tabViewStates: {},
       }
     })
+    scheduleModelDispose(models)
   },
 
   closeOtherTabs: (keepRelPath: string) => {
     const root = get().root
+    const modelsToDispose: MonacoModelHandle[] = []
     set((s) => {
       if (!s.openTabs.includes(keepRelPath)) return {}
       const files = { ...s.files }
       let aiModifiedAt = { ...s.aiModifiedAt }
       let externalChanged = { ...s.externalChanged }
       let lastSeenContent = { ...s.lastSeenContent }
+      let monacoModels = { ...s.monacoModels }
+      let tabViewStates = { ...s.tabViewStates }
       for (const relPath of s.openTabs) {
         if (relPath === keepRelPath) continue
         delete files[k(root, relPath)]
         aiModifiedAt = stripKey(aiModifiedAt, relPath)
         externalChanged = stripKey(externalChanged, relPath)
         lastSeenContent = stripKey(lastSeenContent, relPath)
+        const model = monacoModels[relPath]
+        if (model) modelsToDispose.push(model)
+        monacoModels = stripKey(monacoModels, relPath)
+        tabViewStates = stripKey(tabViewStates, relPath)
       }
       return {
         files,
@@ -825,8 +927,11 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         aiModifiedAt,
         externalChanged,
         lastSeenContent,
+        monacoModels,
+        tabViewStates,
       }
     })
+    scheduleModelDispose(modelsToDispose)
   },
 
   reorderTab: (relPath: string, toIndex: number) => {
@@ -1193,6 +1298,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     })
     get().registerSelfWrite(relPath)
     const key = k(root, relPath)
+    const model = get().monacoModels[relPath]
     set((s) => {
       const files = { ...s.files }
       delete files[key]
@@ -1219,8 +1325,11 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         aiModifiedAt: stripKey(s.aiModifiedAt, relPath),
         externalChanged: stripKey(s.externalChanged, relPath),
         lastSeenContent: stripKey(s.lastSeenContent, relPath),
+        monacoModels: stripKey(s.monacoModels, relPath),
+        tabViewStates: stripKey(s.tabViewStates, relPath),
       }
     })
+    if (model) scheduleModelDispose([model])
     await refreshDir(get, set, parentOf(relPath))
   },
 
@@ -1579,32 +1688,47 @@ async function refreshDir(
     return
   }
   const key = k(root, relPath)
+  const existing = get().dirs[key]
+  if (existing?.loading) return
+  const epoch = dirLoadEpoch[key] ?? 0
   try {
     const tree = await workspaceFilesApi.tree({ root, path: relPath, depth: 1 })
-    set((s) => ({
-      dirs: {
-        ...s.dirs,
-        [key]: {
-          ...(s.dirs[key] ?? emptyDir),
-          children: tree.entries,
-          loaded: true,
-          loading: false,
-          expanded: s.dirs[key]?.expanded ?? true,
-          error: undefined,
+    if (get().root !== root) return
+    if ((dirLoadEpoch[key] ?? 0) !== epoch) return
+    set((s) => {
+      const current = s.dirs[key]
+      if (current?.loading) return {}
+      return {
+        dirs: {
+          ...s.dirs,
+          [key]: {
+            ...(current ?? emptyDir),
+            children: tree.entries,
+            loaded: true,
+            loading: false,
+            expanded: current?.expanded ?? true,
+            error: undefined,
+          },
         },
-      },
-    }))
+      }
+    })
   } catch (err) {
-    set((s) => ({
-      dirs: {
-        ...s.dirs,
-        [key]: {
-          ...(s.dirs[key] ?? emptyDir),
-          error: err instanceof Error ? err.message : String(err),
-          loading: false,
+    if (get().root !== root) return
+    if ((dirLoadEpoch[key] ?? 0) !== epoch) return
+    set((s) => {
+      const current = s.dirs[key]
+      if (!current || current.loading) return {}
+      return {
+        dirs: {
+          ...s.dirs,
+          [key]: {
+            ...current,
+            error: err instanceof Error ? err.message : String(err),
+            loading: false,
+          },
         },
-      },
-    }))
+      }
+    })
   }
 }
 
@@ -1619,17 +1743,21 @@ async function reloadLoadedDir(
   relPath: string,
 ) {
   const key = k(root, relPath)
+  const existing = get().dirs[key]
+  if (!existing || existing.loading) return
+  const epoch = dirLoadEpoch[key] ?? 0
   try {
     const tree = await workspaceFilesApi.tree({ root, path: relPath, depth: 1 })
     if (get().root !== root) return
+    if ((dirLoadEpoch[key] ?? 0) !== epoch) return
     set((s) => {
-      const existing = s.dirs[key]
-      if (!existing) return {}
+      const current = s.dirs[key]
+      if (!current || current.loading) return {}
       return {
         dirs: {
           ...s.dirs,
           [key]: {
-            ...existing,
+            ...current,
             children: tree.entries,
             loaded: true,
             loading: false,
@@ -1638,18 +1766,22 @@ async function reloadLoadedDir(
         },
       }
     })
-  } catch {
+  } catch (err) {
     if (get().root !== root) return
+    if ((dirLoadEpoch[key] ?? 0) !== epoch) return
     set((s) => {
-      if (!s.dirs[key]) return {}
-      const subtreePrefix = `${key}/`
-      const nextDirs: Record<Key, DirState> = {}
-      for (const [dirKey, value] of Object.entries(s.dirs)) {
-        if (dirKey === key || dirKey.startsWith(subtreePrefix)) continue
-        nextDirs[dirKey] = value
+      const current = s.dirs[key]
+      if (!current || current.loading) return {}
+      return {
+        dirs: {
+          ...s.dirs,
+          [key]: {
+            ...current,
+            loading: false,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        },
       }
-      schedulePersistExpanded(root, nextDirs)
-      return { dirs: nextDirs }
     })
   }
 }

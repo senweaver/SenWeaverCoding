@@ -19,9 +19,8 @@ use crate::workers::runner::WorkerRunContext;
 use crate::workers::supervisor::ensure_supervisor;
 use crate::workers::worker::WorkerHandle;
 use crate::workers::worktree::{
-    WorktreeInfo, commit_and_merge_worker, commit_worker_changes, create_worker_worktree,
-    parent_workspace_is_dirty, remove_worker_worktree, remove_worktree_keep_branch,
-    worktree_change_report,
+    WorktreeInfo, commit_and_merge_worker, create_worker_worktree, parent_workspace_is_dirty,
+    remove_worker_worktree, salvage_worktree, worktree_change_report,
 };
 
 const TOOL_NAME: &str = "spawn_workers";
@@ -146,24 +145,55 @@ impl Drop for WorkerBatchCancelGuard {
         if worktrees.is_empty() {
             return;
         }
-        if let Ok(rt) = tokio::runtime::Handle::try_current() {
-            rt.spawn(async move {
-                for h in &handles {
-                    let _ = tokio::time::timeout(
-                        std::time::Duration::from_secs(30),
-                        h.wait(),
-                    )
-                    .await;
-                }
+        match tokio::runtime::Handle::try_current() {
+            Err(_) => {
                 for info in &worktrees {
-                    let _ = commit_worker_changes(info).await;
-                    let note = remove_worktree_keep_branch(info).await;
-                    tracing::info!(
+                    tracing::error!(
                         branch = %info.branch,
-                        "salvaged cancelled worker worktree{note}"
+                        path = %info.path.display(),
+                        "no tokio runtime available while dropping worker batch; worktree \
+                         salvage abandoned — uncommitted work may remain in this directory"
                     );
                 }
-            });
+            }
+            Ok(rt) => {
+                rt.spawn(async move {
+                    let grace_deadline =
+                        tokio::time::Instant::now() + std::time::Duration::from_secs(30);
+                    let mut grace_waits = tokio::task::JoinSet::new();
+                    for h in &handles {
+                        let wait = h.wait();
+                        grace_waits.spawn(async move {
+                            let _ = tokio::time::timeout_at(grace_deadline, wait).await;
+                        });
+                    }
+                    while grace_waits.join_next().await.is_some() {}
+                    let base_lock = worktrees
+                        .first()
+                        .map(|info| crate::workers::worktree::base_merge_lock(&info.base));
+                    let _base_guard = match base_lock.as_ref() {
+                        Some(lock) => Some(lock.lock().await),
+                        None => None,
+                    };
+                    for info in &worktrees {
+                        let salvage = salvage_worktree(info).await;
+                        if salvage.retained {
+                            tracing::warn!(
+                                branch = %info.branch,
+                                path = %info.path.display(),
+                                "cancelled worker worktree salvage: {}",
+                                salvage.note
+                            );
+                        } else {
+                            tracing::info!(
+                                branch = %info.branch,
+                                "cancelled worker worktree salvage: {}",
+                                salvage.note
+                            );
+                        }
+                    }
+                });
+            }
         }
     }
 }
@@ -352,8 +382,14 @@ impl Tool for SpawnWorkersTool {
                                          running in the shared workspace instead"
                                     ));
                                 } else {
-                                    for created in worktrees.iter().flatten() {
-                                        let _ = remove_worker_worktree(created).await;
+                                    if let Some(first) = worktrees.iter().flatten().next() {
+                                        let base_lock = crate::workers::worktree::base_merge_lock(
+                                            &first.base,
+                                        );
+                                        let _base_guard = base_lock.lock().await;
+                                        for created in worktrees.iter().flatten() {
+                                            let _ = remove_worker_worktree(created).await;
+                                        }
                                     }
                                     return Ok(ToolResult {
                                         success: false,
@@ -420,8 +456,12 @@ impl Tool for SpawnWorkersTool {
         let handles = match supervisor.admit_and_spawn_batch(specs, parent_draft.clone(), run_ctx) {
             Ok(h) => h,
             Err(err) => {
-                for created in worktrees.iter().flatten() {
-                    let _ = remove_worker_worktree(created).await;
+                if let Some(first) = worktrees.iter().flatten().next() {
+                    let base_lock = crate::workers::worktree::base_merge_lock(&first.base);
+                    let _base_guard = base_lock.lock().await;
+                    for created in worktrees.iter().flatten() {
+                        let _ = remove_worker_worktree(created).await;
+                    }
                 }
                 return Ok(ToolResult {
                     success: false,
@@ -454,7 +494,8 @@ impl Tool for SpawnWorkersTool {
         });
 
         let mut results: Vec<WorkerResult> = Vec::with_capacity(waits.len());
-        for (idx, w) in waits.into_iter().enumerate() {
+        let mut waits_iter = waits.into_iter().enumerate();
+        while let Some((idx, w)) = waits_iter.next() {
             let h = &handles[idx];
             let outcome = match deadline {
                 Some(dl) => tokio::time::timeout_at(dl, w).await,
@@ -474,31 +515,46 @@ impl Tool for SpawnWorkersTool {
                     });
                 }
                 Err(_elapsed) => {
-                    h.cancel();
-                    let final_result = match tokio::time::timeout(
-                        std::time::Duration::from_secs(10),
-                        h.wait(),
-                    )
-                    .await
-                    {
-                        Ok(Ok(result)) => Some(result),
-                        _ => h.result_snapshot(),
-                    };
-                    if let Some(snapshot) = final_result {
-                        results.push(snapshot);
-                    } else {
-                        results.push(WorkerResult {
-                            worker_id: h.worker_id.clone(),
-                            title: h.title.clone(),
-                            status: WorkerStatus::Stopped,
-                            output: String::new(),
-                            error: Some(format!(
-                                "worker timed out after {timeout_secs}s budget and was cancelled"
-                            )),
-                            started_at: h.started_at,
-                            finished_at: h.finished_at(),
-                        });
+                    for hh in &handles {
+                        if hh.result_snapshot().is_none() {
+                            hh.cancel();
+                        }
                     }
+                    let grace_deadline = tokio::time::Instant::now()
+                        + std::time::Duration::from_secs(10);
+                    let remaining: Vec<usize> = std::iter::once(idx)
+                        .chain(waits_iter.by_ref().map(|(i, _)| i))
+                        .collect();
+                    let grace_waits = remaining.iter().map(|&i| {
+                        let hh = &handles[i];
+                        async move {
+                            match tokio::time::timeout_at(grace_deadline, hh.wait()).await {
+                                Ok(Ok(result)) => Some(result),
+                                _ => hh.result_snapshot(),
+                            }
+                        }
+                    });
+                    let grace_results = futures_util::future::join_all(grace_waits).await;
+                    for (i, final_result) in remaining.iter().copied().zip(grace_results) {
+                        let hh = &handles[i];
+                        if let Some(snapshot) = final_result {
+                            results.push(snapshot);
+                        } else {
+                            results.push(WorkerResult {
+                                worker_id: hh.worker_id.clone(),
+                                title: hh.title.clone(),
+                                status: WorkerStatus::Stopped,
+                                output: String::new(),
+                                error: Some(format!(
+                                    "worker timed out after {timeout_secs}s budget and was \
+                                     cancelled"
+                                )),
+                                started_at: hh.started_at,
+                                finished_at: hh.finished_at(),
+                            });
+                        }
+                    }
+                    break;
                 }
             }
         }
@@ -542,35 +598,66 @@ impl Tool for SpawnWorkersTool {
 
         let mut merge_failed = false;
         if parsed.isolation == Isolation::Worktree && parsed.auto_merge {
+            let base_lock = worktrees
+                .iter()
+                .flatten()
+                .next()
+                .map(|info| crate::workers::worktree::base_merge_lock(&info.base));
+            let _base_guard = match base_lock.as_ref() {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            };
             let parent_dirty = match base_workspace.as_ref() {
                 Some(base) => parent_workspace_is_dirty(base).await,
-                None => false,
+                None => Ok(false),
             };
-            if parent_dirty {
-                let preserved = preserve_all_worktrees(&worktrees).await;
-                aggregated.push_str(
-                    "\n\n## Auto-merge\nSkipped: the parent workspace has uncommitted changes, \
-                     so merging worker branches now could clobber or conflict with your \
-                     in-flight work. Worker changes were committed onto their branches and the \
-                     worktree directories were cleaned up. Commit or stash your changes, then \
-                     merge manually:\n",
-                );
-                aggregated.push_str(&preserved);
-            } else {
-                let merge_report = sequential_merge_worktrees(
-                    &worktrees,
-                    &results,
-                    parsed.merge_strategy,
-                    best_of_n_winner,
-                )
-                .await;
-                if merge_report.has_failure {
-                    merge_failed = true;
+            match parent_dirty {
+                Ok(true) => {
+                    let preserved = preserve_all_worktrees(&worktrees).await;
+                    aggregated.push_str(
+                        "\n\n## Auto-merge\nSkipped: the parent workspace has uncommitted changes, \
+                         so merging worker branches now could clobber or conflict with your \
+                         in-flight work. Worker changes were committed onto their branches and the \
+                         worktree directories were cleaned up. Commit or stash your changes, then \
+                         merge manually:\n",
+                    );
+                    aggregated.push_str(&preserved);
                 }
-                aggregated.push_str("\n\n## Auto-merge (sequential)\n");
-                aggregated.push_str(&merge_report.body);
+                Err(err) => {
+                    let preserved = preserve_all_worktrees(&worktrees).await;
+                    aggregated.push_str(&format!(
+                        "\n\n## Auto-merge\nSkipped: could not determine whether the parent \
+                         workspace has uncommitted changes ({err}); treating it as dirty so \
+                         your in-flight work is never clobbered. Worker branches were \
+                         preserved for manual review:\n"
+                    ));
+                    aggregated.push_str(&preserved);
+                }
+                Ok(false) => {
+                    let merge_report = sequential_merge_worktrees(
+                        &worktrees,
+                        &results,
+                        parsed.merge_strategy,
+                        best_of_n_winner,
+                    )
+                    .await;
+                    if merge_report.has_failure {
+                        merge_failed = true;
+                    }
+                    aggregated.push_str("\n\n## Auto-merge (sequential)\n");
+                    aggregated.push_str(&merge_report.body);
+                }
             }
         } else if parsed.isolation == Isolation::Worktree && !parsed.auto_merge {
+            let base_lock = worktrees
+                .iter()
+                .flatten()
+                .next()
+                .map(|info| crate::workers::worktree::base_merge_lock(&info.base));
+            let _base_guard = match base_lock.as_ref() {
+                Some(lock) => Some(lock.lock().await),
+                None => None,
+            };
             let preserved = preserve_all_worktrees(&worktrees).await;
             aggregated.push_str(
                 "\n\n## Auto-merge\nSkipped (auto_merge=false). Worker changes were committed \
@@ -858,13 +945,12 @@ async fn sequential_merge_worktrees(
         };
         let status = results.get(idx).map(|r| r.status).unwrap_or(WorkerStatus::Failed);
         if !matches!(status, WorkerStatus::Completed) {
-            let _ = commit_worker_changes(info).await;
-            let note = remove_worktree_keep_branch(info).await;
+            let salvage = salvage_worktree(info).await;
             lines.push(format!(
-                "- `{}`: skipped merge (worker status={}); partial work committed to the \
-                 branch{note}",
+                "- `{}`: skipped merge (worker status={}); {}",
                 info.branch,
-                status.as_str()
+                status.as_str(),
+                salvage.note
             ));
             continue;
         }
@@ -872,21 +958,23 @@ async fn sequential_merge_worktrees(
             match best_of_n_winner {
                 Some(winner) if winner == idx => {}
                 Some(_) => {
-                    let _ = commit_worker_changes(info).await;
-                    let note = remove_worktree_keep_branch(info).await;
+                    let salvage = salvage_worktree(info).await;
                     lines.push(format!(
-                        "- `{}`: not the judged winner; branch preserved unmerged{note}",
-                        info.branch
+                        "- `{}`: not the judged winner; branch preserved unmerged; {}",
+                        info.branch, salvage.note
                     ));
                     continue;
                 }
                 None => {
-                    let _ = commit_worker_changes(info).await;
-                    let note = remove_worktree_keep_branch(info).await;
+                    let salvage = salvage_worktree(info).await;
+                    let hint = if salvage.retained {
+                        String::new()
+                    } else {
+                        format!(" — review and merge manually (`git merge {}`)", info.branch)
+                    };
                     lines.push(format!(
-                        "- `{}`: judge verdict unavailable; branch preserved unmerged{note} — \
-                         review and merge manually (`git merge {}`)",
-                        info.branch, info.branch
+                        "- `{}`: judge verdict unavailable; branch preserved unmerged; {}{hint}",
+                        info.branch, salvage.note
                     ));
                     continue;
                 }
@@ -912,12 +1000,15 @@ async fn sequential_merge_worktrees(
 async fn preserve_all_worktrees(worktrees: &[Option<WorktreeInfo>]) -> String {
     let mut lines = String::new();
     for info in worktrees.iter().flatten() {
-        let _ = commit_worker_changes(info).await;
-        let note = remove_worktree_keep_branch(info).await;
-        lines.push_str(&format!(
-            "- `{}`: preserved{note} — merge with `git merge {}`\n",
-            info.branch, info.branch
-        ));
+        let salvage = salvage_worktree(info).await;
+        if salvage.retained {
+            lines.push_str(&format!("- `{}`: {}\n", info.branch, salvage.note));
+        } else {
+            lines.push_str(&format!(
+                "- `{}`: {} — merge with `git merge {}`\n",
+                info.branch, salvage.note, info.branch
+            ));
+        }
     }
     if lines.is_empty() {
         lines.push_str("- (no worktrees to preserve)\n");

@@ -11,9 +11,9 @@ use std::time::Duration;
 use axum::{
     Json, Router,
     extract::{Query, State},
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{
-        IntoResponse,
+        IntoResponse, Response,
         sse::{Event, KeepAlive, Sse},
     },
     routing::{get, post},
@@ -43,13 +43,69 @@ struct AppState {
     sessions: SessionRegistry,
 
     messages_path: String,
+
+    auth_token: Option<Arc<String>>,
 }
 
-pub async fn serve(server: McpServer, bind: SocketAddr) -> anyhow::Result<()> {
+const MCP_SSE_TOKEN_VAR: &str = "SEN_MCP_SSE_TOKEN";
+
+pub fn resolve_sse_auth_token(config_token: Option<&str>) -> Option<String> {
+    if let Some(token) = crate::util::get_runtime_var(MCP_SSE_TOKEN_VAR) {
+        let trimmed = token.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+    config_token
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+fn authorize(state: &AppState, headers: &HeaderMap) -> Result<(), Response> {
+    let Some(expected) = state.auth_token.as_deref() else {
+        return Ok(());
+    };
+    let presented = headers
+        .get(axum::http::header::AUTHORIZATION)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.strip_prefix("Bearer "))
+        .map(str::trim)
+        .unwrap_or("");
+    if crate::security::pairing::constant_time_eq(presented, expected) {
+        Ok(())
+    } else {
+        Err((StatusCode::UNAUTHORIZED, "unauthorized").into_response())
+    }
+}
+
+pub async fn serve(
+    server: McpServer,
+    bind: SocketAddr,
+    config_token: Option<String>,
+) -> anyhow::Result<()> {
+    let auth_token = resolve_sse_auth_token(config_token.as_deref()).map(Arc::new);
+    if !bind.ip().is_loopback() && auth_token.is_none() {
+        anyhow::bail!(
+            "MCP SSE transport refused: bind address '{bind}' is not loopback and no auth token \
+             is configured ({MCP_SSE_TOKEN_VAR} or mcp_server.sse_token). Bind to 127.0.0.1, or \
+             set a token to expose it with Bearer auth."
+        );
+    }
+    if auth_token.is_none() {
+        tracing::warn!(
+            target: "mcp.server.sse",
+            %bind,
+            "SECURITY: MCP SSE transport is running WITHOUT authentication (neither \
+             {MCP_SSE_TOKEN_VAR} nor mcp_server.sse_token set) on loopback; any local process \
+             can invoke the exposed tools. Set a token to require Bearer auth."
+        );
+    }
     let state = AppState {
         server: Arc::new(server),
         sessions: Arc::new(RwLock::new(HashMap::new())),
         messages_path: "/messages".to_string(),
+        auth_token,
     };
 
     let app = Router::new()
@@ -77,9 +133,10 @@ struct MessagesQuery {
     session: String,
 }
 
-async fn handle_sse(
-    State(state): State<AppState>,
-) -> Sse<impl Stream<Item = Result<Event, Infallible>>> {
+async fn handle_sse(State(state): State<AppState>, headers: HeaderMap) -> Response {
+    if let Err(resp) = authorize(&state, &headers) {
+        return resp;
+    }
     let session_id = Uuid::new_v4().to_string();
     let (tx, rx) = mpsc::channel::<OutFrame>(64);
     state
@@ -113,18 +170,24 @@ async fn handle_sse(
         Ok::<Event, Infallible>(Event::default().event(frame.event).data(frame.data))
     });
 
-    Sse::new(mapped).keep_alive(
-        KeepAlive::new()
-            .interval(Duration::from_secs(15))
-            .text("keep-alive"),
-    )
+    Sse::new(mapped)
+        .keep_alive(
+            KeepAlive::new()
+                .interval(Duration::from_secs(15))
+                .text("keep-alive"),
+        )
+        .into_response()
 }
 
 async fn handle_messages(
     State(state): State<AppState>,
     Query(query): Query<MessagesQuery>,
+    headers: HeaderMap,
     Json(body): Json<Value>,
 ) -> impl IntoResponse {
+    if let Err(resp) = authorize(&state, &headers) {
+        return resp;
+    }
     let sender = {
         let sessions = state.sessions.read();
         sessions.get(&query.session).cloned()

@@ -157,6 +157,8 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
 
     let mut current_message: Option<String> = Some(config.initial_prompt.clone());
 
+    let ctrl_c_guard = super::one_shot::CtrlCAbortGuard::install();
+
     loop {
         num_turns += 1;
 
@@ -166,21 +168,29 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
             break;
         }
 
-        match crate::agent::run(
-            loaded_config.clone(),
-            current_message.take(),
-            None,
-            config.model.clone(),
-            loaded_config.default_temperature,
-            Vec::new(),
-            false,
-            None,
-            allowed_tools.clone(),
-            None,
-        )
-        .await
-        {
-            Ok(response) => {
+        let turn_outcome = ctrl_c_guard
+            .run_abortable(crate::agent::run(
+                loaded_config.clone(),
+                current_message.take(),
+                None,
+                config.model.clone(),
+                loaded_config.default_temperature,
+                Vec::new(),
+                false,
+                None,
+                allowed_tools.clone(),
+                None,
+            ))
+            .await;
+
+        match turn_outcome {
+            None => {
+                io.emit_system("Aborted by Ctrl+C");
+                exit_reason = ExitReason::UserAbort;
+                tracing::info!("Headless turn aborted by Ctrl+C");
+                break;
+            }
+            Some(Ok(response)) => {
                 final_response = Some(response.clone());
                 let _ = io.write(&StdoutMessage::AssistantMessage {
                     content: response,
@@ -203,7 +213,7 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
                     }
                 }
             }
-            Err(e) => {
+            Some(Err(e)) => {
                 io.emit_system(&format!("Agent error: {e}"));
                 exit_reason = ExitReason::Error;
                 break;
@@ -216,7 +226,15 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
             break;
         }
 
-        match io.recv().await {
+        let next_input = tokio::select! {
+            msg = io.recv() => msg,
+            () = ctrl_c_guard.aborted() => {
+                exit_reason = ExitReason::UserAbort;
+                tracing::info!("Ctrl+C received while waiting for input");
+                break;
+            }
+        };
+        match next_input {
             Some(StdinMessage::SdkMessage { action, .. }) if action == "abort" => {
                 exit_reason = ExitReason::UserAbort;
                 tracing::info!("User abort received");

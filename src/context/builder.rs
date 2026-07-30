@@ -4,7 +4,7 @@
 
 use std::path::PathBuf;
 use std::sync::{Arc, RwLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use once_cell::sync::Lazy;
 
@@ -454,24 +454,35 @@ pub fn empty_open_files_source() -> Arc<dyn OpenFilesSource> {
 
 pub struct FocusPathRegistry;
 
-static FOCUS_REGISTRY: Lazy<RwLock<std::collections::HashMap<String, Vec<PathBuf>>>> =
+struct FocusEntry {
+    paths: Vec<PathBuf>,
+    last_used: Instant,
+}
+
+static FOCUS_REGISTRY: Lazy<RwLock<std::collections::HashMap<String, FocusEntry>>> =
     Lazy::new(|| RwLock::new(std::collections::HashMap::new()));
 
 const FOCUS_PATHS_PER_SESSION: usize = 8;
 const FOCUS_MAX_SESSIONS: usize = 64;
 
 impl FocusPathRegistry {
-    fn session_key() -> String {
-        crate::session::current_session_context()
-            .map(|c| c.session_id)
-            .unwrap_or_else(|| "__no_session__".to_string())
+    fn session_key() -> Option<String> {
+        crate::session::current_session_context().map(|c| c.session_id)
     }
 
     pub fn set(paths: Vec<PathBuf>) {
-        let key = Self::session_key();
+        let Some(key) = Self::session_key() else {
+            return;
+        };
         if let Ok(mut guard) = FOCUS_REGISTRY.write() {
             Self::evict_if_needed(&mut guard, &key);
-            guard.insert(key, paths);
+            guard.insert(
+                key,
+                FocusEntry {
+                    paths,
+                    last_used: Instant::now(),
+                },
+            );
         }
     }
 
@@ -479,13 +490,19 @@ impl FocusPathRegistry {
         if paths.is_empty() {
             return;
         }
-        let key = Self::session_key();
+        let Some(key) = Self::session_key() else {
+            return;
+        };
         if let Ok(mut guard) = FOCUS_REGISTRY.write() {
             Self::evict_if_needed(&mut guard, &key);
-            let entry = guard.entry(key).or_default();
+            let entry = guard.entry(key).or_insert_with(|| FocusEntry {
+                paths: Vec::new(),
+                last_used: Instant::now(),
+            });
+            entry.last_used = Instant::now();
             for p in paths {
-                if !entry.contains(p) {
-                    entry.push(p.clone());
+                if !entry.paths.contains(p) {
+                    entry.paths.push(p.clone());
                 }
             }
         }
@@ -495,24 +512,34 @@ impl FocusPathRegistry {
         if paths.is_empty() {
             return;
         }
-        let key = Self::session_key();
+        let Some(key) = Self::session_key() else {
+            return;
+        };
         if let Ok(mut guard) = FOCUS_REGISTRY.write() {
             Self::evict_if_needed(&mut guard, &key);
-            let entry = guard.entry(key).or_default();
+            let entry = guard.entry(key).or_insert_with(|| FocusEntry {
+                paths: Vec::new(),
+                last_used: Instant::now(),
+            });
+            entry.last_used = Instant::now();
             for p in paths {
-                entry.retain(|existing| existing != p);
-                entry.insert(0, p.clone());
+                entry.paths.retain(|existing| existing != p);
+                entry.paths.insert(0, p.clone());
             }
-            entry.truncate(FOCUS_PATHS_PER_SESSION);
+            entry.paths.truncate(FOCUS_PATHS_PER_SESSION);
         }
     }
 
     fn evict_if_needed(
-        guard: &mut std::collections::HashMap<String, Vec<PathBuf>>,
+        guard: &mut std::collections::HashMap<String, FocusEntry>,
         incoming_key: &str,
     ) {
         if guard.len() >= FOCUS_MAX_SESSIONS && !guard.contains_key(incoming_key) {
-            if let Some(victim) = guard.keys().next().cloned() {
+            let victim = guard
+                .iter()
+                .min_by_key(|(_, entry)| entry.last_used)
+                .map(|(key, _)| key.clone());
+            if let Some(victim) = victim {
                 guard.remove(&victim);
             }
         }
@@ -520,16 +547,22 @@ impl FocusPathRegistry {
 
     #[must_use]
     pub fn current() -> Vec<PathBuf> {
-        let key = Self::session_key();
-        FOCUS_REGISTRY
-            .read()
-            .ok()
-            .and_then(|g| g.get(&key).cloned())
-            .unwrap_or_default()
+        let Some(key) = Self::session_key() else {
+            return Vec::new();
+        };
+        if let Ok(mut guard) = FOCUS_REGISTRY.write() {
+            if let Some(entry) = guard.get_mut(&key) {
+                entry.last_used = Instant::now();
+                return entry.paths.clone();
+            }
+        }
+        Vec::new()
     }
 
     pub fn clear() {
-        let key = Self::session_key();
+        let Some(key) = Self::session_key() else {
+            return;
+        };
         if let Ok(mut guard) = FOCUS_REGISTRY.write() {
             guard.remove(&key);
         }

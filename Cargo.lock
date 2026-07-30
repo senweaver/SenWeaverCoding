@@ -133,6 +133,7 @@ dependencies = [
  "tree-sitter-toml-ng",
  "tree-sitter-typescript",
  "ttf-parser",
+ "unicode-width 0.2.0",
  "urlencoding",
  "uuid",
  "wa-rs",

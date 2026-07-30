@@ -13,6 +13,12 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::TurnEvent;
 use crate::workers::events::{WorkerMeta, WorkerResult, WorkerStatus, WorkerSummary};
 
+#[derive(Debug, Clone)]
+pub struct SequencedWorkerEvent {
+    pub seq: u64,
+    pub event: TurnEvent,
+}
+
 pub struct WorkerHandle {
     pub worker_id: String,
     pub parent_session_id: String,
@@ -28,7 +34,7 @@ pub struct WorkerHandle {
 
     last_detail: Arc<Mutex<Option<String>>>,
 
-    pub events_tx: broadcast::Sender<TurnEvent>,
+    pub events_tx: broadcast::Sender<SequencedWorkerEvent>,
 
     pub cancel: CancellationToken,
 
@@ -52,7 +58,7 @@ impl WorkerHandle {
         model: String,
         workspace_root: PathBuf,
     ) -> Self {
-        let (events_tx, _) = broadcast::channel::<TurnEvent>(512);
+        let (events_tx, _) = broadcast::channel::<SequencedWorkerEvent>(512);
         Self {
             worker_id,
             parent_session_id,
@@ -115,12 +121,8 @@ impl WorkerHandle {
         self.finished_at.store(Arc::new(Some(chrono::Utc::now())));
     }
 
-    pub fn subscribe(&self) -> broadcast::Receiver<TurnEvent> {
+    pub fn subscribe(&self) -> broadcast::Receiver<SequencedWorkerEvent> {
         self.events_tx.subscribe()
-    }
-
-    pub fn publish_event(&self, event: TurnEvent) {
-        let _ = self.events_tx.send(event);
     }
 
     pub fn cancel(&self) {

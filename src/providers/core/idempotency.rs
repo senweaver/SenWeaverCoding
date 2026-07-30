@@ -66,8 +66,29 @@ where
     IDEMPOTENCY_KEY.scope(key, fut).await
 }
 
+pub fn scope_idempotency_key_sync<F, R>(key: String, f: F) -> R
+where
+    F: FnOnce() -> R,
+{
+    IDEMPOTENCY_KEY.sync_scope(key, f)
+}
+
 pub fn current_idempotency_key() -> Option<String> {
     IDEMPOTENCY_KEY.try_with(|k| k.clone()).ok()
+}
+
+pub fn apply_idempotency_header(req: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+    apply_idempotency_header_value(req, current_idempotency_key())
+}
+
+pub fn apply_idempotency_header_value(
+    req: reqwest::RequestBuilder,
+    key: Option<String>,
+) -> reqwest::RequestBuilder {
+    match key {
+        Some(key) if !key.is_empty() => req.header("Idempotency-Key", key),
+        _ => req,
+    }
 }
 
 fn canonical_json(v: &serde_json::Value) -> String {

@@ -29,8 +29,10 @@ impl SkillShellTool {
         tool: &crate::skills::SkillTool,
         security: Arc<SecurityPolicy>,
     ) -> Self {
+        let tool_name = format!("{}.{}", skill_name, tool.name);
+        crate::hooks::script_runner::register_shell_capable_tool(&tool_name);
         Self {
-            tool_name: format!("{}.{}", skill_name, tool.name),
+            tool_name,
             tool_description: tool.description.clone(),
             command_template: tool.command.clone(),
             args: tool.args.clone(),
@@ -146,6 +148,14 @@ impl Tool for SkillShellTool {
                 success: false,
                 output: String::new(),
                 error: Some("Rate limit exceeded: action budget exhausted".into()),
+            });
+        }
+
+        if let Err(reason) = crate::security::detect::ensure_sandbox_available() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(reason),
             });
         }
 

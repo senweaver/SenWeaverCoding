@@ -1289,6 +1289,8 @@ const KNOWN_SYSTEM_NOTIFICATION_SUBTYPES = new Set<string>([
   'ws_unreachable',
   'runtime_config_updated',
   'runtime_config_persist_failed',
+  'runtime_config_validation_failed',
+  'runtime_config_apply_failed',
   'coding_mode_confirm_required',
   'coding_mode_updated',
   'coding_mode_auto_resolved',
@@ -4676,10 +4678,26 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }).catch(() => {})
         }
 
-        if (msg.subtype === 'runtime_config_updated') {
-          import('../api/websocket').then(({ wsManager }) => {
-            wsManager.notifyRuntimeConfigUpdated(sessionId)
-          }).catch(() => {})
+        if (
+          msg.subtype === 'runtime_config_updated' ||
+          msg.subtype === 'runtime_config_apply_failed'
+        ) {
+          const requestId =
+            typeof msg.data === 'object' &&
+            msg.data !== null &&
+            'requestId' in msg.data &&
+            typeof msg.data.requestId === 'string'
+              ? msg.data.requestId
+              : null
+          if (requestId) {
+            import('../api/websocket').then(({ wsManager }) => {
+              wsManager.notifyRuntimeConfigUpdated(
+                sessionId,
+                requestId,
+                msg.subtype === 'runtime_config_updated',
+              )
+            }).catch(() => {})
+          }
         }
 
         if (

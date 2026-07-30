@@ -376,6 +376,15 @@ fn persist_qwen_oauth_credentials(refreshed: &QwenOauthCredentials) {
         Ok(bytes) => {
             if let Err(error) = crate::util::atomic_write(&path, &bytes) {
                 tracing::warn!(error = %error, "failed to persist refreshed Qwen OAuth credentials");
+            } else {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(
+                        &path,
+                        std::fs::Permissions::from_mode(0o600),
+                    );
+                }
             }
         }
         Err(error) => {
@@ -1433,9 +1442,19 @@ pub fn create_provider_with_url_and_options(
         let has_custom_url = api_url.map(str::trim).filter(|u| !u.is_empty()).is_some();
         if !is_custom && !has_custom_url {
             if let Some(likely_provider) = check_api_key_prefix(name, key_value) {
-                let visible: String = key_value.chars().take(8).collect();
+                let recognized_prefix = match likely_provider {
+                    "anthropic" => "sk-ant-",
+                    "openrouter" => "sk-or-",
+                    "openai" => "sk-",
+                    "groq" => "gsk_",
+                    "perplexity" => "pplx-",
+                    "xai" => "xai-",
+                    "nvidia" => "nvapi-",
+                    "telnyx" => "KEY-",
+                    _ => "",
+                };
                 anyhow::bail!(
-                    "API key prefix mismatch: key \"{visible}...\" looks like a \
+                    "API key prefix mismatch: key prefix \"{recognized_prefix}...\" looks like a \
                      {likely_provider} key, but provider \"{name}\" is selected. \
                      Set the correct provider-specific env var or use `-p {likely_provider}`."
                 );

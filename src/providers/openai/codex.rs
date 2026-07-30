@@ -107,11 +107,14 @@ impl OpenAiCodexProvider {
             responses_url,
             gateway_api_key: gateway_api_key.map(ToString::to_string),
             reasoning_effort: options.reasoning_effort.clone(),
-            client: Client::builder()
-                .connect_timeout(std::time::Duration::from_secs(10))
-                .read_timeout(std::time::Duration::from_secs(300))
-                .build()
-                .unwrap_or_else(|_| Client::new()),
+            client: crate::services::require_services()
+                .proxy_runtime()
+                .build_stream_client(
+                    "provider.openai-codex",
+                    300,
+                    10,
+                    &reqwest::header::HeaderMap::new(),
+                ),
         })
     }
 }
@@ -678,9 +681,9 @@ impl OpenAiCodexProvider {
             access_token.as_deref().unwrap_or_default()
         };
 
-        let mut request_builder = self
-            .client
-            .post(&self.responses_url)
+        let mut request_builder = crate::providers::core::idempotency::apply_idempotency_header(
+            self.client.post(&self.responses_url),
+        )
             .header("Authorization", format!("Bearer {bearer_token}"))
             .header("OpenAI-Beta", "responses=experimental")
             .header("originator", "pi")

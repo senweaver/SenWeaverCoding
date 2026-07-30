@@ -4,5 +4,6 @@
 
 pub mod core;
 pub mod foreground;
+pub mod preflight;
 
 pub use core::*;

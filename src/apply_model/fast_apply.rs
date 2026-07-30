@@ -196,27 +196,58 @@ async fn apply_via_full_tier(
     match refiner.full.refine(source, seed_diff, hint).await {
         Ok(refined) => match apply_unified_diff(source, &refined, options) {
             Ok(outcome) => Ok((outcome, refined, FastPathTier::Full)),
-            Err(diff_err) => merge_full_file_fallback(refiner, source, seed_diff, hint, diff_err)
-                .await
-                .map(|(outcome, merged)| (outcome, merged, FastPathTier::Full)),
+            Err(diff_err) => {
+                merge_full_file_fallback(refiner, source, seed_diff, options, hint, diff_err)
+                    .await
+                    .map(|(outcome, merged)| (outcome, merged, FastPathTier::Full))
+            }
         },
         Err(refine_err) => {
-            merge_full_file_fallback(refiner, source, seed_diff, hint, refine_err)
+            merge_full_file_fallback(refiner, source, seed_diff, options, hint, refine_err)
                 .await
                 .map(|(outcome, merged)| (outcome, merged, FastPathTier::Full))
         }
     }
 }
 
+const MERGE_SHRINK_GUARD_MIN_SOURCE_LEN: usize = 1024;
+
 async fn merge_full_file_fallback(
     refiner: &FastApplyRefiner,
     source: &str,
     edit_snippet: &str,
+    options: &ApplyOptions,
     hint: Option<&str>,
     prior_err: ApplyError,
 ) -> Result<(ApplyOutcome, String), ApplyError> {
     match refiner.merge_full_file(source, edit_snippet, hint).await {
         Ok(merged) => {
+            if source.len() >= MERGE_SHRINK_GUARD_MIN_SOURCE_LEN
+                && merged.len() < source.len() / 2
+            {
+                tracing::warn!(
+                    target: "apply_model.fast_apply",
+                    source_len = source.len(),
+                    merged_len = merged.len(),
+                    "full-file merge result shrank by more than half; rejecting as likely truncated"
+                );
+                return Err(prior_err);
+            }
+            if options.validate {
+                let report = super::validator::validate_edit(
+                    Some(source),
+                    &merged,
+                    options.path.as_deref(),
+                );
+                if report.is_confident_failure() {
+                    tracing::warn!(
+                        target: "apply_model.fast_apply",
+                        issues = %report.advisory_summary(),
+                        "full-file merge result failed validation; rejecting"
+                    );
+                    return Err(prior_err);
+                }
+            }
             crate::observability::code_intel_metrics::incr_apply_model_refine_success();
             let outcome = ApplyOutcome {
                 applied: merged.clone(),

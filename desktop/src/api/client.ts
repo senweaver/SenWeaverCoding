@@ -63,10 +63,8 @@ export function getDefaultBaseUrl() {
   return DEFAULT_BASE_URL
 }
 
-export function setAuthToken(token: string) {
-  if (token && token.length > 0) {
-    authToken = token
-  }
+export function setAuthToken(token: string | null | undefined) {
+  authToken = token && token.length > 0 ? token : undefined
 }
 
 export function getAuthToken() {

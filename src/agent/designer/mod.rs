@@ -160,6 +160,68 @@ fn classify_artifact_surface(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
+pub fn reconcile_session_artifacts(
+    backend: &dyn crate::channels::session::backend::SessionBackend,
+    session_key: &str,
+    session_id: &str,
+    work_dir: &std::path::Path,
+) {
+    let session_dir = work_dir.join(pipeline::designer_session_dir(session_id));
+    let Ok(session_dir) = std::fs::canonicalize(&session_dir).map(|p| strip_verbatim_prefix(&p))
+    else {
+        return;
+    };
+    if !session_dir.is_dir() {
+        return;
+    }
+    let known: std::collections::HashSet<String> = backend
+        .list_design_artifacts(session_key)
+        .into_iter()
+        .map(|r| r.rel_path)
+        .collect();
+    let mut stack = vec![session_dir.clone()];
+    while let Some(dir) = stack.pop() {
+        if dir != session_dir && dir.join(deck::compile::MANIFEST_FILE).is_file() {
+            let manifest = dir.join(deck::compile::MANIFEST_FILE);
+            if !dir.join(deck::compile::RENDER_FILE).is_file() {
+                deck::compile::compile_deck_quiet(&dir, work_dir);
+            }
+            if let Some(rel) = workspace_relative_path(&manifest, work_dir) {
+                if !known.contains(&rel) {
+                    let _ = backend.record_design_artifact(session_key, &rel, None, "deck");
+                }
+            }
+            continue;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                let is_masks = path
+                    .file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.eq_ignore_ascii_case("masks"));
+                if !is_masks {
+                    stack.push(path);
+                }
+                continue;
+            }
+            let Some(surface) = classify_artifact_surface(&path) else {
+                continue;
+            };
+            let Some(rel) = workspace_relative_path(&path, work_dir) else {
+                continue;
+            };
+            if known.contains(&rel) {
+                continue;
+            }
+            let _ = backend.record_design_artifact(session_key, &rel, None, surface);
+        }
+    }
+}
+
 pub fn record_artifact_if_designer(abs_path: &std::path::Path) {
     if !matches!(
         crate::agent::coding_mode::active_coding_mode(),
@@ -174,6 +236,12 @@ pub fn record_artifact_if_designer(abs_path: &std::path::Path) {
     if let Some(deck_dir) = deck::compile::deck_dir_for_spec_path(abs_path) {
         let manifest = deck_dir.join(deck::compile::MANIFEST_FILE);
         let Some(rel_path) = workspace_relative_path(&manifest, workspace_dir) else {
+            tracing::warn!(
+                target: "designer.artifacts",
+                artifact = %manifest.display(),
+                workspace = %workspace_dir.display(),
+                "deck manifest is outside the session workspace; skipping canvas registration"
+            );
             return;
         };
         if rel_path.is_empty() || !rel_path.contains(".senweavercoding/designer/") {
@@ -198,6 +266,12 @@ pub fn record_artifact_if_designer(abs_path: &std::path::Path) {
         return;
     };
     let Some(rel_path) = workspace_relative_path(abs_path, workspace_dir) else {
+        tracing::warn!(
+            target: "designer.artifacts",
+            artifact = %abs_path.display(),
+            workspace = %workspace_dir.display(),
+            "designer artifact is outside the session workspace; skipping canvas registration"
+        );
         return;
     };
     if rel_path.is_empty() {

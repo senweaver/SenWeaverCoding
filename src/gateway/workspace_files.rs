@@ -32,6 +32,7 @@ enum FsError {
     OutsideRoot,
     InvalidName,
     InvalidRoot,
+    RootUnresolved,
     Io(std::io::Error),
     TooLarge(u64),
 }
@@ -54,6 +55,13 @@ impl FsError {
                 StatusCode::FORBIDDEN,
                 Json(json!({
                     "error": "Workspace root is not in the allowed list"
+                })),
+            )
+                .into_response(),
+            FsError::RootUnresolved => (
+                StatusCode::BAD_REQUEST,
+                Json(json!({
+                    "error": "Workspace root path does not exist or cannot be resolved"
                 })),
             )
                 .into_response(),
@@ -86,6 +94,12 @@ impl From<std::io::Error> for FsError {
     }
 }
 
+fn normalize_workspace_root(path: &Path) -> Result<PathBuf, FsError> {
+    path.canonicalize()
+        .map(crate::util::strip_verbatim_prefix)
+        .map_err(|_| FsError::RootUnresolved)
+}
+
 fn session_allowed_workspace_canonicals(state: &AppState) -> Vec<PathBuf> {
     let Some(ref backend) = state.session_backend else {
         return Vec::new();
@@ -98,8 +112,7 @@ fn session_allowed_workspace_canonicals(state: &AppState) -> Vec<PathBuf> {
             if wd.is_empty() {
                 return None;
             }
-            let p = PathBuf::from(wd);
-            p.canonicalize().ok()
+            normalize_workspace_root(Path::new(wd)).ok()
         })
         .collect();
     out.sort();
@@ -112,21 +125,24 @@ async fn allowed_workspace_root(state: &AppState, requested: &str) -> Result<Pat
     let requested = requested.to_string();
     tokio::task::spawn_blocking(move || {
         let workspace = state.config.lock().workspace_dir.clone();
-        let workspace_canonical = workspace.canonicalize().map_err(|_| FsError::InvalidRoot)?;
-        let requested = PathBuf::from(&requested);
-        let requested_canonical = requested.canonicalize().map_err(|_| FsError::InvalidRoot)?;
-        if requested_canonical == workspace_canonical {
+        let workspace_canonical = normalize_workspace_root(&workspace)?;
+        let requested_canonical = normalize_workspace_root(Path::new(&requested))?;
+        if crate::util::path_is_within(&requested_canonical, &workspace_canonical)
+            && crate::util::path_is_within(&workspace_canonical, &requested_canonical)
+        {
             return Ok(workspace_canonical);
         }
         for root in session_allowed_workspace_canonicals(&state) {
-            if root == requested_canonical {
+            if crate::util::path_is_within(&requested_canonical, &root)
+                && crate::util::path_is_within(&root, &requested_canonical)
+            {
                 return Ok(requested_canonical);
             }
         }
         Err(FsError::InvalidRoot)
     })
     .await
-    .map_err(|_| FsError::InvalidRoot)?
+    .map_err(|_| FsError::RootUnresolved)?
 }
 
 fn resolve_within(root: &Path, rel: &str, must_exist: bool) -> Result<PathBuf, FsError> {
@@ -144,27 +160,46 @@ fn resolve_within(root: &Path, rel: &str, must_exist: bool) -> Result<PathBuf, F
     let joined = root.join(&rel_path);
 
     let resolved = if joined.exists() {
-        joined.canonicalize().map_err(FsError::Io)?
+        joined
+            .canonicalize()
+            .map(crate::util::strip_verbatim_prefix)
+            .map_err(FsError::Io)?
     } else {
         if must_exist {
             return Err(FsError::NotFound);
         }
-        let parent = joined.parent().ok_or(FsError::InvalidName)?;
-        let parent_canonical = parent.canonicalize().map_err(|_| FsError::NotFound)?;
-        let file_name = joined.file_name().ok_or(FsError::InvalidName)?;
-        parent_canonical.join(file_name)
+        crate::util::normalize_path_for_containment(&joined)
     };
 
-    if !resolved.starts_with(root) {
+    if !crate::util::path_is_within(&resolved, root) {
         return Err(FsError::OutsideRoot);
     }
     Ok(resolved)
 }
 
 fn relative_path(root: &Path, target: &Path) -> String {
+    if let Some(p) = crate::util::path_relative_to(target, root) {
+        return p.to_string_lossy().replace('\\', "/");
+    }
+    #[cfg(windows)]
+    {
+        let child = crate::util::strip_verbatim_prefix(target.to_path_buf());
+        let ancestor = crate::util::strip_verbatim_prefix(root.to_path_buf());
+        let child_s = child.to_string_lossy().replace('/', "\\");
+        let ancestor_s = ancestor.to_string_lossy().replace('/', "\\");
+        let child_l = child_s.to_lowercase();
+        let ancestor_l = ancestor_s.to_lowercase();
+        if child_l == ancestor_l {
+            return String::new();
+        }
+        let prefix = format!("{ancestor_l}\\");
+        if child_l.starts_with(&prefix) && child_s.len() > ancestor_s.len() + 1 {
+            return child_s[ancestor_s.len() + 1..].replace('\\', "/");
+        }
+    }
     target
-        .strip_prefix(root)
-        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
@@ -307,7 +342,7 @@ pub async fn handle_workspace_tree(
 
     match result {
         Ok((children, truncated)) => Json(json!({
-            "root": root.to_string_lossy(),
+            "root": super::api::display_path(&root.to_string_lossy()),
             "relPath": relative_path(&root, &target),
             "entries": children,
             "truncated": truncated,

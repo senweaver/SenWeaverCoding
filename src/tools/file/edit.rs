@@ -11,7 +11,7 @@ use memchr::memmem::Finder;
 use serde_json::json;
 use std::sync::Arc;
 
-const WHOLE_FILE_EMIT_THRESHOLD: usize = 256 * 1024;
+use crate::agent::file_edit_emitter::WHOLE_FILE_EMIT_THRESHOLD;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EditMode {
@@ -41,7 +41,13 @@ async fn read_text_for_edit(
     path: &std::path::Path,
 ) -> std::io::Result<(String, Option<String>)> {
     let bytes = tokio::fs::read(path).await?;
-    let (text, label) = crate::tools::file::encoding::decode_best_effort(&bytes);
+    if crate::tools::file::encoding::is_probably_binary(&bytes) {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "refusing to edit a binary file as text",
+        ));
+    }
+    let (text, label) = crate::tools::file::encoding::decode_for_edit(&bytes)?;
     let non_utf8 = if crate::tools::file::encoding::is_utf8_label(label) {
         None
     } else {
@@ -59,6 +65,22 @@ async fn fresh_mtime_note(path: &std::path::Path) -> String {
             .map(|d| format!("\n[mtime_ms: {}]", d.as_millis() as u64))
             .unwrap_or_default(),
         Err(_) => String::new(),
+    }
+}
+
+fn dominant_eol(content: &str) -> &'static str {
+    let crlf = content.matches("\r\n").count();
+    let total_lf = content.matches('\n').count();
+    let bare_lf = total_lf.saturating_sub(crlf);
+    if crlf > bare_lf { "\r\n" } else { "\n" }
+}
+
+fn adapt_text_to_eol(text: &str, eol: &str) -> String {
+    let lf = text.replace("\r\n", "\n");
+    if eol == "\r\n" {
+        lf.replace('\n', "\r\n")
+    } else {
+        lf
     }
 }
 
@@ -354,20 +376,17 @@ impl Tool for FileEditTool {
             });
         }
 
-        let _resource_guard = match crate::session::acquire_file_write_locked(
-            &resolved_target,
-        )
-        .await
+        let _resource_guard = match crate::session::acquire_file_write_guard(&resolved_target)
+            .await
         {
-            Some(Ok(g)) => Some(g),
-            Some(Err(e)) => {
+            Ok(g) => g,
+            Err(e) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
                     error: Some(format!("{e}")),
                 });
             }
-            None => None,
         };
 
         if crate::session::is_stale_for_current_session(&resolved_target) {
@@ -557,7 +576,7 @@ impl FileEditTool {
         after: &[u8],
         batch_id: String,
     ) {
-        if before.len() > WHOLE_FILE_EMIT_THRESHOLD && after.len() > WHOLE_FILE_EMIT_THRESHOLD {
+        if before.len() > WHOLE_FILE_EMIT_THRESHOLD || after.len() > WHOLE_FILE_EMIT_THRESHOLD {
             crate::agent::file_edit_emitter::emit_file_edit_large(
                 path,
                 before.len(),
@@ -687,8 +706,13 @@ impl FileEditTool {
                         .await
                     {
                         Ok(()) => {
-                            let diff =
-                                self.generate_diff(display_path, old_string, &adapted_new);
+                            let base_line = locate_line(&content, span_start).0;
+                            let diff = self.generate_diff(
+                                display_path,
+                                &content[span_start..span_end],
+                                &adapted_new,
+                                base_line,
+                            );
                             Ok(ToolResult {
                                 success: true,
                                 output: format!(
@@ -728,10 +752,12 @@ impl FileEditTool {
                         .await
                     {
                         Ok(()) => {
+                            let base_line = locate_line(&content, ws_start).0;
                             let diff = self.generate_diff(
                                 display_path,
                                 &content[ws_start..ws_end],
                                 &adjusted_new,
+                                base_line,
                             );
                             Ok(ToolResult {
                                 success: true,
@@ -841,7 +867,9 @@ impl FileEditTool {
                 .await
             {
                 Ok(()) => {
-                    let diff = self.generate_diff(display_path, old_string, new_string);
+                    let base_line = locate_line(&content, pos).0;
+                    let diff =
+                        self.generate_diff(display_path, old_string, new_string, base_line);
                     Ok(ToolResult {
                         success: true,
                         output: format!(
@@ -859,20 +887,27 @@ impl FileEditTool {
             };
         }
 
-        let new_content = {
+        let (new_content, replaced_count) = if replace_all {
             let mut out = String::with_capacity(bytes.len() + new_string.len());
             let mut cursor = 0usize;
+            let mut count = 0usize;
             for pos in finder.find_iter(&bytes[search_range.clone()]) {
                 let abs_pos = search_range.start + pos;
                 out.push_str(&content[cursor..abs_pos]);
                 out.push_str(new_string);
                 cursor = abs_pos + old_string.len();
+                count += 1;
             }
             out.push_str(&content[cursor..]);
-            out
+            (out, count)
+        } else {
+            let pos = hits[0];
+            let mut out = String::with_capacity(content.len() + new_string.len());
+            out.push_str(&content[..pos]);
+            out.push_str(new_string);
+            out.push_str(&content[pos + old_string.len()..]);
+            (out, 1usize)
         };
-
-        let replaced_count = finder.find_iter(&bytes[search_range.clone()]).count();
 
         match self
             .dispatch_full_file_rewrite_encoded(
@@ -884,11 +919,23 @@ impl FileEditTool {
             .await
         {
             Ok(()) => {
-                let diff = self.generate_diff(display_path, old_string, new_string);
+                let diff = if replaced_count > 1 {
+                    if content.len() <= WHOLE_FILE_EMIT_THRESHOLD
+                        && new_content.len() <= WHOLE_FILE_EMIT_THRESHOLD
+                    {
+                        self.generate_diff(display_path, &content, &new_content, 1)
+                    } else {
+                        let base_line = locate_line(&content, hits[0]).0;
+                        self.generate_diff(display_path, old_string, new_string, base_line)
+                    }
+                } else {
+                    let base_line = locate_line(&content, hits[0]).0;
+                    self.generate_diff(display_path, old_string, new_string, base_line)
+                };
                 Ok(ToolResult {
                     success: true,
                     output: format!(
-                        "Edited {display_path}: replaced {replaced_count} occurrence(s){}\n{diff}",
+                        "Edited {display_path}: replaced {replaced_count} occurrence(s){near_line_note}{}\n{diff}",
                         fresh_mtime_note(resolved_target).await
                     ),
                     error: None,
@@ -919,11 +966,13 @@ impl FileEditTool {
             }
         };
 
+        let eol = dominant_eol(&content);
+        let adapted = adapt_text_to_eol(new_string, eol);
         let needs_newline = !content.is_empty() && !content.ends_with('\n');
         let to_append = if needs_newline {
-            format!("\n{new_string}")
+            format!("{eol}{adapted}")
         } else {
-            new_string.to_string()
+            adapted
         };
         let new_content = format!("{content}{to_append}");
 
@@ -1114,8 +1163,16 @@ impl FileEditTool {
         }
     }
 
-    fn generate_diff(&self, path: &str, old_string: &str, new_string: &str) -> String {
+    fn generate_diff(
+        &self,
+        path: &str,
+        old_string: &str,
+        new_string: &str,
+        base_line: usize,
+    ) -> String {
         use similar::TextDiff;
+        const MAX_TOOL_DIFF_PAYLOAD: usize = 64 * 1024;
+        let line_offset = base_line.saturating_sub(1);
         let diff = TextDiff::from_lines(old_string, new_string);
         let mut out = format!("--- a/{path}\n+++ b/{path}\n");
         for group in diff.grouped_ops(3).iter() {
@@ -1129,9 +1186,9 @@ impl FileEditTool {
             let new_end = last.new_range().end;
             out.push_str(&format!(
                 "@@ -{},{} +{},{} @@\n",
-                old_start + 1,
+                old_start + 1 + line_offset,
                 old_end - old_start,
-                new_start + 1,
+                new_start + 1 + line_offset,
                 new_end - new_start,
             ));
             for op in group {
@@ -1145,6 +1202,11 @@ impl FileEditTool {
                     out.push_str(change.value());
                     if !change.value().ends_with('\n') {
                         out.push('\n');
+                    }
+                    if out.len() > MAX_TOOL_DIFF_PAYLOAD {
+                        crate::util::truncate_string_bytes(&mut out, MAX_TOOL_DIFF_PAYLOAD);
+                        out.push_str("\n... (diff truncated)\n");
+                        return out;
                     }
                 }
             }

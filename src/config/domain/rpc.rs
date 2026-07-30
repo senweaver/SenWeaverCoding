@@ -25,6 +25,9 @@ pub struct RpcConfig {
 
     #[serde(default = "default_rpc_max_sessions")]
     pub max_sessions: usize,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auth_token: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]

@@ -238,15 +238,15 @@ async fn check_memory_roundtrip(config: &crate::config::Config) -> CheckResult {
 
     match mem.recall(test_key, 1, None, None, None).await {
         Ok(entries) if !entries.is_empty() => {
-            let _ = mem.forget(test_key).await;
+            let _ = mem.forget(test_key, true).await;
             CheckResult::pass("memory", "write/read/delete round-trip OK")
         }
         Ok(_) => {
-            let _ = mem.forget(test_key).await;
+            let _ = mem.forget(test_key, true).await;
             CheckResult::fail("memory", "no entries returned after round-trip")
         }
         Err(e) => {
-            let _ = mem.forget(test_key).await;
+            let _ = mem.forget(test_key, true).await;
             CheckResult::fail("memory", format!("read failed: {e}"))
         }
     }

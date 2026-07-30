@@ -445,7 +445,7 @@ export function DesignArtifactFrame({
   }, [inView, root, unit.relPath, refreshToken, needsContent])
 
   const rawSrc = rawId
-    ? `${workspaceFilesApi.rawUrl(rawId, unit.relPath)}${refreshToken ? `?v=${refreshToken}` : ''}`
+    ? workspaceFilesApi.rawUrl(rawId, unit.relPath, refreshToken || undefined)
     : null
 
   const dataUrl = useMemo(() => {

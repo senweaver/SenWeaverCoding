@@ -16,7 +16,7 @@ use serde_json::{Value, json};
 
 use crate::agent::{SubagentChunkKind, TurnEvent};
 use crate::session::event::{SessionEvent, SessionEventKind};
-use crate::workers::persistence::WorkerEventLog;
+use crate::workers::persistence::replay_worker_events;
 use crate::workers::supervisor::global_supervisor;
 
 pub async fn handle_ws_worker(
@@ -24,8 +24,7 @@ pub async fn handle_ws_worker(
     headers: axum::http::HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    if let Some(reject) =
-        crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/worker")
+    if let Some(reject) = crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/worker")
     {
         return reject;
     }
@@ -69,20 +68,24 @@ async fn run_worker_socket(socket: WebSocket, worker_id: String) {
     let handle = match supervisor.as_ref().and_then(|s| s.get(&worker_id)) {
         Some(h) => h,
         None => {
-            if let Ok(log) = WorkerEventLog::open(&workspace_root, &worker_id) {
-                if let Ok(events) = log.replay() {
-                    for event in events {
-                        for frame in session_event_to_wire(&worker_id, &event) {
-                            if sink
-                                .send(Message::Text(frame.to_string().into()))
-                                .await
-                                .is_err()
-                            {
-                                return;
-                            }
+            let mut terminal_sent = false;
+            if let Ok(events) = replay_worker_events(&workspace_root, &worker_id) {
+                for record in events {
+                    terminal_sent |= session_event_is_terminal(&record.event);
+                    for frame in session_event_to_wire(&worker_id, &record.event) {
+                        if sink
+                            .send(Message::Text(frame.to_string().into()))
+                            .await
+                            .is_err()
+                        {
+                            return;
                         }
                     }
                 }
+            }
+            if terminal_sent {
+                let _ = sink.close().await;
+                return;
             }
             let _ = sink
                 .send(Message::Text(
@@ -106,28 +109,40 @@ async fn run_worker_socket(socket: WebSocket, worker_id: String) {
     let handle_for_cancel = handle.clone();
 
     let mut wire_tracker = WorkerWireTracker::default();
-    if let Ok(log) = WorkerEventLog::open(&workspace_root, &worker_id) {
-        if let Ok(events) = log.replay() {
-            for event in events {
-                for frame in session_event_to_wire(&worker_id, &event) {
-                    if sink
-                        .send(Message::Text(frame.to_string().into()))
-                        .await
-                        .is_err()
-                    {
-                        return;
-                    }
+    let mut highwater = 0_u64;
+    let mut terminal_replayed = false;
+    if let Ok(events) = replay_worker_events(&workspace_root, &worker_id) {
+        for record in events {
+            highwater = highwater.max(record.seq);
+            terminal_replayed |= session_event_is_terminal(&record.event);
+            wire_tracker.observe_session_event(&record.event);
+            for frame in session_event_to_wire(&worker_id, &record.event) {
+                if sink
+                    .send(Message::Text(frame.to_string().into()))
+                    .await
+                    .is_err()
+                {
+                    return;
                 }
             }
         }
+    }
+    if terminal_replayed {
+        let _ = sink.close().await;
+        return;
     }
 
     loop {
         tokio::select! {
             recv = rx.recv() => {
                 match recv {
-                    Ok(turn_event) => {
-                        let frames = wire_tracker.turn_event_to_wire(&worker_id, &turn_event);
+                    Ok(live) => {
+                        if live.seq <= highwater {
+                            continue;
+                        }
+                        highwater = live.seq;
+                        let terminal = turn_event_is_terminal(&live.event);
+                        let frames = wire_tracker.turn_event_to_wire(&worker_id, &live.event);
                         for frame in frames {
                             if sink
                                 .send(Message::Text(frame.to_string().into()))
@@ -137,8 +152,35 @@ async fn run_worker_socket(socket: WebSocket, worker_id: String) {
                                 return;
                             }
                         }
+                        if terminal {
+                            break;
+                        }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {
+                        if let Ok(events) = replay_worker_events(&workspace_root, &worker_id) {
+                            let mut terminal = false;
+                            for record in events {
+                                if record.seq <= highwater {
+                                    continue;
+                                }
+                                highwater = record.seq;
+                                terminal |= session_event_is_terminal(&record.event);
+                                wire_tracker.observe_session_event(&record.event);
+                                for frame in session_event_to_wire(&worker_id, &record.event) {
+                                    if sink
+                                        .send(Message::Text(frame.to_string().into()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        return;
+                                    }
+                                }
+                            }
+                            if terminal {
+                                break;
+                            }
+                        }
+                    }
                     Err(_) => break,
                 }
             }
@@ -190,25 +232,18 @@ impl WorkerWireTracker {
         uuid::Uuid::new_v4().to_string()
     }
 
-    fn resolve_tool_call_id(
-        &mut self,
-        name: &str,
-        tool_call_id: &Option<String>,
-    ) -> String {
+    fn resolve_tool_call_id(&mut self, name: &str, tool_call_id: &Option<String>) -> String {
         let id = tool_call_id
             .clone()
             .filter(|s| !s.is_empty())
             .unwrap_or_else(Self::next_tool_use_id);
         self.current_tool_use_id = Some(id.clone());
-        self.tool_use_id_for_name.insert(name.to_string(), id.clone());
+        self.tool_use_id_for_name
+            .insert(name.to_string(), id.clone());
         id
     }
 
-    fn resolve_tool_result_id(
-        &mut self,
-        name: &str,
-        tool_call_id: &Option<String>,
-    ) -> String {
+    fn resolve_tool_result_id(&mut self, name: &str, tool_call_id: &Option<String>) -> String {
         let id = tool_call_id
             .clone()
             .filter(|s| !s.is_empty())
@@ -217,6 +252,28 @@ impl WorkerWireTracker {
             .unwrap_or_else(Self::next_tool_use_id);
         self.current_tool_use_id = None;
         id
+    }
+
+    fn observe_session_event(&mut self, event: &SessionEvent) {
+        match &event.kind {
+            SessionEventKind::ToolCall {
+                tool_name,
+                tool_call_id,
+                ..
+            } => {
+                self.current_tool_use_id = Some(tool_call_id.clone());
+                self.tool_use_id_for_name
+                    .insert(tool_name.clone(), tool_call_id.clone());
+            }
+            SessionEventKind::ToolResult { tool_call_id, .. } => {
+                self.tool_use_id_for_name
+                    .retain(|_, value| value != tool_call_id);
+                if self.current_tool_use_id.as_ref() == Some(tool_call_id) {
+                    self.current_tool_use_id = None;
+                }
+            }
+            _ => {}
+        }
     }
 
     fn turn_event_to_wire(&mut self, session_id: &str, event: &TurnEvent) -> Vec<Value> {
@@ -266,7 +323,9 @@ impl WorkerWireTracker {
                 let is_error = !success
                     || crate::agent::tool_handler::event_status::output_indicates_error(output);
                 let safe_output =
-                    crate::services::governance::credential_vault::redact_for_audit_optional(output);
+                    crate::services::governance::credential_vault::redact_for_audit_optional(
+                        output,
+                    );
                 vec![json!({
                     "type": "tool_result",
                     "toolUseId": id,
@@ -530,6 +589,53 @@ fn session_event_to_wire(session_id: &str, event: &SessionEvent) -> Vec<Value> {
             "message": message,
             "errorCode": "WORKER_ERROR",
         })],
+        SessionEventKind::WorkerSpawned {
+            parent_tool_use_id,
+            worker_id,
+            title,
+            model,
+        } => vec![json!({
+            "type": "worker_spawned",
+            "parentToolUseId": parent_tool_use_id,
+            "workerId": worker_id,
+            "title": title,
+            "model": model,
+        })],
+        SessionEventKind::WorkerStatus {
+            worker_id,
+            status,
+            detail,
+        } => vec![json!({
+            "type": "worker_status",
+            "workerId": worker_id,
+            "status": status,
+            "detail": detail,
+        })],
+        SessionEventKind::WorkerProgress {
+            worker_id,
+            action,
+            detail,
+        } => vec![json!({
+            "type": "worker_progress",
+            "workerId": worker_id,
+            "action": action,
+            "detail": detail,
+        })],
+        SessionEventKind::WorkerCompleted {
+            worker_id,
+            success,
+            summary,
+        } => vec![json!({
+            "type": "worker_completed",
+            "workerId": worker_id,
+            "success": success,
+            "summary": summary,
+        })],
+        SessionEventKind::WorkerStopped { worker_id, reason } => vec![json!({
+            "type": "worker_stopped",
+            "workerId": worker_id,
+            "reason": reason,
+        })],
         SessionEventKind::TurnStarted { .. }
         | SessionEventKind::FirstToken { .. }
         | SessionEventKind::ContextCompressed { .. }
@@ -545,11 +651,20 @@ fn session_event_to_wire(session_id: &str, event: &SessionEvent) -> Vec<Value> {
         | SessionEventKind::CheckpointCreated { .. }
         | SessionEventKind::OpenFileMarked { .. }
         | SessionEventKind::ProviderRetry { .. }
-        | SessionEventKind::WorkerSpawned { .. }
-        | SessionEventKind::WorkerStatus { .. }
-        | SessionEventKind::WorkerProgress { .. }
-        | SessionEventKind::WorkerCompleted { .. }
-        | SessionEventKind::WorkerStopped { .. }
         | SessionEventKind::ParentResumed { .. } => Vec::new(),
     }
+}
+
+fn session_event_is_terminal(event: &SessionEvent) -> bool {
+    matches!(
+        &event.kind,
+        SessionEventKind::WorkerCompleted { .. } | SessionEventKind::WorkerStopped { .. }
+    )
+}
+
+fn turn_event_is_terminal(event: &TurnEvent) -> bool {
+    matches!(
+        event,
+        TurnEvent::WorkerCompleted { .. } | TurnEvent::WorkerStopped { .. }
+    )
 }

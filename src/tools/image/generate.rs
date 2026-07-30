@@ -13,7 +13,6 @@ use std::sync::Arc;
 
 pub struct ImageGenTool {
     security: Arc<SecurityPolicy>,
-    workspace_dir: PathBuf,
     default_model: String,
     api_key_env: String,
 }
@@ -21,13 +20,11 @@ pub struct ImageGenTool {
 impl ImageGenTool {
     pub fn new(
         security: Arc<SecurityPolicy>,
-        workspace_dir: PathBuf,
         default_model: String,
         api_key_env: String,
     ) -> Self {
         Self {
             security,
-            workspace_dir,
             default_model,
             api_key_env,
         }
@@ -187,7 +184,7 @@ impl ImageGenTool {
             .await
             .context("Failed to read image bytes")?;
 
-        let images_dir = self.workspace_dir.join("images");
+        let images_dir = self.security.workspace_dir().join("images");
         tokio::fs::create_dir_all(&images_dir)
             .await
             .context("Failed to create images directory")?;

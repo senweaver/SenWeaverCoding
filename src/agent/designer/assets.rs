@@ -154,7 +154,10 @@ own artifact. The tool never overwrites existing files (it auto-suffixes on coll
 generations and edits are always preserved side by side.\n\
 - Slow video models run submit→poll automatically; wait for completion before critiquing.\n\
 - Never invent provider API keys or call external endpoints directly; the tool resolves everything from \
-existing provider configuration.\n";
+existing provider configuration.\n\
+- Every file the tool writes appears on the design canvas automatically. Do NOT build HTML \
+preview/wrapper pages, take browser screenshots, or copy/move the file elsewhere to \"show\" the \
+result �?report the saved path and stop.\n";
 
 pub const DESIGNER_HYPERFRAMES_CONTRACT: &str = "\n### HyperFrames render path\n\
 HyperFrames are HTML/CSS/JS motion compositions rendered locally to MP4 (not photoreal text-to-video). \
@@ -491,8 +494,8 @@ summary per diagram: file path + engine/type + what it shows.\n"
 fn image_skill() -> &'static str {
     "\n### Sub-mode skill: Image (generate + edit studio)\n\
 Generate image(s) via `media_generate surface=image`. Compose a precise, style-aware prompt from the \
-user's brief plus the selected style and aspect ratio; respect the requested count. Save outputs into the \
-project and present them in the preview panel.\n\
+user's brief plus the selected style and aspect ratio; respect the requested count. Saved outputs show \
+up on the design canvas automatically �?never wrap them in preview HTML pages.\n\
 Naming: every generation passes its own descriptive kebab-case `filename` built from the subject \
 (e.g. `filename=autumn-forest-poster`) — a session accumulates MANY images and each request must \
 become a new, recognizable artifact. The tool auto-suffixes on name collisions so nothing is ever \

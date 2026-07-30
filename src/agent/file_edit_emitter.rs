@@ -7,6 +7,8 @@ use std::path::{Path, PathBuf};
 use crate::agent::loop_::{DraftEvent, take_parent_draft_channel};
 
 const MAX_DIFF_PAYLOAD: usize = 64 * 1024;
+pub const WHOLE_FILE_EMIT_THRESHOLD: usize = 256 * 1024;
+const DIFF_DEADLINE: std::time::Duration = std::time::Duration::from_millis(500);
 
 #[derive(Debug, Clone)]
 pub struct FileEditNotice {
@@ -37,203 +39,79 @@ pub fn count_line_changes(before: &str, after: &str) -> (i32, i32) {
     if before == after {
         return (0, 0);
     }
-    let before_lines: Vec<&str> = before.split('\n').collect();
-    let after_lines: Vec<&str> = after.split('\n').collect();
-    let lcs = lcs_length(&before_lines, &after_lines);
-    let deletions = before_lines.len().saturating_sub(lcs) as i32;
-    let additions = after_lines.len().saturating_sub(lcs) as i32;
+    let diff = similar::TextDiff::configure()
+        .timeout(DIFF_DEADLINE)
+        .diff_lines(before, after);
+    let mut additions = 0i32;
+    let mut deletions = 0i32;
+    for change in diff.iter_all_changes() {
+        match change.tag() {
+            similar::ChangeTag::Insert => additions += 1,
+            similar::ChangeTag::Delete => deletions += 1,
+            similar::ChangeTag::Equal => {}
+        }
+    }
     (additions, deletions)
 }
-
-fn lcs_length(a: &[&str], b: &[&str]) -> usize {
-    if a.is_empty() || b.is_empty() {
-        return 0;
-    }
-    let n = a.len();
-    let m = b.len();
-    let cap = (n + 1).saturating_mul(m + 1);
-    if cap > 4_000_000 {
-        return std::cmp::min(n, m);
-    }
-    let mut prev = vec![0usize; m + 1];
-    let mut curr = vec![0usize; m + 1];
-    for i in 1..=n {
-        for j in 1..=m {
-            if a[i - 1] == b[j - 1] {
-                curr[j] = prev[j - 1] + 1;
-            } else {
-                curr[j] = std::cmp::max(prev[j], curr[j - 1]);
-            }
-        }
-        std::mem::swap(&mut prev, &mut curr);
-        for slot in curr.iter_mut() {
-            *slot = 0;
-        }
-    }
-    prev[m]
-}
-
-const DIFF_CONTEXT: usize = 3;
-const MAX_DIFF_CELLS: usize = 4_000_000;
 
 #[must_use]
 pub fn render_minimal_diff(rel_path: &Path, before: &str, after: &str) -> Option<String> {
     if before == after {
         return None;
     }
-    let header = format!(
+    if before.len() > WHOLE_FILE_EMIT_THRESHOLD || after.len() > WHOLE_FILE_EMIT_THRESHOLD {
+        return Some(format!(
+            "--- a/{p}\n+++ b/{p}\n@@ large file edit omitted from preview ({} -> {} bytes) @@\n",
+            before.len(),
+            after.len(),
+            p = rel_path.display()
+        ));
+    }
+    let mut payload = format!(
         "--- a/{}\n+++ b/{}\n",
         rel_path.display(),
         rel_path.display()
     );
 
-    let before_lines: Vec<&str> = before.split('\n').collect();
-    let after_lines: Vec<&str> = after.split('\n').collect();
-
-    let body = unified_diff_body(&before_lines, &after_lines)
-        .unwrap_or_else(|| fallback_diff_body(&before_lines, &after_lines));
-
-    let mut payload = header;
-    payload.push_str(&body);
-    if payload.len() > MAX_DIFF_PAYLOAD {
-        crate::util::truncate_string_bytes(&mut payload, MAX_DIFF_PAYLOAD);
-        payload.push_str("\n... (diff truncated)\n");
+    let diff = similar::TextDiff::configure()
+        .timeout(DIFF_DEADLINE)
+        .diff_lines(before, after);
+    for group in diff.grouped_ops(3).iter() {
+        let (Some(first), Some(last)) = (group.first(), group.last()) else {
+            continue;
+        };
+        let old_start = first.old_range().start;
+        let old_end = last.old_range().end;
+        let new_start = first.new_range().start;
+        let new_end = last.new_range().end;
+        payload.push_str(&format!(
+            "@@ -{},{} +{},{} @@\n",
+            old_start + 1,
+            old_end - old_start,
+            new_start + 1,
+            new_end - new_start,
+        ));
+        for op in group {
+            for change in diff.iter_changes(op) {
+                let sign = match change.tag() {
+                    similar::ChangeTag::Delete => '-',
+                    similar::ChangeTag::Insert => '+',
+                    similar::ChangeTag::Equal => ' ',
+                };
+                payload.push(sign);
+                payload.push_str(change.value());
+                if !change.value().ends_with('\n') {
+                    payload.push('\n');
+                }
+                if payload.len() > MAX_DIFF_PAYLOAD {
+                    crate::util::truncate_string_bytes(&mut payload, MAX_DIFF_PAYLOAD);
+                    payload.push_str("\n... (diff truncated)\n");
+                    return Some(payload);
+                }
+            }
+        }
     }
     Some(payload)
-}
-
-fn unified_diff_body(a: &[&str], b: &[&str]) -> Option<String> {
-    let n = a.len();
-    let m = b.len();
-    let cap = (n + 1).saturating_mul(m + 1);
-    if cap == 0 || cap > MAX_DIFF_CELLS {
-        return None;
-    }
-
-    let mut dp = vec![0u32; cap];
-    let idx = |i: usize, j: usize| i * (m + 1) + j;
-    for i in (0..n).rev() {
-        for j in (0..m).rev() {
-            dp[idx(i, j)] = if a[i] == b[j] {
-                dp[idx(i + 1, j + 1)] + 1
-            } else {
-                dp[idx(i + 1, j)].max(dp[idx(i, j + 1)])
-            };
-        }
-    }
-
-    let mut ops: Vec<(char, usize, usize)> = Vec::new();
-    let (mut i, mut j) = (0usize, 0usize);
-    while i < n && j < m {
-        if a[i] == b[j] {
-            ops.push((' ', i, j));
-            i += 1;
-            j += 1;
-        } else if dp[idx(i + 1, j)] >= dp[idx(i, j + 1)] {
-            ops.push(('-', i, j));
-            i += 1;
-        } else {
-            ops.push(('+', i, j));
-            j += 1;
-        }
-    }
-    while i < n {
-        ops.push(('-', i, j));
-        i += 1;
-    }
-    while j < m {
-        ops.push(('+', i, j));
-        j += 1;
-    }
-
-    Some(render_hunks(a, b, &ops))
-}
-
-fn render_hunks(a: &[&str], b: &[&str], ops: &[(char, usize, usize)]) -> String {
-    let total = ops.len();
-    let mut include = vec![false; total];
-    for (k, op) in ops.iter().enumerate() {
-        if op.0 != ' ' {
-            let lo = k.saturating_sub(DIFF_CONTEXT);
-            let hi = (k + DIFF_CONTEXT + 1).min(total);
-            for slot in include.iter_mut().take(hi).skip(lo) {
-                *slot = true;
-            }
-        }
-    }
-
-    let mut out = String::new();
-    let mut k = 0;
-    while k < total {
-        if !include[k] {
-            k += 1;
-            continue;
-        }
-        let start = k;
-        while k < total && include[k] {
-            k += 1;
-        }
-        let end = k;
-
-        let mut a_start: Option<usize> = None;
-        let mut b_start: Option<usize> = None;
-        let mut a_count = 0usize;
-        let mut b_count = 0usize;
-        for op in &ops[start..end] {
-            match op.0 {
-                ' ' => {
-                    a_start.get_or_insert(op.1);
-                    b_start.get_or_insert(op.2);
-                    a_count += 1;
-                    b_count += 1;
-                }
-                '-' => {
-                    a_start.get_or_insert(op.1);
-                    a_count += 1;
-                }
-                '+' => {
-                    b_start.get_or_insert(op.2);
-                    b_count += 1;
-                }
-                _ => {}
-            }
-        }
-        let a_s = a_start.map_or(0, |x| x + 1);
-        let b_s = b_start.map_or(0, |x| x + 1);
-        out.push_str(&format!("@@ -{a_s},{a_count} +{b_s},{b_count} @@\n"));
-        for op in &ops[start..end] {
-            let (tag, ai, bj) = *op;
-            let line = if tag == '+' { b[bj] } else { a[ai] };
-            out.push(tag);
-            out.push_str(line);
-            out.push('\n');
-            if out.len() > MAX_DIFF_PAYLOAD {
-                return out;
-            }
-        }
-    }
-    out
-}
-
-fn fallback_diff_body(a: &[&str], b: &[&str]) -> String {
-    let mut out = format!("@@ -1,{} +1,{} @@\n", a.len(), b.len());
-    for line in a {
-        out.push('-');
-        out.push_str(line);
-        out.push('\n');
-        if out.len() > MAX_DIFF_PAYLOAD {
-            return out;
-        }
-    }
-    for line in b {
-        out.push('+');
-        out.push_str(line);
-        out.push('\n');
-        if out.len() > MAX_DIFF_PAYLOAD {
-            return out;
-        }
-    }
-    out
 }
 
 pub async fn emit_file_edit(

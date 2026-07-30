@@ -98,9 +98,9 @@ fn content_hash(content: &str) -> [u8; 32] {
 
 pub struct VectorCodeIndex {
     embedder: Box<dyn EmbeddingProvider>,
-    index: Mutex<IvfVectorIndex>,
-    chunks: Mutex<HashMap<String, CodeChunk>>,
-    embed_cache: Mutex<EmbedCache>,
+    index: Arc<Mutex<IvfVectorIndex>>,
+    chunks: Arc<Mutex<HashMap<String, CodeChunk>>>,
+    embed_cache: Arc<Mutex<EmbedCache>>,
 }
 
 impl VectorCodeIndex {
@@ -108,9 +108,9 @@ impl VectorCodeIndex {
         let index = IvfVectorIndex::new(cfg.num_clusters, cfg.nprobe);
         Self {
             embedder,
-            index: Mutex::new(index),
-            chunks: Mutex::new(HashMap::new()),
-            embed_cache: Mutex::new(EmbedCache::new()),
+            index: Arc::new(Mutex::new(index)),
+            chunks: Arc::new(Mutex::new(HashMap::new())),
+            embed_cache: Arc::new(Mutex::new(EmbedCache::new())),
         }
     }
 
@@ -124,6 +124,10 @@ impl VectorCodeIndex {
 
     pub async fn is_empty(&self) -> bool {
         self.chunks.lock().await.is_empty()
+    }
+
+    pub async fn is_ready(&self) -> bool {
+        self.embedder.dimensions() > 0 && !self.chunks.lock().await.is_empty()
     }
 
     pub async fn upsert_chunk(&self, chunk: CodeChunk) -> anyhow::Result<()> {
@@ -265,16 +269,6 @@ impl VectorCodeIndex {
     }
 
     pub async fn save_snapshot(&self, dir: &std::path::Path) -> anyhow::Result<()> {
-        std::fs::create_dir_all(dir)?;
-        let ivf_path = dir.join("vector_index.ivf");
-        let chunks_path = dir.join("vector_chunks.json");
-        let meta_path = dir.join("vector_index.meta.json");
-        {
-            let index = self.index.lock().await;
-            index.save_to_path(&ivf_path)?;
-        }
-        let meta = serde_json::json!({ "embedder": self.embedder.fingerprint() });
-        std::fs::write(&meta_path, serde_json::to_vec(&meta)?)?;
         let persisted: Vec<PersistedChunk> = {
             let chunks = self.chunks.lock().await;
             chunks
@@ -288,40 +282,60 @@ impl VectorCodeIndex {
                 })
                 .collect()
         };
-        let tmp = chunks_path.with_extension("tmp");
-        let body = serde_json::to_vec(&persisted)?;
-        std::fs::write(&tmp, body)?;
-        std::fs::rename(&tmp, &chunks_path)?;
-        Ok(())
+        let dir = dir.to_path_buf();
+        let fingerprint = self.embedder.fingerprint();
+        let index = Arc::clone(&self.index).lock_owned().await;
+        tokio::task::spawn_blocking(move || {
+            std::fs::create_dir_all(&dir)?;
+            let ivf_path = dir.join("vector_index.ivf");
+            let chunks_path = dir.join("vector_chunks.json");
+            let meta_path = dir.join("vector_index.meta.json");
+            let ivf_tmp = dir.join(format!(
+                "vector_index.{}.tmp",
+                uuid::Uuid::new_v4().simple()
+            ));
+            index.save_to_path(&ivf_tmp)?;
+            crate::util::atomic_replace_file(&ivf_tmp, &ivf_path)?;
+            let meta = serde_json::json!({ "embedder": fingerprint });
+            crate::util::atomic_write(&meta_path, &serde_json::to_vec(&meta)?)?;
+            crate::util::atomic_write(&chunks_path, &serde_json::to_vec(&persisted)?)?;
+            Ok::<(), anyhow::Error>(())
+        })
+        .await
+        .map_err(anyhow::Error::from)?
     }
 
     pub async fn load_snapshot(&self, dir: &std::path::Path) -> anyhow::Result<usize> {
-        let ivf_path = dir.join("vector_index.ivf");
-        let chunks_path = dir.join("vector_chunks.json");
-        let meta_path = dir.join("vector_index.meta.json");
-        if !ivf_path.is_file() || !chunks_path.is_file() {
-            return Ok(0);
-        }
-        let mut fingerprint_verified = false;
-        if let Ok(raw) = std::fs::read(&meta_path) {
-            if let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&raw) {
-                let persisted_fp = meta.get("embedder").and_then(|v| v.as_str()).unwrap_or("");
-                let current_fp = self.embedder.fingerprint();
-                if !persisted_fp.is_empty() {
-                    if persisted_fp != current_fp {
-                        anyhow::bail!(
-                            "persisted vector index was built with embedder '{persisted_fp}' but the current embedder is '{current_fp}'; ignoring snapshot so the index is rebuilt"
-                        );
+        let dir = dir.to_path_buf();
+        let current_fingerprint = self.embedder.fingerprint();
+        let embedder_dims = self.embedder.dimensions();
+        let loaded = tokio::task::spawn_blocking(move || {
+            let ivf_path = dir.join("vector_index.ivf");
+            let chunks_path = dir.join("vector_chunks.json");
+            let meta_path = dir.join("vector_index.meta.json");
+            if !ivf_path.is_file() || !chunks_path.is_file() {
+                return Ok(None);
+            }
+            let mut fingerprint_verified = false;
+            if let Ok(raw) = std::fs::read(&meta_path) {
+                if let Ok(meta) = serde_json::from_slice::<serde_json::Value>(&raw) {
+                    let persisted = meta
+                        .get("embedder")
+                        .and_then(|value| value.as_str())
+                        .unwrap_or("");
+                    if !persisted.is_empty() {
+                        if persisted != current_fingerprint {
+                            anyhow::bail!(
+                                "persisted vector index was built with embedder '{persisted}' but the current embedder is '{current_fingerprint}'; ignoring snapshot so the index is rebuilt"
+                            );
+                        }
+                        fingerprint_verified = true;
                     }
-                    fingerprint_verified = true;
                 }
             }
-        }
-        let loaded = IvfVectorIndex::load_from_path(&ivf_path)?;
-        if !fingerprint_verified {
-            let embedder_dims = self.embedder.dimensions();
-            if embedder_dims != 0 {
-                if let Some(dim) = loaded.dimensions() {
+            let index = IvfVectorIndex::load_from_path(&ivf_path)?;
+            if !fingerprint_verified && embedder_dims != 0 {
+                if let Some(dim) = index.dimensions() {
                     if dim != embedder_dims {
                         anyhow::bail!(
                             "persisted vector index dims {dim} do not match embedder dims {embedder_dims}; ignoring snapshot"
@@ -329,34 +343,45 @@ impl VectorCodeIndex {
                     }
                 }
             }
-        }
-        let body = std::fs::read(&chunks_path)?;
-        let persisted: Vec<PersistedChunk> = serde_json::from_slice(&body)?;
-        let index_ids: std::collections::HashSet<String> =
-            loaded.entry_ids().into_iter().collect();
-        let mut restored: HashMap<String, CodeChunk> = HashMap::with_capacity(persisted.len());
-        for p in persisted {
-            if !index_ids.contains(&p.id) {
-                continue;
+            let persisted: Vec<PersistedChunk> =
+                serde_json::from_slice(&std::fs::read(&chunks_path)?)?;
+            let index_ids: std::collections::HashSet<String> =
+                index.entry_ids().into_iter().collect();
+            let mut restored = HashMap::with_capacity(persisted.len());
+            for persisted_chunk in persisted {
+                if index_ids.contains(&persisted_chunk.id) {
+                    restored.insert(
+                        persisted_chunk.id.clone(),
+                        CodeChunk {
+                            id: persisted_chunk.id,
+                            path: PathBuf::from(persisted_chunk.path),
+                            start_line: persisted_chunk.start_line,
+                            end_line: persisted_chunk.end_line,
+                            content: persisted_chunk.content,
+                        },
+                    );
+                }
             }
-            restored.insert(
-                p.id.clone(),
-                CodeChunk {
-                    id: p.id,
-                    path: PathBuf::from(p.path),
-                    start_line: p.start_line,
-                    end_line: p.end_line,
-                    content: p.content,
-                },
-            );
-        }
+            let cached_embeddings: Vec<([u8; 32], Vec<f32>)> = index
+                .iter_entries()
+                .filter_map(|(id, embedding)| {
+                    restored
+                        .get(id)
+                        .map(|chunk| (content_hash(&chunk.content), embedding.to_vec()))
+                })
+                .collect();
+            Ok::<_, anyhow::Error>(Some((index, restored, cached_embeddings)))
+        })
+        .await
+        .map_err(anyhow::Error::from)??;
+        let Some((loaded, restored, cached_embeddings)) = loaded else {
+            return Ok(0);
+        };
         let count = restored.len();
         {
             let mut cache = self.embed_cache.lock().await;
-            for (id, emb) in loaded.iter_entries() {
-                if let Some(chunk) = restored.get(id) {
-                    cache.insert(content_hash(&chunk.content), emb.to_vec());
-                }
+            for (hash, embedding) in cached_embeddings {
+                cache.insert(hash, embedding);
             }
         }
         {

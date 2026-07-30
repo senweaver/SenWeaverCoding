@@ -10,7 +10,16 @@ import {
   useRef,
   useState,
 } from 'react'
-import { makeCredToken, makeRefToken, parseRefSegments, refIconName, refKind } from './composerRefs'
+import { isCredentialGroup } from '../../api/credentials'
+import { useCredentialsStore } from '../../stores/credentialsStore'
+import {
+  credChipLabel,
+  makeCredToken,
+  makeRefToken,
+  parseRefSegments,
+  refIconName,
+  refKind,
+} from './composerRefs'
 
 export type RichComposerHandle = {
   focus: () => void
@@ -130,21 +139,29 @@ function makeChipElement(name: string, relPath: string): HTMLElement {
   return span
 }
 
-function makeCredChipElement(name: string): HTMLElement {
+function makeCredChipElement(name: string, field?: string): HTMLElement {
   const span = document.createElement('span')
   span.contentEditable = 'false'
-  span.dataset.credToken = makeCredToken(name)
+  span.dataset.credToken = makeCredToken(name, field)
   span.className = `${CHIP_CLASS_BASE} bg-[var(--color-ref-chip-cred-bg)]`
-  span.title = name
+
+  const meta = useCredentialsStore.getState().credentials.find((c) => c.name === name)
+  const group = !field && meta != null && isCredentialGroup(meta)
+  const fieldCount = meta?.fields?.length ?? 0
+  span.title = group
+    ? fieldCount > 0
+      ? `${name} (${fieldCount})`
+      : name
+    : credChipLabel(name, field)
 
   const icon = document.createElement('span')
   icon.className = 'material-symbols-outlined text-[13px] leading-none'
-  icon.textContent = 'key'
+  icon.textContent = group ? 'vpn_key' : 'key'
   span.appendChild(icon)
 
   const label = document.createElement('span')
   label.className = 'text-[11px] font-medium text-[var(--color-text-primary)]'
-  label.textContent = name
+  label.textContent = credChipLabel(name, field)
   span.appendChild(label)
 
   const remove = document.createElement('span')
@@ -163,7 +180,7 @@ function renderInto(root: HTMLElement, value: string): void {
     if (segment.type === 'text') {
       if (segment.text) root.appendChild(document.createTextNode(segment.text))
     } else if (segment.type === 'cred') {
-      root.appendChild(makeCredChipElement(segment.name))
+      root.appendChild(makeCredChipElement(segment.name, segment.field))
     } else {
       root.appendChild(makeChipElement(segment.name, segment.relPath))
     }

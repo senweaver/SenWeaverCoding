@@ -209,6 +209,7 @@ pub type PreservedIndexFn = dyn Fn(&[ChatMessage]) -> Vec<usize> + Send + Sync;
 pub struct ContextCompressor {
     config: ContextCompressionConfig,
     context_window: usize,
+    tool_overhead_tokens: usize,
 }
 
 impl ContextCompressor {
@@ -216,7 +217,14 @@ impl ContextCompressor {
         Self {
             config,
             context_window,
+            tool_overhead_tokens: 0,
         }
+    }
+
+    #[must_use]
+    pub fn with_tool_overhead_tokens(mut self, tokens: usize) -> Self {
+        self.tool_overhead_tokens = tokens;
+        self
     }
 
     pub fn set_context_window(&mut self, window: usize) {
@@ -278,7 +286,8 @@ impl ContextCompressor {
             "context compression token breakdown"
         );
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let threshold = (self.context_window as f64 * self.config.threshold_ratio) as usize;
+        let threshold = ((self.context_window as f64 * self.config.threshold_ratio) as usize)
+            .saturating_sub(self.tool_overhead_tokens);
 
         if tokens_before <= threshold {
             return Ok(CompressionResult {
@@ -561,6 +570,8 @@ impl ContextCompressor {
             return 0;
         }
         let mut current = estimate_tokens_for(history, model);
+        let calibration =
+            crate::agent::token::budget::calibration_factor_for(model) * 1.05;
         let mut evicted = 0usize;
         for idx in start..end {
             if current <= threshold {
@@ -578,7 +589,9 @@ impl ContextCompressor {
                 continue;
             }
             let after = crate::providers::traits::estimate_message_tokens(msg);
-            current = current.saturating_sub(before.saturating_sub(after));
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            let delta = ((before.saturating_sub(after)) as f64 * calibration).round() as usize;
+            current = current.saturating_sub(delta);
             evicted += 1;
         }
         evicted
@@ -733,7 +746,7 @@ fn evict_tool_message_content(msg: &mut ChatMessage, min_bytes: usize) -> bool {
     true
 }
 
-fn repair_tool_pairs(messages: &mut Vec<ChatMessage>) {
+pub(crate) fn repair_tool_pairs(messages: &mut Vec<ChatMessage>) {
 
     let mut i = 0;
     while i < messages.len() {

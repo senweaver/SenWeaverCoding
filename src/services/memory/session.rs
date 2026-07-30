@@ -188,7 +188,7 @@ impl SessionMemoryService {
             };
             for (key, category) in items {
                 let long_term = long_term_key(session_id.as_deref(), category, &key);
-                if let Err(err) = mem.forget(&long_term).await {
+                if let Err(err) = mem.forget(&long_term, true).await {
                     tracing::warn!(
                         key = %long_term,
                         error = %err,

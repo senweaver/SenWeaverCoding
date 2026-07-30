@@ -532,14 +532,14 @@ impl Observer for OtelObserver {
             ObserverMetric::RecoveryTime(duration) => {
                 self.recovery_time.record(duration.as_secs_f64(), &[]);
             }
-            ObserverMetric::FirstTokenLatency { agent_id, elapsed } => {
+            ObserverMetric::FirstTokenLatency {
+                agent_id: _,
+                elapsed,
+            } => {
 
                 self.request_latency.record(
                     elapsed.as_secs_f64(),
-                    &[
-                        KeyValue::new("agent_id", agent_id.clone()),
-                        KeyValue::new("kind", "first_token"),
-                    ],
+                    &[KeyValue::new("kind", "first_token")],
                 );
             }
             ObserverMetric::ResponseCacheOutcome {

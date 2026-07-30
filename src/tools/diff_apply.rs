@@ -183,20 +183,19 @@ impl Tool for DiffApplyTool {
             });
         }
 
-        let _resource_guards = match crate::session::acquire_many_file_writes_for_current_session(
+        let _resource_guards = match crate::session::acquire_many_file_write_guards(
             resolved_paths.clone(),
         )
         .await
         {
-            Some(Ok(g)) => Some(g),
-            Some(Err(e)) => {
+            Ok(g) => g,
+            Err(e) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
                     error: Some(format!("{e}")),
                 });
             }
-            None => None,
         };
 
         for p in &resolved_paths {

@@ -78,6 +78,7 @@ impl InflightCancel {
 pub struct RpcState {
     pub(crate) sessions: Arc<Mutex<std::collections::HashMap<String, Session>>>,
     pub(crate) inflight: Arc<Mutex<std::collections::HashMap<String, InflightCancel>>>,
+    pub(crate) watchers: Arc<Mutex<std::collections::HashMap<String, crate::runtime::TaskHandle>>>,
     pub session_timeout: Duration,
     pub max_sessions: usize,
 }
@@ -87,6 +88,8 @@ pub struct RpcCtx {
     pub config: Config,
 
     pub stdout_tx: Arc<Mutex<Option<tokio::sync::mpsc::Sender<String>>>>,
+
+    memory: Arc<tokio::sync::OnceCell<Arc<dyn crate::memory::Memory>>>,
 }
 
 impl RpcCtx {
@@ -95,6 +98,7 @@ impl RpcCtx {
             state: Arc::new(RwLock::new(None)),
             config,
             stdout_tx: Arc::new(Mutex::new(None)),
+            memory: Arc::new(tokio::sync::OnceCell::new()),
         }
     }
 
@@ -102,6 +106,7 @@ impl RpcCtx {
         let state = RpcState {
             sessions: Arc::new(Mutex::new(std::collections::HashMap::new())),
             inflight: Arc::new(Mutex::new(std::collections::HashMap::new())),
+            watchers: Arc::new(Mutex::new(std::collections::HashMap::new())),
             session_timeout: Duration::from_secs(session_timeout_secs),
             max_sessions,
         };
@@ -119,7 +124,27 @@ impl RpcCtx {
             state: Arc::clone(&self.state),
             config: self.config.clone(),
             stdout_tx: Arc::new(Mutex::new(Some(tx))),
+            memory: Arc::clone(&self.memory),
         })
+    }
+
+    async fn shared_memory(&self) -> RpcResult<Arc<dyn crate::memory::Memory>> {
+        let mem = self
+            .memory
+            .get_or_try_init(|| async {
+                crate::memory::create_memory_with_storage_and_routes_async(
+                    self.config.memory.clone(),
+                    self.config.embedding_routes.clone(),
+                    Some(self.config.storage.provider.config.clone()),
+                    self.config.workspace_dir.clone(),
+                    self.config.api_key.clone(),
+                )
+                .await
+                .map(Arc::from)
+            })
+            .await
+            .map_err(|e: anyhow::Error| RpcError::memory(format!("Failed to create memory: {e}")))?;
+        Ok(Arc::clone(mem))
     }
 
     async fn write_json<T: serde::Serialize>(&self, value: &T) {
@@ -261,13 +286,13 @@ impl RpcCtx {
             return Err(RpcError::session_limit_reached(state.max_sessions));
         }
 
-        let workspace_dir = params
+        let requested_workspace = params
             .get("cwd")
             .or_else(|| params.get("workspaceDir"))
             .or_else(|| params.get("workspace_dir"))
             .and_then(|v| v.as_str())
-            .unwrap_or_else(|| self.config.workspace_dir.to_str().unwrap_or("."))
-            .to_string();
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
         let model = params
             .get("model")
@@ -280,6 +305,40 @@ impl RpcCtx {
         if let Some(m) = model {
             session_config.default_model = Some(m);
         }
+
+        let workspace_dir = match requested_workspace {
+            Some(raw) => {
+                let requested = std::path::PathBuf::from(raw);
+                if !requested.is_absolute() {
+                    return Err(RpcError::invalid_params(format!(
+                        "workspace path '{raw}' must be absolute"
+                    )));
+                }
+                let canonical = tokio::fs::canonicalize(&requested).await.map_err(|e| {
+                    RpcError::invalid_params(format!(
+                        "workspace path '{raw}' is not accessible: {e}"
+                    ))
+                })?;
+                let metadata = tokio::fs::metadata(&canonical).await.map_err(|e| {
+                    RpcError::invalid_params(format!(
+                        "workspace path '{raw}' could not be inspected: {e}"
+                    ))
+                })?;
+                if !metadata.is_dir() {
+                    return Err(RpcError::invalid_params(format!(
+                        "workspace path '{raw}' is not a directory"
+                    )));
+                }
+                session_config.workspace_dir = canonical.clone();
+                canonical.to_string_lossy().to_string()
+            }
+            None => self
+                .config
+                .workspace_dir
+                .to_str()
+                .unwrap_or(".")
+                .to_string(),
+        };
 
         let agent = Agent::from_config(&session_config, None, None)
             .await
@@ -1106,14 +1165,36 @@ impl RpcCtx {
                     .and_then(|svc| svc.session_coding_mode(session_id))
             })
             .unwrap_or_default();
-        let result = crate::agent::coding_mode::scope_coding_mode(
-            scoped_mode,
-            session.agent.execute_tool(tool_name, args),
-        )
-        .await;
+        let result = {
+            use futures_util::FutureExt as _;
+            std::panic::AssertUnwindSafe(crate::agent::coding_mode::scope_coding_mode(
+                scoped_mode,
+                session.agent.execute_tool(tool_name, args),
+            ))
+            .catch_unwind()
+            .await
+        };
         session.last_active = Instant::now();
-        let mut guard = sessions.lock().await;
-        guard.insert(session_id.to_string(), session);
+        {
+            let mut guard = sessions.lock().await;
+            guard.insert(session_id.to_string(), session);
+        }
+
+        let result = match result {
+            Ok(result) => result,
+            Err(panic_payload) => {
+                let description = crate::util::describe_panic(panic_payload.as_ref());
+                tracing::error!(
+                    session_id = %session_id,
+                    tool = %tool_name,
+                    panic = %description,
+                    "RPC tool exec panicked; session returned to pool"
+                );
+                return Err(RpcError::agent(format!(
+                    "Tool execution panicked: {description}"
+                )));
+            }
+        };
 
         Ok(serde_json::json!({
             "name": result.name,
@@ -1144,17 +1225,7 @@ impl RpcCtx {
             other => crate::memory::MemoryCategory::Custom(other.to_string()),
         };
 
-        let mem: Arc<dyn crate::memory::Memory> = Arc::from(
-            crate::memory::create_memory_with_storage_and_routes_async(
-                self.config.memory.clone(),
-                self.config.embedding_routes.clone(),
-                Some(self.config.storage.provider.config.clone()),
-                self.config.workspace_dir.clone(),
-                self.config.api_key.clone(),
-            )
-            .await
-            .map_err(|e| RpcError::memory(format!("Failed to create memory: {e}")))?,
-        );
+        let mem = self.shared_memory().await?;
 
         let key = Uuid::new_v4().to_string();
         let importance = params.get("importance").and_then(|v| v.as_f64());
@@ -1182,17 +1253,7 @@ impl RpcCtx {
             .and_then(|v| v.as_str())
             .unwrap_or("default");
 
-        let mem: Arc<dyn crate::memory::Memory> = Arc::from(
-            crate::memory::create_memory_with_storage_and_routes_async(
-                self.config.memory.clone(),
-                self.config.embedding_routes.clone(),
-                Some(self.config.storage.provider.config.clone()),
-                self.config.workspace_dir.clone(),
-                self.config.api_key.clone(),
-            )
-            .await
-            .map_err(|e| RpcError::memory(format!("Failed to create memory: {e}")))?,
-        );
+        let mem = self.shared_memory().await?;
 
         let results = mem
             .recall_namespaced(namespace, query, limit, None, None, None)
@@ -1265,19 +1326,131 @@ impl RpcCtx {
     }
 
     async fn handle_blackboard_watch(&self, params: &Value) -> RpcResult {
-        let _key = params
+        let key = params
             .get("key")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError::invalid_params("Missing required: key"))?;
-        Ok(serde_json::json!({ "watching": true }))
+        let namespace = params
+            .get("namespace")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let tx = {
+            let guard = self.stdout_tx.lock().await;
+            guard.clone()
+        };
+        let Some(tx) = tx else {
+            return Err(RpcError::invalid_params(
+                "blackboard/watch requires a streaming transport (stdio or unix socket); \
+                 the HTTP transport cannot deliver change notifications",
+            ));
+        };
+
+        let watchers = {
+            let state = self.state.read().await;
+            let state = state
+                .as_ref()
+                .ok_or_else(|| RpcError::internal("RPC server not initialized"))?;
+            Arc::clone(&state.watchers)
+        };
+
+        let watch_id = format!("{namespace}::{key}");
+        let mut guard = watchers.lock().await;
+        if let Some(existing) = guard.get(&watch_id) {
+            if !existing.is_finished() {
+                return Ok(serde_json::json!({
+                    "watching": true,
+                    "key": key,
+                    "namespace": namespace,
+                    "alreadyWatching": true,
+                }));
+            }
+        }
+
+        let rt = crate::agent::multi_agent_runtime::init_global_runtime();
+        let mut rx = rt.blackboard.inner().subscribe();
+        let task_key = key.to_string();
+        let task_namespace = namespace.to_string();
+        let handle = crate::runtime::spawn_supervised("rpc.blackboard_watch", async move {
+            loop {
+                match rx.recv().await {
+                    Ok(change) => {
+                        if !blackboard_change_matches(
+                            &change.key,
+                            &change.namespace,
+                            &task_key,
+                            &task_namespace,
+                        ) {
+                            continue;
+                        }
+                        let Ok(change_value) = serde_json::to_value(&change) else {
+                            continue;
+                        };
+                        let notification =
+                            JsonRpcNotification::new("blackboard/changed", change_value);
+                        let Ok(line) = serde_json::to_string(&notification) else {
+                            continue;
+                        };
+                        if tx.send(line + "\n").await.is_err() {
+                            break;
+                        }
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                        tracing::warn!(
+                            key = %task_key,
+                            skipped,
+                            "blackboard watch lagged behind; some change notifications were dropped"
+                        );
+                    }
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+        });
+        guard.insert(watch_id, handle);
+
+        Ok(serde_json::json!({
+            "watching": true,
+            "key": key,
+            "namespace": namespace,
+        }))
     }
 
     async fn handle_blackboard_unwatch(&self, params: &Value) -> RpcResult {
-        let _key = params
+        let key = params
             .get("key")
             .and_then(|v| v.as_str())
             .ok_or_else(|| RpcError::invalid_params("Missing required: key"))?;
-        Ok(serde_json::json!({ "unwatched": true }))
+        let namespace = params
+            .get("namespace")
+            .and_then(|v| v.as_str())
+            .unwrap_or("default");
+
+        let watchers = {
+            let state = self.state.read().await;
+            let state = state
+                .as_ref()
+                .ok_or_else(|| RpcError::internal("RPC server not initialized"))?;
+            Arc::clone(&state.watchers)
+        };
+
+        let watch_id = format!("{namespace}::{key}");
+        let removed = {
+            let mut guard = watchers.lock().await;
+            guard.remove(&watch_id)
+        };
+        let unwatched = match removed {
+            Some(handle) => {
+                handle.abort();
+                true
+            }
+            None => false,
+        };
+
+        Ok(serde_json::json!({
+            "unwatched": unwatched,
+            "key": key,
+            "namespace": namespace,
+        }))
     }
 
     fn extract_session_id(&self, params: &Value) -> RpcResult<String> {
@@ -1297,4 +1470,21 @@ impl RpcCtx {
             .map(String::from)
             .ok_or_else(|| RpcError::invalid_params("Missing required: prompt (or message)"))
     }
+}
+
+fn blackboard_change_matches(
+    change_key: &str,
+    change_namespace: &str,
+    watch_key: &str,
+    watch_namespace: &str,
+) -> bool {
+    let key_matches = change_key == watch_key
+        || change_key
+            .split_once("::")
+            .is_some_and(|(_, tail)| tail == watch_key);
+    let namespace_matches = change_namespace == watch_namespace
+        || change_namespace
+            .strip_prefix(watch_namespace)
+            .is_some_and(|rest| rest.starts_with(':'));
+    key_matches && namespace_matches
 }

@@ -1702,7 +1702,7 @@ async fn async_main() -> Result<()> {
                     };
                     CliEntrypoint::run_with_config(opts, config).await
                 } else {
-                    Box::pin(agent::run(
+                    let run_fut = Box::pin(agent::run(
                         config,
                         message,
                         provider,
@@ -1717,9 +1717,22 @@ async fn async_main() -> Result<()> {
                             Some(allowed_tools)
                         },
                         None,
-                    ))
-                    .await
-                    .map(|_| ())
+                    ));
+                    if is_interactive {
+                        run_fut.await.map(|_| ())
+                    } else {
+                        let ctrl_c_guard =
+                            senweavercoding::cli::one_shot::CtrlCAbortGuard::install();
+                        match ctrl_c_guard.run_abortable(run_fut).await {
+                            Some(result) => result.map(|_| ()),
+                            None => {
+                                eprintln!(
+                                    "\x1b[33m[cancelled] One-shot run aborted by Ctrl+C\x1b[0m"
+                                );
+                                Ok(())
+                            }
+                        }
+                    }
                 }
             }
         }

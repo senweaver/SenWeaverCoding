@@ -363,20 +363,19 @@ impl Tool for CodeXfileRefactorTool {
                 let planned_paths: Vec<PathBuf> =
                     computed.iter().map(|r| r.abs.clone()).collect();
                 let _resource_guards =
-                    match crate::session::acquire_many_file_writes_for_current_session(
+                    match crate::session::acquire_many_file_write_guards(
                         planned_paths.clone(),
                     )
                     .await
                     {
-                        Some(Ok(g)) => Some(g),
-                        Some(Err(e)) => {
+                        Ok(g) => g,
+                        Err(e) => {
                             return Ok(ToolResult {
                                 success: false,
                                 output: String::new(),
                                 error: Some(format!("{e}")),
                             });
                         }
-                        None => None,
                     };
 
                 for p in &planned_paths {

@@ -153,10 +153,16 @@ impl CostTracker {
         );
 
         if tokio::runtime::Handle::try_current().is_ok() {
+            {
+                let mut storage = self.lock_storage();
+                if let Err(e) = storage.apply_record_to_aggregates(&record, false) {
+                    tracing::warn!(error = %e, "cost aggregate update failed");
+                }
+            }
             let storage = Arc::clone(&self.storage);
             let persisted = record.clone();
             tokio::task::spawn_blocking(move || {
-                if let Err(e) = storage.lock().add_record(persisted) {
+                if let Err(e) = storage.lock().append_record_to_disk(&persisted) {
                     tracing::warn!(error = %e, "cost record persistence failed");
                 }
             });
@@ -512,7 +518,31 @@ impl CostStorage {
         Ok(())
     }
 
+    fn acquire_ipc_lock(&self) -> Option<crate::session::os_lock::OsAdvisoryLock> {
+        let key = format!("costs.jsonl:{}", self.path.display());
+        for _ in 0..10 {
+            match crate::session::os_lock::OsAdvisoryLock::try_acquire_key(&key) {
+                Ok(Some(lock)) => return Some(lock),
+                Ok(None) => std::thread::sleep(std::time::Duration::from_millis(20)),
+                Err(_) => return None,
+            }
+        }
+        None
+    }
+
     fn add_record(&mut self, record: CostRecord) -> Result<()> {
+        self.append_record_to_disk(&record)?;
+        self.apply_record_to_aggregates(&record, true)
+    }
+
+    fn append_record_to_disk(&mut self, record: &CostRecord) -> Result<()> {
+        let ipc_lock = self.acquire_ipc_lock();
+        if ipc_lock.is_none() {
+            tracing::warn!(
+                path = %self.path.display(),
+                "appending cost record without inter-process lock (lock unavailable)"
+            );
+        }
         {
             let mut file = OpenOptions::new()
                 .create(true)
@@ -522,15 +552,23 @@ impl CostStorage {
                     format!("Failed to open cost storage at {}", self.path.display())
                 })?;
 
-            writeln!(file, "{}", serde_json::to_string(&record)?).with_context(|| {
+            let mut line = serde_json::to_string(record)?;
+            line.push('\n');
+            file.write_all(line.as_bytes()).with_context(|| {
                 format!("Failed to write cost record to {}", self.path.display())
             })?;
         }
 
-        if let Err(e) = self.maybe_compact() {
-            tracing::warn!("cost storage compaction skipped: {e}");
+        if ipc_lock.is_some() {
+            if let Err(e) = self.maybe_compact() {
+                tracing::warn!("cost storage compaction skipped: {e}");
+            }
         }
+        drop(ipc_lock);
+        Ok(())
+    }
 
+    fn apply_record_to_aggregates(&mut self, record: &CostRecord, on_disk: bool) -> Result<()> {
         let day_before = self.cached_day;
         let year_before = self.cached_year;
         let month_before = self.cached_month;
@@ -539,7 +577,7 @@ impl CostStorage {
             || self.cached_year != year_before
             || self.cached_month != month_before;
 
-        if !period_rebuilt {
+        if !period_rebuilt || !on_disk {
             let timestamp = record.usage.timestamp.naive_utc();
             if timestamp.date() == self.cached_day {
                 self.daily_cost_usd += record.usage.cost_usd;

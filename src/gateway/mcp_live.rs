@@ -195,6 +195,30 @@ async fn try_reconnect_and_publish(
                     })
                     .collect();
                 svc.set_server_tools(&name, manager_tools).await;
+                match server.list_resources().await {
+                    Ok(resources) => {
+                        let manager_resources: Vec<
+                            crate::services::mcp_manager::McpResource,
+                        > = resources
+                            .into_iter()
+                            .map(|r| crate::services::mcp_manager::McpResource {
+                                uri: r.uri,
+                                name: r.name,
+                                description: r.description,
+                                mime_type: r.mime_type,
+                                server_name: name.clone(),
+                            })
+                            .collect();
+                        svc.set_server_resources(&name, manager_resources).await;
+                    }
+                    Err(err) => {
+                        tracing::debug!(
+                            target: "gateway.mcp_live",
+                            server = %name,
+                            "MCP resources/list unavailable during reconcile: {err:#}"
+                        );
+                    }
+                }
                 svc.set_server_status(&name, McpServerStatus::Connected, None)
                     .await;
             }

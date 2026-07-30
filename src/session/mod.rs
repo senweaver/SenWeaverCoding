@@ -27,8 +27,8 @@ pub use bridge::SessionEventSink;
 pub use resource_lock::{
     AcquireError as ResourceAcquireError, ResourceEvent, ResourceGuard, ResourceKind,
     SessionContext, WaiterSnapshot, WorkspaceResourceManager, acquire_browser_for_current_session,
-    acquire_file_write_for_current_session, acquire_file_write_locked,
-    acquire_many_file_writes_for_current_session,
+    acquire_file_write_for_current_session, acquire_file_write_guard, acquire_file_write_locked,
+    acquire_many_file_write_guards, acquire_many_file_writes_locked,
     acquire_shell_for_current_session, acquire_workspace_exclusive_for_current_session,
     current_connection_id, current_session_context,
     global_workspace_resources,

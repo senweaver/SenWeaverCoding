@@ -10,6 +10,11 @@ use super::vector::index::VectorIndex;
 
 pub const IVF_FILE_MAGIC: &[u8; 8] = b"SENIVF01";
 
+const MAX_SANE_CLUSTERS: usize = 1 << 20;
+const MAX_SANE_DIM: usize = 1 << 16;
+const MAX_SANE_TOTAL: usize = 1 << 28;
+const MAX_SANE_ID_LEN: usize = 1 << 12;
+
 #[derive(Clone, Debug)]
 struct IvfEntry {
     id: String,
@@ -344,15 +349,27 @@ impl IvfVectorIndex {
 
     pub fn save_to_path(&self, path: impl AsRef<Path>) -> std::io::Result<usize> {
         let path = path.as_ref();
-        let tmp = path.with_extension("tmp");
-        let written = {
+        let tmp = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4().simple()));
+        let written = (|| {
             let mut f = std::fs::File::create(&tmp)?;
             let n = self.save_to_writer(&mut f)?;
-            f.flush()?;
-            n
+            f.sync_all()?;
+            Ok::<usize, std::io::Error>(n)
+        })();
+        let written = match written {
+            Ok(n) => n,
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
         };
-        std::fs::rename(&tmp, path)?;
-        Ok(written)
+        match crate::util::atomic_replace_file(&tmp, path) {
+            Ok(()) => Ok(written),
+            Err(e) => {
+                let _ = std::fs::remove_file(&tmp);
+                Err(e)
+            }
+        }
     }
 
     pub fn load_from_reader<R: Read>(r: &mut R) -> std::io::Result<Self> {
@@ -373,9 +390,6 @@ impl IvfVectorIndex {
         let dim_stored = read_u64(r)? as usize;
         let total = read_u64(r)? as usize;
 
-        const MAX_SANE_CLUSTERS: usize = 1 << 20;
-        const MAX_SANE_DIM: usize = 1 << 16;
-        const MAX_SANE_TOTAL: usize = 1 << 28;
         if num_clusters == 0
             || num_clusters > MAX_SANE_CLUSTERS
             || dim_stored > MAX_SANE_DIM
@@ -401,6 +415,12 @@ impl IvfVectorIndex {
 
         for _ in 0..num_clusters {
             let len = read_u64(r)? as usize;
+            if len > MAX_SANE_DIM {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("IVF snapshot centroid length {len} exceeds sane bound {MAX_SANE_DIM}"),
+                ));
+            }
             let mut centroid = vec![0.0_f32; len];
             for slot in centroid.iter_mut() {
                 let mut buf = [0u8; 4];
@@ -416,14 +436,38 @@ impl IvfVectorIndex {
         index.inverted_lists = (0..num_clusters).map(|_| Vec::new()).collect();
         for list in index.inverted_lists.iter_mut() {
             let entries = read_u64(r)? as usize;
+            if entries > MAX_SANE_TOTAL {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!(
+                        "IVF snapshot list entry count {entries} exceeds sane bound {MAX_SANE_TOTAL}"
+                    ),
+                ));
+            }
             for _ in 0..entries {
                 let id_len = read_u64(r)? as usize;
+                if id_len > MAX_SANE_ID_LEN {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "IVF snapshot id length {id_len} exceeds sane bound {MAX_SANE_ID_LEN}"
+                        ),
+                    ));
+                }
                 let mut id_bytes = vec![0u8; id_len];
                 r.read_exact(&mut id_bytes)?;
                 let id = String::from_utf8(id_bytes).map_err(|_| {
                     std::io::Error::new(std::io::ErrorKind::InvalidData, "invalid UTF-8 id")
                 })?;
                 let emb_len = read_u64(r)? as usize;
+                if emb_len > MAX_SANE_DIM {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::InvalidData,
+                        format!(
+                            "IVF snapshot embedding length {emb_len} exceeds sane bound {MAX_SANE_DIM}"
+                        ),
+                    ));
+                }
                 let mut embedding = vec![0.0_f32; emb_len];
                 for slot in embedding.iter_mut() {
                     let mut buf = [0u8; 4];

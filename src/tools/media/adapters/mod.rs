@@ -26,9 +26,14 @@ pub struct MediaJob {
 impl MediaJob {
     pub fn require_key(&self) -> anyhow::Result<&str> {
         self.provider.api_key.as_deref().ok_or_else(|| {
+            let env_hint = super::credentials::env_key_for(&self.provider.provider_id)
+                .map(|var| format!(" or set the {var} environment variable"))
+                .unwrap_or_default();
             anyhow::anyhow!(
-                "No API key configured for provider '{}'. Add it under model providers settings.",
-                self.provider.provider_id
+                "No API key configured for provider '{id}' (base_url: {base}). Set \
+                 `model_providers.{id}.api_key` in config / desktop Settings → Providers{env_hint}.",
+                id = self.provider.provider_id,
+                base = self.provider.base_url,
             )
         })
     }

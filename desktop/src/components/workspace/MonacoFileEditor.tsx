@@ -2846,12 +2846,14 @@ export function MonacoFileEditor({ workDir }: Props) {
   useEffect(() => {
     return () => {
       const editor = editorRef.current
-      const model = editor?.getModel?.()
-      if (!model) return
+      const current = editor?.getModel?.() as unknown as MonacoModelHandle | null
       const store = useWorkspaceFilesStore.getState()
       for (const [rel, registered] of Object.entries(store.monacoModels)) {
-        if (registered === (model as unknown as MonacoModelHandle)) {
-          store.unregisterMonacoModel(rel, registered)
+        store.unregisterMonacoModel(rel, registered)
+        if (current && registered === current) continue
+        try {
+          if (!registered.isDisposed?.()) registered.dispose?.()
+        } catch {
         }
       }
     }

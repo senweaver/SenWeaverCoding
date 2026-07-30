@@ -864,6 +864,7 @@ impl SqliteMemory {
         conn: &Connection,
         query: &str,
         limit: usize,
+        namespace: Option<&str>,
     ) -> anyhow::Result<Vec<(String, f32)>> {
 
         let fts_query: String = query
@@ -878,18 +879,29 @@ impl SqliteMemory {
             return Ok(Vec::new());
         }
 
-        let sql = "SELECT m.id, bm25(memories_fts) as score
-                   FROM memories_fts f
-                   JOIN memories m ON m.rowid = f.rowid
-                   WHERE memories_fts MATCH ?1
-                   ORDER BY score
-                   LIMIT ?2";
+        let mut sql = String::from(
+            "SELECT m.id, bm25(memories_fts) as score
+             FROM memories_fts f
+             JOIN memories m ON m.rowid = f.rowid
+             WHERE memories_fts MATCH ?1",
+        );
+        if namespace.is_some() {
+            sql.push_str(" AND COALESCE(m.namespace, 'default') = ?3");
+        }
+        sql.push_str(" ORDER BY score LIMIT ?2");
 
-        let mut stmt = conn.prepare(sql)?;
+        let mut stmt = conn.prepare(&sql)?;
         #[allow(clippy::cast_possible_wrap)]
         let limit_i64 = limit as i64;
 
-        let rows = stmt.query_map(params![fts_query, limit_i64], |row| {
+        let mut param_values: Vec<Box<dyn rusqlite::types::ToSql>> =
+            vec![Box::new(fts_query), Box::new(limit_i64)];
+        if let Some(ns) = namespace {
+            param_values.push(Box::new(ns.to_string()));
+        }
+        let params_ref: Vec<&dyn rusqlite::types::ToSql> =
+            param_values.iter().map(AsRef::as_ref).collect();
+        let rows = stmt.query_map(params_ref.as_slice(), |row| {
             let id: String = row.get(0)?;
             let score: f64 = row.get(1)?;
 
@@ -910,6 +922,7 @@ impl SqliteMemory {
         limit: usize,
         category: Option<&str>,
         session_id: Option<&str>,
+        namespace: Option<&str>,
     ) -> anyhow::Result<Vec<(String, f32)>> {
         let mut sql =
             "SELECT id, embedding, embedding_norm FROM memories WHERE embedding IS NOT NULL"
@@ -925,6 +938,11 @@ impl SqliteMemory {
         if let Some(sid) = session_id {
             let _ = write!(sql, " AND (session_id IS NULL OR session_id = ?{idx})");
             param_values.push(Box::new(sid.to_string()));
+            idx += 1;
+        }
+        if let Some(ns) = namespace {
+            let _ = write!(sql, " AND COALESCE(namespace, 'default') = ?{idx}");
+            param_values.push(Box::new(ns.to_string()));
         }
 
         let query_norm: f32 = query_embedding.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -1008,6 +1026,7 @@ impl SqliteMemory {
         limit: usize,
         category: Option<&str>,
         session_id: Option<&str>,
+        namespace: Option<&str>,
     ) -> anyhow::Result<Vec<(String, f32)>> {
         let overfetch = 8usize;
         let candidate_limit = limit.saturating_mul(overfetch).max(limit);
@@ -1016,16 +1035,30 @@ impl SqliteMemory {
             let cache = vec_index.read();
             let Some(index) = cache.index.as_ref() else {
                 drop(cache);
-                return Self::vector_search(conn, query_embedding, limit, category, session_id);
+                return Self::vector_search(
+                    conn,
+                    query_embedding,
+                    limit,
+                    category,
+                    session_id,
+                    namespace,
+                );
             };
             if index.is_empty() {
                 drop(cache);
-                return Self::vector_search(conn, query_embedding, limit, category, session_id);
+                return Self::vector_search(
+                    conn,
+                    query_embedding,
+                    limit,
+                    category,
+                    session_id,
+                    namespace,
+                );
             }
             index.search(query_embedding, candidate_limit)
         };
 
-        if category.is_none() && session_id.is_none() {
+        if category.is_none() && session_id.is_none() && namespace.is_none() {
             return Ok(candidates.into_iter().take(limit).collect());
         }
 
@@ -1048,6 +1081,10 @@ impl SqliteMemory {
         }
         if session_id.is_some() {
             let _ = write!(sql, " AND (session_id IS NULL OR session_id = ?{next_idx})");
+            next_idx += 1;
+        }
+        if namespace.is_some() {
+            let _ = write!(sql, " AND COALESCE(namespace, 'default') = ?{next_idx}");
         }
 
         let mut stmt = conn.prepare(&sql)?;
@@ -1060,6 +1097,9 @@ impl SqliteMemory {
         }
         if let Some(sid) = session_id {
             params.push(Box::new(sid.to_string()));
+        }
+        if let Some(ns) = namespace {
+            params.push(Box::new(ns.to_string()));
         }
         let params_ref: Vec<&dyn rusqlite::types::ToSql> =
             params.iter().map(AsRef::as_ref).collect();
@@ -1150,101 +1190,16 @@ impl SqliteMemory {
         })
         .await?
     }
-}
 
-#[async_trait]
-impl Memory for SqliteMemory {
-    fn name(&self) -> &str {
-        "sqlite"
-    }
-
-    async fn store(
-        &self,
-        key: &str,
-        content: &str,
-        category: MemoryCategory,
-        session_id: Option<&str>,
-    ) -> anyhow::Result<()> {
-        self.enforce_store_policy("default", &category, key, session_id)
-            .await?;
-
-        let (embedding_bytes, embedding_norm) =
-            match self.get_or_compute_embedding(content).await {
-                Ok(embedding) => {
-                    let norm = embedding
-                        .as_ref()
-                        .map(|emb| f64::from(Self::embedding_norm(emb)));
-                    (embedding.map(|emb| vector::vec_to_bytes(&emb)), norm)
-                }
-                Err(err) => {
-                    tracing::warn!(
-                        key = %key,
-                        error = %err,
-                        "memory store: embedding failed; storing entry without vector"
-                    );
-                    (None, None)
-                }
-            };
-
-        let key_owned = key.to_string();
-        let content_owned = content.to_string();
-        let sid_owned = session_id.map(String::from);
-        let conn_arc = self.conn.clone();
-
-        let policy = crate::util::retry::RetryPolicy::sqlite_busy();
-        crate::util::retry::retry(&policy, |_attempt| {
-            let conn = conn_arc.clone();
-            let key = key_owned.clone();
-            let content = content_owned.clone();
-            let sid = sid_owned.clone();
-            let category = category.clone();
-            let embedding_bytes = embedding_bytes.clone();
-            let embedding_norm = embedding_norm;
-            async move {
-                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
-                    let conn = conn.lock();
-                    let now = chrono::Utc::now().to_rfc3339();
-                    let cat = Self::category_to_str(&category);
-                    let id = Uuid::new_v4().to_string();
-                    let importance =
-                        crate::memory::importance::compute_importance(&content, &category);
-
-                    conn.execute(
-                        "INSERT INTO memories (id, key, content, category, embedding, embedding_norm, created_at, updated_at, session_id, namespace, importance)
-                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'default', ?10)
-                         ON CONFLICT(key, COALESCE(namespace, 'default'), COALESCE(session_id, '')) DO UPDATE SET
-                            content = excluded.content,
-                            category = excluded.category,
-                            embedding = excluded.embedding,
-                            embedding_norm = excluded.embedding_norm,
-                            updated_at = excluded.updated_at,
-                            session_id = excluded.session_id,
-                            importance = excluded.importance",
-                        params![id, key, content, cat, embedding_bytes, embedding_norm, now, now, sid, importance],
-                    )?;
-                    Ok(())
-                })
-                .await?
-            }
-        })
-        .await
-    }
-
-    async fn recall(
+    async fn recall_hybrid(
         &self,
         query: &str,
         limit: usize,
         session_id: Option<&str>,
         since: Option<&str>,
         until: Option<&str>,
+        namespace: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
-
-        if query.trim().is_empty() {
-            return self
-                .recall_by_time_only(limit, session_id, since, until)
-                .await;
-        }
-
         let mut effective_mode = self.search_mode.clone();
         let query_embedding = if self.search_mode == SearchMode::Bm25 {
             None
@@ -1268,6 +1223,7 @@ impl Memory for SqliteMemory {
         let vec_index = self.vec_index.clone();
         let query = query.to_string();
         let sid = session_id.map(String::from);
+        let ns = namespace.map(String::from);
         let since_owned = since.map(String::from);
         let until_owned = until.map(String::from);
         let vector_weight = self.vector_weight;
@@ -1283,13 +1239,14 @@ impl Memory for SqliteMemory {
             }
             let conn = conn.lock();
             let session_ref = sid.as_deref();
+            let ns_ref = ns.as_deref();
             let since_ref = since_owned.as_deref();
             let until_ref = until_owned.as_deref();
 
             let keyword_results = if search_mode == SearchMode::Embedding {
                 Vec::new()
             } else {
-                Self::fts5_search(&conn, &query, limit * 2).unwrap_or_else(|e| {
+                Self::fts5_search(&conn, &query, limit * 2, ns_ref).unwrap_or_else(|e| {
                     tracing::warn!("FTS5 search failed: {e}");
                     Vec::new()
                 })
@@ -1298,11 +1255,19 @@ impl Memory for SqliteMemory {
             let vector_results = if search_mode == SearchMode::Bm25 {
                 Vec::new()
             } else if let Some(ref qe) = query_embedding {
-                Self::vector_search_indexed(&vec_index, &conn, qe, limit * 2, None, session_ref)
-                    .unwrap_or_else(|e| {
-                        tracing::warn!("Vector search failed: {e}");
-                        Vec::new()
-                    })
+                Self::vector_search_indexed(
+                    &vec_index,
+                    &conn,
+                    qe,
+                    limit * 2,
+                    None,
+                    session_ref,
+                    ns_ref,
+                )
+                .unwrap_or_else(|e| {
+                    tracing::warn!("Vector search failed: {e}");
+                    Vec::new()
+                })
             } else {
                 Vec::new()
             };
@@ -1351,17 +1316,31 @@ impl Memory for SqliteMemory {
                     .map(|i| format!("?{i}"))
                     .collect::<Vec<_>>()
                     .join(", ");
-                let sql = format!(
+                let mut sql = format!(
                     "SELECT id, key, content, category, created_at, session_id, namespace, importance, superseded_by \
                      FROM memories WHERE superseded_by IS NULL AND id IN ({placeholders}) \
                      AND key NOT LIKE 'user\\_msg\\_%' ESCAPE '\\' \
                      AND key NOT LIKE 'assistant\\_msg\\_%' ESCAPE '\\'"
                 );
+                let mut next_idx = merged.len() + 1;
+                if ns_ref.is_some() {
+                    let _ = write!(sql, " AND COALESCE(namespace, 'default') = ?{next_idx}");
+                    next_idx += 1;
+                }
+                if session_ref.is_some() {
+                    let _ = write!(sql, " AND (session_id = ?{next_idx} OR session_id IS NULL)");
+                }
                 let mut stmt = conn.prepare(&sql)?;
-                let id_params: Vec<Box<dyn rusqlite::types::ToSql>> = merged
+                let mut id_params: Vec<Box<dyn rusqlite::types::ToSql>> = merged
                     .iter()
                     .map(|s| Box::new(s.id.clone()) as Box<dyn rusqlite::types::ToSql>)
                     .collect();
+                if let Some(ns_val) = ns_ref {
+                    id_params.push(Box::new(ns_val.to_string()));
+                }
+                if let Some(sid_val) = session_ref {
+                    id_params.push(Box::new(sid_val.to_string()));
+                }
                 let params_ref: Vec<&dyn rusqlite::types::ToSql> =
                     id_params.iter().map(AsRef::as_ref).collect();
                 let rows = stmt.query_map(params_ref.as_slice(), |row| {
@@ -1399,7 +1378,7 @@ impl Memory for SqliteMemory {
                                 continue;
                             }
                         }
-                        let entry = MemoryEntry {
+                        results.push(MemoryEntry {
                             id: scored.id.clone(),
                             key,
                             content,
@@ -1410,15 +1389,7 @@ impl Memory for SqliteMemory {
                             namespace: ns.unwrap_or_else(|| "default".into()),
                             importance: imp,
                             superseded_by: sup,
-                        };
-                        if let Some(filter_sid) = session_ref {
-                            if let Some(other) = entry.session_id.as_deref() {
-                                if other != filter_sid {
-                                    continue;
-                                }
-                            }
-                        }
-                        results.push(entry);
+                        });
                     }
                 }
             }
@@ -1440,18 +1411,32 @@ impl Memory for SqliteMemory {
                         .collect();
                     let where_clause = conditions.join(" OR ");
                     let mut param_idx = keywords.len() * 2 + 1;
-                    let mut time_conditions = String::new();
+                    let mut extra_conditions = String::new();
                     if since_ref.is_some() {
-                        let _ = write!(time_conditions, " AND created_at >= ?{param_idx}");
+                        let _ = write!(extra_conditions, " AND created_at >= ?{param_idx}");
                         param_idx += 1;
                     }
                     if until_ref.is_some() {
-                        let _ = write!(time_conditions, " AND created_at <= ?{param_idx}");
+                        let _ = write!(extra_conditions, " AND created_at <= ?{param_idx}");
+                        param_idx += 1;
+                    }
+                    if ns_ref.is_some() {
+                        let _ = write!(
+                            extra_conditions,
+                            " AND COALESCE(namespace, 'default') = ?{param_idx}"
+                        );
+                        param_idx += 1;
+                    }
+                    if session_ref.is_some() {
+                        let _ = write!(
+                            extra_conditions,
+                            " AND (session_id = ?{param_idx} OR session_id IS NULL)"
+                        );
                         param_idx += 1;
                     }
                     let sql = format!(
                         "SELECT id, key, content, category, created_at, session_id, namespace, importance, superseded_by FROM memories
-                         WHERE superseded_by IS NULL AND ({where_clause}){time_conditions}
+                         WHERE superseded_by IS NULL AND ({where_clause}){extra_conditions}
                          AND key NOT LIKE 'user\\_msg\\_%' ESCAPE '\\'
                          AND key NOT LIKE 'assistant\\_msg\\_%' ESCAPE '\\'
                          ORDER BY updated_at DESC
@@ -1468,6 +1453,12 @@ impl Memory for SqliteMemory {
                     }
                     if let Some(u) = until_ref {
                         param_values.push(Box::new(Self::normalize_time_bound(u)));
+                    }
+                    if let Some(ns_val) = ns_ref {
+                        param_values.push(Box::new(ns_val.to_string()));
+                    }
+                    if let Some(sid_val) = session_ref {
+                        param_values.push(Box::new(sid_val.to_string()));
                     }
                     #[allow(clippy::cast_possible_wrap)]
                     param_values.push(Box::new(limit as i64));
@@ -1488,15 +1479,7 @@ impl Memory for SqliteMemory {
                         })
                     })?;
                     for row in rows {
-                        let entry = row?;
-                        if let Some(filter_sid) = session_ref {
-                            if let Some(other) = entry.session_id.as_deref() {
-                                if other != filter_sid {
-                                    continue;
-                                }
-                            }
-                        }
-                        results.push(entry);
+                        results.push(row?);
                     }
                 }
             }
@@ -1505,6 +1488,123 @@ impl Memory for SqliteMemory {
             Ok(results)
         })
         .await?
+    }
+
+    fn store_namespace() -> String {
+        let Some(sid) = crate::session::current_session_context()
+            .map(|c| c.session_id)
+            .filter(|s| !s.is_empty())
+        else {
+            return "default".to_string();
+        };
+        let Some(supervisor) = crate::workers::supervisor::global_supervisor() else {
+            return "default".to_string();
+        };
+        if supervisor.get(&sid).is_some() {
+            format!("worker:{sid}")
+        } else {
+            "default".to_string()
+        }
+    }
+}
+
+#[async_trait]
+impl Memory for SqliteMemory {
+    fn name(&self) -> &str {
+        "sqlite"
+    }
+
+    async fn store(
+        &self,
+        key: &str,
+        content: &str,
+        category: MemoryCategory,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<()> {
+        let namespace = Self::store_namespace();
+        self.enforce_store_policy(&namespace, &category, key, session_id)
+            .await?;
+
+        let (embedding_bytes, embedding_norm) =
+            match self.get_or_compute_embedding(content).await {
+                Ok(embedding) => {
+                    let norm = embedding
+                        .as_ref()
+                        .map(|emb| f64::from(Self::embedding_norm(emb)));
+                    (embedding.map(|emb| vector::vec_to_bytes(&emb)), norm)
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        key = %key,
+                        error = %err,
+                        "memory store: embedding failed; storing entry without vector"
+                    );
+                    (None, None)
+                }
+            };
+
+        let key_owned = key.to_string();
+        let content_owned = content.to_string();
+        let sid_owned = session_id.map(String::from);
+        let conn_arc = self.conn.clone();
+
+        let policy = crate::util::retry::RetryPolicy::sqlite_busy();
+        crate::util::retry::retry(&policy, |_attempt| {
+            let conn = conn_arc.clone();
+            let key = key_owned.clone();
+            let content = content_owned.clone();
+            let sid = sid_owned.clone();
+            let ns = namespace.clone();
+            let category = category.clone();
+            let embedding_bytes = embedding_bytes.clone();
+            let embedding_norm = embedding_norm;
+            async move {
+                tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                    let conn = conn.lock();
+                    let now = chrono::Utc::now().to_rfc3339();
+                    let cat = Self::category_to_str(&category);
+                    let id = Uuid::new_v4().to_string();
+                    let importance =
+                        crate::memory::importance::compute_importance(&content, &category);
+
+                    conn.execute(
+                        "INSERT INTO memories (id, key, content, category, embedding, embedding_norm, created_at, updated_at, session_id, namespace, importance)
+                         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
+                         ON CONFLICT(key, COALESCE(namespace, 'default'), COALESCE(session_id, '')) DO UPDATE SET
+                            content = excluded.content,
+                            category = excluded.category,
+                            embedding = excluded.embedding,
+                            embedding_norm = excluded.embedding_norm,
+                            updated_at = excluded.updated_at,
+                            session_id = excluded.session_id,
+                            importance = excluded.importance",
+                        params![id, key, content, cat, embedding_bytes, embedding_norm, now, now, sid, ns, importance],
+                    )?;
+                    Ok(())
+                })
+                .await?
+            }
+        })
+        .await
+    }
+
+    async fn recall(
+        &self,
+        query: &str,
+        limit: usize,
+        session_id: Option<&str>,
+        since: Option<&str>,
+        until: Option<&str>,
+    ) -> anyhow::Result<Vec<MemoryEntry>> {
+
+        if query.trim().is_empty() {
+            return self
+                .recall_by_time_only(limit, session_id, since, until)
+                .await;
+        }
+
+        self.recall_hybrid(query, limit, session_id, since, until, None)
+            .await
     }
 
     async fn get(&self, key: &str) -> anyhow::Result<Option<MemoryEntry>> {
@@ -1627,23 +1727,42 @@ impl Memory for SqliteMemory {
         .await?
     }
 
-    async fn forget(&self, key: &str) -> anyhow::Result<bool> {
+    async fn forget(&self, key: &str, include_global: bool) -> anyhow::Result<bool> {
         let conn = self.conn.clone();
         let key = key.to_string();
+        let namespace = Self::store_namespace();
         let current_session = crate::session::current_session_context()
             .map(|c| c.session_id)
             .filter(|s| !s.is_empty());
 
         tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
             let conn = conn.lock();
-            let affected = if let Some(sid) = current_session {
-                conn.execute(
-                    "DELETE FROM memories WHERE key = ?1 AND (session_id = ?2 OR session_id IS NULL)",
-                    params![key, sid],
-                )?
-            } else {
-                conn.execute("DELETE FROM memories WHERE key = ?1", params![key])?
+            let affected = match (current_session, include_global) {
+                (Some(sid), false) => conn.execute(
+                    "DELETE FROM memories WHERE key = ?1 AND COALESCE(namespace, 'default') = ?2 AND (session_id = ?3 OR session_id IS NULL)",
+                    params![key, namespace, sid],
+                )?,
+                (Some(_), true) | (None, true) => conn.execute(
+                    "DELETE FROM memories WHERE key = ?1 AND COALESCE(namespace, 'default') = ?2",
+                    params![key, namespace],
+                )?,
+                (None, false) => conn.execute(
+                    "DELETE FROM memories WHERE key = ?1 AND COALESCE(namespace, 'default') = ?2 AND session_id IS NULL",
+                    params![key, namespace],
+                )?,
             };
+            Ok(affected > 0)
+        })
+        .await?
+    }
+
+    async fn forget_everywhere(&self, key: &str) -> anyhow::Result<bool> {
+        let conn = self.conn.clone();
+        let key = key.to_string();
+
+        tokio::task::spawn_blocking(move || -> anyhow::Result<bool> {
+            let conn = conn.lock();
+            let affected = conn.execute("DELETE FROM memories WHERE key = ?1", params![key])?;
             Ok(affected > 0)
         })
         .await?
@@ -1832,15 +1951,8 @@ impl Memory for SqliteMemory {
             .await?;
         }
 
-        let entries = self
-            .recall(query, limit * 2, session_id, since, until)
-            .await?;
-        let filtered: Vec<MemoryEntry> = entries
-            .into_iter()
-            .filter(|e| e.namespace == namespace)
-            .take(limit)
-            .collect();
-        Ok(filtered)
+        self.recall_hybrid(query, limit, session_id, since, until, Some(namespace))
+            .await
     }
 
     async fn store_with_metadata(

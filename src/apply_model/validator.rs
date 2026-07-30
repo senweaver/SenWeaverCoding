@@ -85,6 +85,21 @@ pub fn grammar_id_for_path(path: &std::path::Path) -> Option<&'static str> {
     }
 }
 
+fn hash_line_comment_path(path: &std::path::Path) -> bool {
+    matches!(
+        path.extension().and_then(|e| e.to_str()),
+        Some(
+            "py" | "pyw" | "rb" | "sh" | "bash" | "zsh" | "fish" | "yaml" | "yml" | "toml"
+                | "pl" | "pm" | "r" | "R" | "jl" | "ex" | "exs" | "nim" | "cmake" | "tcl"
+                | "ps1" | "psm1" | "psd1" | "php"
+        )
+    )
+}
+
+fn hash_line_comment_lang(lang: Option<&str>) -> bool {
+    matches!(lang, Some("python") | Some("toml"))
+}
+
 pub fn bracket_checkable_path(path: &std::path::Path) -> bool {
     matches!(
         path.extension().and_then(|e| e.to_str()),
@@ -106,6 +121,7 @@ pub fn validate_edit(
         return ValidationReport::default();
     }
     let bracket_ok = path.map(bracket_checkable_path).unwrap_or(true);
+    let hash_comment = path.map(hash_line_comment_path).unwrap_or(false);
     #[cfg(feature = "code-intel")]
     let lang = path.and_then(grammar_id_for_path);
 
@@ -119,7 +135,7 @@ pub fn validate_edit(
             }
         }
         if bracket_ok {
-            bracket_balance_validate(text)
+            bracket_balance_validate(text, hash_comment)
         } else {
             ValidationReport::default()
         }
@@ -182,13 +198,7 @@ pub fn validate_bytes_with_lang(s: &str, lang: Option<&str>) -> ValidationReport
             }
         }
     }
-    #[cfg(not(feature = "code-intel"))]
-    {
-
-        let _ = lang;
-    }
-
-    bracket_balance_validate(s)
+    bracket_balance_validate(s, hash_line_comment_lang(lang))
 }
 
 #[cfg(feature = "code-intel")]
@@ -231,7 +241,7 @@ fn tree_sitter_validate(s: &str, lang: &str) -> Option<ValidationReport> {
     Some(ValidationReport::default())
 }
 
-fn bracket_balance_validate(s: &str) -> ValidationReport {
+fn bracket_balance_validate(s: &str, hash_line_comment: bool) -> ValidationReport {
     let mut issues = Vec::new();
     let mut parens = 0i64;
     let mut braces = 0i64;
@@ -251,7 +261,7 @@ fn bracket_balance_validate(s: &str) -> ValidationReport {
             i += 1;
             continue;
         }
-        if c == '#' || (c == '/' && i + 1 < n && chars[i + 1] == '/') {
+        if (c == '#' && hash_line_comment) || (c == '/' && i + 1 < n && chars[i + 1] == '/') {
             while i < n && chars[i] != '\n' {
                 i += 1;
             }

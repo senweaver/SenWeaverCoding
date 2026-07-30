@@ -15,10 +15,12 @@ use std::sync::Arc;
 pub struct GlobEditTool {
     security: Arc<SecurityPolicy>,
     ops_applier: Arc<OpsApplier>,
+    edit_history: Option<Arc<crate::tools::edit_history::EditHistory>>,
 }
 
 impl GlobEditTool {
     const MAX_FILE_SIZE: u64 = 10 * 1024 * 1024;
+    const MAX_FILES_CAP: u64 = 1000;
 
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
         let ops_applier = Arc::new(
@@ -28,12 +30,22 @@ impl GlobEditTool {
         Self {
             security,
             ops_applier,
+            edit_history: None,
         }
     }
 
     #[must_use]
     pub fn with_ops_applier(mut self, ops_applier: Arc<OpsApplier>) -> Self {
         self.ops_applier = ops_applier;
+        self
+    }
+
+    #[must_use]
+    pub fn with_edit_history(
+        mut self,
+        history: Arc<crate::tools::edit_history::EditHistory>,
+    ) -> Self {
+        self.edit_history = Some(history);
         self
     }
 
@@ -191,8 +203,9 @@ impl Tool for GlobEditTool {
 
         let max_files = args
             .get("max_files")
-            .and_then(|v| v.as_i64())
-            .unwrap_or(100) as usize;
+            .and_then(|v| v.as_u64())
+            .unwrap_or(100)
+            .min(Self::MAX_FILES_CAP) as usize;
 
         let security_arc = Arc::clone(&self.security);
         let pattern_owned = pattern.to_string();
@@ -247,8 +260,14 @@ impl Tool for GlobEditTool {
                                 Ok(_) => {}
                                 Err(_) => return false,
                             }
-                            std::fs::read_to_string(path)
-                                .map(|c| c.contains(filter))
+                            let Ok(raw) = std::fs::read(path) else {
+                                return false;
+                            };
+                            if crate::tools::file::encoding::is_probably_binary(&raw) {
+                                return false;
+                            }
+                            crate::tools::file::encoding::decode_for_edit(&raw)
+                                .map(|(c, _)| c.contains(filter))
                                 .unwrap_or(false)
                         })
                         .take(max_files)
@@ -344,20 +363,19 @@ impl Tool for GlobEditTool {
         }
 
         let _resource_guards =
-            match crate::session::acquire_many_file_writes_for_current_session(
+            match crate::session::acquire_many_file_write_guards(
                 resolved_paths.clone(),
             )
             .await
             {
-                Some(Ok(g)) => Some(g),
-                Some(Err(e)) => {
+                Ok(g) => g,
+                Err(e) => {
                     return Ok(ToolResult {
                         success: false,
                         output: String::new(),
                         error: Some(format!("{e}")),
                     });
                 }
-                None => None,
             };
 
         let mut batch = EditBatch::new(EditOrigin::GlobEditTool).with_atomic(true);
@@ -375,7 +393,7 @@ impl Tool for GlobEditTool {
                 ));
                 continue;
             }
-            let content = match tokio::fs::read_to_string(resolved).await {
+            let raw = match tokio::fs::read(resolved).await {
                 Ok(c) => c,
                 Err(e) => {
                     return Ok(ToolResult {
@@ -388,6 +406,24 @@ impl Tool for GlobEditTool {
                     });
                 }
             };
+            if crate::tools::file::encoding::is_probably_binary(&raw) {
+                size_skipped.push(format!(
+                    "  ! Skipped (binary): {}",
+                    resolved.display()
+                ));
+                continue;
+            }
+            let (content, encoding_label) =
+                match crate::tools::file::encoding::decode_for_edit(&raw) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        size_skipped.push(format!(
+                            "  ! Skipped (undecodable: {e}): {}",
+                            resolved.display()
+                        ));
+                        continue;
+                    }
+                };
             if !content.contains(old_string) {
                 continue;
             }
@@ -396,13 +432,22 @@ impl Tool for GlobEditTool {
                 content.as_bytes().to_vec(),
                 new_content.as_bytes().to_vec(),
             ));
-            batch.push(EditOp::Replace {
-                path: resolved.clone(),
-                byte_range: 0..content.len(),
-                old_text: content,
-                new_text: new_content,
-                anchor: None,
-            });
+            if crate::tools::file::encoding::is_utf8_label(encoding_label) {
+                batch.push(EditOp::Replace {
+                    path: resolved.clone(),
+                    byte_range: 0..content.len(),
+                    old_text: content,
+                    new_text: new_content,
+                    anchor: None,
+                });
+            } else {
+                batch.push(EditOp::CreateFile {
+                    path: resolved.clone(),
+                    contents: new_content,
+                    overwrite: true,
+                    encoding: Some(encoding_label.to_string()),
+                });
+            }
             planned_paths.push(resolved.clone());
         }
 
@@ -422,6 +467,18 @@ impl Tool for GlobEditTool {
                  again (non-idempotent)"
                     .to_string(),
             );
+        }
+
+        if let Some(history) = self.edit_history.as_ref() {
+            for path in &planned_paths {
+                let _ = history
+                    .snapshot_before_write_async(
+                        path.clone(),
+                        "glob_edit".to_string(),
+                        format!("bulk replace across glob '{pattern}'"),
+                    )
+                    .await;
+            }
         }
 
         let batch_id_for_emit = batch.batch_id.clone();

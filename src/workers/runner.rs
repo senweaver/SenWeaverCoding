@@ -26,13 +26,14 @@ pub struct WorkerRunContext {
 
     pub parent_permission_mode: Option<String>,
 
-    pub parent_cost_ctx:
-        Option<crate::agent::reward::cost_tracking::ToolLoopCostTrackingContext>,
+    pub parent_cost_ctx: Option<crate::agent::reward::cost_tracking::ToolLoopCostTrackingContext>,
 }
 
 struct WorkerFinalizeGuard {
     supervisor: Arc<WorkerSupervisor>,
     handle: Arc<WorkerHandle>,
+    spec: WorkerSpec,
+    event_log: Option<Arc<WorkerEventLog>>,
 }
 
 impl Drop for WorkerFinalizeGuard {
@@ -49,7 +50,7 @@ impl Drop for WorkerFinalizeGuard {
         );
         self.handle.set_status(WorkerStatus::Failed);
         self.handle.mark_finished_now();
-        self.handle.complete(WorkerResult {
+        let result = WorkerResult {
             worker_id: self.handle.worker_id.clone(),
             title: self.handle.title.clone(),
             status: WorkerStatus::Failed,
@@ -57,8 +58,39 @@ impl Drop for WorkerFinalizeGuard {
             error: Some("worker task aborted unexpectedly before completion".to_string()),
             started_at: self.handle.started_at,
             finished_at: self.handle.finished_at(),
-        });
-        self.supervisor.unregister(&self.handle.worker_id);
+        };
+        if let Some(event_log) = self.event_log.clone() {
+            let supervisor = Arc::clone(&self.supervisor);
+            let handle = Arc::clone(&self.handle);
+            let spec = self.spec.clone();
+            crate::runtime::spawn_supervised("worker.abort_finalize", async move {
+                let lifecycle = WorkerLifecycle::Completed {
+                    success: false,
+                    summary: "worker task aborted unexpectedly before completion".to_string(),
+                };
+                let session_event = lifecycle_to_session_event(&handle, &lifecycle);
+                let live_event = lifecycle_to_turn_event(&handle, &lifecycle);
+                if let Err(err) = event_log.append(session_event, live_event).await {
+                    tracing::warn!(
+                        worker_id = %handle.worker_id,
+                        error = %err,
+                        "failed to persist aborted worker terminal event"
+                    );
+                }
+                write_meta_safe(&handle.workspace_root, &handle, &spec, Some(&result));
+                handle.complete(result);
+                supervisor.unregister(&handle.worker_id);
+            });
+        } else {
+            write_meta_safe(
+                &self.handle.workspace_root,
+                &self.handle,
+                &self.spec,
+                Some(&result),
+            );
+            self.handle.complete(result);
+            self.supervisor.unregister(&self.handle.worker_id);
+        }
     }
 }
 
@@ -69,22 +101,25 @@ pub async fn run_worker(
     parent_draft_tx: Option<mpsc::Sender<DraftEvent>>,
     ctx: WorkerRunContext,
 ) {
+    let workspace_root = handle.workspace_root.clone();
+
+    let event_log =
+        match WorkerEventLog::open(&workspace_root, &handle.worker_id, handle.events_tx.clone()) {
+            Ok(log) => Some(Arc::new(log)),
+            Err(err) => {
+                tracing::warn!(
+                    worker_id = %handle.worker_id,
+                    error = %err,
+                    "failed to open worker event log; running without persistence"
+                );
+                None
+            }
+        };
     let _finalize_guard = WorkerFinalizeGuard {
         supervisor: Arc::clone(&supervisor),
         handle: Arc::clone(&handle),
-    };
-    let workspace_root = handle.workspace_root.clone();
-
-    let event_log = match WorkerEventLog::open(&workspace_root, &handle.worker_id) {
-        Ok(log) => Some(Arc::new(log)),
-        Err(err) => {
-            tracing::warn!(
-                worker_id = %handle.worker_id,
-                error = %err,
-                "failed to open worker event log; running without persistence"
-            );
-            None
-        }
+        spec: spec.clone(),
+        event_log: event_log.clone(),
     };
 
     emit_worker_lifecycle(
@@ -151,7 +186,7 @@ pub async fn run_worker(
     )
     .await;
 
-    write_meta_safe(&workspace_root, &handle, &spec);
+    write_meta_safe(&workspace_root, &handle, &spec, None);
 
     let (tx, mut rx) = mpsc::channel::<TurnEvent>(128);
 
@@ -166,7 +201,8 @@ pub async fn run_worker(
                 event_log_for_bridge.as_deref(),
                 &turn_event,
                 &mut tool_id_pairer,
-            );
+            )
+            .await;
 
             forward_turn_event_to_parent_summary(
                 &handle_for_bridge,
@@ -212,10 +248,8 @@ pub async fn run_worker(
 
     let run_future = {
         let turn = agent.turn_streamed(&prompt, tx);
-        let mode_scoped =
-            crate::agent::coding_mode::scope_coding_mode(worker_coding_mode, turn);
-        let session_scoped =
-            crate::session::scope_session_context(worker_session_ctx, mode_scoped);
+        let mode_scoped = crate::agent::coding_mode::scope_coding_mode(worker_coding_mode, turn);
+        let session_scoped = crate::session::scope_session_context(worker_session_ctx, mode_scoped);
         let perm_scoped = crate::gateway::ws::desktop::scope_permission_mode(
             worker_permission_mode,
             session_scoped,
@@ -287,12 +321,17 @@ fn write_meta_safe(
     workspace_root: &std::path::Path,
     handle: &WorkerHandle,
     spec: &WorkerSpec,
+    result: Option<&WorkerResult>,
 ) {
-    let meta = handle.to_meta(
+    let mut meta = handle.to_meta(
         &spec.prompt,
         spec.context.as_deref(),
         spec.workspace_dir.as_deref(),
     );
+    if let Some(result) = result {
+        meta.output = Some(result.output.clone());
+        meta.error = result.error.clone();
+    }
     if let Err(err) = write_meta(workspace_root, &meta) {
         tracing::warn!(
             worker_id = %handle.worker_id,
@@ -335,14 +374,16 @@ async fn finalize_worker(
             summary: error_text.clone().unwrap_or_else(|| "failed".to_string()),
         },
         WorkerStatus::Stopped => WorkerLifecycle::Stopped {
-            reason: error_text.clone().unwrap_or_else(|| "cancelled".to_string()),
+            reason: error_text
+                .clone()
+                .unwrap_or_else(|| "cancelled".to_string()),
         },
         WorkerStatus::Pending | WorkerStatus::Running => WorkerLifecycle::StatusChanged,
     };
 
     emit_worker_lifecycle(handle, parent_draft_tx, summary_kind, event_log).await;
 
-    write_meta_safe(&handle.workspace_root, handle, spec);
+    write_meta_safe(&handle.workspace_root, handle, spec, Some(&result));
 
     if let Some(hooks) = crate::hooks::global_hooks() {
         let summary = error_text.as_deref().unwrap_or(output.as_str());
@@ -393,13 +434,10 @@ async fn emit_worker_lifecycle(
         },
     };
 
-    if let Some(tx) = parent_draft_tx.as_ref() {
-        let _ = tx.send(event).await;
-    }
-
     let sess_event = lifecycle_to_session_event(handle, &kind);
+    let live_event = lifecycle_to_turn_event(handle, &kind);
     if let Some(log) = event_log {
-        if let Err(err) = log.append(&sess_event) {
+        if let Err(err) = log.append(sess_event, live_event).await {
             tracing::debug!(
                 worker_id = %handle.worker_id,
                 error = %err,
@@ -407,48 +445,80 @@ async fn emit_worker_lifecycle(
             );
         }
     }
+    if let Some(tx) = parent_draft_tx.as_ref() {
+        if tokio::time::timeout(std::time::Duration::from_secs(5), tx.send(event))
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                worker_id = %handle.worker_id,
+                "parent draft channel blocked for 5s; worker lifecycle event dropped to avoid stalling the worker"
+            );
+        }
+    }
 }
 
 fn lifecycle_to_session_event(handle: &WorkerHandle, kind: &WorkerLifecycle) -> SessionEvent {
     match kind {
-        WorkerLifecycle::Spawned => SessionEvent::new(SessionEventKind::TurnStarted {
-            input: format!("[worker:{}] {}", handle.title, handle.worker_id),
+        WorkerLifecycle::Spawned => SessionEvent::new(SessionEventKind::WorkerSpawned {
+            parent_tool_use_id: handle.parent_tool_use_id.clone(),
+            worker_id: handle.worker_id.clone(),
+            title: handle.title.clone(),
+            model: handle.model.clone(),
         }),
-        WorkerLifecycle::StatusChanged => SessionEvent::new(SessionEventKind::Delta {
-            text: format!(
-                "[worker:{}] status={}",
-                handle.title,
-                handle.status().as_str()
-            ),
+        WorkerLifecycle::StatusChanged => SessionEvent::new(SessionEventKind::WorkerStatus {
+            worker_id: handle.worker_id.clone(),
+            status: handle.status().as_str().to_string(),
+            detail: handle.last_detail(),
         }),
         WorkerLifecycle::Completed { success, summary } => {
-            SessionEvent::new(SessionEventKind::TurnFinished {
-                output: if *success {
-                    summary.clone()
-                } else {
-                    format!("[failed] {summary}")
-                },
-                tokens_used: 0,
+            SessionEvent::new(SessionEventKind::WorkerCompleted {
+                worker_id: handle.worker_id.clone(),
+                success: *success,
+                summary: summary.clone(),
             })
         }
-        WorkerLifecycle::Stopped { reason } => SessionEvent::new(SessionEventKind::TurnFinished {
-            output: format!("[stopped] {reason}"),
-            tokens_used: 0,
+        WorkerLifecycle::Stopped { reason } => SessionEvent::new(SessionEventKind::WorkerStopped {
+            worker_id: handle.worker_id.clone(),
+            reason: reason.clone(),
         }),
     }
 }
 
-fn forward_turn_event_to_worker_session(
+fn lifecycle_to_turn_event(handle: &WorkerHandle, kind: &WorkerLifecycle) -> TurnEvent {
+    match kind {
+        WorkerLifecycle::Spawned => TurnEvent::WorkerSpawned {
+            parent_tool_use_id: handle.parent_tool_use_id.clone(),
+            worker_id: handle.worker_id.clone(),
+            title: handle.title.clone(),
+            model: handle.model.clone(),
+        },
+        WorkerLifecycle::StatusChanged => TurnEvent::WorkerStatus {
+            worker_id: handle.worker_id.clone(),
+            status: handle.status().as_str().to_string(),
+            detail: handle.last_detail(),
+        },
+        WorkerLifecycle::Completed { success, summary } => TurnEvent::WorkerCompleted {
+            worker_id: handle.worker_id.clone(),
+            success: *success,
+            summary: summary.clone(),
+        },
+        WorkerLifecycle::Stopped { reason } => TurnEvent::WorkerStopped {
+            worker_id: handle.worker_id.clone(),
+            reason: reason.clone(),
+        },
+    }
+}
+
+async fn forward_turn_event_to_worker_session(
     handle: &WorkerHandle,
     event_log: Option<&WorkerEventLog>,
     event: &TurnEvent,
     tool_id_pairer: &mut crate::session::FallbackToolIdPairer,
 ) {
-    handle.publish_event(event.clone());
-
     if let Some(sess_event) = turn_event_to_session_event(event.clone(), tool_id_pairer) {
         if let Some(log) = event_log {
-            if let Err(err) = log.append(&sess_event) {
+            if let Err(err) = log.append(sess_event, event.clone()).await {
                 tracing::debug!(
                     worker_id = %handle.worker_id,
                     error = %err,
@@ -517,7 +587,12 @@ async fn forward_turn_event_to_parent_summary(
     };
 
     if let Some(evt) = progress {
-        let _ = tx.send(evt).await;
+        if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = tx.try_send(evt) {
+            tracing::trace!(
+                worker_id = %handle.worker_id,
+                "parent draft channel full; worker progress event dropped"
+            );
+        }
     }
 }
 

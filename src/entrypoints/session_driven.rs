@@ -65,6 +65,76 @@ impl ChatViewSink for CliTranscriptSink {
     }
 }
 
+async fn run_turn_with_force_abort<T, F>(
+    session_ctx: &crate::session::SessionContext,
+    force_abort_slot: &parking_lot::Mutex<Option<tokio_util::sync::CancellationToken>>,
+    cancel_presses: &std::sync::atomic::AtomicU32,
+    turn_active: &std::sync::atomic::AtomicBool,
+    turn: F,
+) -> Option<Result<T>>
+where
+    F: std::future::Future<Output = Result<T>>,
+{
+    let turn_force = tokio_util::sync::CancellationToken::new();
+    *force_abort_slot.lock() = Some(turn_force.clone());
+    cancel_presses.store(0, std::sync::atomic::Ordering::Relaxed);
+    turn_active.store(true, std::sync::atomic::Ordering::Relaxed);
+    let turn_fut = crate::session::scope_session_context(session_ctx.clone(), turn);
+    let result = tokio::select! {
+        r = turn_fut => Some(r),
+        _ = turn_force.cancelled() => None,
+    };
+    turn_active.store(false, std::sync::atomic::Ordering::Relaxed);
+    *force_abort_slot.lock() = None;
+    cancel_presses.store(0, std::sync::atomic::Ordering::Relaxed);
+    result
+}
+
+fn read_repl_input(
+    label: &str,
+    reader: &mut io::BufReader<io::StdinLock<'static>>,
+    history: &mut Vec<String>,
+) -> Option<String> {
+    #[cfg(feature = "tui")]
+    {
+        if let Some(result) = crate::cli::line_editor::read_line_interactive(label, history) {
+            return match result {
+                Ok(crate::cli::line_editor::ReplRead::Line(line)) => {
+                    let trimmed = line.trim();
+                    if !trimmed.is_empty()
+                        && history.last().map(String::as_str) != Some(trimmed)
+                    {
+                        history.push(trimmed.to_string());
+                    }
+                    Some(line)
+                }
+                Ok(crate::cli::line_editor::ReplRead::Eof)
+                | Ok(crate::cli::line_editor::ReplRead::Interrupted)
+                | Err(_) => None,
+            };
+        }
+    }
+    let _ = &history;
+    {
+        let mut stdout = io::stdout().lock();
+        let _ = write!(stdout, "{label}");
+        let _ = stdout.flush();
+    }
+    match crate::cli::input::read_line_lossy(reader) {
+        Ok(None) | Err(_) => None,
+        Ok(Some(first)) => {
+            let mut block = first;
+            while !reader.buffer().is_empty() {
+                match crate::cli::input::read_line_lossy(reader) {
+                    Ok(Some(next)) => block.push_str(&next),
+                    Ok(None) | Err(_) => break,
+                }
+            }
+            Some(block)
+        }
+    }
+}
+
 fn provision_actor(
     workspace_root: &std::path::Path,
     session_id: &str,
@@ -89,6 +159,7 @@ pub async fn run_session_driven(
     resume_session_id: Option<String>,
 ) -> Result<()> {
 
+    let _ = crate::cli::terminal::ansi_supported();
     let resuming = resume_session_id.is_some();
     let session_id = resume_session_id.unwrap_or_else(|| {
         format!(
@@ -210,12 +281,20 @@ pub async fn run_session_driven(
                         }
                         let _ = writeln!(
                             stdout,
-                            "\n\x1b[31m[force-abort] Force-aborting the current turn\x1b[0m"
+                            "\n{}",
+                            crate::cli::terminal::paint(
+                                "31",
+                                "[force-abort] Force-aborting the current turn"
+                            )
                         );
                     } else {
                         let _ = writeln!(
                             stdout,
-                            "\n\x1b[33m[cancelled] Cancellation requested for the current turn (press Ctrl+C again to force-abort; press Ctrl+C at the prompt to exit)\x1b[0m"
+                            "\n{}",
+                            crate::cli::terminal::paint(
+                                "33",
+                                "[cancelled] Cancellation requested for the current turn (press Ctrl+C again to force-abort; press Ctrl+C at the prompt to exit)"
+                            )
                         );
                     }
                     let _ = stdout.flush();
@@ -231,8 +310,13 @@ pub async fn run_session_driven(
     let renderer = crate::runtime::spawn_supervised("entrypoints.session_renderer", async move {
         let mut rx = event_rx;
         let _ = renderer_session;
+        let cli_format = if crate::cli::terminal::ansi_supported() {
+            CliFormat::Pretty
+        } else {
+            CliFormat::Plain
+        };
         while let Ok(event) = rx.recv().await {
-            let (text, newline) = render_cli(&event, CliFormat::Pretty);
+            let (text, newline) = render_cli(&event, cli_format);
             let mut stdout = io::stdout().lock();
             if newline {
                 let _ = writeln!(stdout, "{text}");
@@ -248,30 +332,31 @@ pub async fn run_session_driven(
     });
 
     let (input_tx, mut input_rx) = tokio::sync::mpsc::channel::<String>(4);
+    let (prompt_tx, prompt_rx) = std::sync::mpsc::channel::<()>();
     let label = prompt_label.to_string();
     std::thread::spawn(move || {
         let stdin = io::stdin();
         let handle = stdin.lock();
         let mut reader = io::BufReader::new(handle);
-        loop {
-
-            {
-                let mut stdout = io::stdout().lock();
-                let _ = write!(stdout, "{label}");
-                let _ = stdout.flush();
+        let mut history: Vec<String> = Vec::new();
+        'outer: loop {
+            if prompt_rx.recv().is_err() {
+                break;
             }
-
-            match crate::cli::input::read_line_lossy(&mut reader) {
-                Ok(None) | Err(_) => break,
-                Ok(Some(buf)) => {
-                    let trimmed = buf.trim().to_string();
-                    if trimmed.is_empty() {
-                        continue;
-                    }
-                    if trimmed == "/exit" || trimmed == "/quit" {
-                        break;
-                    }
-                    if input_tx.blocking_send(trimmed).is_err() {
+            loop {
+                match read_repl_input(&label, &mut reader, &mut history) {
+                    None => break 'outer,
+                    Some(block) => {
+                        let trimmed = block.trim().to_string();
+                        if trimmed.is_empty() {
+                            continue;
+                        }
+                        if trimmed == "/exit" || trimmed == "/quit" {
+                            break 'outer;
+                        }
+                        if input_tx.blocking_send(trimmed).is_err() {
+                            break 'outer;
+                        }
                         break;
                     }
                 }
@@ -293,39 +378,79 @@ pub async fn run_session_driven(
                 drop(stdout);
                 first
             }
-            None => tokio::select! {
-                line = input_rx.recv() => match line {
-                    Some(line) => line,
-                    None => break,
-                },
-                () = shutdown.cancelled() => break,
-            },
+            None => {
+                if prompt_tx.send(()).is_err() {
+                    break;
+                }
+                tokio::select! {
+                    line = input_rx.recv() => match line {
+                        Some(line) => line,
+                        None => break,
+                    },
+                    () = shutdown.cancelled() => break,
+                }
+            }
         };
-        match crate::commands::dispatch::dispatch_slash_input(&input).await {
+        let dispatched = run_turn_with_force_abort(
+            &session_ctx,
+            &force_abort_slot,
+            &cancel_presses,
+            &turn_active,
+            async {
+                Ok::<_, anyhow::Error>(
+                    crate::commands::dispatch::dispatch_slash_input(&input).await,
+                )
+            },
+        )
+        .await;
+        let outcome = match dispatched {
+            Some(Ok(outcome)) => outcome,
+            Some(Err(err)) => {
+                tracing::warn!(error = %err, "CLI: slash dispatch failed");
+                continue;
+            }
+            None => {
+                tracing::warn!("CLI: slash command force-aborted by user");
+                let mut stdout = io::stdout().lock();
+                let _ = writeln!(
+                    stdout,
+                    "{}",
+                    crate::cli::terminal::paint(
+                        "31",
+                        "[force-abort] Command force-aborted"
+                    )
+                );
+                let _ = stdout.flush();
+                continue;
+            }
+        };
+        match outcome {
             crate::commands::dispatch::SlashOutcome::NotCommand => {
                 let perm_scoped = crate::gateway::ws::desktop::scope_permission_mode(
                     cli_permission_mode.clone(),
                     session.submit(&input),
                 );
-                let turn_force = tokio_util::sync::CancellationToken::new();
-                *force_abort_slot.lock() = Some(turn_force.clone());
-                cancel_presses.store(0, std::sync::atomic::Ordering::Relaxed);
-                turn_active.store(true, std::sync::atomic::Ordering::Relaxed);
-                let turn_fut =
-                    crate::session::scope_session_context(session_ctx.clone(), perm_scoped);
-                let result = tokio::select! {
-                    r = turn_fut => Some(r),
-                    _ = turn_force.cancelled() => None,
-                };
-                turn_active.store(false, std::sync::atomic::Ordering::Relaxed);
-                *force_abort_slot.lock() = None;
-                cancel_presses.store(0, std::sync::atomic::Ordering::Relaxed);
+                let result = run_turn_with_force_abort(
+                    &session_ctx,
+                    &force_abort_slot,
+                    &cancel_presses,
+                    &turn_active,
+                    perm_scoped,
+                )
+                .await;
                 match result {
                     Some(Ok(())) => {}
                     Some(Err(err)) => {
                         tracing::warn!(error = %err, "CLI: session turn failed");
                         let mut stdout = io::stdout().lock();
-                        let _ = writeln!(stdout, "\x1b[31m[error] Turn failed: {err}\x1b[0m");
+                        let _ = writeln!(
+                            stdout,
+                            "{}",
+                            crate::cli::terminal::paint(
+                                "31",
+                                &format!("[error] Turn failed: {err}")
+                            )
+                        );
                         let _ = stdout.flush();
                     }
                     None => {
@@ -333,7 +458,11 @@ pub async fn run_session_driven(
                         let mut stdout = io::stdout().lock();
                         let _ = writeln!(
                             stdout,
-                            "\x1b[31m[force-abort] Current turn force-aborted\x1b[0m"
+                            "{}",
+                            crate::cli::terminal::paint(
+                                "31",
+                                "[force-abort] Current turn force-aborted"
+                            )
                         );
                         let _ = stdout.flush();
                     }
@@ -342,7 +471,7 @@ pub async fn run_session_driven(
             crate::commands::dispatch::SlashOutcome::Quit => break,
             crate::commands::dispatch::SlashOutcome::Clear => {
                 let mut stdout = io::stdout().lock();
-                let _ = write!(stdout, "\x1b[2J\x1b[H");
+                let _ = write!(stdout, "{}", crate::cli::terminal::clear_screen_sequence());
                 let _ = stdout.flush();
             }
             crate::commands::dispatch::SlashOutcome::Handled { success, message } => {
@@ -350,7 +479,11 @@ pub async fn run_session_driven(
                 if success {
                     let _ = writeln!(stdout, "{message}");
                 } else {
-                    let _ = writeln!(stdout, "\x1b[31m{message}\x1b[0m");
+                    let _ = writeln!(
+                        stdout,
+                        "{}",
+                        crate::cli::terminal::paint("31", &message)
+                    );
                 }
             }
             crate::commands::dispatch::SlashOutcome::Followup { message, prompt } => {
@@ -362,15 +495,42 @@ pub async fn run_session_driven(
                     cli_permission_mode.clone(),
                     session.submit(&prompt),
                 );
-                turn_active.store(true, std::sync::atomic::Ordering::Relaxed);
-                let result =
-                    crate::session::scope_session_context(session_ctx.clone(), perm_scoped).await;
-                turn_active.store(false, std::sync::atomic::Ordering::Relaxed);
-                if let Err(err) = result {
-                    tracing::warn!(error = %err, "CLI: session follow-up turn failed");
-                    let mut stdout = io::stdout().lock();
-                    let _ = writeln!(stdout, "\x1b[31m[error] Follow-up turn failed: {err}\x1b[0m");
-                    let _ = stdout.flush();
+                let result = run_turn_with_force_abort(
+                    &session_ctx,
+                    &force_abort_slot,
+                    &cancel_presses,
+                    &turn_active,
+                    perm_scoped,
+                )
+                .await;
+                match result {
+                    Some(Ok(())) => {}
+                    Some(Err(err)) => {
+                        tracing::warn!(error = %err, "CLI: session follow-up turn failed");
+                        let mut stdout = io::stdout().lock();
+                        let _ = writeln!(
+                            stdout,
+                            "{}",
+                            crate::cli::terminal::paint(
+                                "31",
+                                &format!("[error] Follow-up turn failed: {err}")
+                            )
+                        );
+                        let _ = stdout.flush();
+                    }
+                    None => {
+                        tracing::warn!("CLI: session follow-up turn force-aborted by user");
+                        let mut stdout = io::stdout().lock();
+                        let _ = writeln!(
+                            stdout,
+                            "{}",
+                            crate::cli::terminal::paint(
+                                "31",
+                                "[force-abort] Current turn force-aborted"
+                            )
+                        );
+                        let _ = stdout.flush();
+                    }
                 }
             }
         }

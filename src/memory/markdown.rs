@@ -267,7 +267,7 @@ impl Memory for MarkdownMemory {
         }
     }
 
-    async fn forget(&self, _key: &str) -> anyhow::Result<bool> {
+    async fn forget(&self, _key: &str, _include_global: bool) -> anyhow::Result<bool> {
 
         Ok(false)
     }

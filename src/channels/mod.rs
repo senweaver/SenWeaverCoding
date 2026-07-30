@@ -2473,9 +2473,45 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
             continue;
         }
 
+        if ctx.debouncer.enabled() && msg.attachments.is_empty() {
+            let sender_key = conversation_history_key(&msg);
+            match ctx.debouncer.debounce(&sender_key, &msg.content).await {
+                pipeline::debounce::DebounceResult::Passthrough(content) => {
+                    let mut msg = msg;
+                    msg.content = content;
+                    dispatch_channel_turn(&ctx, &in_flight, msg).await;
+                }
+                pipeline::debounce::DebounceResult::Aggregated(rx) => {
+                    let ctx_task = ctx.clone();
+                    let in_flight_task = Arc::clone(&in_flight);
+                    let mut leader_msg = msg;
+                    runtime::spawn_supervised("channels.debounce.dispatch", async move {
+                        if let Ok(combined) = rx.await {
+                            leader_msg.content = combined;
+                            dispatch_channel_turn(&ctx_task, &in_flight_task, leader_msg).await;
+                        }
+                    });
+                }
+                pipeline::debounce::DebounceResult::Coalesced(_) => {}
+            }
+            continue;
+        }
+
+        dispatch_channel_turn(&ctx, &in_flight, msg).await;
+    }
+
+    tracing::info!("Channel message stream ended; start_channels returning");
+    Ok(())
+}
+
+async fn dispatch_channel_turn(
+    ctx: &ChannelRuntimeContext,
+    in_flight: &Arc<Mutex<HashMap<String, InFlightSenderTaskState>>>,
+    msg: traits::ChannelMessage,
+) {
         let sender_key = conversation_history_key(&msg);
         let ctx_clone = ctx.clone();
-        let in_flight_clone = Arc::clone(&in_flight);
+        let in_flight_clone = Arc::clone(in_flight);
         let msg_clone = msg.clone();
 
         if ctx.interrupt_on_new_message.enabled_for_channel(&msg.channel) {
@@ -2783,10 +2819,6 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
                 }
             },
         );
-    }
-
-    tracing::info!("Channel message stream ended; start_channels returning");
-    Ok(())
 }
 
 pub async fn doctor_channels(config: Config) -> anyhow::Result<()> {

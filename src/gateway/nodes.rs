@@ -9,7 +9,7 @@ use axum::{
         Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{HeaderMap, header},
+    http::HeaderMap,
     response::IntoResponse,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -19,8 +19,6 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::{mpsc, oneshot};
-
-const BEARER_SUBPROTO_PREFIX: &str = "bearer.";
 
 const WS_NODE_PROTOCOL: &str = "sen.nodes.v1";
 
@@ -183,75 +181,43 @@ pub struct NodeWsQuery {
     pub token: Option<String>,
 }
 
-fn extract_node_ws_token<'a>(
-    headers: &'a HeaderMap,
-    query_token: Option<&'a str>,
-) -> Option<&'a str> {
-
-    if let Some(t) = headers
-        .get(header::AUTHORIZATION)
-        .and_then(|v| v.to_str().ok())
-        .and_then(|auth| auth.strip_prefix("Bearer "))
-    {
-        if !t.is_empty() {
-            return Some(t);
-        }
-    }
-
-    if let Some(t) = headers
-        .get("sec-websocket-protocol")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|protos| {
-            protos
-                .split(',')
-                .map(|p| p.trim())
-                .find_map(|p| p.strip_prefix(BEARER_SUBPROTO_PREFIX))
-        })
-    {
-        if !t.is_empty() {
-            return Some(t);
-        }
-    }
-
-    if let Some(t) = query_token {
-        if !t.is_empty() {
-            return Some(t);
-        }
-    }
-
-    None
-}
-
 pub async fn handle_ws_nodes(
     State(state): State<AppState>,
     Query(params): Query<NodeWsQuery>,
+    axum::extract::ConnectInfo(peer): axum::extract::ConnectInfo<std::net::SocketAddr>,
     headers: HeaderMap,
     ws: WebSocketUpgrade,
 ) -> impl IntoResponse {
-    if let Some(reject) = crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/nodes") {
-        return reject;
-    }
-
     let nodes_config = state.config.lock().nodes.clone();
-    if let Some(ref expected_token) = nodes_config.auth_token {
-        let token = extract_node_ws_token(&headers, params.token.as_deref()).unwrap_or("");
-        if token != expected_token {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                "Unauthorized  -  provide a valid node auth token",
-            )
-                .into_response();
+    match nodes_config.auth_token {
+        Some(ref expected_token) => {
+            if let Some(reject) =
+                crate::gateway::cors::reject_ws_disallowed_origin(&headers, "/ws/nodes")
+            {
+                return reject;
+            }
+            let authorized =
+                crate::gateway::ws::core::websocket_tokens(&headers, params.token.as_deref())
+                    .iter()
+                    .any(|token| token == expected_token);
+            if !authorized {
+                return (
+                    axum::http::StatusCode::UNAUTHORIZED,
+                    "Unauthorized  -  provide a valid node auth token",
+                )
+                    .into_response();
+            }
         }
-    }
-
-    if nodes_config.auth_token.is_none() && state.pairing.require_pairing() {
-        let token = extract_node_ws_token(&headers, params.token.as_deref()).unwrap_or("");
-        if !state.pairing.is_authenticated(token) {
-            return (
-                axum::http::StatusCode::UNAUTHORIZED,
-                "Unauthorized  -  provide Authorization header or ?token= query param",
-            )
-                .into_response();
+        None => {
+            if let Err(reject) = crate::gateway::ws::core::authorize_ws_request(
+                &state,
+                &headers,
+                Some(peer),
+                params.token.as_deref(),
+                "/ws/nodes",
+            ) {
+                return reject;
+            }
         }
     }
 

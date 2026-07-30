@@ -38,3 +38,44 @@ impl Sandbox for NoopSandbox {
         "No sandboxing (application-layer security only)"
     }
 }
+
+#[derive(Debug, Clone)]
+pub struct UnavailableSandbox {
+    requested: String,
+}
+
+impl UnavailableSandbox {
+    pub fn new(requested: impl Into<String>) -> Self {
+        Self {
+            requested: requested.into(),
+        }
+    }
+
+    pub fn requested_backend(&self) -> &str {
+        &self.requested
+    }
+}
+
+impl Sandbox for UnavailableSandbox {
+    fn wrap_command(&self, _cmd: &mut Command) -> std::io::Result<()> {
+        Err(std::io::Error::other(format!(
+            "sandbox backend '{}' was explicitly requested in [security.sandbox].backend but is \
+             not available on this system; refusing to run commands without the requested \
+             isolation. Install/enable the backend, or set backend = \"auto\" or \"none\" to \
+             proceed without it.",
+            self.requested
+        )))
+    }
+
+    fn is_available(&self) -> bool {
+        false
+    }
+
+    fn name(&self) -> &str {
+        "unavailable"
+    }
+
+    fn description(&self) -> &str {
+        "Requested sandbox backend unavailable (fail-closed: command execution is blocked)"
+    }
+}

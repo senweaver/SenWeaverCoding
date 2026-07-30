@@ -12,7 +12,7 @@ import { useMinimalComputerStore } from '../stores/minimalComputerStore'
 import { useMinimalRecorderStore } from '../stores/minimalRecorderStore'
 import { useComputerUseStore } from '../stores/computerUseStore'
 import { isTauriRuntime, subscribeServerStatus } from '../lib/desktopRuntime'
-import { getBaseUrl, setBaseUrl } from '../api/client'
+import { getBaseUrl, setAuthToken, setBaseUrl } from '../api/client'
 import { wsManager } from '../api/websocket'
 import {
   MINIMAL_EVENT_ACTIVATE,
@@ -29,6 +29,47 @@ import type {
   MinimalRecorderProgress,
 } from '../lib/minimalMode'
 
+let serverAuthReady: Promise<void> | null = null
+let serverAuthGeneration = 0
+
+function ensureServerAuth(options?: { force?: boolean }): Promise<void> {
+  if (options?.force) {
+    serverAuthReady = null
+  }
+  if (serverAuthReady) return serverAuthReady
+  serverAuthGeneration += 1
+  const generation = serverAuthGeneration
+  const attempt = (async () => {
+    const { invoke } = await import('@tauri-apps/api/core')
+    const [url, token] = await Promise.all([
+      invoke<string>('get_server_url').catch(() => null),
+      invoke<string>('get_server_token').catch(() => null),
+    ])
+    const stale = generation !== serverAuthGeneration
+    if (typeof token !== 'string' || token.length === 0) {
+      if (!stale && options?.force) {
+        setAuthToken(null)
+      }
+      throw new Error('bridge token unavailable')
+    }
+    if (stale) {
+      throw new Error('bridge auth attempt superseded')
+    }
+    setAuthToken(token)
+    if (typeof url === 'string' && /^https?:\/\//.test(url)) {
+      setBaseUrl(url.replace(/\/$/, ''))
+    }
+  })()
+  const guarded = attempt.catch((err) => {
+    if (generation === serverAuthGeneration) {
+      serverAuthReady = null
+    }
+    throw err
+  })
+  serverAuthReady = guarded
+  return guarded
+}
+
 export function useMinimalWindowBridge() {
   useEffect(() => {
     if (!isTauriRuntime()) return
@@ -36,19 +77,13 @@ export function useMinimalWindowBridge() {
     let disposed = false
     let unlisten: (() => void) | null = null
 
+    void ensureServerAuth().catch(() => {})
+
     const bootstrap = async () => {
       if (ran) return
       ran = true
       try {
-        const { invoke } = await import('@tauri-apps/api/core')
-        try {
-          const url = await invoke<string>('get_server_url')
-          if (typeof url === 'string' && /^https?:\/\//.test(url)) {
-            setBaseUrl(url.replace(/\/$/, ''))
-          }
-        } catch {
-
-        }
+        await ensureServerAuth().catch(() => {})
         await useSettingsStore.getState().fetchAll().catch(() => {})
         useSessionRunStateStore.getState().start()
         void useProviderStore.getState().fetchProviders().catch(() => {})
@@ -123,9 +158,16 @@ export function useMinimalWindowBridge() {
         const normalized = url.replace(/\/$/, '')
         if (normalized === getBaseUrl().replace(/\/$/, '')) return
         setBaseUrl(normalized)
-        useSessionRunStateStore.getState().stop()
-        useSessionRunStateStore.getState().start()
-        wsManager.forceReconnectAll()
+        void ensureServerAuth({ force: true })
+          .then(() => {
+            setBaseUrl(normalized)
+            useSessionRunStateStore.getState().stop()
+            useSessionRunStateStore.getState().start()
+            wsManager.forceReconnectAll()
+          })
+          .catch((err) => {
+            console.warn('[minimal] server auth refresh failed; skipping reconnect', err)
+          })
       })
       if (disposed) off()
       else unlisten = off

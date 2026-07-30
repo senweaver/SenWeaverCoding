@@ -3,10 +3,11 @@
 // Licensed under the MIT License.
 
 import { useEffect, useMemo, useState } from 'react'
-import { useTranslation } from '../i18n'
+import { useTranslation, type TranslationKey } from '../i18n'
 import { Button } from '../components/shared/Button'
 import type { SavedProvider, UpdateProviderInput } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
+import { modelTypeLabelKey } from '../utils/modelTypes'
 import { aggregateProviderModels } from '../utils/providerModels'
 
 const DEFAULT_VISIBLE_COUNT = 10
@@ -66,10 +67,14 @@ export function GlobalModelsPanel({
     const needle = query.trim().toLowerCase()
     if (!needle) return allModels
     return allModels.filter((entry) => {
-      const haystack = `${entry.modelId} ${entry.providerName} ${entry.presetName ?? ''}`.toLowerCase()
+      const typeLabels = entry.types
+        .map((type) => `${type} ${t(modelTypeLabelKey(type) as TranslationKey)}`)
+        .join(' ')
+      const haystack =
+        `${entry.modelId} ${entry.providerName} ${entry.presetName ?? ''} ${typeLabels}`.toLowerCase()
       return haystack.includes(needle)
     })
-  }, [allModels, query])
+  }, [allModels, query, t])
 
   useEffect(() => {
     setShowAll(false)
@@ -153,8 +158,8 @@ export function GlobalModelsPanel({
                 key={`${entry.providerId}:${entry.modelId}`}
                 className="flex items-center justify-between gap-3 px-3 py-2 rounded-md bg-[var(--color-surface-container-low)] border border-[var(--color-border)]"
               >
-                <div className="flex items-center gap-2 min-w-0 flex-1">
-                  <span className="text-xs font-mono text-[var(--color-text-primary)] truncate">
+                <div className="flex items-center flex-wrap gap-x-2 gap-y-1 min-w-0 flex-1">
+                  <span className="text-xs font-mono text-[var(--color-text-primary)] truncate min-w-0 max-w-full">
                     {entry.modelId}
                   </span>
                   <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[var(--color-surface-container-high)] text-[var(--color-text-tertiary)] leading-none flex-shrink-0 truncate max-w-[120px]">
@@ -170,6 +175,14 @@ export function GlobalModelsPanel({
                       {t('settings.providers.primaryTag')}
                     </span>
                   )}
+                  {entry.types.map((type) => (
+                    <span
+                      key={type}
+                      className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[var(--color-surface-container-high)] text-[var(--color-text-tertiary)] leading-none flex-shrink-0"
+                    >
+                      {t(modelTypeLabelKey(type) as TranslationKey)}
+                    </span>
+                  ))}
                 </div>
                 <ModelToggleSwitch
                   checked={entry.enabled}

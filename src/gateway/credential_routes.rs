@@ -12,7 +12,8 @@ use serde::Deserialize;
 use super::api::require_auth;
 use super::AppState;
 use crate::services::governance::credential_vault::{
-    init_credential_vault, try_get_credential_vault, CredentialKind, CredentialMeta,
+    init_credential_vault, try_get_credential_vault, CredentialField, CredentialKind,
+    CredentialMeta,
 };
 
 fn ensure_vault(
@@ -51,6 +52,11 @@ fn meta_to_json(meta: &CredentialMeta) -> serde_json::Value {
         "kind": meta.kind,
         "created_at": meta.created_at,
         "updated_at": meta.updated_at,
+        "shape": meta.shape,
+        "fields": meta.fields.iter().map(|f| serde_json::json!({
+            "key": f.key,
+            "kind": f.kind,
+        })).collect::<Vec<_>>(),
     })
 }
 
@@ -70,10 +76,19 @@ pub async fn handle_list(State(state): State<AppState>, headers: HeaderMap) -> i
 }
 
 #[derive(Debug, Deserialize)]
+pub struct PutFieldBody {
+    pub key: String,
+    pub kind: Option<String>,
+    pub value: String,
+}
+
+#[derive(Debug, Deserialize)]
 pub struct PutBody {
     pub name: String,
     pub kind: Option<String>,
-    pub value: String,
+    pub value: Option<String>,
+    #[serde(default)]
+    pub fields: Option<Vec<PutFieldBody>>,
 }
 
 pub async fn handle_put(
@@ -88,14 +103,42 @@ pub async fn handle_put(
         Ok(v) => v,
         Err(resp) => return *resp,
     };
-    let kind = body
-        .kind
-        .as_deref()
-        .map(CredentialKind::parse)
-        .unwrap_or(CredentialKind::Other);
     let name = body.name.clone();
-    let value = body.value.clone();
-    let result = tokio::task::spawn_blocking(move || vault.put(&name, kind, &value)).await;
+    let result = if let Some(fields_body) = body.fields.filter(|f| !f.is_empty()) {
+        let fields: Vec<CredentialField> = fields_body
+            .into_iter()
+            .map(|f| CredentialField {
+                key: f.key,
+                kind: f
+                    .kind
+                    .as_deref()
+                    .map(CredentialKind::parse)
+                    .unwrap_or(CredentialKind::Other),
+                value: f.value,
+            })
+            .collect();
+        tokio::task::spawn_blocking(move || vault.put_group(&name, fields)).await
+    } else {
+        let value = match body.value {
+            Some(v) if !v.is_empty() => v,
+            _ => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": "invalid",
+                        "detail": "either non-empty value or non-empty fields is required",
+                    })),
+                )
+                    .into_response();
+            }
+        };
+        let kind = body
+            .kind
+            .as_deref()
+            .map(CredentialKind::parse)
+            .unwrap_or(CredentialKind::Other);
+        tokio::task::spawn_blocking(move || vault.put(&name, kind, &value)).await
+    };
     match result {
         Ok(Ok(meta)) => Json(serde_json::json!({
             "status": "ok",

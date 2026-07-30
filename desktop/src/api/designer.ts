@@ -16,7 +16,6 @@ export type DesignerFieldType =
   | 'multiselect'
   | 'toggle'
   | 'number'
-  | 'models'
   | 'designSystem'
   | 'promptTemplate'
   | 'htmlTemplate'
@@ -42,22 +41,12 @@ export type DesignerSubmode = {
   labelZh: string
   icon: string
   surface?: 'image' | 'video' | 'audio' | null
+  modelPicker?: boolean
   fields: DesignerField[]
-}
-
-export type DesignerMediaModel = {
-  id: string
-  label: string
-  provider: string
 }
 
 export type DesignerSubmodesResponse = {
   submodes: DesignerSubmode[]
-  mediaModels: {
-    image: DesignerMediaModel[]
-    video: DesignerMediaModel[]
-    audio: DesignerMediaModel[]
-  }
 }
 
 export type DesignSystemMeta = {

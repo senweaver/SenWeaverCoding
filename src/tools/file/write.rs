@@ -215,20 +215,17 @@ impl Tool for FileWriteTool {
             });
         }
 
-        let _resource_guard = match crate::session::acquire_file_write_locked(
-            &resolved_target,
-        )
-        .await
+        let _resource_guard = match crate::session::acquire_file_write_guard(&resolved_target)
+            .await
         {
-            Some(Ok(g)) => Some(g),
-            Some(Err(e)) => {
+            Ok(g) => g,
+            Err(e) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new(),
                     error: Some(format!("{e}")),
                 });
             }
-            None => None,
         };
 
         if crate::session::is_stale_for_current_session(&resolved_target) {

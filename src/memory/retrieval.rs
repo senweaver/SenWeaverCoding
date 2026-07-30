@@ -85,13 +85,17 @@ impl RetrievalPipeline {
         limit: usize,
         session_id: Option<&str>,
         namespace: Option<&str>,
+        since: Option<&str>,
+        until: Option<&str>,
     ) -> String {
         format!(
-            "{}:{}:{}:{}",
+            "{}:{}:{}:{}:{}:{}",
             query,
             limit,
             session_id.unwrap_or(""),
-            namespace.unwrap_or("")
+            namespace.unwrap_or(""),
+            since.unwrap_or(""),
+            until.unwrap_or("")
         )
     }
 
@@ -136,7 +140,7 @@ impl RetrievalPipeline {
         since: Option<&str>,
         until: Option<&str>,
     ) -> anyhow::Result<Vec<MemoryEntry>> {
-        let ck = Self::cache_key(query, limit, session_id, namespace);
+        let ck = Self::cache_key(query, limit, session_id, namespace, since, until);
 
         for stage in &self.config.stages {
             match stage.as_str() {
@@ -305,8 +309,16 @@ impl Memory for PipelinedMemory {
         self.inner.list(category, session_id).await
     }
 
-    async fn forget(&self, key: &str) -> anyhow::Result<bool> {
-        let result = self.inner.forget(key).await;
+    async fn forget(&self, key: &str, include_global: bool) -> anyhow::Result<bool> {
+        let result = self.inner.forget(key, include_global).await;
+        if matches!(result, Ok(true)) {
+            self.pipeline.invalidate_cache();
+        }
+        result
+    }
+
+    async fn forget_everywhere(&self, key: &str) -> anyhow::Result<bool> {
+        let result = self.inner.forget_everywhere(key).await;
         if matches!(result, Ok(true)) {
             self.pipeline.invalidate_cache();
         }

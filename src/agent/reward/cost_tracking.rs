@@ -79,6 +79,14 @@ pub(crate) fn provider_uses_separate_cache_fields(provider_name: &str) -> bool {
         || base.starts_with("claude")
 }
 
+pub(crate) fn usage_reports_separate_cache_fields(
+    provider_name: &str,
+    usage: &crate::providers::traits::TokenUsage,
+) -> bool {
+    provider_uses_separate_cache_fields(provider_name)
+        || usage.cache_creation_input_tokens.is_some()
+}
+
 pub(crate) fn record_tool_loop_cost_usage(
     provider_name: &str,
     model: &str,
@@ -116,7 +124,7 @@ pub(crate) fn record_tool_loop_cost_usage(
 
     let cached_input = usage.cached_input_tokens.unwrap_or(0);
     let cache_creation = usage.cache_creation_input_tokens.unwrap_or(0);
-    let anthropic_family = provider_uses_separate_cache_fields(provider_name);
+    let anthropic_family = usage_reports_separate_cache_fields(provider_name, usage);
     let fresh_input = if anthropic_family {
         input_tokens
     } else {

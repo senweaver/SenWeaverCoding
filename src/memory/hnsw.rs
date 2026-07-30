@@ -72,7 +72,11 @@ pub struct HnswMemIndex {
     rng_state: u64,
 
     deleted_count: usize,
+
+    dim: Option<usize>,
 }
+
+const TOMBSTONE_COMPACT_RATIO: f32 = 0.3;
 
 impl HnswMemIndex {
     pub fn new() -> Self {
@@ -90,7 +94,37 @@ impl HnswMemIndex {
             top_level: 0,
             rng_state: params.rng_seed.max(1),
             deleted_count: 0,
+            dim: None,
         }
+    }
+
+    fn maybe_compact(&mut self) {
+        if self.deleted_count == 0 || self.tombstone_ratio() <= TOMBSTONE_COMPACT_RATIO {
+            return;
+        }
+        self.compact();
+    }
+
+    fn compact(&mut self) {
+        let entries: Vec<(String, Vec<f32>)> = self
+            .nodes
+            .iter()
+            .filter(|n| !n.deleted)
+            .map(|n| (n.id.clone(), n.vector.clone()))
+            .collect();
+        let mut fresh = Self::with_params(self.params);
+        fresh.rng_state = self.rng_state;
+        fresh.dim = self.dim;
+        for (id, vector) in entries {
+            fresh.upsert(&id, &vector);
+        }
+        tracing::debug!(
+            target: "memory.vector",
+            removed = self.deleted_count,
+            remaining = fresh.nodes.len(),
+            "hnsw index compacted: tombstoned nodes purged and graph rebuilt"
+        );
+        *self = fresh;
     }
 
     pub fn tombstone_ratio(&self) -> f32 {
@@ -294,6 +328,21 @@ impl Default for HnswMemIndex {
 
 impl VectorIndex for HnswMemIndex {
     fn upsert(&mut self, id: &str, embedding: &[f32]) {
+        if let Some(dim) = self.dim {
+            if embedding.len() != dim {
+                crate::observability::coordination_metrics::incr_vector_dim_mismatch();
+                tracing::warn!(
+                    target: "memory.vector",
+                    id,
+                    expected = dim,
+                    got = embedding.len(),
+                    "skipping hnsw upsert with mismatched dimensions (embedding model changed?)"
+                );
+                return;
+            }
+        } else {
+            self.dim = Some(embedding.len());
+        }
 
         if let Some(&idx) = self.id_to_index.get(id) {
             self.nodes[idx].vector = embedding.to_vec();
@@ -302,6 +351,7 @@ impl VectorIndex for HnswMemIndex {
                 self.nodes[idx].deleted = false;
                 self.deleted_count = self.deleted_count.saturating_sub(1);
             }
+            self.maybe_compact();
             return;
         }
 
@@ -362,6 +412,8 @@ impl VectorIndex for HnswMemIndex {
             self.entry_point = Some(new_idx);
             self.top_level = level;
         }
+
+        self.maybe_compact();
     }
 
     fn remove(&mut self, id: &str) {
@@ -371,6 +423,7 @@ impl VectorIndex for HnswMemIndex {
                 self.deleted_count += 1;
             }
         }
+        self.maybe_compact();
     }
 
     fn search(&self, query: &[f32], limit: usize) -> Vec<(String, f32)> {

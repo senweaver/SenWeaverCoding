@@ -44,12 +44,22 @@ pub struct PrometheusObserver {
     deploy_success_count: std::sync::atomic::AtomicU64,
     deploy_failure_count: std::sync::atomic::AtomicU64,
 
-    first_token_latency_ms: HistogramVec,
+    first_token_latency_ms: Histogram,
     response_cache_hits_total: IntCounterVec,
     response_cache_misses_total: IntCounterVec,
 
     flow_runs_total: IntCounterVec,
     flow_duration_seconds: HistogramVec,
+}
+
+fn register_metric(registry: &Registry, collector: Box<dyn prometheus::core::Collector>) {
+    if let Err(err) = registry.register(collector) {
+        tracing::error!(
+            target: "observability.prometheus",
+            error = %err,
+            "failed to register prometheus metric"
+        );
+    }
 }
 
 impl PrometheusObserver {
@@ -238,7 +248,7 @@ impl PrometheusObserver {
         )
         .expect("valid metric");
 
-        let first_token_latency_ms = HistogramVec::new(
+        let first_token_latency_ms = Histogram::with_opts(
             HistogramOpts::new(
                 "sen_first_token_latency_ms",
                 "Latency (ms) from TurnStarted to first streamed token",
@@ -246,7 +256,6 @@ impl PrometheusObserver {
             .buckets(vec![
                 50.0, 100.0, 200.0, 500.0, 1000.0, 2000.0, 5000.0, 10000.0, 30000.0,
             ]),
-            &["agent_id"],
         )
         .expect("valid metric");
 
@@ -289,56 +298,38 @@ impl PrometheusObserver {
         )
         .expect("valid metric");
 
-        registry.register(Box::new(agent_starts.clone())).ok();
-        registry.register(Box::new(llm_requests.clone())).ok();
-        registry.register(Box::new(tokens_input_total.clone())).ok();
-        registry
-            .register(Box::new(tokens_output_total.clone()))
-            .ok();
-        registry.register(Box::new(tool_calls.clone())).ok();
-        registry.register(Box::new(channel_messages.clone())).ok();
-        registry.register(Box::new(heartbeat_ticks.clone())).ok();
-        registry.register(Box::new(errors.clone())).ok();
-        registry.register(Box::new(cache_hits.clone())).ok();
-        registry.register(Box::new(cache_misses.clone())).ok();
-        registry.register(Box::new(cache_tokens_saved.clone())).ok();
-        registry.register(Box::new(agent_duration.clone())).ok();
-        registry.register(Box::new(tool_duration.clone())).ok();
-        registry.register(Box::new(request_latency.clone())).ok();
-        registry.register(Box::new(tokens_used.clone())).ok();
-        registry.register(Box::new(active_sessions.clone())).ok();
-        registry.register(Box::new(queue_depth.clone())).ok();
-        registry.register(Box::new(hand_runs.clone())).ok();
-        registry.register(Box::new(hand_duration.clone())).ok();
-        registry.register(Box::new(hand_findings.clone())).ok();
-        registry.register(Box::new(deployments_total.clone())).ok();
-        registry
-            .register(Box::new(deployment_lead_time.clone()))
-            .ok();
-        registry
-            .register(Box::new(deployment_failure_rate.clone()))
-            .ok();
-        registry.register(Box::new(recovery_time.clone())).ok();
-        registry.register(Box::new(mttr.clone())).ok();
-        registry
-            .register(Box::new(session_events_total.clone()))
-            .ok();
-        registry
-            .register(Box::new(keybindings_reload_total.clone()))
-            .ok();
-        registry
-            .register(Box::new(first_token_latency_ms.clone()))
-            .ok();
-        registry
-            .register(Box::new(response_cache_hits_total.clone()))
-            .ok();
-        registry
-            .register(Box::new(response_cache_misses_total.clone()))
-            .ok();
-        registry.register(Box::new(flow_runs_total.clone())).ok();
-        registry
-            .register(Box::new(flow_duration_seconds.clone()))
-            .ok();
+        register_metric(&registry, Box::new(agent_starts.clone()));
+        register_metric(&registry, Box::new(llm_requests.clone()));
+        register_metric(&registry, Box::new(tokens_input_total.clone()));
+        register_metric(&registry, Box::new(tokens_output_total.clone()));
+        register_metric(&registry, Box::new(tool_calls.clone()));
+        register_metric(&registry, Box::new(channel_messages.clone()));
+        register_metric(&registry, Box::new(heartbeat_ticks.clone()));
+        register_metric(&registry, Box::new(errors.clone()));
+        register_metric(&registry, Box::new(cache_hits.clone()));
+        register_metric(&registry, Box::new(cache_misses.clone()));
+        register_metric(&registry, Box::new(cache_tokens_saved.clone()));
+        register_metric(&registry, Box::new(agent_duration.clone()));
+        register_metric(&registry, Box::new(tool_duration.clone()));
+        register_metric(&registry, Box::new(request_latency.clone()));
+        register_metric(&registry, Box::new(tokens_used.clone()));
+        register_metric(&registry, Box::new(active_sessions.clone()));
+        register_metric(&registry, Box::new(queue_depth.clone()));
+        register_metric(&registry, Box::new(hand_runs.clone()));
+        register_metric(&registry, Box::new(hand_duration.clone()));
+        register_metric(&registry, Box::new(hand_findings.clone()));
+        register_metric(&registry, Box::new(deployments_total.clone()));
+        register_metric(&registry, Box::new(deployment_lead_time.clone()));
+        register_metric(&registry, Box::new(deployment_failure_rate.clone()));
+        register_metric(&registry, Box::new(recovery_time.clone()));
+        register_metric(&registry, Box::new(mttr.clone()));
+        register_metric(&registry, Box::new(session_events_total.clone()));
+        register_metric(&registry, Box::new(keybindings_reload_total.clone()));
+        register_metric(&registry, Box::new(first_token_latency_ms.clone()));
+        register_metric(&registry, Box::new(response_cache_hits_total.clone()));
+        register_metric(&registry, Box::new(response_cache_misses_total.clone()));
+        register_metric(&registry, Box::new(flow_runs_total.clone()));
+        register_metric(&registry, Box::new(flow_duration_seconds.clone()));
 
         Self {
             registry,
@@ -388,10 +379,8 @@ impl PrometheusObserver {
             .observe(duration_seconds);
     }
 
-    pub fn observe_first_token_latency_ms(&self, agent_id: &str, elapsed_ms: u64) {
-        self.first_token_latency_ms
-            .with_label_values(&[agent_id])
-            .observe(elapsed_ms as f64);
+    pub fn observe_first_token_latency_ms(&self, elapsed_ms: u64) {
+        self.first_token_latency_ms.observe(elapsed_ms as f64);
     }
 
     pub fn inc_response_cache(&self, provider: &str, model: &str, hit: bool) {
@@ -665,9 +654,12 @@ impl Observer for PrometheusObserver {
                 self.recovery_time.observe(d.as_secs_f64());
                 self.mttr.set(d.as_secs_f64());
             }
-            ObserverMetric::FirstTokenLatency { agent_id, elapsed } => {
+            ObserverMetric::FirstTokenLatency {
+                agent_id: _,
+                elapsed,
+            } => {
                 let ms = elapsed.as_millis().min(u128::from(u64::MAX)) as u64;
-                self.observe_first_token_latency_ms(agent_id, ms);
+                self.observe_first_token_latency_ms(ms);
             }
             ObserverMetric::ResponseCacheOutcome {
                 provider,

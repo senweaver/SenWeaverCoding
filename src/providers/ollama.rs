@@ -818,14 +818,19 @@ impl Provider for OllamaProvider {
                 .iter()
                 .map(|tc| {
                     let (name, args) = self.extract_tool_name_and_args(tc);
-                    ToolCall {
-                        id: tc
-                            .id
-                            .clone()
-                            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                        name,
-                        arguments: serde_json::to_string(&args)
+                    let raw_arguments = match args {
+                        serde_json::Value::String(text) => text,
+                        other => serde_json::to_string(&other)
                             .unwrap_or_else(|_| "{}".to_string()),
+                    };
+                    let arguments = crate::providers::sanitize::normalize_tool_call_arguments(
+                        &name,
+                        raw_arguments,
+                    );
+                    ToolCall {
+                        id: crate::providers::sanitize::normalize_tool_call_id(tc.id.clone()),
+                        name,
+                        arguments,
                     }
                 })
                 .collect();
@@ -1009,6 +1014,7 @@ impl Provider for OllamaProvider {
                 return;
             }
 
+            const MAX_NDJSON_LINE_BYTES: usize = 64 * 1024 * 1024;
             let mut byte_stream = response.bytes_stream();
             let mut pending: Vec<u8> = Vec::new();
             while let Some(chunk) = byte_stream.next().await {
@@ -1024,10 +1030,23 @@ impl Provider for OllamaProvider {
                     }
                 };
                 pending.extend_from_slice(&chunk);
-                while let Some(pos) = pending.iter().position(|b| *b == b'\n') {
-                    let line: Vec<u8> = pending.drain(..=pos).collect();
-                    let line = String::from_utf8_lossy(&line);
+                if pending.len() > MAX_NDJSON_LINE_BYTES
+                    && memchr::memchr(b'\n', &pending).is_none()
+                {
+                    let _ = tx
+                        .send(Err(StreamError::Provider(
+                            "Ollama stream line exceeded size limit; upstream response malformed or truncated"
+                                .to_string(),
+                        )))
+                        .await;
+                    return;
+                }
+                let mut cursor = 0usize;
+                while let Some(rel) = memchr::memchr(b'\n', &pending[cursor..]) {
+                    let end = cursor + rel;
+                    let line = String::from_utf8_lossy(&pending[cursor..end]);
                     let line = line.trim();
+                    cursor = end + 1;
                     if line.is_empty() {
                         continue;
                     }
@@ -1063,16 +1082,28 @@ impl Provider for OllamaProvider {
                             if name.is_empty() {
                                 continue;
                             }
-                            let arguments = call
+                            let raw_arguments = match call
                                 .get("function")
                                 .and_then(|f| f.get("arguments"))
-                                .cloned()
-                                .unwrap_or_else(|| serde_json::json!({}));
+                            {
+                                Some(serde_json::Value::String(text)) => text.clone(),
+                                Some(other) => other.to_string(),
+                                None => "{}".to_string(),
+                            };
+                            let arguments =
+                                crate::providers::sanitize::normalize_tool_call_arguments(
+                                    &name,
+                                    raw_arguments,
+                                );
+                            let id = call
+                                .get("id")
+                                .and_then(|v| v.as_str())
+                                .map(ToString::to_string);
                             if tx
                                 .send(Ok(StreamEvent::ToolCall(ToolCall {
-                                    id: uuid::Uuid::new_v4().to_string(),
+                                    id: crate::providers::sanitize::normalize_tool_call_id(id),
                                     name,
-                                    arguments: arguments.to_string(),
+                                    arguments,
                                 })))
                                 .await
                                 .is_err()
@@ -1105,6 +1136,9 @@ impl Provider for OllamaProvider {
                         let _ = tx.send(Ok(StreamEvent::Final)).await;
                         return;
                     }
+                }
+                if cursor > 0 {
+                    pending.drain(..cursor);
                 }
             }
             let _ = tx
