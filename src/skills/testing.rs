@@ -104,8 +104,8 @@ fn run_test_case(case: &TestCase, skill_dir: &Path, verbose: bool) -> Option<Tes
     };
 
     let actual_exit = output.status.code().unwrap_or(-1);
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = crate::util::decode_subprocess_bytes(&output.stdout);
+    let stderr = crate::util::decode_subprocess_bytes(&output.stderr);
     let combined = format!("{stdout}{stderr}");
 
     if verbose {

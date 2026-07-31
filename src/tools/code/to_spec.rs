@@ -1293,6 +1293,7 @@ impl Tool for CodeToSpecTool {
                     crate::util::atomic_write_async(write_path, write_data.into_bytes())
                         .await
                         .with_context(|| format!("Failed to write SPEC.md to {}", output_path))?;
+                    crate::session::record_write_for_current_session(&full_path);
                 }
 
                 Ok(ToolResult {

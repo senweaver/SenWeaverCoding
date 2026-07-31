@@ -640,6 +640,8 @@ struct UsageInfo {
     completion_tokens: Option<u64>,
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -648,11 +650,23 @@ struct PromptTokensDetails {
     cached_tokens: Option<u64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
+}
+
 impl UsageInfo {
     fn cached_input_tokens(&self) -> Option<u64> {
         self.prompt_tokens_details
             .as_ref()
             .and_then(|d| d.cached_tokens)
+    }
+
+    fn reasoning_output_tokens(&self) -> Option<u64> {
+        self.completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens)
     }
 }
 
@@ -2220,6 +2234,7 @@ impl Provider for OpenAiCompatibleProvider {
             output_tokens: u.completion_tokens,
             cached_input_tokens: u.cached_input_tokens(),
             cache_creation_input_tokens: None,
+            reasoning_tokens: u.reasoning_output_tokens(),
         });
         let choice = chat_response
             .choices
@@ -2421,6 +2436,7 @@ impl Provider for OpenAiCompatibleProvider {
             output_tokens: u.completion_tokens,
             cached_input_tokens: u.cached_input_tokens(),
             cache_creation_input_tokens: None,
+            reasoning_tokens: u.reasoning_output_tokens(),
         });
         let choice = native_response
             .choices
@@ -2536,6 +2552,7 @@ impl Provider for OpenAiCompatibleProvider {
             output_tokens: u.completion_tokens,
             cached_input_tokens: u.cached_input_tokens(),
             cache_creation_input_tokens: None,
+            reasoning_tokens: u.reasoning_output_tokens(),
         });
         let raw = native
             .choices
@@ -2730,6 +2747,7 @@ impl Provider for OpenAiCompatibleProvider {
         let thinking_retry_options = options;
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
+        let cancel_token = super::current_session_cancel_token();
 
         let _ = crate::runtime::spawn_supervised(
             "providers.compatible.chat_with_history_stream",
@@ -2779,7 +2797,14 @@ impl Provider for OpenAiCompatibleProvider {
                             fallback_temperature,
                             thinking_retry_options,
                         );
-                        while let Some(event) = retry_stream.next().await {
+                        loop {
+                            let event = tokio::select! {
+                                _ = super::stream_cancelled(&cancel_token) => break,
+                                next = retry_stream.next() => match next {
+                                    Some(event) => event,
+                                    None => break,
+                                },
+                            };
                             if tx.send(event).await.is_err() {
                                 break;
                             }
@@ -2842,8 +2867,19 @@ impl Provider for OpenAiCompatibleProvider {
                     return;
                 }
 
-                let mut event_stream = sse_bytes_to_events(response, count_tokens);
-                while let Some(event) = event_stream.next().await {
+                let mut event_stream = sse_bytes_to_events(
+                    response,
+                    count_tokens,
+                    crate::providers::sanitize::ProviderKind::OpenAi,
+                );
+                loop {
+                    let event = tokio::select! {
+                        _ = super::stream_cancelled(&cancel_token) => break,
+                        next = event_stream.next() => match next {
+                            Some(event) => event,
+                            None => break,
+                        },
+                    };
                     if tx.send(event).await.is_err() {
                         break;
                     }
@@ -2921,6 +2957,7 @@ impl Provider for OpenAiCompatibleProvider {
         let message_owned = message.to_string();
         let temperature_owned = temperature;
         let options_owned = options;
+        let cancel_token = super::current_session_cancel_token();
 
         let _ = crate::runtime::spawn_supervised("providers.compatible.chat_stream", async move {
 
@@ -2967,7 +3004,14 @@ impl Provider for OpenAiCompatibleProvider {
                         temperature_owned,
                         options_owned,
                     );
-                    while let Some(chunk) = retry_stream.next().await {
+                    loop {
+                        let chunk = tokio::select! {
+                            _ = super::stream_cancelled(&cancel_token) => break,
+                            next = retry_stream.next() => match next {
+                                Some(chunk) => chunk,
+                                None => break,
+                            },
+                        };
                         if tx.send(chunk).await.is_err() {
                             break;
                         }
@@ -2982,7 +3026,14 @@ impl Provider for OpenAiCompatibleProvider {
             }
 
             let mut chunk_stream = sse_bytes_to_chunks(response, options.count_tokens);
-            while let Some(chunk) = chunk_stream.next().await {
+            loop {
+                let chunk = tokio::select! {
+                    _ = super::stream_cancelled(&cancel_token) => break,
+                    next = chunk_stream.next() => match next {
+                        Some(chunk) => chunk,
+                        None => break,
+                    },
+                };
                 if tx.send(chunk).await.is_err() {
                     break;
                 }
@@ -3069,6 +3120,7 @@ impl Provider for OpenAiCompatibleProvider {
         let temperature_owned = temperature;
         let options_owned = options;
         let retry_messages: Vec<ChatMessage> = messages.to_vec();
+        let cancel_token = super::current_session_cancel_token();
 
         let _ = crate::runtime::spawn_supervised(
             "providers.compatible.stream_chat_with_history",
@@ -3118,7 +3170,14 @@ impl Provider for OpenAiCompatibleProvider {
                             temperature_owned,
                             options_owned,
                         );
-                        while let Some(chunk) = retry_stream.next().await {
+                        loop {
+                            let chunk = tokio::select! {
+                                _ = super::stream_cancelled(&cancel_token) => break,
+                                next = retry_stream.next() => match next {
+                                    Some(chunk) => chunk,
+                                    None => break,
+                                },
+                            };
                             if tx.send(chunk).await.is_err() {
                                 break;
                             }
@@ -3133,7 +3192,14 @@ impl Provider for OpenAiCompatibleProvider {
                 }
 
                 let mut chunk_stream = sse_bytes_to_chunks(response, options.count_tokens);
-                while let Some(chunk) = chunk_stream.next().await {
+                loop {
+                    let chunk = tokio::select! {
+                        _ = super::stream_cancelled(&cancel_token) => break,
+                        next = chunk_stream.next() => match next {
+                            Some(chunk) => chunk,
+                            None => break,
+                        },
+                    };
                     if tx.send(chunk).await.is_err() {
                         break;
                     }

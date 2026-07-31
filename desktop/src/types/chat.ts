@@ -77,7 +77,9 @@ export type UIAttachment = {
   mimeType?: string
 }
 
-export type ServerMessage =
+export type ServerMessage = ServerMessagePayload & { seq?: number }
+
+type ServerMessagePayload =
   | { type: 'connected'; sessionId: string }
   | { type: 'content_start'; blockType: 'text' | 'tool_use'; toolName?: string; toolUseId?: string; parentToolUseId?: string }
   | { type: 'content_delta'; text?: string }

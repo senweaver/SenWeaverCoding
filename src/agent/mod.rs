@@ -56,6 +56,7 @@ pub mod task_orchestrator;
 pub mod team_protocol;
 pub mod thinking;
 pub mod token;
+pub mod tool_authorizer;
 pub mod tool_handler;
 pub mod web_search_url_guard;
 

@@ -160,6 +160,22 @@ struct UsageInfo {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    #[serde(default)]
+    completion_tokens_details: Option<UsageCompletionTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageCompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
+}
+
+impl UsageInfo {
+    fn reasoning_output_tokens(&self) -> Option<u64> {
+        self.completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -506,6 +522,7 @@ impl Provider for AzureOpenAiProvider {
             output_tokens: u.completion_tokens,
             cached_input_tokens: None,
             cache_creation_input_tokens: None,
+            reasoning_tokens: u.reasoning_output_tokens(),
         });
         let choice = native_response
             .choices
@@ -578,6 +595,7 @@ impl Provider for AzureOpenAiProvider {
             output_tokens: u.completion_tokens,
             cached_input_tokens: None,
             cache_creation_input_tokens: None,
+            reasoning_tokens: u.reasoning_output_tokens(),
         });
         let choice = native_response
             .choices

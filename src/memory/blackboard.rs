@@ -1062,6 +1062,10 @@ impl BlackboardHandle {
         &self.inner
     }
 
+    pub fn inner_arc(&self) -> Arc<Blackboard> {
+        self.inner.clone()
+    }
+
     pub fn write(
         &self,
         key: impl Into<String>,

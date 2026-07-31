@@ -163,8 +163,8 @@ impl Tool for CodexCliTool {
 
         match result {
             Ok(Ok(output)) => {
-                let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
-                let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+                let mut stdout = crate::util::decode_subprocess_bytes(&output.stdout);
+                let stderr = crate::util::decode_subprocess_bytes(&output.stderr);
 
                 if stdout.len() > self.config.max_output_bytes {
                     let mut b = self.config.max_output_bytes.min(stdout.len());

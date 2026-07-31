@@ -1958,7 +1958,7 @@ fn lsp_language_id_from_path(path: &Path) -> Option<String> {
     detect_language(path).map(|s| s.to_string())
 }
 
-fn infer_workspace_root(path: &Path) -> Option<PathBuf> {
+pub fn infer_workspace_root(path: &Path) -> Option<PathBuf> {
     const MARKERS: &[&str] = &[
         ".git",
         "Cargo.toml",

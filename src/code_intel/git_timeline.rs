@@ -96,7 +96,7 @@ fn recently_changed_files(root: &Path, max_files: usize) -> std::collections::Ha
         .output();
     if let Ok(o) = out {
         if o.status.success() {
-            for line in String::from_utf8_lossy(&o.stdout).lines() {
+            for line in crate::util::decode_subprocess_bytes(&o.stdout).lines() {
                 let l = line.trim();
                 if l.is_empty() {
                     continue;
@@ -118,7 +118,7 @@ fn is_git_repo(root: &Path) -> bool {
         .args(["rev-parse", "--is-inside-work-tree"])
         .output();
     match out {
-        Ok(o) => o.status.success() && String::from_utf8_lossy(&o.stdout).trim() == "true",
+        Ok(o) => o.status.success() && crate::util::decode_subprocess_bytes(&o.stdout).trim() == "true",
         Err(_) => false,
     }
 }
@@ -138,7 +138,7 @@ fn run_blame(root: &Path, file: &Path, lines: &[u32]) -> Option<HashMap<u32, Tim
     if !out.status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stdout = crate::util::decode_subprocess_bytes(&out.stdout);
     Some(parse_blame_porcelain(&stdout))
 }
 

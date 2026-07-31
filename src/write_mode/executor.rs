@@ -613,16 +613,16 @@ async fn rollback_or_escalate(
 
 async fn run_shell(command: &str, cwd: &Path) -> Result<(i32, String), ExecuteError> {
     #[cfg(windows)]
-    let (program, flag) = ("cmd", "/C");
+    let (program, shell_args): (&str, &[&str]) = ("cmd", &["/S", "/C"]);
     #[cfg(not(windows))]
-    let (program, flag) = ("sh", "-c");
+    let (program, shell_args): (&str, &[&str]) = ("sh", &["-c"]);
 
     let timeout_secs = crate::services::try_get_services()
         .and_then(|s| s.config().pacing.tool_timeout_secs)
         .unwrap_or(120);
 
     let mut cmd = crate::util::hidden_async_command(program);
-    cmd.arg(flag)
+    cmd.args(shell_args)
         .arg(command)
         .current_dir(cwd)
         .kill_on_drop(true)
@@ -636,7 +636,7 @@ async fn run_shell(command: &str, cwd: &Path) -> Result<(i32, String), ExecuteEr
             timeout_secs,
         })?
         .map_err(ExecuteError::Spawn)?;
-    let mut captured = String::from_utf8_lossy(&output.stdout).into_owned();
-    captured.push_str(&String::from_utf8_lossy(&output.stderr));
+    let mut captured = crate::util::decode_subprocess_bytes(&output.stdout);
+    captured.push_str(&crate::util::decode_subprocess_bytes(&output.stderr));
     Ok((output.status.code().unwrap_or(-1), captured))
 }

@@ -86,6 +86,7 @@ export const AssistantMessage = memo(function AssistantMessage({
                     content={streamingSplit.committed}
                     variant={documentLayout ? 'document' : 'default'}
                     scale="chat"
+                    streaming
                   />
                 )}
                 <StreamingMarkdownRenderer

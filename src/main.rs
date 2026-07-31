@@ -4530,9 +4530,12 @@ async fn run_team_command(config: &Config, action: TeamAction) -> Result<()> {
                 params.stage_timeout = Duration::from_secs(secs);
             }
 
-            let blackboard = Arc::new(Blackboard::new());
+            let blackboard = crate::agent::multi_agent_runtime::global_runtime()
+                .map(|rt| rt.blackboard.inner_arc())
+                .unwrap_or_else(|| Arc::new(Blackboard::new()));
+            let provider: Arc<dyn crate::providers::Provider> = Arc::from(provider);
             let report = pipeline_obj
-                .run(&goal, provider.as_ref(), blackboard, params)
+                .run(&goal, provider, blackboard, params)
                 .await
                 .map_err(|e| anyhow::anyhow!(e))?;
 

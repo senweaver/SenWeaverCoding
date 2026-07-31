@@ -869,7 +869,7 @@ fn disk_available_mb(path: &Path) -> Option<u64> {
     if !output.status.success() {
         return None;
     }
-    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stdout = crate::util::decode_subprocess_bytes(&output.stdout);
     parse_df_available_mb(&stdout)
 }
 
@@ -1077,7 +1077,7 @@ fn check_command_available(cmd: &str, args: &[&str], cat: &'static str, items: &
         .output()
     {
         Ok(output) if output.status.success() => {
-            let ver = String::from_utf8_lossy(&output.stdout);
+            let ver = crate::util::decode_subprocess_bytes(&output.stdout);
             let first_line = ver.lines().next().unwrap_or("").trim();
             let display = truncate_for_display(first_line, COMMAND_VERSION_PREVIEW_CHARS);
             items.push(DiagItem::ok(cat, format!("{cmd}: {display}")));

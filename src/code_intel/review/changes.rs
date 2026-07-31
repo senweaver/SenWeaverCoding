@@ -60,7 +60,7 @@ fn run_git(repo_root: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).to_string())
+    Some(crate::util::decode_subprocess_bytes(&output.stdout))
 }
 
 #[must_use]

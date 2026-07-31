@@ -202,6 +202,7 @@ impl ImageGenTool {
         tokio::fs::write(&output_path, &bytes)
             .await
             .context("Failed to write image file")?;
+        crate::session::record_write_for_current_session(&output_path);
 
         let size_kb = bytes.len() / 1024;
 

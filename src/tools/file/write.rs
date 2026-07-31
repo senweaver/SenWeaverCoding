@@ -258,6 +258,22 @@ impl Tool for FileWriteTool {
             }
         }
 
+        if expected_mtime_ms.is_none()
+            && tokio::fs::metadata(&resolved_target).await.is_ok()
+            && !crate::session::has_read_in_current_session(&resolved_target)
+        {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!(
+                    "Refusing to overwrite '{}': this session has not read the file yet. \
+                     Use file_read on it first (the write replaces the file's CURRENT \
+                     contents), then retry, or pass expected_mtime_ms from a prior read.",
+                    resolved_target.display()
+                )),
+            });
+        }
+
         self.snapshot_before_write(&resolved_target).await;
 
         let existed = tokio::fs::metadata(&resolved_target).await.is_ok();
@@ -297,6 +313,18 @@ impl Tool for FileWriteTool {
             (Some(_), Some(_)) if utf8_bom => Some("UTF-8-BOM".to_string()),
             _ => None,
         };
+        let content: String = match &original_text {
+            Some(orig)
+                if !content.contains("\r\n") && content.contains('\n') && {
+                    let crlf = orig.matches("\r\n").count();
+                    let bare_lf = orig.matches('\n').count().saturating_sub(crlf);
+                    crlf > bare_lf
+                } =>
+            {
+                content.replace('\n', "\r\n")
+            }
+            _ => content.to_string(),
+        };
         let op = match (existed, original_text) {
             (true, Some(original_text)) if !utf8_bom => {
                 let original_len = original_text.len();
@@ -304,19 +332,22 @@ impl Tool for FileWriteTool {
                     path: resolved_target.clone(),
                     byte_range: 0..original_len,
                     old_text: original_text,
-                    new_text: content.to_string(),
+                    new_text: content.clone(),
                     anchor: None,
                 }
             }
             _ => EditOp::CreateFile {
                 path: resolved_target.clone(),
-                contents: content.to_string(),
+                contents: content.clone(),
                 overwrite: true,
                 encoding: preserved_encoding,
             },
         };
         let batch = EditBatch::new(EditOrigin::FileWriteTool).with_op(op);
         let batch_id = batch.batch_id.clone();
+        let diag_paths = [resolved_target.clone()];
+        let diag_baseline =
+            crate::code_intel::post_edit_diagnostics::baseline(&diag_paths).await;
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
                 crate::session::record_write_for_current_session(&resolved_target);
@@ -345,12 +376,22 @@ impl Tool for FileWriteTool {
                         .unwrap_or_default(),
                     Err(_) => String::new(),
                 };
+                let mut output = format!(
+                    "Written {} bytes to {path}{mtime_note}\n+++ b/{path}\n{preview}{suffix}",
+                    content.len()
+                );
+                if let Some(feedback) =
+                    crate::code_intel::post_edit_diagnostics::new_error_feedback(
+                        &diag_paths,
+                        &diag_baseline,
+                    )
+                    .await
+                {
+                    output.push_str(&feedback);
+                }
                 Ok(ToolResult {
                     success: true,
-                    output: format!(
-                        "Written {} bytes to {path}{mtime_note}\n+++ b/{path}\n{preview}{suffix}",
-                        content.len()
-                    ),
+                    output,
                     error: None,
                 })
             }

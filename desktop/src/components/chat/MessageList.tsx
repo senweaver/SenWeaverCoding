@@ -468,6 +468,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     pendingSendAfterRewind,
     historyHasMore,
     historyLoadingOlder,
+    historyReloadNonce,
   } = useChatStore(
     useShallow((s) => {
       const st = resolvedSessionId ? s.sessions[resolvedSessionId] : undefined
@@ -482,6 +483,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
         pendingSendAfterRewind: st?.pendingSendAfterRewind ?? null,
         historyHasMore: st?.historyHasMore === true,
         historyLoadingOlder: st?.historyLoadingOlder === true,
+        historyReloadNonce: st?.historyReloadNonce ?? 0,
       }
     }),
   )
@@ -917,6 +919,20 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     })
   }, [listRenderItems.length, pinToLatestProgrammatically])
 
+  const lastHistoryReloadNonceRef = useRef(historyReloadNonce)
+  useLayoutEffect(() => {
+    if (historyReloadNonce === lastHistoryReloadNonceRef.current) return
+    lastHistoryReloadNonceRef.current = historyReloadNonce
+    prevRenderKeysRef.current = []
+    setFirstItemIndex(FIRST_ITEM_INDEX_BASE)
+    followRef.current = true
+    atBottomRef.current = true
+    setShowScrollToBottom(false)
+    requestAnimationFrame(() => {
+      pinToLatestProgrammatically()
+    })
+  }, [historyReloadNonce, pinToLatestProgrammatically])
+
   const rewindIndexByMsgId = useMemo(() => {
     const map = new Map<string, number>()
     let counter = -1
@@ -1150,7 +1166,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const onEditAsDraftHandler =
     !isMemberSession && resolvedSessionId ? handleEditAsDraftCb : undefined
 
-  const renderListItem = (item: RenderItem) => {
+  const renderListItem = useCallback((item: RenderItem) => {
           if (item.kind === 'explored') {
             const stillStreaming =
               chatState !== 'idle' &&
@@ -1281,7 +1297,34 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
           )
 
           return block
-  }
+  }, [
+    chatState,
+    activeThinkingId,
+    toolResultMap,
+    resolvedSessionId,
+    handleLiveThinkingGrow,
+    rewindIndexByMsgId,
+    restoreAnchorMsgId,
+    editingMessage,
+    subagentTimelines,
+    assistantTurnCopyByMsgId,
+    childToolCallsByParent,
+    childResultsByParent,
+    activeSessionMeta?.workDir,
+    isMemberSession,
+    onRequestRewindHandler,
+    onRequestRestoreHandler,
+    onEditAsDraftHandler,
+  ])
+
+  const itemContent = useCallback(
+    (_: number, item: RenderItem) => (
+      <div className="mx-auto w-full max-w-[860px] flow-root px-4">
+        {renderListItem(item)}
+      </div>
+    ),
+    [renderListItem],
+  )
 
   return (
     <div className="relative flex flex-1 min-h-0 flex-col">
@@ -1328,11 +1371,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
         increaseViewportBy={{ top: 800, bottom: 1200 }}
         startReached={maybeLoadOlder}
         components={VIRTUOSO_COMPONENTS}
-        itemContent={(_, item) => (
-          <div className="mx-auto w-full max-w-[860px] flow-root px-4">
-            {renderListItem(item)}
-          </div>
-        )}
+        itemContent={itemContent}
       />
 
       {}

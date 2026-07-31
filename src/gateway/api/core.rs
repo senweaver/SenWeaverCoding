@@ -3054,7 +3054,7 @@ pub async fn handle_api_session_rewind(
 
     let want_revert = body.revert_files.unwrap_or(true);
 
-    let (rewind_id, tombstoned) = {
+    let (rewind_id, tombstoned, skipped_stale_paths) = {
         let backend_arc = std::sync::Arc::clone(backend);
         let sk = session_key.clone();
         let workspace = workspace.clone();
@@ -3141,15 +3141,21 @@ pub async fn handle_api_session_rewind(
                 tracing::warn!(target: "rewind", "save_rewind_stash failed: {e}");
             }
 
+            let mut skipped_stale_paths: Vec<String> = Vec::new();
             if want_revert {
                 for batch_id in batches_after.iter().rev() {
-                    match history.revert_batch(batch_id) {
-                        Ok(reverted) => {
+                    match history.revert_batch_guarded(batch_id, false) {
+                        Ok(outcome) => {
                             tracing::info!(
                                 target: "rewind",
                                 "reverted batch {batch_id}: {} files",
-                                reverted.len()
+                                outcome.reverted.len()
                             );
+                            for path in outcome.skipped_stale {
+                                if !skipped_stale_paths.contains(&path) {
+                                    skipped_stale_paths.push(path);
+                                }
+                            }
                         }
                         Err(e) => {
                             tracing::warn!(target: "rewind", "revert_batch({batch_id}) failed: {e}");
@@ -3165,10 +3171,10 @@ pub async fn handle_api_session_rewind(
                     0
                 }
             };
-            (rewind_id, tombstoned)
+            (rewind_id, tombstoned, skipped_stale_paths)
         })
         .await
-        .unwrap_or_else(|_| (String::new(), 0))
+        .unwrap_or_else(|_| (String::new(), 0, Vec::new()))
     };
 
     if rewind_id.is_empty() {
@@ -3213,6 +3219,7 @@ pub async fn handle_api_session_rewind(
             "filesChanged": files_changed,
             "insertions": insertions,
             "deletions": deletions,
+            "skippedStalePaths": skipped_stale_paths,
         },
     }))
     .into_response()
@@ -3419,7 +3426,7 @@ pub async fn handle_api_session_revert_batches(
     let _rewind_guard = acquire_rewind_lock(&id).await;
 
     let session_key = format!("{GW_SESSION_PREFIX}{id}");
-    let (reverted_paths, failed_batch_ids) = {
+    let (reverted_paths, failed_batch_ids, skipped_stale_paths) = {
         let state_cl = state.clone();
         let sk = session_key.clone();
         let batch_ids = body.edit_batch_ids.clone();
@@ -3429,13 +3436,15 @@ pub async fn handle_api_session_revert_batches(
 
             let mut reverted_paths: Vec<String> = Vec::new();
             let mut failed_batch_ids: Vec<String> = Vec::new();
+            let mut skipped_stale_paths: Vec<String> = Vec::new();
             for batch_id in batch_ids.iter().rev() {
-                match history.revert_batch(batch_id) {
-                    Ok(paths) => {
-                        if paths.is_empty() {
+                match history.revert_batch_guarded(batch_id, false) {
+                    Ok(outcome) => {
+                        skipped_stale_paths.extend(outcome.skipped_stale.iter().cloned());
+                        if outcome.reverted.is_empty() && outcome.skipped_stale.is_empty() {
                             failed_batch_ids.push(batch_id.clone());
                         } else {
-                            reverted_paths.extend(paths);
+                            reverted_paths.extend(outcome.reverted);
                         }
                     }
                     Err(e) => {
@@ -3447,16 +3456,17 @@ pub async fn handle_api_session_revert_batches(
                     }
                 }
             }
-            (reverted_paths, failed_batch_ids)
+            (reverted_paths, failed_batch_ids, skipped_stale_paths)
         })
         .await
-        .unwrap_or_else(|_| (Vec::new(), Vec::new()))
+        .unwrap_or_else(|_| (Vec::new(), Vec::new(), Vec::new()))
     };
 
     Json(serde_json::json!({
         "ok": failed_batch_ids.is_empty(),
         "revertedPaths": reverted_paths,
         "failedBatchIds": failed_batch_ids,
+        "skippedStalePaths": skipped_stale_paths,
     }))
     .into_response()
 }

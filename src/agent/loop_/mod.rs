@@ -623,30 +623,7 @@ fn build_hardware_context(
     context
 }
 
-fn canonical_tool_alias(name: &str) -> Option<&'static str> {
-    let mapped = match name.to_ascii_lowercase().as_str() {
-        "grep" | "ripgrep" | "rg" | "code_search" | "codesearch" | "search_files"
-        | "searchfiles" | "search_code" => "content_search",
-        "read" | "readfile" | "read_file" | "cat" | "view" | "viewfile" => "file_read",
-        "write" | "writefile" | "create_file" | "createfile" => "file_write",
-        "edit" | "str_replace" | "str_replace_editor" | "apply_patch" | "applypatch"
-        | "edit_file" | "editfile" => "file_edit",
-        "bash" | "sh" | "exec" | "command" | "cmd" | "terminal" | "run_command"
-        | "runcommand" | "shell_command" => "shell",
-        "web_search" | "websearch" | "web-search" | "search_web" | "websearch_tool" => {
-            "web_search_tool"
-        }
-        "ls" | "list_files" | "listfiles" | "list_dir" | "listdir" | "dir" | "file_list"
-        | "filelist" => "dir_list",
-        "askquestion" => "ask_question",
-        "askuser" => "ask_user",
-        "memory_search" | "memorysearch" | "memrecall" | "memory_query" => "memory_recall",
-        "lsp_symbols" | "lspsymbols" | "symbols" | "lsp_hover" | "lsphover"
-        | "lsp_definition" => "lsp",
-        _ => return None,
-    };
-    Some(mapped)
-}
+use crate::agent::tool_authorizer::canonical_tool_alias;
 
 fn find_tool<'a>(
     tools: &'a [Box<dyn Tool>],
@@ -703,6 +680,13 @@ pub(crate) async fn execute_tool_panic_safe(
     tool_name: &str,
     args: serde_json::Value,
 ) -> anyhow::Result<tools::ToolResult> {
+    if let Err(reason) = crate::agent::tool_authorizer::authorize_tool_dispatch(tool_name) {
+        return Ok(tools::ToolResult {
+            success: false,
+            output: reason.clone(),
+            error: Some(reason),
+        });
+    }
     let fut = std::panic::AssertUnwindSafe(tool.execute(args)).catch_unwind();
     match fut.await {
         Ok(inner) => inner,
@@ -3710,6 +3694,13 @@ pub(crate) async fn run_unified_loop_impl(
                 .saturating_sub(tools_overhead_tokens);
             let estimated_tokens =
                 crate::agent::token::budget::estimate_history_tokens_calibrated(history, model);
+            let estimated_tokens = match crate::session::current_session_context() {
+                Some(ctx) => crate::agent::token::budget::anchored_history_tokens(
+                    &ctx.session_id,
+                    estimated_tokens,
+                ),
+                None => estimated_tokens,
+            };
             let over_threshold = estimated_tokens > compression_threshold;
             let retry_blocked =
                 compression_retry_floor.is_some_and(|floor| estimated_tokens <= floor);
@@ -3964,6 +3955,26 @@ pub(crate) async fn run_unified_loop_impl(
             if let Some(ref tx) = on_delta {
                 let _ = tx.send(DraftEvent::Content(budget_text.clone())).await;
             }
+            let turn_tools_used: Vec<String> = turn_tool_results
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect();
+            fire_post_turn_hooks(
+                channel_name,
+                hooks,
+                response_cache_hook.as_ref(),
+                experience_recorder_hook.as_ref(),
+                memory_session_hook.as_ref(),
+                response_cache_key.as_ref(),
+                &user_msg_for_hooks,
+                model,
+                &budget_text,
+                _pacing_gov.total_generated_tokens() as u32,
+                &turn_tools_used,
+                &turn_tool_results,
+                false,
+            )
+            .await;
             return Ok(budget_text);
         }
 
@@ -3985,6 +3996,26 @@ pub(crate) async fn run_unified_loop_impl(
                 if let Some(ref tx) = on_delta {
                     let _ = tx.send(DraftEvent::Content(policy_text.clone())).await;
                 }
+                let turn_tools_used: Vec<String> = turn_tool_results
+                    .iter()
+                    .map(|(name, _)| name.clone())
+                    .collect();
+                fire_post_turn_hooks(
+                    channel_name,
+                    hooks,
+                    response_cache_hook.as_ref(),
+                    experience_recorder_hook.as_ref(),
+                    memory_session_hook.as_ref(),
+                    response_cache_key.as_ref(),
+                    &user_msg_for_hooks,
+                    model,
+                    &policy_text,
+                    _pacing_gov.total_generated_tokens() as u32,
+                    &turn_tools_used,
+                    &turn_tool_results,
+                    false,
+                )
+                .await;
                 return Ok(policy_text);
             }
         }
@@ -4420,6 +4451,18 @@ pub(crate) async fn run_unified_loop_impl(
                                 estimated_input,
                                 reported_prompt_tokens,
                             );
+                            if let Some(ctx) = crate::session::current_session_context() {
+                                let estimated_calibrated =
+                                    crate::agent::token::budget::estimate_history_tokens_calibrated(
+                                        &prepared_messages.messages,
+                                        model,
+                                    );
+                                crate::agent::token::budget::record_prompt_anchor(
+                                    &ctx.session_id,
+                                    reported_prompt_tokens,
+                                    estimated_calibrated,
+                                );
+                            }
                         }
                         if let Some(opt) = crate::agent::token::optimizer::global_optimizer() {
                             opt.record_api_usage(input_tokens as usize, output_tokens as usize);
@@ -5049,6 +5092,8 @@ pub(crate) async fn run_unified_loop_impl(
                         .as_ref()
                         .is_some_and(CancellationToken::is_cancelled)
                     {
+                        history.push(ChatMessage::assistant(response_text.clone()));
+                        _turn_metrics.mark_status("interrupted");
                         return Err(tool_loop_cancelled());
                     }
                     chunk.push_str(word);
@@ -5161,7 +5206,6 @@ pub(crate) async fn run_unified_loop_impl(
             (0..tool_calls.len()).map(|_| None).collect();
         let mut final_args_by_index: Vec<Option<serde_json::Value>> =
             (0..tool_calls.len()).map(|_| None).collect();
-        let allow_parallel_execution = should_execute_tools_in_parallel(&tool_calls, approval);
         let mut executable_indices: Vec<usize> = Vec::new();
         let mut executable_calls: Vec<ParsedToolCall> = Vec::new();
         let mut executable_pre_cleared: Vec<bool> = Vec::new();
@@ -5220,7 +5264,10 @@ pub(crate) async fn run_unified_loop_impl(
                 continue;
             }
 
-            let mut tool_name = call.name.clone();
+            let canonical_name = canonical_tool_alias(&call.name)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| call.name.clone());
+            let mut tool_name = canonical_name.clone();
             let mut tool_args = call.arguments.clone();
 
             if call.parse_error {
@@ -5265,14 +5312,14 @@ pub(crate) async fn run_unified_loop_impl(
                 );
                 let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
                 let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
-                let tool_lc = call.name.to_ascii_lowercase();
+                let tool_lc = tool_name.to_ascii_lowercase();
                 let guardrail_ctx = crate::guardrails::GuardrailContext {
                     coding_mode: coding_label_lc.as_deref(),
                     permission_mode: Some(&perm_mode_lc),
                     tool_name: Some(&tool_lc),
                 };
                 let pre_hook_denial: Option<String> = match crate::guardrails::evaluate_tool_guardrails(
-                    &call.name,
+                    &tool_name,
                     Some(&guardrail_ctx),
                 ) {
                     crate::guardrails::GuardrailDecision::Allow => None,
@@ -5284,7 +5331,7 @@ pub(crate) async fn run_unified_loop_impl(
                             crate::agent::mode::effects::mode_auto_approves(
                                 crate::agent::coding_mode::active_coding_mode(),
                             ) && approval
-                                .is_none_or(|m| m.mode_auto_approve_allows(&call.name));
+                                .is_none_or(|m| m.mode_auto_approve_allows(&tool_name));
                         if mode_auto_approved {
                             None
                         } else if let Some(mgr) = approval {
@@ -5561,6 +5608,50 @@ pub(crate) async fn run_unified_loop_impl(
                 continue;
             }
 
+            if plan_mode_active && !is_plan_mode_allowed(&tool_name) {
+                let denial = format!(
+                    "Tool '{}' is blocked while plan mode is active. Only read-only analysis \
+                     and plan-authoring tools may run. Update the plan with \
+                     `update_plan(...)`, then call `exit_plan_mode` so the user can switch to \
+                     Agent mode for execution.",
+                    tool_name
+                );
+                crate::agent::mode::effects::record_mode_intercept(
+                    crate::agent::mode::effects::ModeInterceptReason::ToolNotAllowed,
+                    &crate::agent::mode::effects::ModeInterceptContext {
+                        mode: crate::agent::coding_mode::active_coding_mode(),
+                        channel: Some(channel_name),
+                        provider: Some(provider_name),
+                        model: Some(model),
+                        turn_id: Some(&turn_id),
+                        tool: Some(&tool_name),
+                        tool_call_id: call.tool_call_id.as_deref(),
+                        iteration: Some(iteration + 1),
+                        message: Some(&denial),
+                    },
+                );
+                if let Some(ref tx) = on_delta {
+                    let _ = tx
+                        .send(DraftEvent::Progress(format!(
+                            "\u{274c} {}: {}\n",
+                            tool_name,
+                            truncate_with_ellipsis(&denial, 200)
+                        )))
+                        .await;
+                }
+                ordered_results[idx] = Some((
+                    tool_name.clone(),
+                    call.tool_call_id.clone(),
+                    ToolExecutionOutcome {
+                        output: denial.clone(),
+                        success: false,
+                        error_reason: Some(denial),
+                        duration: Duration::ZERO,
+                    },
+                ));
+                continue;
+            }
+
             let intercept = {
                 let mode = crate::agent::coding_mode::active_coding_mode();
                 crate::agent::mode::effects::mode_blocks_tool(mode, &tool_name)
@@ -5608,7 +5699,7 @@ pub(crate) async fn run_unified_loop_impl(
             ) && approval.is_none_or(|m| m.mode_auto_approve_allows(&tool_name));
 
             let already_user_approved = pre_hook_user_approved
-                && tool_name == call.name
+                && tool_name == canonical_name
                 && tool_args == call.arguments;
 
             if approval.is_none() {
@@ -5912,7 +6003,7 @@ pub(crate) async fn run_unified_loop_impl(
             executable_indices.push(idx);
             executable_pre_cleared.push(
                 pre_hook_guardrail_cleared
-                    && tool_name == call.name
+                    && tool_name == canonical_name
                     && tool_args == call.arguments,
             );
             executable_runtime_approved.push(runtime_approved);
@@ -5925,6 +6016,8 @@ pub(crate) async fn run_unified_loop_impl(
         }
 
         let parent_draft_for_scope = on_delta.clone();
+        let allow_parallel_execution =
+            should_execute_tools_in_parallel(&executable_calls, approval);
         let executed_outcomes: Vec<(usize, ParsedToolCall, ToolExecutionOutcome)> =
             if allow_parallel_execution && executable_calls.len() > 1 {
                 let outcomes = PARENT_DRAFT_CHANNEL
@@ -6152,6 +6245,7 @@ pub(crate) async fn run_unified_loop_impl(
             std::collections::hash_map::DefaultHasher::new();
         let mut detection_has_payload = false;
         let mut batch_had_success = false;
+        let mut circuit_break_abort: Option<String> = None;
 
         for (result_index, (tool_name, tool_call_id, outcome)) in ordered_results
             .into_iter()
@@ -6216,16 +6310,13 @@ pub(crate) async fn run_unified_loop_impl(
                             }),
                         );
                         if loop_recovery_used >= MAX_LOOP_RECOVERY {
-                            _turn_metrics.mark_status("aborted");
-                            return Ok(finalize_loop_recovery(
-                                &msg,
-                                history,
-                                on_delta.as_ref(),
-                            )
-                            .await);
+                            if circuit_break_abort.is_none() {
+                                circuit_break_abort = Some(msg);
+                            }
+                        } else {
+                            loop_recovery_used += 1;
+                            deferred_system_after_tool_batch.push(loop_recovery_nudge(&msg));
                         }
-                        loop_recovery_used += 1;
-                        deferred_system_after_tool_batch.push(loop_recovery_nudge(&msg));
                     }
                 }
             }
@@ -6278,6 +6369,22 @@ pub(crate) async fn run_unified_loop_impl(
                 "<tool_result name=\"{}\">\n{}\n</tool_result>",
                 tool_name, safe_output
             );
+        }
+
+        if let Some(msg) = circuit_break_abort {
+            _turn_metrics.mark_status("aborted");
+            append_turn_records_to_history(
+                history,
+                &assistant_history_content,
+                &native_tool_calls,
+                &individual_results,
+                use_native_tools,
+                &tool_results,
+            );
+            for body in std::mem::take(&mut deferred_system_after_tool_batch) {
+                history.push(ChatMessage::system(body));
+            }
+            return Ok(finalize_loop_recovery(&msg, history, on_delta.as_ref()).await);
         }
 
         if batch_had_success && !batch_edit_diagnostics_dirty {
@@ -6446,6 +6553,17 @@ pub(crate) async fn run_unified_loop_impl(
                     }),
                 );
                 let abort_text = abort_msg.to_string();
+                append_turn_records_to_history(
+                    history,
+                    &assistant_history_content,
+                    &native_tool_calls,
+                    &individual_results,
+                    use_native_tools,
+                    &tool_results,
+                );
+                for body in std::mem::take(&mut deferred_system_after_tool_batch) {
+                    history.push(ChatMessage::system(body));
+                }
                 if loop_recovery_used >= MAX_LOOP_RECOVERY {
                     _turn_metrics.mark_status("aborted");
                     return Ok(finalize_loop_recovery(

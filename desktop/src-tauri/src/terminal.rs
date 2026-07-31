@@ -124,11 +124,13 @@ fn spawn_terminal_blocking(
 #[tauri::command]
 pub(crate) async fn terminal_spawn(
     app: AppHandle,
+    window: tauri::WebviewWindow,
     state: State<'_, TerminalState>,
     cols: u16,
     rows: u16,
     cwd: Option<String>,
 ) -> Result<TerminalSpawnResult, String> {
+    let target_label = window.label().to_string();
     let spawned =
         tauri::async_runtime::spawn_blocking(move || spawn_terminal_blocking(cols, rows, cwd))
             .await
@@ -175,6 +177,7 @@ pub(crate) async fn terminal_spawn(
     }
 
     let output_app = app.clone();
+    let output_target = target_label.clone();
     let (chunk_tx, chunk_rx) =
         std::sync::mpsc::sync_channel::<String>(TERMINAL_OUTPUT_CHANNEL_CAPACITY);
     thread::spawn(move || {
@@ -220,7 +223,8 @@ pub(crate) async fn terminal_spawn(
                     Err(_) => break,
                 }
             }
-            if let Err(err) = output_app.emit(
+            if let Err(err) = output_app.emit_to(
+                output_target.as_str(),
                 "terminal-output",
                 TerminalOutputPayload {
                     session_id,
@@ -233,6 +237,7 @@ pub(crate) async fn terminal_spawn(
     });
 
     let exit_app = app.clone();
+    let exit_target = target_label.clone();
     thread::spawn(move || {
         static EXIT_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
         static WAIT_ERROR_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
@@ -244,7 +249,8 @@ pub(crate) async fn terminal_spawn(
         }
         match status {
             Ok(status) => {
-                if let Err(err) = exit_app.emit(
+                if let Err(err) = exit_app.emit_to(
+                    exit_target.as_str(),
                     "terminal-exit",
                     TerminalExitPayload {
                         session_id,
@@ -255,7 +261,8 @@ pub(crate) async fn terminal_spawn(
                 }
             }
             Err(err) => {
-                if let Err(emit_err) = exit_app.emit(
+                if let Err(emit_err) = exit_app.emit_to(
+                    exit_target.as_str(),
                     "terminal-output",
                     TerminalOutputPayload {
                         session_id,

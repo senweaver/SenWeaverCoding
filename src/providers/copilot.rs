@@ -153,6 +153,22 @@ struct UsageInfo {
     prompt_tokens: Option<u64>,
     #[serde(default)]
     completion_tokens: Option<u64>,
+    #[serde(default)]
+    completion_tokens_details: Option<UsageCompletionTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct UsageCompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
+}
+
+impl UsageInfo {
+    fn reasoning_output_tokens(&self) -> Option<u64> {
+        self.completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens)
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -405,6 +421,7 @@ impl CopilotProvider {
             output_tokens: u.completion_tokens,
             cached_input_tokens: None,
             cache_creation_input_tokens: None,
+            reasoning_tokens: u.reasoning_output_tokens(),
         });
         let choice = api_response
             .choices
@@ -831,6 +848,7 @@ impl Provider for CopilotProvider {
         >(100);
 
         let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
+        let cancel_token = crate::providers::current_session_cancel_token();
         crate::runtime::spawn_supervised("providers.copilot.stream", async move {
             let (token, endpoint) = match provider.get_api_key().await {
                 Ok(v) => v,
@@ -886,8 +904,19 @@ impl Provider for CopilotProvider {
             }
 
             let mut event_stream =
-                crate::providers::core::openai_sse::sse_bytes_to_events(response, count_tokens);
-            while let Some(event) = event_stream.next().await {
+                crate::providers::core::openai_sse::sse_bytes_to_events(
+                    response,
+                    count_tokens,
+                    crate::providers::sanitize::ProviderKind::OpenAi,
+                );
+            loop {
+                let event = tokio::select! {
+                    _ = crate::providers::stream_cancelled(&cancel_token) => break,
+                    next = event_stream.next() => match next {
+                        Some(event) => event,
+                        None => break,
+                    },
+                };
                 if tx.send(event).await.is_err() {
                     break;
                 }

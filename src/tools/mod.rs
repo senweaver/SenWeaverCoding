@@ -128,6 +128,7 @@ pub mod swarm;
 pub mod tavily_search;
 pub mod text_browser;
 pub mod todo_write;
+pub mod tool_result_expand;
 pub mod traits;
 pub mod update_plan;
 pub mod verifiable_intent;
@@ -334,6 +335,7 @@ pub use team::create::TeamCreateTool;
 pub use team::delete::TeamDeleteTool;
 pub use text_browser::TextBrowserTool;
 pub use todo_write::TodoWriteTool;
+pub use tool_result_expand::ToolResultExpandTool;
 pub use handler::search::ToolSearchTool;
 pub use handler::tier::{
     BuiltinDeferredRegistrationOptions, BuiltinToolTier, TOOL_TIERS, ToolRiskLevel,
@@ -487,6 +489,11 @@ pub fn default_tools_with_runtime(
                 .with_edit_history(shared_edit_history.clone()),
         ),
         Box::new(
+            MultiEditTool::new(security.clone())
+                .with_ops_applier(shared_ops.clone())
+                .with_edit_history(shared_edit_history.clone()),
+        ),
+        Box::new(
             NotebookEditTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
         ),
         Box::new(GlobSearchTool::new(security.clone())),
@@ -504,6 +511,7 @@ pub fn default_tools_with_runtime(
         ),
         Box::new(DiffApplyTool::new(security.clone()).with_ops_applier(shared_ops)),
         Box::new(WritePlanTool::new()),
+        Box::new(ToolResultExpandTool::new()),
         Box::new(ContentSearchTool::new(security)),
     ]
 }
@@ -926,6 +934,7 @@ pub fn all_tools_with_runtime(
         Arc::new(CreateDirectoryTool::new(security.clone())),
         Arc::new(RestoreFileTool::new(security.clone())),
         Arc::new(DiagnosticsTool::new(security.workspace_root_handle())),
+        Arc::new(ToolResultExpandTool::new()),
         Arc::new(UpdatePlanTool::with_workspace_root(
             Arc::new(RwLock::new(Vec::new())),
             security.workspace_root_handle(),

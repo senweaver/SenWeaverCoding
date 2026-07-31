@@ -140,6 +140,79 @@ pub enum FastPathTier {
     Full,
 }
 
+pub struct LadderRefinedContent {
+    pub contents: String,
+    pub encoding: Option<String>,
+    pub tier: FastPathTier,
+}
+
+pub fn runtime_ladder_refiner() -> Option<Arc<FastApplyRefiner>> {
+    let services = crate::services::try_get_services()?;
+    let config = services.config();
+    if !config.agent_runtime.apply_ladder_enabled {
+        return None;
+    }
+    crate::inline_edit::service::default_fast_refiner(&config)
+}
+
+pub async fn refine_failing_diff_to_content(
+    refiner: &FastApplyRefiner,
+    path: &std::path::Path,
+    raw_diff: &str,
+    max_fuzz: usize,
+) -> Option<LadderRefinedContent> {
+    let path_for_read = path.to_path_buf();
+    let raw_bytes = tokio::task::spawn_blocking(move || std::fs::read(&path_for_read))
+        .await
+        .ok()?
+        .ok()?;
+    if crate::tools::file::encoding::is_probably_binary(&raw_bytes) {
+        return None;
+    }
+    let (source, encoding_label) =
+        crate::tools::file::encoding::decode_for_edit(&raw_bytes).ok()?;
+    let options = ApplyOptions {
+        max_fuzz,
+        dry_run: false,
+        validate: true,
+        path: Some(path.to_path_buf()),
+    };
+    if HeuristicApplier.apply(&source, raw_diff, &options).is_ok() {
+        return None;
+    }
+    match apply_unified_diff_with_fast_path(&source, raw_diff, &options, Some(refiner), None)
+        .await
+    {
+        Ok((outcome, _final_diff, tier)) => {
+            tracing::info!(
+                target: "apply_model.fast_apply",
+                path = %path.display(),
+                tier = ?tier,
+                "apply ladder recovered a failing diff"
+            );
+            let encoding = if crate::tools::file::encoding::is_utf8_label(encoding_label) {
+                None
+            } else {
+                Some(encoding_label.to_string())
+            };
+            Some(LadderRefinedContent {
+                contents: outcome.applied,
+                encoding,
+                tier,
+            })
+        }
+        Err(err) => {
+            tracing::debug!(
+                target: "apply_model.fast_apply",
+                path = %path.display(),
+                error = %err,
+                "apply ladder could not recover failing diff"
+            );
+            None
+        }
+    }
+}
+
 pub async fn apply_unified_diff_with_fast_path(
     source: &str,
     raw_diff: &str,

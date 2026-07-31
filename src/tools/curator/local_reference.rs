@@ -152,6 +152,7 @@ impl Tool for CuratorLocalReferenceTool {
                     notes_after,
                 } => {
                     if let Some(after) = sources_after.as_deref() {
+                        crate::session::record_write_for_current_session(&sources_path);
                         crate::agent::file_edit_emitter::emit_file_edit(
                             &sources_path,
                             sources_before.as_deref(),
@@ -161,6 +162,7 @@ impl Tool for CuratorLocalReferenceTool {
                         .await;
                     }
                     if let Some(after) = notes_after.as_deref() {
+                        crate::session::record_write_for_current_session(&notes_path);
                         crate::agent::file_edit_emitter::emit_file_edit(
                             &notes_path,
                             notes_before.as_deref(),

@@ -198,6 +198,14 @@ struct UsageInfo {
     completion_tokens: Option<u64>,
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokensDetails>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1136,6 +1144,9 @@ impl Provider for OpenRouterProvider {
                 .prompt_tokens_details
                 .and_then(|d| d.cached_tokens),
             cache_creation_input_tokens: None,
+            reasoning_tokens: u
+                .completion_tokens_details
+                .and_then(|d| d.reasoning_tokens),
         });
         let choice = native_response
             .choices
@@ -1287,6 +1298,9 @@ impl Provider for OpenRouterProvider {
                 .prompt_tokens_details
                 .and_then(|d| d.cached_tokens),
             cache_creation_input_tokens: None,
+            reasoning_tokens: u
+                .completion_tokens_details
+                .and_then(|d| d.reasoning_tokens),
         });
         let choice = native_response
             .choices
@@ -1486,6 +1500,7 @@ impl Provider for OpenRouterProvider {
         let retry_messages: Vec<ChatMessage> = request.messages.to_vec();
         let retry_tools: Option<Vec<ToolSpec>> = request.tools.map(|t| t.to_vec());
         let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
+        let cancel_token = super::current_session_cancel_token();
 
         let _ = crate::runtime::spawn_supervised(
             "providers.openrouter.stream_chat",
@@ -1538,7 +1553,14 @@ impl Provider for OpenRouterProvider {
                             temperature_owned,
                             options_owned,
                         );
-                        while let Some(event) = retry_stream.next().await {
+                        loop {
+                            let event = tokio::select! {
+                                _ = super::stream_cancelled(&cancel_token) => break,
+                                next = retry_stream.next() => match next {
+                                    Some(event) => event,
+                                    None => break,
+                                },
+                            };
                             if tx.send(event).await.is_err() {
                                 break;
                             }
@@ -1552,8 +1574,19 @@ impl Provider for OpenRouterProvider {
                     return;
                 }
 
-                let mut event_stream = sse_bytes_to_events(response, count_tokens);
-                while let Some(event) = event_stream.next().await {
+                let mut event_stream = sse_bytes_to_events(
+                    response,
+                    count_tokens,
+                    crate::providers::sanitize::ProviderKind::OpenAi,
+                );
+                loop {
+                    let event = tokio::select! {
+                        _ = super::stream_cancelled(&cancel_token) => break,
+                        next = event_stream.next() => match next {
+                            Some(event) => event,
+                            None => break,
+                        },
+                    };
                     if tx.send(event).await.is_err() {
                         break;
                     }

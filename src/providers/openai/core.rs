@@ -197,12 +197,20 @@ struct UsageInfo {
     completion_tokens: Option<u64>,
     #[serde(default)]
     prompt_tokens_details: Option<PromptTokensDetails>,
+    #[serde(default)]
+    completion_tokens_details: Option<CompletionTokensDetails>,
 }
 
 #[derive(Debug, Deserialize)]
 struct PromptTokensDetails {
     #[serde(default)]
     cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompletionTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -829,12 +837,16 @@ impl Provider for OpenAiProvider {
         let native_response: NativeChatResponse = response.json().await?;
         let usage = native_response.usage.map(|u| {
             let cached = u.prompt_tokens_details.and_then(|d| d.cached_tokens);
+            let reasoning = u
+                .completion_tokens_details
+                .and_then(|d| d.reasoning_tokens);
             crate::observability::subsystem_metrics::observe_prompt_cache_usage(cached, None);
             TokenUsage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
                 cached_input_tokens: cached,
                 cache_creation_input_tokens: None,
+                reasoning_tokens: reasoning,
             }
         });
         let choice = native_response
@@ -921,12 +933,16 @@ impl Provider for OpenAiProvider {
         let native_response: NativeChatResponse = response.json().await?;
         let usage = native_response.usage.map(|u| {
             let cached = u.prompt_tokens_details.and_then(|d| d.cached_tokens);
+            let reasoning = u
+                .completion_tokens_details
+                .and_then(|d| d.reasoning_tokens);
             crate::observability::subsystem_metrics::observe_prompt_cache_usage(cached, None);
             TokenUsage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
                 cached_input_tokens: cached,
                 cache_creation_input_tokens: None,
+                reasoning_tokens: reasoning,
             }
         });
         let choice = native_response
@@ -1009,12 +1025,16 @@ impl Provider for OpenAiProvider {
         let native_response: NativeChatResponse = response.json().await?;
         let usage = native_response.usage.map(|u| {
             let cached = u.prompt_tokens_details.and_then(|d| d.cached_tokens);
+            let reasoning = u
+                .completion_tokens_details
+                .and_then(|d| d.reasoning_tokens);
             crate::observability::subsystem_metrics::observe_prompt_cache_usage(cached, None);
             TokenUsage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
                 cached_input_tokens: cached,
                 cache_creation_input_tokens: None,
+                reasoning_tokens: reasoning,
             }
         });
         let raw = native_response
@@ -1097,6 +1117,7 @@ impl Provider for OpenAiProvider {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
         let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
+        let cancel_token = crate::providers::current_session_cancel_token();
 
         let _ = crate::runtime::spawn_supervised("providers.openai.stream_chat", async move {
             let response = match crate::providers::core::idempotency::apply_idempotency_header_value(
@@ -1127,8 +1148,19 @@ impl Provider for OpenAiProvider {
             }
 
             let mut event_stream =
-                crate::providers::core::openai_sse::sse_bytes_to_events(response, count_tokens);
-            while let Some(event) = event_stream.next().await {
+                crate::providers::core::openai_sse::sse_bytes_to_events(
+                    response,
+                    count_tokens,
+                    crate::providers::sanitize::ProviderKind::OpenAi,
+                );
+            loop {
+                let event = tokio::select! {
+                    _ = crate::providers::stream_cancelled(&cancel_token) => break,
+                    next = event_stream.next() => match next {
+                        Some(event) => event,
+                        None => break,
+                    },
+                };
                 if tx.send(event).await.is_err() {
                     break;
                 }

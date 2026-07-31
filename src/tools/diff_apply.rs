@@ -30,6 +30,52 @@ impl DiffApplyTool {
         self
     }
 
+    async fn retry_with_ladder(
+        &self,
+        files: &[serde_json::Value],
+        resolved_paths: &[PathBuf],
+    ) -> Option<Result<crate::diff_session::ApplyReport, crate::diff_session::DiffSessionError>>
+    {
+        let refiner = crate::apply_model::fast_apply::runtime_ladder_refiner()?;
+        let root = self.security.workspace_dir();
+        let mut session = DiffSession::new(root)
+            .with_allowed_roots(self.security.allowed_roots.clone());
+        if let Some(ops) = self.ops_applier.clone() {
+            session = session.with_ops_applier(ops);
+        }
+        let mut refined_any = false;
+        for (entry, resolved) in files.iter().zip(resolved_paths.iter()) {
+            let path = entry.get("path").and_then(|v| v.as_str()).unwrap_or("");
+            let diff = entry.get("diff").and_then(|v| v.as_str()).unwrap_or("");
+            if resolved.exists() {
+                if let Some(refined) =
+                    crate::apply_model::fast_apply::refine_failing_diff_to_content(
+                        refiner.as_ref(),
+                        resolved,
+                        diff,
+                        3,
+                    )
+                    .await
+                {
+                    refined_any = true;
+                    if let Err(e) =
+                        session.stage_full_content(path, refined.contents, refined.encoding)
+                    {
+                        return Some(Err(e));
+                    }
+                    continue;
+                }
+            }
+            if let Err(e) = session.stage(path, diff) {
+                return Some(Err(e));
+            }
+        }
+        if !refined_any {
+            return None;
+        }
+        Some(session.apply_all().await)
+    }
+
     async fn verify_no_symlink(&self, path: &Path) -> anyhow::Result<()> {
         if let Ok(meta) = tokio::fs::symlink_metadata(path).await {
             if meta.file_type().is_symlink() {
@@ -206,6 +252,18 @@ impl Tool for DiffApplyTool {
                     error: Some(crate::session::stale_file_error_message(p)),
                 });
             }
+            if p.exists() && !crate::session::has_read_in_current_session(p) {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Refusing to apply diff to '{}': this session has not read the file \
+                         yet. Use file_read on it first (the diff must be based on the \
+                         file's CURRENT contents), then retry.",
+                        p.display()
+                    )),
+                });
+            }
         }
 
         let pre_contents: Vec<Option<Vec<u8>>> = {
@@ -217,36 +275,69 @@ impl Tool for DiffApplyTool {
             .unwrap_or_default()
         };
 
-        match session.apply_all().await {
-            Ok(report) => {
-                for (idx, path) in resolved_paths.iter().enumerate() {
-                    let after = tokio::fs::read(path).await.ok();
-                    let before = pre_contents.get(idx).cloned().flatten();
-                    if let Some(after_bytes) = after.as_deref() {
-                        crate::agent::file_edit_emitter::emit_file_edit(
-                            path,
-                            before.as_deref(),
-                            Some(after_bytes),
-                            None,
-                        )
-                        .await;
+        let diag_baseline =
+            crate::code_intel::post_edit_diagnostics::baseline(&resolved_paths).await;
+
+        let report = match session.apply_all().await {
+            Ok(report) => report,
+            Err(first_err) => {
+                let Some(retry_report) = self
+                    .retry_with_ladder(&files, &resolved_paths)
+                    .await
+                else {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "diff session apply failed (changes rolled back): {first_err}"
+                        )),
+                    });
+                };
+                match retry_report {
+                    Ok(report) => report,
+                    Err(retry_err) => {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "diff session apply failed (changes rolled back): {retry_err}"
+                            )),
+                        });
                     }
-                    crate::session::record_write_for_current_session(path);
                 }
-                Ok(ToolResult {
-                    success: true,
-                    output: format!(
-                        "Applied {} file(s) atomically via diff session.",
-                        report.files_touched.len()
-                    ),
-                    error: None,
-                })
             }
-            Err(e) => Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!("diff session apply failed (changes rolled back): {e}")),
-            }),
+        };
+
+        for (idx, path) in resolved_paths.iter().enumerate() {
+            let after = tokio::fs::read(path).await.ok();
+            let before = pre_contents.get(idx).cloned().flatten();
+            if let Some(after_bytes) = after.as_deref() {
+                crate::agent::file_edit_emitter::emit_file_edit(
+                    path,
+                    before.as_deref(),
+                    Some(after_bytes),
+                    None,
+                )
+                .await;
+            }
+            crate::session::record_write_for_current_session(path);
         }
+        let mut output = format!(
+            "Applied {} file(s) atomically via diff session.",
+            report.files_touched.len()
+        );
+        if let Some(feedback) = crate::code_intel::post_edit_diagnostics::new_error_feedback(
+            &resolved_paths,
+            &diag_baseline,
+        )
+        .await
+        {
+            output.push_str(&feedback);
+        }
+        Ok(ToolResult {
+            success: true,
+            output,
+            error: None,
+        })
     }
 }

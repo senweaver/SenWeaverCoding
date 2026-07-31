@@ -411,6 +411,7 @@ impl Tool for ContentSearchTool {
                                     offset,
                                     page_size,
                                     output_mode,
+                                    &workspace_canon,
                                 );
                             }
                             Err(fallback_err) => {
@@ -437,7 +438,7 @@ impl Tool for ContentSearchTool {
 
                 let exit_code = output.status.code().unwrap_or(-1);
                 if exit_code >= 2 {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stderr = crate::util::decode_subprocess_bytes(&output.stderr);
                     return Ok(ToolResult {
                         success: false,
                         output: String::new(),
@@ -445,7 +446,7 @@ impl Tool for ContentSearchTool {
                     });
                 }
 
-                let raw_stdout = String::from_utf8_lossy(&output.stdout);
+                let raw_stdout = crate::util::decode_subprocess_bytes(&output.stdout);
                 if self.has_rg() {
                     format_rg_output(&raw_stdout, &workspace_canon, output_mode, max_results)
                 } else {
@@ -459,7 +460,7 @@ impl Tool for ContentSearchTool {
             }
         };
 
-        finalise_search_result(formatted, offset, page_size, output_mode)
+        finalise_search_result(formatted, offset, page_size, output_mode, &workspace_canon)
     }
 }
 
@@ -493,12 +494,38 @@ fn split_result_blocks(text: &str) -> Vec<&str> {
     }
 }
 
+fn record_observed_content_paths(
+    formatted: &str,
+    workspace_canon: &std::path::Path,
+    output_mode: &str,
+) {
+    if output_mode != "content" {
+        return;
+    }
+    let mut seen = std::collections::HashSet::new();
+    for line in formatted.lines() {
+        if let Some((path, _)) = parse_content_line(line) {
+            if seen.insert(path.to_string()) {
+                let p = std::path::Path::new(path);
+                let abs = if p.is_absolute() {
+                    p.to_path_buf()
+                } else {
+                    workspace_canon.join(p)
+                };
+                crate::session::record_observed_for_current_session(&abs);
+            }
+        }
+    }
+}
+
 fn finalise_search_result(
     formatted: String,
     offset: usize,
     max_results: usize,
     output_mode: &str,
+    workspace_canon: &std::path::Path,
 ) -> anyhow::Result<ToolResult> {
+    record_observed_content_paths(&formatted, workspace_canon, output_mode);
     let saver_applied = apply_token_saver(&formatted, output_mode);
     let pre_pagination = saver_applied.unwrap_or(formatted);
     let paginated = if offset > 0 {

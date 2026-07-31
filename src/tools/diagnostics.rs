@@ -119,8 +119,8 @@ impl DiagnosticsTool {
 
         match output {
             Ok(Ok(out)) => {
-                let stdout = String::from_utf8_lossy(&out.stdout);
-                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stdout = crate::util::decode_subprocess_bytes(&out.stdout);
+                let stderr = crate::util::decode_subprocess_bytes(&out.stderr);
                 let combined = if stdout.is_empty() {
                     stderr.to_string()
                 } else if stderr.is_empty() {

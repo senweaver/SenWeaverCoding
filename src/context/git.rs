@@ -101,7 +101,7 @@ async fn run_git(cwd: &Path, args: &[&str]) -> anyhow::Result<String> {
         .output()
         .await?;
     if output.status.success() {
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        Ok(crate::util::decode_subprocess_bytes(&output.stdout))
     } else {
         anyhow::bail!("git command failed: {:?}", args);
     }

@@ -502,7 +502,7 @@ pub fn verify_chain(log_path: &Path) -> Result<u64> {
                 mac.update(entry.entry_hash.as_bytes());
                 let expected_sig = hex::encode(mac.finalize().into_bytes());
 
-                if signature != &expected_sig {
+                if !crate::security::pairing::constant_time_eq(signature, &expected_sig) {
                     bail!(
                         "signature verification failed at line {} (sequence {}): signature mismatch",
                         line_idx + 1,

@@ -150,8 +150,34 @@ pub async fn fan_out_personas(
         });
     }
 
+    let cancel_token = crate::providers::current_session_cancel_token();
     let mut outcomes = Vec::new();
-    while let Some(joined) = join_set.join_next().await {
+    loop {
+        let joined = match cancel_token.as_ref() {
+            Some(token) => tokio::select! {
+                biased;
+                () = token.cancelled() => {
+                    join_set.abort_all();
+                    while join_set.join_next().await.is_some() {}
+                    outcomes.push(PersonaOutcome {
+                        id: "cancelled".to_string(),
+                        label: "session cancelled".to_string(),
+                        raw_response: String::new(),
+                        error: Some("persona fan-out cancelled by session".to_string()),
+                        elapsed_ms: 0,
+                    });
+                    return outcomes;
+                }
+                next = join_set.join_next() => match next {
+                    Some(result) => result,
+                    None => break,
+                },
+            },
+            None => match join_set.join_next().await {
+                Some(result) => result,
+                None => break,
+            },
+        };
         match joined {
             Ok(outcome) => outcomes.push(outcome),
             Err(join_err) => outcomes.push(PersonaOutcome {

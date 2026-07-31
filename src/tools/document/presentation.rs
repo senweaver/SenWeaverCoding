@@ -168,6 +168,17 @@ impl Tool for PresentationCreateTool {
             }
         };
 
+        let _write_guard = match crate::session::acquire_file_write_guard(&target).await {
+            Ok(guard) => guard,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+        };
+
         let workspace = self.security.workspace_dir();
         let before = tokio::fs::read(&target).await.ok();
         let target_for_task = target.clone();

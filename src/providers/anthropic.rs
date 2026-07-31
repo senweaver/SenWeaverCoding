@@ -871,6 +871,7 @@ impl AnthropicProvider {
                 output_tokens: u.output_tokens,
                 cached_input_tokens: cached,
                 cache_creation_input_tokens: created,
+                reasoning_tokens: None,
             }
         });
 
@@ -983,6 +984,7 @@ impl AnthropicProvider {
     async fn parse_anthropic_sse(
         response: reqwest::Response,
         tx: &tokio::sync::mpsc::Sender<StreamResult<StreamEvent>>,
+        cancel_token: Option<tokio_util::sync::CancellationToken>,
     ) {
         let mut byte_stream = response.bytes_stream();
         let mut parser = crate::providers::core::sse::SseParser::new();
@@ -1000,7 +1002,11 @@ impl AnthropicProvider {
 
         let mut stream_ended = false;
         while !stream_ended {
-            match byte_stream.next().await {
+            let next_bytes = tokio::select! {
+                _ = crate::providers::stream_cancelled(&cancel_token) => return,
+                next = byte_stream.next() => next,
+            };
+            match next_bytes {
                 Some(Ok(bytes)) => {
                     parser.push(&bytes);
                     if parser.overflowed() {
@@ -1088,7 +1094,10 @@ impl AnthropicProvider {
                                             crate::providers::sanitize::ProviderKind::Anthropic,
                                         );
                                         let input = std::mem::take(&mut tool_input_json);
-                                        let safe_input = sanitize_tool_call_arguments(input);
+                                        let safe_input =
+                                            crate::providers::sanitize::normalize_tool_call_arguments(
+                                                &name, input,
+                                            );
                                         made_progress = true;
                                         let _ = tx
                                             .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
@@ -1238,7 +1247,10 @@ impl AnthropicProvider {
                                     crate::providers::sanitize::ProviderKind::Anthropic,
                                 );
                                 let input = std::mem::take(&mut tool_input_json);
-                                let safe_input = sanitize_tool_call_arguments(input);
+                                let safe_input =
+                                    crate::providers::sanitize::normalize_tool_call_arguments(
+                                        &name, input,
+                                    );
                                 made_progress = true;
                                 let _ = tx
                                     .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
@@ -1360,25 +1372,8 @@ impl AnthropicStreamUsage {
             output_tokens: self.output_tokens,
             cached_input_tokens: self.cache_read_input_tokens,
             cache_creation_input_tokens: self.cache_creation_input_tokens,
+            reasoning_tokens: None,
         })
-    }
-}
-
-fn sanitize_tool_call_arguments(raw: String) -> String {
-    if raw.trim().is_empty() {
-        return "{}".to_string();
-    }
-    match serde_json::from_str::<serde_json::Value>(&raw) {
-        Ok(_) => raw,
-        Err(err) => {
-            tracing::warn!(
-                target: "providers.anthropic.stream",
-                error = %err,
-                raw_len = raw.len(),
-                "anthropic SSE produced invalid tool_input JSON; preserving it for fail-closed rejection"
-            );
-            raw
-        }
     }
 }
 
@@ -1404,7 +1399,7 @@ async fn flush_pending_tool_call(
         );
         return;
     }
-    let safe_input = sanitize_tool_call_arguments(input);
+    let safe_input = crate::providers::sanitize::normalize_tool_call_arguments(&name, input);
     let _ = tx
         .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
             id,
@@ -1767,6 +1762,7 @@ impl Provider for AnthropicProvider {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(64);
         let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
+        let cancel_token = crate::providers::current_session_cancel_token();
 
         let _bg = crate::runtime::spawn_supervised("providers.anthropic.stream", async move {
             let (system_prompt, messages) = match tokio::task::spawn_blocking(move || {
@@ -1893,7 +1889,7 @@ impl Provider for AnthropicProvider {
                 return;
             }
 
-            Self::parse_anthropic_sse(response, &tx).await;
+            Self::parse_anthropic_sse(response, &tx, cancel_token).await;
         });
 
         stream::unfold(rx, |mut rx| async move {

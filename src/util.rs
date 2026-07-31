@@ -366,6 +366,9 @@ pub fn decode_subprocess_bytes(raw: &[u8]) -> String {
 
 #[cfg(windows)]
 fn decode_with_active_codepage(raw: &[u8]) -> String {
+    if let Some(decoded) = decode_with_console_codepage(raw) {
+        return decoded;
+    }
     let encoding = active_ansi_encoding();
     let (decoded, _, had_errors) = encoding.decode(raw);
     if had_errors && !std::ptr::eq(encoding, encoding_rs::GBK) {
@@ -375,6 +378,56 @@ fn decode_with_active_codepage(raw: &[u8]) -> String {
         }
     }
     decoded.into_owned()
+}
+
+#[cfg(windows)]
+fn decode_with_console_codepage(raw: &[u8]) -> Option<String> {
+    use windows_sys::Win32::Globalization::{GetOEMCP, MultiByteToWideChar};
+    use windows_sys::Win32::System::Console::GetConsoleOutputCP;
+
+    const MB_ERR_INVALID_CHARS: u32 = 0x0000_0008;
+
+    if raw.is_empty() {
+        return Some(String::new());
+    }
+    let codepage = {
+        let console_cp = unsafe { GetConsoleOutputCP() };
+        if console_cp != 0 {
+            console_cp
+        } else {
+            unsafe { GetOEMCP() }
+        }
+    };
+    if codepage == 0 || codepage == 65001 {
+        return None;
+    }
+    let len = i32::try_from(raw.len()).ok()?;
+    unsafe {
+        let needed = MultiByteToWideChar(
+            codepage,
+            MB_ERR_INVALID_CHARS,
+            raw.as_ptr(),
+            len,
+            std::ptr::null_mut(),
+            0,
+        );
+        if needed <= 0 {
+            return None;
+        }
+        let mut buf: Vec<u16> = vec![0; needed as usize];
+        let written = MultiByteToWideChar(
+            codepage,
+            MB_ERR_INVALID_CHARS,
+            raw.as_ptr(),
+            len,
+            buf.as_mut_ptr(),
+            needed,
+        );
+        if written <= 0 {
+            return None;
+        }
+        Some(String::from_utf16_lossy(&buf[..written as usize]))
+    }
 }
 
 #[cfg(windows)]

@@ -1495,7 +1495,7 @@ impl DelegateTool {
         .with_hooks(delegate_hooks.as_deref())
         .with_on_delta(on_delta_for_loop);
 
-        let sub_agent_mode = crate::agent::coding_mode::CodingMode::default();
+        let sub_agent_mode = crate::agent::coding_mode::active_coding_mode();
         let result = tokio::time::timeout(
             Duration::from_secs(agentic_timeout_secs),
             crate::agent::coding_mode::scope_coding_mode(

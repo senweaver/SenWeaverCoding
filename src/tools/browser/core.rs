@@ -1439,6 +1439,7 @@ impl BrowserTool {
                 tokio::fs::write(&abs_path, &png).await.with_context(|| {
                     format!("failed to write screenshot to {}", abs_path.display())
                 })?;
+                crate::session::record_write_for_current_session(&abs_path);
                 let mut payload = json!({
                     "path": relative_path,
                     "saved_to": abs_path.to_string_lossy(),
@@ -2659,6 +2660,7 @@ mod native_backend {
                         tokio::fs::write(&abs_path, &png).await.with_context(|| {
                             format!("failed to write screenshot to {}", abs_path.display())
                         })?;
+                        crate::session::record_write_for_current_session(&abs_path);
                         payload["path"] = Value::String(relative_path);
                         payload["saved_to"] = Value::String(abs_path.to_string_lossy().to_string());
                     } else {

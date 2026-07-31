@@ -94,7 +94,7 @@ export function ToastContainer() {
 
   return (
     <div
-      className="fixed bottom-4 z-[100] flex flex-col gap-2 max-w-sm"
+      className="fixed bottom-4 z-[100] flex max-h-[60vh] max-w-sm flex-col gap-2 overflow-y-auto overscroll-contain pr-1"
       style={{ right: `${rightInset + 16}px` }}
     >
       {toasts.map((toast) => (

@@ -112,13 +112,16 @@ impl Tool for RestoreFileTool {
         };
 
         match output {
-            Ok(out) if out.status.success() => Ok(ToolResult {
-                success: true,
-                output: format!("Restored {path} from {revision}"),
-                error: None,
-            }),
+            Ok(out) if out.status.success() => {
+                crate::session::record_write_for_current_session(&full_path);
+                Ok(ToolResult {
+                    success: true,
+                    output: format!("Restored {path} from {revision}"),
+                    error: None,
+                })
+            }
             Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stderr = crate::util::decode_subprocess_bytes(&out.stderr);
 
                 if stderr.contains("not a git repository") {
                     Ok(ToolResult {

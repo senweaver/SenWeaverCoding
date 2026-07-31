@@ -308,6 +308,7 @@ async fn spawn_background(
     cmd: tokio::process::Command,
     command_text: &str,
     job_limits: Option<JobLimits>,
+    preflight: crate::tools::shell::preflight::ShellPreflight,
 ) -> anyhow::Result<ToolResult> {
     let (job_guard, mut child): (Option<JobObjectGuard>, tokio::process::Child) =
         match spawn_with_job_limits(cmd, job_limits).await {
@@ -370,12 +371,15 @@ async fn spawn_background(
 
     let id_for_watchdog = id.clone();
     let sid_for_watchdog = session_id.clone();
+    let guarded_write_paths = preflight.guarded_write_paths();
+    let session_ctx_for_watchdog = crate::session::current_session_context();
     let max_lifetime_secs = std::env::var("SEN_BACKGROUND_SHELL_MAX_SECS")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
         .filter(|v| *v > 0);
     crate::runtime::spawn_supervised("tools.shell.bg.watchdog", async move {
         let _job_guard = job_guard;
+        let _preflight = preflight;
         let started = std::time::Instant::now();
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         tick.tick().await;
@@ -419,6 +423,17 @@ async fn spawn_background(
             }
         };
         let exit_code = exit_status.and_then(|s| s.code());
+        if exit_code == Some(0) {
+            if let Some(ctx) = &session_ctx_for_watchdog {
+                if let Some(manager) = crate::session::global_workspace_resources() {
+                    for path in &guarded_write_paths {
+                        if path.is_file() {
+                            manager.record_write(&ctx.workspace_key, &ctx.session_id, path);
+                        }
+                    }
+                }
+            }
+        }
         super::super::background::registry::publish(
             super::super::background::registry::BackgroundShellSignal::Exited {
                 id: id_for_watchdog.clone(),
@@ -688,7 +703,7 @@ impl Tool for ShellTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' parameter"))?;
 
-        let _preflight = match crate::tools::shell::preflight::acquire_shell_execution_clearance(
+        let preflight = match crate::tools::shell::preflight::acquire_shell_execution_clearance(
             &self.security,
             command,
         )
@@ -720,7 +735,7 @@ impl Tool for ShellTool {
             .and_then(|v| v.as_bool())
             .unwrap_or(false);
         if background {
-            return spawn_background(cmd, command, self.job_limits).await;
+            return spawn_background(cmd, command, self.job_limits, preflight).await;
         }
 
         let timeout_duration = if let Some(ms) = args.get("timeout_ms").and_then(|v| v.as_u64()) {
@@ -875,6 +890,10 @@ impl Tool for ShellTool {
                     },
                 );
 
+                if status.success() {
+                    preflight.record_guarded_writes();
+                }
+
                 if stdout.len() > MAX_OUTPUT_BYTES {
                     let mut b = MAX_OUTPUT_BYTES.min(stdout.len());
                     while b > 0 && !stdout.is_char_boundary(b) {
@@ -913,7 +932,7 @@ impl Tool for ShellTool {
                         target: "shell.output_truncated",
                         command = %command,
                         total_bytes = stdout.len(),
-                        stdout_full = %stdout,
+                        stdout_full = %crate::agent::profile::pii_sanitize::scrub_credentials(&stdout),
                         "shell stdout exceeded LLM cap; full content logged at debug",
                     );
                     stdout = clipped;
@@ -931,7 +950,7 @@ impl Tool for ShellTool {
                         target: "shell.output_truncated",
                         command = %command,
                         total_bytes = stderr.len(),
-                        stderr_full = %stderr,
+                        stderr_full = %crate::agent::profile::pii_sanitize::scrub_credentials(&stderr),
                         "shell stderr exceeded LLM cap; full content logged at debug",
                     );
                     stderr = clipped;

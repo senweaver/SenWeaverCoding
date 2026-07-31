@@ -99,11 +99,20 @@ impl SwarmTool {
             &agent_config.model,
             temperature,
         );
-        let result = tokio::time::timeout(
+        let bounded = tokio::time::timeout(
             Duration::from_secs(timeout_secs),
             crate::session::scope_session_context(subagent_ctx, call),
-        )
-        .await;
+        );
+        let result = match crate::providers::current_session_cancel_token() {
+            Some(token) => tokio::select! {
+                biased;
+                () = token.cancelled() => {
+                    return Err(format!("Agent '{agent_name}' cancelled by session"));
+                }
+                result = bounded => result,
+            },
+            None => bounded.await,
+        };
 
         match result {
             Ok(Ok(response)) => {
@@ -285,8 +294,27 @@ impl SwarmTool {
             ));
         }
 
+        let cancel_token = crate::providers::current_session_cancel_token();
         let mut results = Vec::new();
-        while let Some(join_result) = join_set.join_next().await {
+        let mut cancelled = false;
+        loop {
+            let join_result = match cancel_token.as_ref() {
+                Some(token) => tokio::select! {
+                    biased;
+                    () = token.cancelled() => {
+                        cancelled = true;
+                        break;
+                    }
+                    next = join_set.join_next() => match next {
+                        Some(result) => result,
+                        None => break,
+                    },
+                },
+                None => match join_set.join_next().await {
+                    Some(result) => result,
+                    None => break,
+                },
+            };
             match join_result {
                 Ok((name, provider_name, model, output)) => {
                     results.push(format!("[{name} ({provider_name}/{model})]\n{output}"));
@@ -295,6 +323,15 @@ impl SwarmTool {
                     results.push(format!("[join error] {e}"));
                 }
             }
+        }
+        if cancelled {
+            join_set.abort_all();
+            while join_set.join_next().await.is_some() {}
+            return Ok(ToolResult {
+                success: false,
+                output: results.join("\n\n---\n\n"),
+                error: Some("swarm parallel execution cancelled by session".to_string()),
+            });
         }
 
         Ok(ToolResult {

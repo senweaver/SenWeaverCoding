@@ -106,17 +106,18 @@ fn query_token(uri: &Uri) -> Option<&str> {
 
 pub fn request_matches(headers: &HeaderMap, query_token: Option<&str>) -> bool {
     let expected = loopback_token();
+    let eq = crate::security::pairing::constant_time_eq;
     if let Some(t) = headers
         .get(header::AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
         .and_then(|auth| auth.strip_prefix("Bearer "))
     {
-        if t == expected {
+        if eq(t, expected) {
             return true;
         }
     }
     if let Some(t) = headers.get(TOKEN_HEADER).and_then(|v| v.to_str().ok()) {
-        if t.trim() == expected {
+        if eq(t.trim(), expected) {
             return true;
         }
     }
@@ -130,12 +131,12 @@ pub fn request_matches(headers: &HeaderMap, query_token: Option<&str>) -> bool {
                 .find_map(decode_websocket_bearer_protocol)
         })
     {
-        if t == expected {
+        if eq(&t, expected) {
             return true;
         }
     }
     if let Some(t) = query_token {
-        if t == expected {
+        if eq(t, expected) {
             return true;
         }
     }

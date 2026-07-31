@@ -369,7 +369,7 @@ pub async fn receive_loopback_code(expected_state: &str, timeout: Duration) -> R
                     let request = String::from_utf8_lossy(&buffer[..n]);
                     let (code, state) = parse_callback_request(&request)?;
 
-                    if state != expected_state {
+                    if !crate::security::pairing::constant_time_eq(&state, expected_state) {
                         let response = "HTTP/1.1 400 Bad Request\r\nContent-Type: text/html\r\n\r\n\
                              <html><body><h1>State mismatch</h1><p>Please try again.</p></body></html>";
                         let _ = stream.write_all(response.as_bytes()).await;
@@ -463,8 +463,8 @@ pub fn parse_code_from_redirect(input: &str, expected_state: Option<&str>) -> Re
 
         if let Some(expected) = expected_state {
             if let Some(actual) = params.get("state") {
-                if actual != expected {
-                    anyhow::bail!("OAuth state mismatch: expected {expected}, got {actual}");
+                if !crate::security::pairing::constant_time_eq(actual, expected) {
+                    anyhow::bail!("OAuth state mismatch");
                 }
             }
         }

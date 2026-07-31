@@ -136,6 +136,8 @@ export type PerSessionState = {
   historyFirstIndex?: number
 
   historyLoadingOlder?: boolean
+
+  historyReloadNonce?: number
 }
 
 export type ProviderRetryNotice = {
@@ -1287,6 +1289,8 @@ const nextId = () => `msg-${++msgCounter}-${Date.now()}`
 const KNOWN_SYSTEM_NOTIFICATION_SUBTYPES = new Set<string>([
   'ws_reconnecting',
   'ws_unreachable',
+  'ws_handler_error',
+  'ws_frame_gap',
   'runtime_config_updated',
   'runtime_config_persist_failed',
   'runtime_config_validation_failed',
@@ -2920,6 +2924,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             historyLoaded: true,
             historyFirstIndex,
             historyHasMore,
+            historyReloadNonce: (s.historyReloadNonce ?? 0) + 1,
           })),
         }
       })
@@ -3001,6 +3006,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               historyLoaded: true,
               historyFirstIndex,
               historyHasMore,
+              historyReloadNonce: (s.historyReloadNonce ?? 0) + 1,
             }
           }),
         }
@@ -4593,6 +4599,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 : {},
             ),
           }))
+          break
+        }
+        if (msg.subtype === 'ws_handler_error' || msg.subtype === 'ws_frame_gap') {
+          const cur = get().sessions[sessionId]
+          const uiActive =
+            cur?.chatState === 'thinking' ||
+            cur?.chatState === 'tool_executing' ||
+            cur?.chatState === 'streaming' ||
+            cur?.chatState === 'permission_pending'
+          if (uiActive) {
+            dirtyMidTurnSessions.add(sessionId)
+          } else {
+            void get().reloadHistory(sessionId)
+          }
           break
         }
         if (msg.subtype === 'ws_unreachable') {

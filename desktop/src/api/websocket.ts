@@ -17,6 +17,7 @@ const MAX_RECONNECT_DELAY_MS = 30_000
 const PENDING_MAX_COUNT = 200
 const PENDING_MAX_BYTES = 262_144
 const MAX_CONCURRENT_CONNECTIONS = 32
+const HANDLER_ERROR_NOTIFY_THROTTLE_MS = 10_000
 
 const CRITICAL_MESSAGE_TYPES = new Set<string>([
   'user_message',
@@ -84,6 +85,9 @@ type Connection = {
   errorCount: number
   parseFailures: number
   pathPrefix: string
+  lastHandlerErrorNotifyAt: number
+  lastServerSeq: number
+  lastSeqGapNotifyAt: number
 }
 
 class WebSocketManager {
@@ -201,8 +205,7 @@ class WebSocketManager {
     }
     if (options?.force && existing) {
       existing.intentionalClose = true
-      this.stopPingLoop(sessionId)
-      this.stopPongWatcher(sessionId)
+      this.stopTimers(existing)
       if (existing.reconnectTimer) {
         clearTimeout(existing.reconnectTimer)
         existing.reconnectTimer = null
@@ -278,6 +281,9 @@ class WebSocketManager {
       errorCount: existing?.errorCount ?? 0,
       parseFailures: existing?.parseFailures ?? 0,
       pathPrefix,
+      lastHandlerErrorNotifyAt: 0,
+      lastServerSeq: 0,
+      lastSeqGapNotifyAt: 0,
     }
     this.connections.set(sessionId, conn)
 
@@ -301,8 +307,8 @@ class WebSocketManager {
       conn.reconnectAttempt = 0
       conn.lastPongAt = Date.now()
       conn.lastActivityAt = Date.now()
-      this.startPingLoop(sessionId)
-      this.startPongWatcher(sessionId)
+      this.startPingLoop(sessionId, conn)
+      this.startPongWatcher(sessionId, conn)
       this.notifyConnected(sessionId)
       this.flushPendingMessages(conn)
     }
@@ -320,16 +326,66 @@ class WebSocketManager {
         )
         return
       }
+      if (
+        typeof msg !== 'object' ||
+        msg === null ||
+        typeof (msg as { type?: unknown }).type !== 'string'
+      ) {
+        conn.parseFailures++
+        console.warn(
+          `[wsManager] ws message failed shape validation (session=${sessionId}, total=${conn.parseFailures})`,
+        )
+        return
+      }
       const msgType = (msg as { type?: string }).type
+      const frameSeq = (msg as { seq?: unknown }).seq
+      if (typeof frameSeq === 'number' && Number.isFinite(frameSeq)) {
+        if (
+          conn.lastServerSeq > 0 &&
+          frameSeq > conn.lastServerSeq + 1
+        ) {
+          const missed = frameSeq - conn.lastServerSeq - 1
+          console.warn(
+            `[wsManager] frame sequence gap (session=${sessionId}, missed=${missed})`,
+          )
+          const now = Date.now()
+          if (now - conn.lastSeqGapNotifyAt > HANDLER_ERROR_NOTIFY_THROTTLE_MS) {
+            conn.lastSeqGapNotifyAt = now
+            this.broadcastSystemNotification(
+              sessionId,
+              'ws_frame_gap',
+              'Frame sequence gap detected; client state may be out of sync.',
+              { missed },
+            )
+          }
+        }
+        if (frameSeq > conn.lastServerSeq) {
+          conn.lastServerSeq = frameSeq
+        }
+      }
       if (msgType === 'pong') {
         conn.lastPongAt = Date.now()
         return
       }
+      let handlerFailed = false
       for (const handler of conn.handlers) {
         try {
           handler(msg)
         } catch (err) {
+          handlerFailed = true
           console.warn(`[wsManager] handler threw for session ${sessionId}`, err)
+        }
+      }
+      if (handlerFailed && msgType !== 'system_notification') {
+        const now = Date.now()
+        if (now - conn.lastHandlerErrorNotifyAt > HANDLER_ERROR_NOTIFY_THROTTLE_MS) {
+          conn.lastHandlerErrorNotifyAt = now
+          this.broadcastSystemNotification(
+            sessionId,
+            'ws_handler_error',
+            'A message handler failed; client state may be out of sync.',
+            { messageType: msgType },
+          )
         }
       }
     }
@@ -339,8 +395,7 @@ class WebSocketManager {
         clearTimeout(conn.connectTimer)
         conn.connectTimer = null
       }
-      this.stopPingLoop(sessionId)
-      this.stopPongWatcher(sessionId)
+      this.stopTimers(conn)
       conn.state = 'closed'
       if (!conn.intentionalClose && this.connections.get(sessionId) === conn) {
         if (event.code === 1008 || event.code === 4401 || event.code === 4403) {
@@ -381,6 +436,9 @@ class WebSocketManager {
       errorCount: 0,
       parseFailures: 0,
       pathPrefix: '/ws',
+      lastHandlerErrorNotifyAt: 0,
+      lastServerSeq: 0,
+      lastSeqGapNotifyAt: 0,
     }
   }
 
@@ -418,8 +476,7 @@ class WebSocketManager {
     if (!conn) return
 
     conn.intentionalClose = true
-    this.stopPingLoop(sessionId)
-    this.stopPongWatcher(sessionId)
+    this.stopTimers(conn)
     if (conn.reconnectTimer) {
       clearTimeout(conn.reconnectTimer)
       conn.reconnectTimer = null
@@ -561,40 +618,52 @@ class WebSocketManager {
     this.preRegisteredHandlers.delete(sessionId)
   }
 
-  private startPingLoop(sessionId: string) {
-    this.stopPingLoop(sessionId)
-    const conn = this.connections.get(sessionId)
-    if (!conn) return
+  private stopTimers(conn: Connection) {
+    if (conn.pingInterval) {
+      clearInterval(conn.pingInterval)
+      conn.pingInterval = null
+    }
+    if (conn.pongWatcher) {
+      clearInterval(conn.pongWatcher)
+      conn.pongWatcher = null
+    }
+  }
+
+  private startPingLoop(sessionId: string, conn: Connection) {
+    if (conn.pingInterval) {
+      clearInterval(conn.pingInterval)
+      conn.pingInterval = null
+    }
     conn.pingInterval = setInterval(() => {
+      if (this.connections.get(sessionId) !== conn) {
+        this.stopTimers(conn)
+        return
+      }
       this.send(sessionId, { type: 'ping' })
     }, PING_INTERVAL_MS)
   }
 
-  private stopPingLoop(sessionId: string) {
-    const conn = this.connections.get(sessionId)
-    if (conn?.pingInterval) {
-      clearInterval(conn.pingInterval)
-      conn.pingInterval = null
+  private startPongWatcher(sessionId: string, conn: Connection) {
+    if (conn.pongWatcher) {
+      clearInterval(conn.pongWatcher)
+      conn.pongWatcher = null
     }
-  }
-
-  private startPongWatcher(sessionId: string) {
-    this.stopPongWatcher(sessionId)
-    const conn = this.connections.get(sessionId)
-    if (!conn) return
     conn.pongWatcher = setInterval(() => {
-      const c = this.connections.get(sessionId)
-      if (!c || c.state !== 'open') return
-      if (c.lastPongAt === 0) return
+      if (this.connections.get(sessionId) !== conn) {
+        this.stopTimers(conn)
+        return
+      }
+      if (conn.state !== 'open') return
+      if (conn.lastPongAt === 0) return
       const now = Date.now()
-      const sincePong = now - c.lastPongAt
-      const sinceActivity = now - c.lastActivityAt
+      const sincePong = now - conn.lastPongAt
+      const sinceActivity = now - conn.lastActivityAt
       if (sincePong > PONG_TIMEOUT_MS && sinceActivity > PONG_TIMEOUT_MS) {
         console.warn(
           `[wsManager] connection silent (pong ${sincePong}ms / activity ${sinceActivity}ms) for session=${sessionId}; forcing reconnect`,
         )
         try {
-          c.ws.close()
+          conn.ws.close()
         } catch (err) {
           console.warn('[wsManager] force close on pong timeout failed', err)
         }
@@ -602,17 +671,9 @@ class WebSocketManager {
     }, PONG_WATCHER_TICK_MS)
   }
 
-  private stopPongWatcher(sessionId: string) {
-    const conn = this.connections.get(sessionId)
-    if (conn?.pongWatcher) {
-      clearInterval(conn.pongWatcher)
-      conn.pongWatcher = null
-    }
-  }
-
   private scheduleReconnect(sessionId: string, conn: Connection) {
     if (conn.reconnectTimer) {
-      clearTimeout(conn.reconnectTimer)
+      return
     }
 
     if (conn.reconnectAttempt >= MAX_RECONNECT_ATTEMPTS) {
@@ -641,9 +702,14 @@ class WebSocketManager {
 
   private markAbandoned(sessionId: string, conn: Connection, reason: string) {
     conn.state = 'abandoned'
+    this.stopTimers(conn)
     if (conn.reconnectTimer) {
       clearTimeout(conn.reconnectTimer)
       conn.reconnectTimer = null
+    }
+    if (conn.connectTimer) {
+      clearTimeout(conn.connectTimer)
+      conn.connectTimer = null
     }
     console.warn(
       `[wsManager] session=${sessionId} abandoned after ${conn.reconnectAttempt} attempts (reason=${reason})`,

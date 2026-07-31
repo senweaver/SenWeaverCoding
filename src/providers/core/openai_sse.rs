@@ -59,12 +59,21 @@ pub struct StreamUsageInfo {
 
     #[serde(default)]
     pub prompt_tokens_details: Option<StreamUsagePromptDetails>,
+
+    #[serde(default)]
+    pub completion_tokens_details: Option<StreamUsageCompletionDetails>,
 }
 
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct StreamUsagePromptDetails {
     #[serde(default)]
     pub cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct StreamUsageCompletionDetails {
+    #[serde(default)]
+    pub reasoning_tokens: Option<u64>,
 }
 
 impl StreamUsageInfo {
@@ -76,6 +85,10 @@ impl StreamUsageInfo {
             .prompt_tokens_details
             .as_ref()
             .and_then(|d| d.cached_tokens);
+        let reasoning = self
+            .completion_tokens_details
+            .as_ref()
+            .and_then(|d| d.reasoning_tokens);
         if prompt.is_none() && completion.is_none() && cached.is_none() {
             return None;
         }
@@ -90,6 +103,7 @@ impl StreamUsageInfo {
             output_tokens: completion,
             cached_input_tokens: cached,
             cache_creation_input_tokens: None,
+            reasoning_tokens: reasoning,
         })
     }
 }
@@ -263,13 +277,16 @@ impl StreamToolCallAccumulator {
         serde_json::from_str::<serde_json::Value>(arguments).is_ok()
     }
 
-    pub fn into_provider_tool_call(self) -> Option<ProviderToolCall> {
+    pub fn into_provider_tool_call(
+        self,
+        kind: crate::providers::sanitize::ProviderKind,
+    ) -> Option<ProviderToolCall> {
         let name = self.name?;
         let normalized_arguments =
             crate::providers::sanitize::normalize_tool_call_arguments(&name, self.arguments);
 
         Some(ProviderToolCall {
-            id: crate::providers::sanitize::normalize_tool_call_id(self.id),
+            id: crate::providers::sanitize::normalize_tool_call_id_for_provider(self.id, kind),
             name,
             arguments: normalized_arguments,
         })
@@ -470,6 +487,7 @@ pub fn sse_bytes_to_chunks(
 pub fn sse_bytes_to_events(
     response: reqwest::Response,
     count_tokens: bool,
+    provider_kind: crate::providers::sanitize::ProviderKind,
 ) -> stream::BoxStream<'static, StreamResult<StreamEvent>> {
     let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
 
@@ -660,7 +678,13 @@ pub fn sse_bytes_to_events(
                                         return;
                                     }
                                 }
-                                if choice.finish_reason.as_deref() == Some("tool_calls") {
+                                if matches!(
+                                    choice
+                                        .finish_reason
+                                        .as_deref()
+                                        .and_then(crate::providers::traits::StopReason::from_wire),
+                                    Some(crate::providers::traits::StopReason::ToolCalls)
+                                ) {
                                     should_emit_tool_calls = true;
                                 }
                             }
@@ -669,7 +693,7 @@ pub fn sse_bytes_to_events(
                                 emitted_tool_calls = true;
                                 for tool_call in tool_calls
                                     .drain(..)
-                                    .filter_map(StreamToolCallAccumulator::into_provider_tool_call)
+                                    .filter_map(|acc| acc.into_provider_tool_call(provider_kind))
                                 {
                                     made_progress = true;
                                     if tx.send(Ok(StreamEvent::ToolCall(tool_call))).await.is_err()
@@ -713,7 +737,7 @@ pub fn sse_bytes_to_events(
             }
             for tool_call in tool_calls
                 .drain(..)
-                .filter_map(StreamToolCallAccumulator::into_provider_tool_call)
+                .filter_map(|acc| acc.into_provider_tool_call(provider_kind))
             {
                 made_progress = true;
                 if tx.send(Ok(StreamEvent::ToolCall(tool_call))).await.is_err() {

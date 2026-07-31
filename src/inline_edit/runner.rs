@@ -342,6 +342,7 @@ fn apply_error_to_failure_kind(err: &ApplyError) -> Option<FailureKind> {
     match err {
         ApplyError::EmptyDiff => None,
         ApplyError::HunkMismatch { .. } => Some(FailureKind::ContextMismatch),
+        ApplyError::HunkCountMismatch { .. } => Some(FailureKind::ContextMismatch),
         ApplyError::Parse(_) => Some(FailureKind::ContextMismatch),
         ApplyError::LlmError(_) => None,
         ApplyError::Validation { reasons } => {

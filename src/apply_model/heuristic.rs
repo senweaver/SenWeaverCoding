@@ -99,6 +99,10 @@ struct Hunk {
     old_start: usize,
 
     lines: Vec<String>,
+
+    declared_old: Option<i64>,
+
+    declared_new: Option<i64>,
 }
 
 #[derive(Debug, Clone)]
@@ -330,6 +334,8 @@ fn parse_hunks(diff: &str) -> Result<Vec<Hunk>, ApplyError> {
             current = Some(Hunk {
                 old_start: header.old_start,
                 lines: Vec::new(),
+                declared_old: header.old_count,
+                declared_new: header.new_count,
             });
             continue;
         }
@@ -410,7 +416,47 @@ fn parse_hunks(diff: &str) -> Result<Vec<Hunk>, ApplyError> {
     if let Some(h) = current {
         hunks.push(h);
     }
+    validate_hunk_counts(&hunks)?;
     Ok(hunks)
+}
+
+fn validate_hunk_counts(hunks: &[Hunk]) -> Result<(), ApplyError> {
+    let mut problems: Vec<String> = Vec::new();
+    for (idx, hunk) in hunks.iter().enumerate() {
+        let (Some(declared_old), Some(declared_new)) = (hunk.declared_old, hunk.declared_new)
+        else {
+            continue;
+        };
+        let mut actual_old = 0i64;
+        let mut actual_new = 0i64;
+        for line in &hunk.lines {
+            match line.as_bytes().first() {
+                Some(b'\\') => {}
+                Some(b'-') => actual_old += 1,
+                Some(b'+') => actual_new += 1,
+                _ => {
+                    actual_old += 1;
+                    actual_new += 1;
+                }
+            }
+        }
+        if actual_old != declared_old || actual_new != declared_new {
+            problems.push(format!(
+                "hunk {} at old line {} declares -{declared_old}/+{declared_new} but body \
+                 contains {actual_old} old / {actual_new} new lines (the diff is likely \
+                 truncated or miscounted; regenerate it against the current file contents)",
+                idx + 1,
+                hunk.old_start,
+            ));
+        }
+    }
+    if problems.is_empty() {
+        Ok(())
+    } else {
+        Err(ApplyError::HunkCountMismatch {
+            details: problems.join("; "),
+        })
+    }
 }
 
 struct ParsedHunkHeader {

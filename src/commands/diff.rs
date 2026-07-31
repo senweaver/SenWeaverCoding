@@ -25,26 +25,22 @@ pub async fn handle_diff(ctx: CommandContext) -> CommandResult {
 
     match output {
         Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = crate::util::decode_subprocess_bytes(&out.stdout);
+            let stderr = crate::util::decode_subprocess_bytes(&out.stderr);
             if out.status.success() {
                 let text = if stdout.is_empty() && stderr.is_empty() {
                     "No changes.".to_string()
                 } else if !stdout.is_empty() {
-                    stdout.into_owned()
+                    stdout
                 } else {
-                    stderr.into_owned()
+                    stderr
                 };
                 CommandResult::ok(text)
             } else {
                 CommandResult::err(format!(
                     "git diff failed (exit {}): {}",
                     out.status.code().unwrap_or(-1),
-                    if stderr.is_empty() {
-                        stdout.into_owned()
-                    } else {
-                        stderr.into_owned()
-                    }
+                    if stderr.is_empty() { stdout } else { stderr }
                 ))
             }
         }

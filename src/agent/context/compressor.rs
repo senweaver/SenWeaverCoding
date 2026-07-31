@@ -703,12 +703,19 @@ fn is_compaction_banner(content: &str) -> bool {
 
 const EVICTED_OUTPUT_MARKER: &str = "[tool output evicted";
 
-fn eviction_placeholder(bytes: usize) -> String {
-    format!(
-        "{EVICTED_OUTPUT_MARKER} during context compaction ({bytes} bytes). The result is no \
-         longer in context — re-run the tool or re-read the file if these details are needed \
-         again.]"
-    )
+fn eviction_placeholder(bytes: usize, blob_id: Option<&str>) -> String {
+    match blob_id {
+        Some(id) => format!(
+            "{EVICTED_OUTPUT_MARKER} during context compaction ({bytes} bytes; archived as \
+             blob {id} — call tool_result_expand with this id to retrieve it). Otherwise \
+             re-run the tool or re-read the file if these details are needed again.]"
+        ),
+        None => format!(
+            "{EVICTED_OUTPUT_MARKER} during context compaction ({bytes} bytes). The result \
+             is no longer in context — re-run the tool or re-read the file if these details \
+             are needed again.]"
+        ),
+    }
 }
 
 fn evict_tool_message_content(msg: &mut ChatMessage, min_bytes: usize) -> bool {
@@ -718,17 +725,21 @@ fn evict_tool_message_content(msg: &mut ChatMessage, min_bytes: usize) -> bool {
     if let Ok(mut value) = serde_json::from_str::<serde_json::Value>(&msg.content) {
         if let Some(obj) = value.as_object_mut() {
             if obj.contains_key("tool_call_id") {
-                let payload_len = obj
+                let payload = obj
                     .get("content")
                     .and_then(|c| c.as_str())
-                    .map(str::len)
-                    .unwrap_or(0);
-                if payload_len < min_bytes {
+                    .map(str::to_string)
+                    .unwrap_or_default();
+                if payload.len() < min_bytes {
                     return false;
                 }
+                let blob_id = crate::agent::history::blob_store::put(&payload);
                 obj.insert(
                     "content".to_string(),
-                    serde_json::Value::String(eviction_placeholder(payload_len)),
+                    serde_json::Value::String(eviction_placeholder(
+                        payload.len(),
+                        blob_id.as_deref(),
+                    )),
                 );
                 if let Ok(serialized) = serde_json::to_string(&value) {
                     msg.content = serialized;
@@ -742,7 +753,8 @@ fn evict_tool_message_content(msg: &mut ChatMessage, min_bytes: usize) -> bool {
         return false;
     }
     let bytes = msg.content.len();
-    msg.content = eviction_placeholder(bytes);
+    let blob_id = crate::agent::history::blob_store::put(&msg.content);
+    msg.content = eviction_placeholder(bytes, blob_id.as_deref());
     true
 }
 

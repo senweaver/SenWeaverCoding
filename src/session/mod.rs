@@ -34,10 +34,13 @@ pub use resource_lock::{
     global_workspace_resources,
     has_read_in_current_session, install_global as install_global_workspace_resources,
     is_stale_for_current_session,
-    record_read_for_current_session, record_write_for_current_session, scope_session_context,
-    stale_file_error_message, subagent_session_context,
+    record_observed_for_current_session, record_read_for_current_session,
+    record_write_for_current_session, scope_session_context,
+    stale_file_error_message, subagent_session_context, subagent_session_context_at,
 };
-pub use run_state::{SessionRunGuard, SessionRunStateEvent, SessionRunStateRegistry};
+pub use run_state::{
+    SessionRunGuard, SessionRunStateEvent, SessionRunStateRegistry, is_session_running_global,
+};
 pub use turn_feed::{
     SessionTurnFeed, TurnFeedGuard, deregister_turn_feed, get_turn_feed, register_turn_feed,
 };

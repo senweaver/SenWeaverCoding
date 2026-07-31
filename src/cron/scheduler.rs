@@ -1160,7 +1160,7 @@ where
         }
     }
 
-    (String::from_utf8_lossy(&collected).into_owned(), truncated)
+    (crate::util::decode_subprocess_bytes(&collected), truncated)
 }
 
 fn build_cron_shell_command(
@@ -1171,7 +1171,7 @@ fn build_cron_shell_command(
     let mut cmd = {
         use std::os::windows::process::CommandExt;
         let mut std_cmd = crate::util::hidden_sync_command("cmd.exe");
-        std_cmd.arg("/C").raw_arg(command);
+        std_cmd.arg("/S").arg("/C").raw_arg(command);
         tokio::process::Command::from(std_cmd)
     };
     #[cfg(not(target_os = "windows"))]

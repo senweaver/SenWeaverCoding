@@ -76,8 +76,29 @@ fn insert_session_workspace(guard: &mut FsConfinement, id: String, root: PathBuf
     if guard.session_workspaces.len() >= MAX_SESSION_WORKSPACES
         && !guard.session_workspaces.contains_key(&id)
     {
-        if let Some(victim) = guard.session_workspaces.keys().next().cloned() {
-            guard.session_workspaces.remove(&victim);
+        let victim = guard
+            .session_workspaces
+            .keys()
+            .find(|k| crate::session::is_session_running_global(k) == Some(false))
+            .or_else(|| {
+                guard
+                    .session_workspaces
+                    .keys()
+                    .find(|k| crate::session::is_session_running_global(k).is_none())
+            })
+            .cloned();
+        match victim {
+            Some(victim) => {
+                guard.session_workspaces.remove(&victim);
+            }
+            None => {
+                tracing::warn!(
+                    session_id = %id,
+                    count = guard.session_workspaces.len(),
+                    "sandbox: all tracked session workspaces are live; growing past soft cap \
+                     rather than relaxing an active session's confinement"
+                );
+            }
         }
     }
     guard.session_workspaces.insert(id, root);
@@ -302,15 +323,18 @@ pub fn sandbox_allows_path(path: &Path) -> bool {
     {
         let guard = confinement().read();
         if guard.enabled {
-            let session_root = crate::session::current_session_context()
+            let session_ctx = crate::session::current_session_context();
+            let session_root = session_ctx
+                .as_ref()
                 .and_then(|c| guard.session_workspaces.get(&c.session_id).cloned());
             let session_scoped = session_root.is_some();
+            let has_session_ctx = session_ctx.is_some();
             let effective_root = session_root.or_else(|| guard.workspace.clone());
             if let Some(ws) = effective_root.as_ref() {
                 if path_within(path, ws) {
                     return true;
                 }
-                if !session_scoped {
+                if !has_session_ctx {
                     if let Ok(cwd) = std::env::current_dir() {
                         if path_within(path, &resolve_real_path(&cwd)) {
                             return true;

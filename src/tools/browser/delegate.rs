@@ -291,12 +291,12 @@ impl Tool for BrowserDelegateTool {
 
         match result {
             Ok(Ok(output)) => {
-                let mut stdout = String::from_utf8_lossy(&output.stdout).to_string();
+                let mut stdout = crate::util::decode_subprocess_bytes(&output.stdout);
                 if stdout.len() > MAX_STDOUT_BYTES {
                     crate::util::truncate_string_bytes(&mut stdout, MAX_STDOUT_BYTES);
                     stdout.push_str("\n... [stdout truncated at 1MB]");
                 }
-                let stderr = String::from_utf8_lossy(&output.stderr);
+                let stderr = crate::util::decode_subprocess_bytes(&output.stderr);
                 let stderr_truncated: String = stderr.chars().take(MAX_STDERR_CHARS).collect();
 
                 if output.status.success() {

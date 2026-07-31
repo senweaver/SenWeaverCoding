@@ -117,8 +117,16 @@ impl PipelineTool {
         steps: &[PipelineStep],
     ) -> std::result::Result<Vec<StepResult>, PipelineError> {
         let mut results: Vec<StepResult> = Vec::with_capacity(steps.len());
+        let cancel_token = crate::providers::current_session_cancel_token();
 
         for (i, step) in steps.iter().enumerate() {
+            if cancel_token.as_ref().is_some_and(|t| t.is_cancelled()) {
+                return Err(PipelineError::StepFailed {
+                    index: i,
+                    tool: step.tool.clone(),
+                    message: "pipeline cancelled by session".to_string(),
+                });
+            }
             let tool = self
                 .find_tool(&step.tool)
                 .ok_or_else(|| PipelineError::UnknownTool(step.tool.clone()))?;
@@ -189,8 +197,31 @@ impl PipelineTool {
         }
 
         let mut results: Vec<StepResult> = Vec::with_capacity(steps.len());
+        let cancel_token = crate::providers::current_session_cancel_token();
 
-        while let Some(join_result) = join_set.join_next().await {
+        loop {
+            let join_result = match cancel_token.as_ref() {
+                Some(token) => tokio::select! {
+                    biased;
+                    () = token.cancelled() => {
+                        join_set.abort_all();
+                        while join_set.join_next().await.is_some() {}
+                        return Err(PipelineError::StepFailed {
+                            index: 0,
+                            tool: "pipeline".to_string(),
+                            message: "pipeline cancelled by session".to_string(),
+                        });
+                    }
+                    next = join_set.join_next() => match next {
+                        Some(result) => result,
+                        None => break,
+                    },
+                },
+                None => match join_set.join_next().await {
+                    Some(result) => result,
+                    None => break,
+                },
+            };
             let (index, tool_name, tool_result) =
                 join_result.map_err(|e| PipelineError::StepFailed {
                     index: 0,

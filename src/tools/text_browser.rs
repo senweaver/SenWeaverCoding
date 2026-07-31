@@ -237,7 +237,7 @@ impl Tool for TextBrowserTool {
         match result {
             Ok(Ok(output)) => {
                 if output.status.success() {
-                    let text = String::from_utf8_lossy(&output.stdout).into_owned();
+                    let text = crate::util::decode_subprocess_bytes(&output.stdout);
                     let text = self.truncate_response(&text);
                     let text =
                         crate::security::prompt_guard::core::PromptGuard::screen_untrusted_web_content(
@@ -249,7 +249,7 @@ impl Tool for TextBrowserTool {
                         error: None,
                     })
                 } else {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    let stderr = crate::util::decode_subprocess_bytes(&output.stderr);
                     Ok(ToolResult {
                         success: false,
                         output: String::new(),

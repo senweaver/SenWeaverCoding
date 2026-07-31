@@ -19,6 +19,8 @@ type Props = {
   className?: string
 
   scale?: 'default' | 'chat'
+
+  streaming?: boolean
 }
 
 function shouldRenderAsMermaid(block: CodeBlock): boolean {
@@ -28,7 +30,7 @@ function shouldRenderAsMermaid(block: CodeBlock): boolean {
 const ENHANCE_CACHE = new Map<string, string>()
 const ENHANCE_CACHE_MAX = 200
 
-function enhanceMarkdownHtml(html: string): string {
+function enhanceMarkdownHtml(html: string, cacheWrite = true): string {
   const cached = ENHANCE_CACHE.get(html)
   if (cached !== undefined) return cached
 
@@ -58,11 +60,13 @@ function enhanceMarkdownHtml(html: string): string {
   })
 
   const result = container.innerHTML
-  if (ENHANCE_CACHE.size >= ENHANCE_CACHE_MAX) {
-    const oldest = ENHANCE_CACHE.keys().next().value
-    if (oldest !== undefined) ENHANCE_CACHE.delete(oldest)
+  if (cacheWrite) {
+    if (ENHANCE_CACHE.size >= ENHANCE_CACHE_MAX) {
+      const oldest = ENHANCE_CACHE.keys().next().value
+      if (oldest !== undefined) ENHANCE_CACHE.delete(oldest)
+    }
+    ENHANCE_CACHE.set(html, result)
   }
-  ENHANCE_CACHE.set(html, result)
   return result
 }
 
@@ -126,6 +130,15 @@ const CHAT_DOCUMENT_PROSE_CLASSES = `
   prose-li:my-1
   prose-table:my-0`
 
+function hashHtmlPartKey(content: string): string {
+  let hash = 5381
+  const max = Math.min(content.length, 128)
+  for (let i = 0; i < max; i++) {
+    hash = ((hash << 5) + hash + content.charCodeAt(i)) | 0
+  }
+  return (hash >>> 0).toString(36)
+}
+
 function getProseClasses(
   variant: 'default' | 'document',
   className?: string,
@@ -148,7 +161,7 @@ function getProseClasses(
   return chunks.filter(Boolean).join(' ')
 }
 
-export function MarkdownRenderer({ content, variant = 'default', className, scale = 'default' }: Props) {
+export function MarkdownRenderer({ content, variant = 'default', className, scale = 'default', streaming = false }: Props) {
   const [parsed, setParsed] = useState<{ source: string; result: ParsedMarkdown } | null>(() => {
     const cached = getCachedMarkdown(content)
     return cached ? { source: content, result: cached } : null
@@ -163,13 +176,13 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
       return
     }
     let stale = false
-    void parseMarkdownAsync(content).then((result) => {
+    void parseMarkdownAsync(content, { cacheWrite: !streaming }).then((result) => {
       if (!stale) setParsed({ source: content, result })
     })
     return () => {
       stale = true
     }
-  }, [content])
+  }, [content, streaming])
 
   const active = parsed ? parsed.result : null
   const html = active?.html ?? ''
@@ -180,31 +193,40 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
   )
 
   const parts = useMemo(() => {
+    const raw: Array<{ type: 'html'; content: string } | { type: 'code'; block: CodeBlock }> = []
     if (codeBlocks.length === 0) {
-      return [{ type: 'html' as const, content: html }]
-    }
+      raw.push({ type: 'html' as const, content: html })
+    } else {
+      let remaining = html
 
-    const result: Array<{ type: 'html'; content: string } | { type: 'code'; block: CodeBlock }> = []
-    let remaining = html
+      for (const block of codeBlocks) {
+        const marker = `<div data-codeblock-id="${block.id}"></div>`
+        const idx = remaining.indexOf(marker)
+        if (idx === -1) continue
 
-    for (const block of codeBlocks) {
-      const marker = `<div data-codeblock-id="${block.id}"></div>`
-      const idx = remaining.indexOf(marker)
-      if (idx === -1) continue
-
-      const before = remaining.slice(0, idx)
-      if (before) {
-        result.push({ type: 'html', content: before })
+        const before = remaining.slice(0, idx)
+        if (before) {
+          raw.push({ type: 'html', content: before })
+        }
+        raw.push({ type: 'code', block })
+        remaining = remaining.slice(idx + marker.length)
       }
-      result.push({ type: 'code', block })
-      remaining = remaining.slice(idx + marker.length)
+
+      if (remaining) {
+        raw.push({ type: 'html', content: remaining })
+      }
     }
 
-    if (remaining) {
-      result.push({ type: 'html', content: remaining })
-    }
-
-    return result
+    const seen = new Map<string, number>()
+    return raw.map((part) => {
+      if (part.type === 'code') {
+        return { part, key: `code:${part.block.id}` }
+      }
+      const h = hashHtmlPartKey(part.content)
+      const occurrence = (seen.get(h) ?? 0) + 1
+      seen.set(h, occurrence)
+      return { part, key: `html:${h}:${occurrence}` }
+    })
   }, [html, codeBlocks])
 
   const handleClick = useCallback(async (event: React.MouseEvent<HTMLDivElement>) => {
@@ -236,7 +258,7 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
   }
 
   if (codeBlocks.length === 0) {
-    const cleanHtml = enhanceMarkdownHtml(html)
+    const cleanHtml = enhanceMarkdownHtml(html, !streaming)
     return (
       <div
         className={proseClasses}
@@ -248,12 +270,12 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
 
   return (
     <div className={proseClasses} onClick={handleClick}>
-      {parts.map((part, i) =>
+      {parts.map(({ part, key }) =>
         part.type === 'html' ? (
-          <div key={i} dangerouslySetInnerHTML={{ __html: enhanceMarkdownHtml(part.content) }} />
+          <div key={key} dangerouslySetInnerHTML={{ __html: enhanceMarkdownHtml(part.content, !streaming) }} />
         ) : shouldRenderAsMermaid(part.block) ? (
           <Suspense
-            key={part.block.id}
+            key={key}
             fallback={
               <pre className="my-4 overflow-x-auto rounded bg-[var(--color-surface-2,rgba(0,0,0,0.04))] p-3 text-xs">
                 {part.block.code}
@@ -263,7 +285,7 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
             <MermaidRenderer code={part.block.code} />
           </Suspense>
         ) : (
-          <div key={part.block.id} className="my-4">
+          <div key={key} className="my-4">
             <CodeViewer
               code={part.block.code}
               language={part.block.language}

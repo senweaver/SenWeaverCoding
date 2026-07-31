@@ -940,7 +940,84 @@ pub fn scrub_secret_patterns(input: &str) -> String {
         }
     }
 
+    scrubbed = scrub_auth_key_values(scrubbed);
+    scrubbed = scrub_high_entropy_runs(&scrubbed);
+
     scrubbed
+}
+
+fn scrub_auth_key_values(input: String) -> String {
+    const KEYS: [&str; 6] = [
+        "authorization",
+        "api-key",
+        "x-api-key",
+        "apikey",
+        "api_key",
+        "access_token",
+    ];
+    let mut scrubbed = input;
+    for key in KEYS {
+        loop {
+            let Some(rel) = scrubbed.to_ascii_lowercase().find(key) else {
+                break;
+            };
+            let after_key = rel + key.len();
+            let bytes = scrubbed.as_bytes();
+            let mut cursor = after_key;
+            while cursor < bytes.len()
+                && matches!(bytes[cursor], b':' | b'=' | b' ' | b'"' | b'\'' | b'\t')
+            {
+                cursor += 1;
+            }
+            for scheme in ["Bearer ", "bearer ", "Basic ", "basic "] {
+                if scrubbed[cursor..].starts_with(scheme) {
+                    cursor += scheme.len();
+                    break;
+                }
+            }
+            let end = token_end(&scrubbed, cursor);
+            if end > cursor {
+                scrubbed.replace_range(cursor..end, "[REDACTED]");
+            } else {
+                scrubbed.replace_range(rel..after_key, "[REDACTED_KEY]");
+            }
+        }
+    }
+    scrubbed
+}
+
+fn scrub_high_entropy_runs(input: &str) -> String {
+    fn is_run_char(c: char) -> bool {
+        c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-')
+    }
+    let mut out = String::with_capacity(input.len());
+    let chars: Vec<char> = input.chars().collect();
+    let mut i = 0;
+    while i < chars.len() {
+        if is_run_char(chars[i]) {
+            let start = i;
+            let mut has_digit = false;
+            let mut has_alpha = false;
+            while i < chars.len() && is_run_char(chars[i]) {
+                if chars[i].is_ascii_digit() {
+                    has_digit = true;
+                } else if chars[i].is_ascii_alphabetic() {
+                    has_alpha = true;
+                }
+                i += 1;
+            }
+            let run: String = chars[start..i].iter().collect();
+            if run.len() >= 32 && has_digit && has_alpha {
+                out.push_str("[REDACTED]");
+            } else {
+                out.push_str(&run);
+            }
+        } else {
+            out.push(chars[i]);
+            i += 1;
+        }
+    }
+    out
 }
 
 pub(crate) fn record_text_path_usage(
@@ -955,6 +1032,7 @@ pub(crate) fn record_text_path_usage(
         output_tokens,
         cached_input_tokens,
         cache_creation_input_tokens: None,
+        reasoning_tokens: None,
     };
     let _ = crate::agent::reward::cost_tracking::record_tool_loop_cost_usage(
         provider_name,
@@ -1056,6 +1134,20 @@ impl ProviderError {
     #[must_use]
     pub fn is_retryable(&self) -> bool {
         crate::services::api::is_retryable(self.category())
+    }
+}
+
+#[must_use]
+pub fn current_session_cancel_token() -> Option<tokio_util::sync::CancellationToken> {
+    crate::session::current_session_context()
+        .and_then(|ctx| crate::session::get_turn_feed(&ctx.session_id))
+        .map(|feed| feed.current_cancel_token())
+}
+
+pub async fn stream_cancelled(token: &Option<tokio_util::sync::CancellationToken>) {
+    match token {
+        Some(token) => token.cancelled().await,
+        None => std::future::pending::<()>().await,
     }
 }
 

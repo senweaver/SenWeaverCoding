@@ -41,6 +41,9 @@ pub struct AgentRuntimeExtras {
     #[serde(default = "default_fast_apply_timeout_secs")]
     pub fast_apply_timeout_secs: u64,
 
+    #[serde(default = "default_apply_ladder_enabled")]
+    pub apply_ladder_enabled: bool,
+
     #[serde(default)]
     pub self_consistency: SelfConsistencyConfig,
 }
@@ -117,6 +120,9 @@ fn default_fast_apply_temperature() -> f64 {
 fn default_fast_apply_timeout_secs() -> u64 {
     15
 }
+fn default_apply_ladder_enabled() -> bool {
+    true
+}
 
 impl Default for AgentRuntimeExtras {
     fn default() -> Self {
@@ -132,6 +138,7 @@ impl Default for AgentRuntimeExtras {
             fast_apply_model: None,
             fast_apply_temperature: default_fast_apply_temperature(),
             fast_apply_timeout_secs: default_fast_apply_timeout_secs(),
+            apply_ladder_enabled: default_apply_ladder_enabled(),
             self_consistency: SelfConsistencyConfig::default(),
         }
     }

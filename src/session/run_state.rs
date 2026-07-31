@@ -3,13 +3,22 @@
 // Licensed under the MIT License.
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock, Weak};
 
 use parking_lot::RwLock;
 use serde::Serialize;
 use tokio::sync::broadcast;
 
 const RUN_STATE_BROADCAST_CAPACITY: usize = 256;
+
+static GLOBAL_RUN_STATE: OnceLock<Weak<SessionRunStateRegistry>> = OnceLock::new();
+
+pub fn is_session_running_global(session_id: &str) -> Option<bool> {
+    GLOBAL_RUN_STATE
+        .get()
+        .and_then(Weak::upgrade)
+        .map(|registry| registry.is_running(session_id))
+}
 
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -26,10 +35,12 @@ pub struct SessionRunStateRegistry {
 impl SessionRunStateRegistry {
     pub fn new() -> Arc<Self> {
         let (tx, _) = broadcast::channel(RUN_STATE_BROADCAST_CAPACITY);
-        Arc::new(Self {
+        let registry = Arc::new(Self {
             inner: RwLock::new(HashSet::new()),
             tx,
-        })
+        });
+        let _ = GLOBAL_RUN_STATE.set(Arc::downgrade(&registry));
+        registry
     }
 
     pub fn snapshot(&self) -> Vec<String> {

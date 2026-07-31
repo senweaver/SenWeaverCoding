@@ -446,13 +446,13 @@ async fn run_acceptance_check(
 ) -> Result<(), String> {
     use std::process::Stdio;
 
-    let (shell, flag) = if cfg!(windows) {
-        ("cmd", "/C")
+    let (shell, shell_args): (&str, &[&str]) = if cfg!(windows) {
+        ("cmd", &["/S", "/C"])
     } else {
-        ("sh", "-c")
+        ("sh", &["-c"])
     };
     let mut cmd = crate::util::hidden_async_command(shell);
-    cmd.arg(flag).arg(verify_cmd);
+    cmd.args(shell_args).arg(verify_cmd);
     if !cwd.as_os_str().is_empty() {
         cmd.current_dir(cwd);
     }
@@ -474,8 +474,8 @@ async fn run_acceptance_check(
         }
     };
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = crate::util::decode_subprocess_bytes(&output.stdout);
+    let stderr = crate::util::decode_subprocess_bytes(&output.stderr);
 
     if !output.status.success() {
         let code = output.status.code().unwrap_or(-1);

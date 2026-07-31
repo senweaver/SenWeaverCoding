@@ -163,7 +163,7 @@ impl Tool for SkillShellTool {
         let mut cmd = {
             use std::os::windows::process::CommandExt;
             let mut c = crate::util::hidden_sync_command("cmd.exe");
-            c.arg("/C").raw_arg(&command);
+            c.arg("/S").arg("/C").raw_arg(&command);
             tokio::process::Command::from(c)
         };
         #[cfg(not(windows))]
@@ -268,8 +268,8 @@ impl Tool for SkillShellTool {
         let stdout_bytes = stdout_task.await.unwrap_or_default();
         let stderr_bytes = stderr_task.await.unwrap_or_default();
 
-        let mut stdout = String::from_utf8_lossy(&stdout_bytes).to_string();
-        let mut stderr = String::from_utf8_lossy(&stderr_bytes).to_string();
+        let mut stdout = crate::util::decode_subprocess_bytes(&stdout_bytes);
+        let mut stderr = crate::util::decode_subprocess_bytes(&stderr_bytes);
 
         if stdout.len() > MAX_OUTPUT_BYTES {
             let mut b = MAX_OUTPUT_BYTES.min(stdout.len());

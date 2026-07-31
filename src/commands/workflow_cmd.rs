@@ -5,7 +5,7 @@
 use super::registry::{CommandCategory, CommandContext, CommandResult, StaticSlashCommand};
 use std::path::PathBuf;
 
-use crate::agent::scheduler::runtime::{TaskExecutor, TaskSchedulerRuntime};
+use crate::agent::scheduler::runtime::TaskExecutor;
 use crate::agent::workflow_loader::WorkflowSpec;
 use crate::coordinator::delegation::{SubTaskResult, merge_results};
 
@@ -58,12 +58,12 @@ async fn run_workflow(path: &std::path::Path) -> CommandResult {
         Ok(s) => s,
         Err(e) => return CommandResult::err(format!("Failed to load workflow: {e}")),
     };
-    let scheduler = match spec.build_scheduler() {
-        Ok(s) => s,
+    let tasks = match spec.schedulable_tasks() {
+        Ok(t) => t,
         Err(e) => return CommandResult::err(format!("Schedule build failed: {e}")),
     };
 
-    let runtime = TaskSchedulerRuntime::new(scheduler);
+    let runtime = crate::agent::multi_agent_runtime::init_global_runtime();
 
     let config = match crate::config::Config::load_or_init().await {
         Ok(c) => c,
@@ -103,7 +103,19 @@ async fn run_workflow(path: &std::path::Path) -> CommandResult {
     });
 
     let started = std::time::Instant::now();
-    let outcomes = runtime.run(exec).await;
+    let outcomes = match runtime
+        .submit_task_graph_with_context(
+            tasks,
+            spec.max_parallel,
+            exec,
+            None,
+            crate::providers::current_session_cancel_token(),
+        )
+        .await
+    {
+        Ok(outcomes) => outcomes,
+        Err(e) => return CommandResult::err(format!("Workflow execution failed: {e}")),
+    };
     let elapsed = started.elapsed();
 
     let results: Vec<SubTaskResult> = outcomes

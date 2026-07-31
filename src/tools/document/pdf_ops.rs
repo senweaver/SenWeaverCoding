@@ -102,6 +102,17 @@ impl PdfOpsTool {
     }
 
     async fn emit_written(&self, target: &std::path::Path, bytes: &[u8]) {
+        let _write_guard = match crate::session::acquire_file_write_guard(target).await {
+            Ok(guard) => guard,
+            Err(e) => {
+                tracing::warn!(
+                    target = %target.display(),
+                    error = %e,
+                    "pdf_ops: failed to acquire file write lock; skipping write"
+                );
+                return;
+            }
+        };
         let before = tokio::fs::read(target).await.ok();
         if tokio::fs::write(target, bytes).await.is_ok() {
             crate::session::record_write_for_current_session(target);

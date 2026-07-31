@@ -11,7 +11,7 @@ use crate::observability::coordination_metrics;
 
 const MAX_HISTORY_ENTRIES: usize = 10_000;
 const MAX_OUTBOX_ENTRIES: usize = 4_096;
-const CONTEXT_WINDOW_BYTES: usize = 64;
+const CONTEXT_WINDOW_BYTES: usize = 256;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
@@ -124,9 +124,13 @@ fn snap_right(text: &str, mut i: usize) -> usize {
     i
 }
 
-pub fn context_pair_hash(text: &str, before_end: usize, after_start: usize) -> String {
+fn window_before(text: &str, before_end: usize) -> &str {
     let be = snap_left(text, before_end);
     let bs = snap_left(text, be.saturating_sub(CONTEXT_WINDOW_BYTES));
+    &text[bs..be]
+}
+
+fn window_after(text: &str, after_start: usize) -> &str {
     let a_start = snap_right(text, after_start.min(text.len()));
     let a_end = snap_right(
         text,
@@ -134,12 +138,30 @@ pub fn context_pair_hash(text: &str, before_end: usize, after_start: usize) -> S
             .saturating_add(CONTEXT_WINDOW_BYTES)
             .min(text.len()),
     );
-    let mut buf = String::with_capacity((be - bs) + (a_end - a_start) + 1);
-    buf.push_str(&text[bs..be]);
-    buf.push('\u{1}');
     if a_start < a_end {
-        buf.push_str(&text[a_start..a_end]);
+        &text[a_start..a_end]
+    } else {
+        ""
     }
+}
+
+pub fn context_pair_hash(text: &str, before_end: usize, after_start: usize) -> String {
+    let before = window_before(text, before_end);
+    let after = window_after(text, after_start);
+    let mut buf = String::with_capacity(before.len() + after.len() + 1);
+    buf.push_str(before);
+    buf.push('\u{1}');
+    buf.push_str(after);
+    region_hash(&buf)
+}
+
+pub fn replace_context_hash(before: &str, region: &str, after: &str) -> String {
+    let mut buf = String::with_capacity(before.len() + region.len() + after.len() + 2);
+    buf.push_str(before);
+    buf.push('\u{1}');
+    buf.push_str(region);
+    buf.push('\u{1}');
+    buf.push_str(after);
     region_hash(&buf)
 }
 
@@ -244,7 +266,11 @@ impl Document {
                         "replace range {start}..{end} is not aligned to UTF-8 boundaries"
                     )));
                 }
-                let pre_hash = Some(region_hash(&self.text[start..end]));
+                let pre_hash = Some(replace_context_hash(
+                    window_before(&self.text, start),
+                    &self.text[start..end],
+                    window_after(&self.text, end),
+                ));
                 self.text.replace_range(start..end, new_text);
                 let clock = self.next_clock();
                 self.record_local(CrdtUpdate::Replace {
@@ -335,6 +361,12 @@ impl Document {
                 new_text,
                 ..
             } => {
+                let after_start = byte_range.start.saturating_add(new_text.len());
+                let pre_hash = Some(replace_context_hash(
+                    window_before(&self.text, byte_range.start),
+                    old_text,
+                    window_after(&self.text, after_start),
+                ));
                 let clock = self.next_clock();
                 self.record_local(CrdtUpdate::Replace {
                     clock,
@@ -343,7 +375,7 @@ impl Document {
                     start: byte_range.start,
                     end: byte_range.end,
                     text: new_text.clone(),
-                    pre_hash: Some(region_hash(old_text)),
+                    pre_hash,
                 });
             }
             EditOp::Insert {
@@ -461,7 +493,15 @@ impl Document {
                     Err("replace range out of bounds for local text")
                 } else {
                     match pre_hash {
-                        Some(h) if region_hash(&self.text[*start..*end]) == *h => Ok(()),
+                        Some(h)
+                            if replace_context_hash(
+                                window_before(&self.text, *start),
+                                &self.text[*start..*end],
+                                window_after(&self.text, *end),
+                            ) == *h =>
+                        {
+                            Ok(())
+                        }
                         Some(_) => Err("replace pre-image mismatch"),
                         None => Err("replace missing pre-image"),
                     }

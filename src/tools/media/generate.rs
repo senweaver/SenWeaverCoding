@@ -409,6 +409,7 @@ impl MediaGenTool {
             };
             let path = Self::unique_output_path(&out_dir, &name_base, ext);
             tokio::fs::write(&path, &bytes).await?;
+            crate::session::record_write_for_current_session(&path);
             crate::agent::designer::record_artifact_if_designer(&path);
             saved.push(path.display().to_string());
         }

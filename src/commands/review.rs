@@ -23,7 +23,7 @@ fn git_output(args: &[&str], cwd: &std::path::Path) -> Option<String> {
         .current_dir(cwd)
         .output()
         .ok()?;
-    let text = String::from_utf8_lossy(&output.stdout).to_string();
+    let text = crate::util::decode_subprocess_bytes(&output.stdout);
     if text.trim().is_empty() { None } else { Some(text) }
 }
 

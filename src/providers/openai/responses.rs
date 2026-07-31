@@ -173,6 +173,10 @@ impl OpenAiResponsesProvider {
                 output_tokens: u.output_tokens,
                 cached_input_tokens: cached,
                 cache_creation_input_tokens: None,
+                reasoning_tokens: u
+                    .output_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.reasoning_tokens),
             }
         });
         let text = parsed.collect_text();
@@ -253,12 +257,20 @@ struct ResponsesUsage {
     output_tokens: Option<u64>,
     #[serde(default)]
     input_tokens_details: Option<ResponsesUsageDetails>,
+    #[serde(default)]
+    output_tokens_details: Option<ResponsesOutputTokensDetails>,
 }
 
 #[derive(Debug, Deserialize)]
 struct ResponsesUsageDetails {
     #[serde(default)]
     cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResponsesOutputTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
 }
 
 impl ResponsesPayload {
@@ -282,17 +294,12 @@ impl ResponsesPayload {
     fn stop_reason(&self, has_tool_calls: bool) -> Option<crate::providers::traits::StopReason> {
         use crate::providers::traits::StopReason;
         match self.status.as_deref() {
-            Some("incomplete") => {
-                match self
-                    .incomplete_details
-                    .as_ref()
-                    .and_then(|d| d.reason.as_deref())
-                {
-                    Some("max_output_tokens") => Some(StopReason::Length),
-                    Some("content_filter") => Some(StopReason::ContentFilter),
-                    _ => Some(StopReason::Length),
-                }
-            }
+            Some("incomplete") => self
+                .incomplete_details
+                .as_ref()
+                .and_then(|d| d.reason.as_deref())
+                .and_then(StopReason::from_wire)
+                .or(Some(StopReason::Length)),
             Some("completed") => {
                 if has_tool_calls {
                     Some(StopReason::ToolCalls)
@@ -361,10 +368,14 @@ impl ResponsesPayload {
                 .clone()
                 .or_else(|| item.id.clone())
                 .unwrap_or_else(|| format!("call_{}", uuid::Uuid::new_v4().simple()));
+            let arguments = crate::providers::sanitize::normalize_tool_call_arguments(
+                name,
+                item.arguments.clone().unwrap_or_default(),
+            );
             calls.push(ProviderToolCall {
                 id,
                 name: name.clone(),
-                arguments: item.arguments.clone().unwrap_or_else(|| "{}".to_string()),
+                arguments,
             });
         }
         calls
@@ -718,6 +729,10 @@ impl Provider for OpenAiResponsesProvider {
                 output_tokens: u.output_tokens,
                 cached_input_tokens: cached,
                 cache_creation_input_tokens: None,
+                reasoning_tokens: u
+                    .output_tokens_details
+                    .as_ref()
+                    .and_then(|d| d.reasoning_tokens),
             }
         });
         let raw = parsed.collect_text();

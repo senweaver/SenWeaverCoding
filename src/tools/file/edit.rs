@@ -120,7 +120,14 @@ fn find_eol_insensitive_unique(content: &str, old_string: &str) -> Option<(usize
     let orig_start = offsets[first];
     let last_norm_idx = norm_end - 1;
     let last_orig_idx = offsets[last_norm_idx];
-    let last_width = if bytes[last_orig_idx] == b'\r' { 2 } else { 1 };
+    let last_width = if bytes[last_orig_idx] == b'\r'
+        && last_orig_idx + 1 < bytes.len()
+        && bytes[last_orig_idx + 1] == b'\n'
+    {
+        2
+    } else {
+        1
+    };
     let orig_end = last_orig_idx + last_width;
     let span_had_crlf = content[orig_start..orig_end].contains("\r\n");
     Some((orig_start, orig_end, span_had_crlf))
@@ -450,32 +457,47 @@ impl Tool for FileEditTool {
             }
         }
 
-        match mode {
+        let diag_paths = [resolved_target.clone()];
+        let diag_baseline =
+            crate::code_intel::post_edit_diagnostics::baseline(&diag_paths).await;
+
+        let mut result = match mode {
             EditMode::Replace => {
                 let old_string = old_string
                     .ok_or_else(|| anyhow::anyhow!("'old_string' is required for mode 'replace'"))?;
                 self.execute_replace(&args, old_string, new_string, &resolved_target, path)
-                    .await
+                    .await?
             }
             EditMode::Append => {
                 self.execute_append(new_string, &resolved_target, path)
-                    .await
+                    .await?
             }
             EditMode::InsertAfter => {
                 let old_string = old_string.ok_or_else(|| {
                     anyhow::anyhow!("'old_string' is required for mode 'insert_after'")
                 })?;
                 self.execute_insert_after(old_string, new_string, &resolved_target, path)
-                    .await
+                    .await?
             }
             EditMode::InsertBefore => {
                 let old_string = old_string.ok_or_else(|| {
                     anyhow::anyhow!("'old_string' is required for mode 'insert_before'")
                 })?;
                 self.execute_insert_before(old_string, new_string, &resolved_target, path)
-                    .await
+                    .await?
+            }
+        };
+        if result.success {
+            if let Some(feedback) = crate::code_intel::post_edit_diagnostics::new_error_feedback(
+                &diag_paths,
+                &diag_baseline,
+            )
+            .await
+            {
+                result.output.push_str(&feedback);
             }
         }
+        Ok(result)
     }
 }
 
@@ -737,6 +759,7 @@ impl FileEditTool {
                         &content, old_string, new_string,
                     )
                 {
+                    let adjusted_new = adapt_text_to_eol(&adjusted_new, dominant_eol(&content));
                     let mut out =
                         String::with_capacity(content.len() + adjusted_new.len());
                     out.push_str(&content[..ws_start]);

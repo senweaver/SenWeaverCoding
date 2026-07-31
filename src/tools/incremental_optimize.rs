@@ -636,11 +636,16 @@ impl Tool for IncrementalOptimizeTool {
                     output_lines.push(format!("Running verification: {cmd}"));
 
                     let shell = if cfg!(windows) { "cmd" } else { "sh" };
-                    let shell_arg = if cfg!(windows) { "/C" } else { "-c" };
+                    let shell_args: &[&str] = if cfg!(windows) {
+                        &["/S", "/C"]
+                    } else {
+                        &["-c"]
+                    };
 
                     let mut verify_cmd = crate::util::hidden_async_command(shell);
                     verify_cmd
-                        .args([shell_arg, cmd])
+                        .args(shell_args)
+                        .arg(cmd)
                         .current_dir(self.project_workspace())
                         .env_clear()
                         .envs(std::env::vars().filter(|(k, _)| {
@@ -725,8 +730,8 @@ impl Tool for IncrementalOptimizeTool {
 
                     match result {
                         Ok(output) => {
-                            let stdout = String::from_utf8_lossy(&output.stdout);
-                            let stderr = String::from_utf8_lossy(&output.stderr);
+                            let stdout = crate::util::decode_subprocess_bytes(&output.stdout);
+                            let stderr = crate::util::decode_subprocess_bytes(&output.stderr);
                             let exit_code = output.status.code().unwrap_or(-1);
                             if output.status.success() {
                                 output_lines.push(format!(

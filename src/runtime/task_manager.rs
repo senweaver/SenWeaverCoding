@@ -152,6 +152,51 @@ where
     })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShutdownOutcome {
+    Completed,
+    CancelledGraceful,
+    Aborted,
+}
+
+pub async fn shutdown_with_grace(
+    cancel: Option<&tokio_util::sync::CancellationToken>,
+    join_handles: Vec<JoinHandle<()>>,
+    normal_wait: Option<std::time::Duration>,
+    grace: std::time::Duration,
+) -> ShutdownOutcome {
+    const POST_ABORT_REAP: std::time::Duration = std::time::Duration::from_secs(2);
+
+    let abort_handles: Vec<AbortHandle> =
+        join_handles.iter().map(JoinHandle::abort_handle).collect();
+    let mut join_all = Box::pin(async move {
+        for mut handle in join_handles {
+            let _ = (&mut handle).await;
+        }
+    });
+
+    if let Some(wait) = normal_wait {
+        if tokio::time::timeout(wait, &mut join_all).await.is_ok() {
+            return ShutdownOutcome::Completed;
+        }
+    }
+    if let Some(token) = cancel {
+        token.cancel();
+    }
+    if tokio::time::timeout(grace, &mut join_all).await.is_ok() {
+        return if normal_wait.is_none() && cancel.is_none() {
+            ShutdownOutcome::Completed
+        } else {
+            ShutdownOutcome::CancelledGraceful
+        };
+    }
+    for handle in &abort_handles {
+        handle.abort();
+    }
+    let _ = tokio::time::timeout(POST_ABORT_REAP, &mut join_all).await;
+    ShutdownOutcome::Aborted
+}
+
 pub fn abort_all() -> usize {
     let infos: Vec<TaskInfo> = {
         let mut guard = REGISTRY.lock();

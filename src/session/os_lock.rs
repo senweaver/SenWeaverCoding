@@ -13,17 +13,31 @@ pub struct OsAdvisoryLock {
 
 impl OsAdvisoryLock {
     pub fn lock_path_for_key(key: &str) -> PathBuf {
+        Self::lock_path_for_key_in(None, key)
+    }
+
+    pub fn lock_path_for_key_in(workspace_root: Option<&Path>, key: &str) -> PathBuf {
         use sha2::{Digest, Sha256};
         let digest = Sha256::digest(key.as_bytes());
         let name = format!("{}.lock", hex::encode(&digest[..16]));
-        std::env::temp_dir()
-            .join("senweavercoding")
-            .join("locks")
-            .join(name)
+        match workspace_root {
+            Some(root) => root.join(".sen").join("locks").join(name),
+            None => std::env::temp_dir()
+                .join("senweavercoding")
+                .join("locks")
+                .join(name),
+        }
     }
 
     pub fn try_acquire_key(key: &str) -> io::Result<Option<Self>> {
-        let path = Self::lock_path_for_key(key);
+        Self::try_acquire_key_in(None, key)
+    }
+
+    pub fn try_acquire_key_in(
+        workspace_root: Option<&Path>,
+        key: &str,
+    ) -> io::Result<Option<Self>> {
+        let path = Self::lock_path_for_key_in(workspace_root, key);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }

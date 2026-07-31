@@ -438,7 +438,9 @@ impl ScriptHookRunner {
 
         if !output.status.success() {
 
-            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            let stderr = crate::util::decode_subprocess_bytes(&output.stderr)
+                .trim()
+                .to_string();
             return HookDecision::Deny {
                 user_message: Some(format!("hook `{}` exited non-zero", cmd.command)),
                 agent_message: if stderr.is_empty() {
@@ -449,7 +451,7 @@ impl ScriptHookRunner {
             };
         }
 
-        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stdout = crate::util::decode_subprocess_bytes(&output.stdout);
         let trimmed = stdout.trim();
         if trimmed.is_empty() {
             return HookDecision::Allow;
@@ -460,7 +462,7 @@ impl ScriptHookRunner {
 
                 tracing::debug!(
                     command = cmd.command,
-                    stdout = trimmed,
+                    stdout = %crate::agent::profile::pii_sanitize::scrub_credentials(trimmed),
                     "hook script returned non-JSON output; allowing"
                 );
                 HookDecision::Allow
@@ -597,7 +599,7 @@ fn build_shell_command(line: &str) -> tokio::process::Command {
     {
         use std::os::windows::process::CommandExt;
         let mut c = crate::util::hidden_sync_command("cmd.exe");
-        c.arg("/C").raw_arg(line);
+        c.arg("/S").arg("/C").raw_arg(line);
         tokio::process::Command::from(c)
     }
     #[cfg(not(target_os = "windows"))]

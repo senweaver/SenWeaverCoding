@@ -95,11 +95,11 @@ impl GitOperationsTool {
                 })??;
 
         if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stderr = crate::util::decode_subprocess_bytes(&output.stderr);
             anyhow::bail!("Git command failed: {stderr}");
         }
 
-        Ok(String::from_utf8_lossy(&output.stdout).to_string())
+        Ok(crate::util::decode_subprocess_bytes(&output.stdout))
     }
 
     async fn git_status(

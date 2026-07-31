@@ -347,8 +347,8 @@ impl Verifier for TestRunnerVerifier {
         };
 
         let exit_ok = output.status.success();
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        let stderr = crate::util::decode_subprocess_bytes(&output.stderr);
+        let stdout = crate::util::decode_subprocess_bytes(&output.stdout);
 
         match parser {
             ParserKind::CargoJson => {

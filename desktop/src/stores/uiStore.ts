@@ -205,6 +205,16 @@ type UIStore = {
 }
 
 let toastCounter = 0
+const MAX_TOASTS = 5
+const toastTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function clearToastTimer(id: string) {
+  const timer = toastTimers.get(id)
+  if (timer) {
+    clearTimeout(timer)
+    toastTimers.delete(id)
+  }
+}
 
 export const useUIStore = create<UIStore>((set, get) => ({
   theme: getStoredTheme(),
@@ -346,23 +356,62 @@ export const useUIStore = create<UIStore>((set, get) => ({
   clearEditorCloseRequest: () => set({ editorCloseRequest: null }),
 
   addToast: (toast) => {
-    const id = `toast-${++toastCounter}`
-    set((s) => ({ toasts: [...s.toasts, { ...toast, id }] }))
+    let toastId = ''
+    set((s) => {
+      const duplicate = s.toasts.find(
+        (t) =>
+          t.type === toast.type &&
+          t.message === toast.message &&
+          t.sessionId === toast.sessionId,
+      )
+      if (duplicate) {
+        toastId = duplicate.id
+        return {
+          toasts: s.toasts.map((t) =>
+            t.id === duplicate.id ? { ...toast, id: duplicate.id } : t,
+          ),
+        }
+      }
+      const id = `toast-${++toastCounter}`
+      toastId = id
+      const next = [...s.toasts, { ...toast, id }]
+      while (next.length > MAX_TOASTS) {
+        const evicted = next.shift()
+        if (evicted) {
+          clearToastTimer(evicted.id)
+          try {
+            evicted.onDismiss?.()
+          } catch {
+          }
+        }
+      }
+      return { toasts: next }
+    })
 
+    clearToastTimer(toastId)
     const duration = toast.duration ?? 4000
     if (duration > 0) {
-      setTimeout(() => {
-        const existing = get().toasts.find((t) => t.id === id)
-        if (existing) {
-          existing.onDismiss?.()
-          set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
-        }
-      }, duration)
+      const id = toastId
+      toastTimers.set(
+        id,
+        setTimeout(() => {
+          toastTimers.delete(id)
+          const existing = get().toasts.find((t) => t.id === id)
+          if (existing) {
+            try {
+              existing.onDismiss?.()
+            } catch {
+            }
+            set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) }))
+          }
+        }, duration),
+      )
     }
   },
 
   removeToast: (id) =>
     set((s) => {
+      clearToastTimer(id)
       const target = s.toasts.find((t) => t.id === id)
       if (target?.onDismiss) {
         try {

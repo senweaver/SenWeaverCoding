@@ -25,6 +25,7 @@ use crate::tools::web::fetch::{FetchController, FetchedPage};
 
 pub const BRIDGE_MODE_ENV: &str = "SEN_DESKTOP_BRIDGE";
 pub const BRIDGE_TOKEN_ENV: &str = "SEN_DESKTOP_BRIDGE_TOKEN";
+pub const BRIDGE_TOKEN_HEADER: &str = "x-sen-bridge-token";
 
 const DEFAULT_REQUEST_TIMEOUT: Duration = Duration::from_secs(15);
 const SCREENSHOT_TIMEOUT: Duration = Duration::from_secs(60);
@@ -189,12 +190,28 @@ pub async fn handle_bridge_ws(
         return reject;
     }
     let expected = std::env::var(BRIDGE_TOKEN_ENV).unwrap_or_default();
-    if !expected.is_empty() {
-        let provided = params.get("token").map(String::as_str).unwrap_or("");
-        if provided != expected {
-            return (axum::http::StatusCode::UNAUTHORIZED, "invalid bridge token")
-                .into_response();
-        }
+    if expected.is_empty() {
+        tracing::warn!(
+            target: "gateway.desktop_bridge",
+            "rejecting desktop bridge connection: {BRIDGE_TOKEN_ENV} is not configured"
+        );
+        return (
+            axum::http::StatusCode::UNAUTHORIZED,
+            "desktop bridge token not configured",
+        )
+            .into_response();
+    }
+    let provided = headers
+        .get(BRIDGE_TOKEN_HEADER)
+        .and_then(|v| v.to_str().ok())
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+        .map(str::to_string)
+        .or_else(|| params.get("token").cloned())
+        .unwrap_or_default();
+    if !crate::security::pairing::constant_time_eq(&provided, &expected) {
+        return (axum::http::StatusCode::UNAUTHORIZED, "invalid bridge token")
+            .into_response();
     }
     ws.on_upgrade(handle_bridge_socket)
 }

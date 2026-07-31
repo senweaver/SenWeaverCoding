@@ -44,5 +44,5 @@ async fn run_git(cwd: &Path, args: &[&str]) -> Option<String> {
     if !output.status.success() {
         return None;
     }
-    Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    Some(crate::util::decode_subprocess_bytes(&output.stdout))
 }

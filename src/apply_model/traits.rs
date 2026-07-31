@@ -62,6 +62,8 @@ pub enum ApplyError {
     Validation { reasons: Vec<String> },
     #[error("malformed unified diff: {0}")]
     Parse(String),
+    #[error("hunk body line counts do not match @@ header: {details}")]
+    HunkCountMismatch { details: String },
 
     #[error("llm refine failed: {0}")]
     LlmError(String),

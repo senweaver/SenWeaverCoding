@@ -218,6 +218,7 @@ impl Tool for CuratorGitReferenceTool {
             .map_err(|e| anyhow::anyhow!("curator_git_reference: internal task error: {e}"))??;
 
             if let Some(after) = persisted.sources_after.as_deref() {
+                crate::session::record_write_for_current_session(&persisted.sources_path);
                 crate::agent::file_edit_emitter::emit_file_edit(
                     &persisted.sources_path,
                     persisted.sources_before.as_deref(),
@@ -227,6 +228,7 @@ impl Tool for CuratorGitReferenceTool {
                 .await;
             }
             if let Some(after) = persisted.notes_after.as_deref() {
+                crate::session::record_write_for_current_session(&persisted.notes_path);
                 crate::agent::file_edit_emitter::emit_file_edit(
                     &persisted.notes_path,
                     persisted.notes_before.as_deref(),
@@ -545,7 +547,7 @@ async fn ensure_clone(
     };
     let elapsed_ms = started.elapsed().as_millis();
     if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+        let stderr = crate::util::decode_subprocess_bytes(&output.stderr);
         let cleaned = stderr.lines().take(6).collect::<Vec<_>>().join(" | ");
         anyhow::bail!(
             "git clone exit {}: {}",
@@ -569,10 +571,10 @@ async fn resolve_commit_sha(target_dir: &Path) -> anyhow::Result<String> {
     if !output.status.success() {
         anyhow::bail!(
             "git rev-parse failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            crate::util::decode_subprocess_bytes(&output.stderr).trim()
         );
     }
-    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+    Ok(crate::util::decode_subprocess_bytes(&output.stdout).trim().to_string())
 }
 
 fn pathdiff_or_self(target: &Path, base: &Path) -> String {

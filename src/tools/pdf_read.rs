@@ -153,6 +153,8 @@ impl Tool for PdfReadTool {
             }
         };
 
+        crate::session::record_observed_for_current_session(&resolved_path);
+
         #[cfg(feature = "rag-pdf")]
         {
             let text = match tokio::task::spawn_blocking(move || {

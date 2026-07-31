@@ -294,7 +294,7 @@ impl MultiAgentRuntime {
         max_parallel: usize,
         executor: TaskExecutor,
     ) -> Result<Vec<TaskOutcome>, String> {
-        self.submit_task_graph_with_context(tasks, max_parallel, executor, None)
+        self.submit_task_graph_with_context(tasks, max_parallel, executor, None, None)
             .await
     }
 
@@ -304,6 +304,7 @@ impl MultiAgentRuntime {
         max_parallel: usize,
         executor: TaskExecutor,
         parent_agent_id: Option<String>,
+        parent_cancel: Option<tokio_util::sync::CancellationToken>,
     ) -> Result<Vec<TaskOutcome>, String> {
         if tasks.is_empty() {
             return Err("submit_task_graph: task list is empty".into());
@@ -345,7 +346,20 @@ impl MultiAgentRuntime {
         }
 
         let runtime = TaskSchedulerRuntime::new(scheduler);
+        let cancel_bridge = parent_cancel.map(|parent| {
+            let scheduler_token = runtime.cancellation_token();
+            crate::runtime::spawn_supervised(
+                "multi_agent_runtime.cancel_bridge",
+                async move {
+                    parent.cancelled().await;
+                    scheduler_token.cancel();
+                },
+            )
+        });
         let outcomes = runtime.run_with_context(executor, span_ctx).await;
+        if let Some(bridge) = cancel_bridge {
+            bridge.abort();
+        }
 
         for outcome in &outcomes {
             self.blackboard.inner().write_with_ttl(

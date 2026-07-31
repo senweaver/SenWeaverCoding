@@ -281,6 +281,19 @@ struct GeminiUsageMetadata {
     prompt_token_count: Option<u64>,
     #[serde(default, rename = "candidatesTokenCount")]
     candidates_token_count: Option<u64>,
+    #[serde(default, rename = "thoughtsTokenCount")]
+    thoughts_token_count: Option<u64>,
+}
+
+impl GeminiUsageMetadata {
+    fn output_tokens_with_thoughts(&self) -> Option<u64> {
+        match (self.candidates_token_count, self.thoughts_token_count) {
+            (Some(candidates), Some(thoughts)) => Some(candidates + thoughts),
+            (Some(candidates), None) => Some(candidates),
+            (None, Some(thoughts)) => Some(thoughts),
+            (None, None) => None,
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -335,10 +348,14 @@ impl CandidateContent {
 
         for part in self.parts {
             if let Some(function_call) = part.function_call {
-                let arguments = function_call
+                let raw = function_call
                     .args
                     .map(|v| serde_json::to_string(&v).unwrap_or_else(|_| "{}".to_string()))
-                    .unwrap_or_else(|| "{}".to_string());
+                    .unwrap_or_default();
+                let arguments = crate::providers::sanitize::normalize_tool_call_arguments(
+                    &function_call.name,
+                    raw,
+                );
                 tool_calls.push(ProviderToolCall {
                     id: uuid::Uuid::new_v4().to_string(),
                     name: function_call.name,
@@ -1120,9 +1137,10 @@ impl GeminiProvider {
         let result = self.send_raw_request(request, model).await?;
         let usage = result.usage_metadata.as_ref().map(|u| TokenUsage {
             input_tokens: u.prompt_token_count,
-            output_tokens: u.candidates_token_count,
+            output_tokens: u.output_tokens_with_thoughts(),
             cached_input_tokens: None,
             cache_creation_input_tokens: None,
+            reasoning_tokens: u.thoughts_token_count,
         });
         let text = result
             .candidates
@@ -1350,9 +1368,10 @@ impl GeminiProvider {
 
         let usage = result.usage_metadata.as_ref().map(|u| TokenUsage {
             input_tokens: u.prompt_token_count,
-            output_tokens: u.candidates_token_count,
+            output_tokens: u.output_tokens_with_thoughts(),
             cached_input_tokens: None,
             cache_creation_input_tokens: None,
+            reasoning_tokens: u.thoughts_token_count,
         });
 
         let first = result.candidates.and_then(|c| c.into_iter().next());
@@ -1947,6 +1966,7 @@ impl Provider for GeminiProvider {
         >(64);
 
         let idempotency_key = crate::providers::core::idempotency::current_idempotency_key();
+        let cancel_token = crate::providers::current_session_cancel_token();
         crate::runtime::spawn_supervised("providers.gemini.stream", async move {
             let response = match crate::providers::core::idempotency::apply_idempotency_header_value(
                 client.post(&url),
@@ -1986,7 +2006,11 @@ impl Provider for GeminiProvider {
             let mut saw_stop_reason = false;
             let mut stream_ended = false;
             while !stream_ended {
-                match byte_stream.next().await {
+                let next_bytes = tokio::select! {
+                    _ = crate::providers::stream_cancelled(&cancel_token) => return,
+                    next = byte_stream.next() => next,
+                };
+                match next_bytes {
                     Some(Ok(chunk)) => {
                         parser.push(&chunk);
                         if parser.overflowed() {
@@ -2034,9 +2058,10 @@ impl Provider for GeminiProvider {
                     if let Some(usage) = parsed.usage_metadata.as_ref() {
                         last_usage = Some(TokenUsage {
                             input_tokens: usage.prompt_token_count,
-                            output_tokens: usage.candidates_token_count,
+                            output_tokens: usage.output_tokens_with_thoughts(),
                             cached_input_tokens: None,
                             cache_creation_input_tokens: None,
+                            reasoning_tokens: usage.thoughts_token_count,
                         });
                     }
                     let Some(candidate) = parsed.candidates.and_then(|c| c.into_iter().next())

@@ -186,6 +186,7 @@ impl Tool for PresentFilesTool {
             if is_text && size <= MAX_INLINE_SIZE {
                 match tokio::fs::read_to_string(&full_path).await {
                     Ok(content) => {
+                        crate::session::record_read_for_current_session(&full_path);
                         let lang = match ext.as_str() {
                             "rs" => "rust",
                             "py" => "python",

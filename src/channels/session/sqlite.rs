@@ -848,11 +848,20 @@ impl SessionBackend for SqliteSessionBackend {
     fn set_session_name(&self, session_key: &str, name: &str) -> std::io::Result<()> {
         let conn = self.writer.lock();
         let name_val = if name.is_empty() { None } else { Some(name) };
-        conn.execute(
-            "UPDATE session_metadata SET name = ?1 WHERE session_key = ?2",
-            params![name_val, session_key],
-        )
-        .map_err(std::io::Error::other)?;
+        let now = Utc::now().to_rfc3339();
+        let affected = conn
+            .execute(
+                "INSERT INTO session_metadata (session_key, created_at, last_activity, message_count, name)
+                 VALUES (?2, ?3, ?3, 0, ?1)
+                 ON CONFLICT(session_key) DO UPDATE SET name = excluded.name",
+                params![name_val, session_key, now],
+            )
+            .map_err(std::io::Error::other)?;
+        if affected == 0 {
+            return Err(std::io::Error::other(format!(
+                "set_session_name affected 0 rows for session {session_key}"
+            )));
+        }
         Ok(())
     }
 
@@ -869,11 +878,20 @@ impl SessionBackend for SqliteSessionBackend {
     fn set_session_work_dir(&self, session_key: &str, dir: &str) -> std::io::Result<()> {
         let conn = self.writer.lock();
         let dir_val = dir.trim();
-        conn.execute(
-            "UPDATE session_metadata SET work_dir = ?1 WHERE session_key = ?2",
-            params![dir_val, session_key],
-        )
-        .map_err(std::io::Error::other)?;
+        let now = Utc::now().to_rfc3339();
+        let affected = conn
+            .execute(
+                "INSERT INTO session_metadata (session_key, created_at, last_activity, message_count, work_dir)
+                 VALUES (?2, ?3, ?3, 0, ?1)
+                 ON CONFLICT(session_key) DO UPDATE SET work_dir = excluded.work_dir",
+                params![dir_val, session_key, now],
+            )
+            .map_err(std::io::Error::other)?;
+        if affected == 0 {
+            return Err(std::io::Error::other(format!(
+                "set_session_work_dir affected 0 rows for session {session_key}"
+            )));
+        }
         Ok(())
     }
 

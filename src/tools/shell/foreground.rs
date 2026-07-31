@@ -85,6 +85,17 @@ pub(crate) fn build_cancelled_output(stdout: &str, stderr: &str) -> String {
     }
 }
 
+struct ForegroundRegistration {
+    session_id: String,
+    token: u64,
+}
+
+impl Drop for ForegroundRegistration {
+    fn drop(&mut self) {
+        registry::unregister_foreground(&self.session_id, self.token);
+    }
+}
+
 struct StreamReaderHandle {
     rx: tokio::sync::oneshot::Receiver<String>,
     buf: Arc<Mutex<Vec<u8>>>,
@@ -182,19 +193,31 @@ pub(crate) async fn run_foreground_streamed_inner(
     );
 
     let (kill_tx, mut kill_rx) = tokio::sync::oneshot::channel::<()>();
-    let (foreground_token, _kill_tx_keepalive) = if let Some(sid) = mirror_session_id {
+    let (_foreground_registration, _kill_tx_keepalive) = if let Some(sid) = mirror_session_id {
         let connection_id = crate::session::current_connection_id();
+        let token =
+            registry::register_foreground(sid.to_string(), connection_id, kill_tx);
         (
-            Some(registry::register_foreground(
-                sid.to_string(),
-                connection_id,
-                kill_tx,
-            )),
+            Some(ForegroundRegistration {
+                session_id: sid.to_string(),
+                token,
+            }),
             None,
         )
     } else {
         (None, Some(kill_tx))
     };
+
+    let session_cancel = mirror_session_id
+        .and_then(crate::session::get_turn_feed)
+        .map(|feed| feed.current_cancel_token());
+    let session_cancelled = async {
+        match session_cancel.as_ref() {
+            Some(token) => token.cancelled().await,
+            None => std::future::pending::<()>().await,
+        }
+    };
+    tokio::pin!(session_cancelled);
 
     enum WaitOutcome {
         Exited(std::process::ExitStatus),
@@ -245,6 +268,11 @@ pub(crate) async fn run_foreground_streamed_inner(
                 let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
                 break WaitOutcome::Cancelled;
             }
+            _ = &mut session_cancelled => {
+                crate::util::kill_child_process_tree(&mut child).await;
+                let _ = tokio::time::timeout(Duration::from_secs(3), child.wait()).await;
+                break WaitOutcome::Cancelled;
+            }
             _ = heartbeat.tick() => {
                 registry::publish(BackgroundShellSignal::Heartbeat {
                     id: mirror_id.to_string(),
@@ -255,9 +283,7 @@ pub(crate) async fn run_foreground_streamed_inner(
         }
     };
 
-    if let (Some(sid), Some(token)) = (mirror_session_id, foreground_token) {
-        registry::unregister_foreground(sid, token);
-    }
+    drop(_foreground_registration);
 
     if matches!(wait_outcome, WaitOutcome::Background) {
         let partial_stdout = {

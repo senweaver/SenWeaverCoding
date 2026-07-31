@@ -480,6 +480,27 @@ impl OpsApplier {
         }
 
         let unique_paths = unique_touched_paths(&batch);
+
+        let _session_write_guards =
+            match crate::session::acquire_many_file_write_guards(unique_paths.clone()).await {
+                Ok(guards) => guards,
+                Err(e) => {
+                    return Err(ApplyBatchError::Lock(LockProviderError::Acquire(
+                        e.to_string(),
+                    )));
+                }
+            };
+
+        for path in &unique_paths {
+            if crate::session::is_stale_for_current_session(path) {
+                return Err(ApplyBatchError::Apply {
+                    op_index: 0,
+                    path: path.clone(),
+                    source: anyhow::anyhow!(crate::session::stale_file_error_message(path)),
+                });
+            }
+        }
+
         let region_requests = region_requests_for_batch(&batch);
         let _guard = self
             .lock_provider
@@ -718,6 +739,10 @@ impl OpsApplier {
         }
 
         crate::agent::loop_::services::note_code_files_changed(&unique_paths);
+
+        for path in &unique_paths {
+            crate::session::record_write_for_current_session(path);
+        }
 
         if let Some(notifier) = self.lsp_notify.as_ref() {
             let applied_dedup: std::collections::HashSet<PathBuf> =

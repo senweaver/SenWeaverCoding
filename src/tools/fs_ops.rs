@@ -181,6 +181,17 @@ impl Tool for CopyPathTool {
             }
         }
 
+        let _write_guard = match crate::session::acquire_file_write_guard(&dst_path).await {
+            Ok(guard) => guard,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+        };
+
         if src_path.is_dir() {
             copy_dir_recursive(&src_path, &dst_path).await?;
         } else {
@@ -190,6 +201,7 @@ impl Tool for CopyPathTool {
             tokio::fs::copy(&src_path, &dst_path).await?;
         }
 
+        record_writes_for_tree(&dst_path);
         notify_indexes_paths_changed(std::slice::from_ref(&dst_path));
 
         Ok(ToolResult {
@@ -330,12 +342,29 @@ impl Tool for MovePathTool {
             });
         }
 
+        let _write_guards = match crate::session::acquire_many_file_write_guards(vec![
+            src_path.clone(),
+            dst_path.clone(),
+        ])
+        .await
+        {
+            Ok(guards) => guards,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+        };
+
         if let Some(parent) = dst_path.parent() {
             tokio::fs::create_dir_all(parent).await?;
         }
 
         tokio::fs::rename(&src_path, &dst_path).await?;
 
+        record_writes_for_tree(&dst_path);
         notify_indexes_paths_removed(std::slice::from_ref(&src_path));
         notify_indexes_paths_changed(std::slice::from_ref(&dst_path));
 
@@ -344,6 +373,18 @@ impl Tool for MovePathTool {
             output: format!("Moved {src} → {dst}"),
             error: None,
         })
+    }
+}
+
+const MAX_RECORDED_WRITES: usize = 200;
+
+fn record_writes_for_tree(root: &std::path::Path) {
+    if root.is_dir() {
+        for file in collect_files_bounded(root, MAX_RECORDED_WRITES) {
+            crate::session::record_write_for_current_session(&file);
+        }
+    } else if root.is_file() {
+        crate::session::record_write_for_current_session(root);
     }
 }
 
@@ -425,6 +466,17 @@ impl Tool for DeletePathTool {
                 error: Some("Rate limit exceeded".into()),
             });
         }
+
+        let _write_guard = match crate::session::acquire_file_write_guard(&full).await {
+            Ok(guard) => guard,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+        };
 
         const MAX_DELETE_SNAPSHOTS: usize = 200;
         let workspace = self.security.workspace_dir();

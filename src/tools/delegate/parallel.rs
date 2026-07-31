@@ -277,10 +277,14 @@ impl Tool for DelegateParallelTool {
             "delegate_parallel:{}",
             uuid::Uuid::new_v4()
         );
+        let delegation_root_token = crate::session::current_session_context()
+            .and_then(|ctx| crate::session::get_turn_feed(&ctx.session_id))
+            .map(|feed| feed.current_cancel_token().child_token())
+            .unwrap_or_default();
         let _delegation_root_handle = limiter.register(
             delegation_root_id.clone(),
             None,
-            tokio_util::sync::CancellationToken::new(),
+            delegation_root_token,
         );
         let delegation_root_for_exec = delegation_root_id.clone();
 
@@ -294,6 +298,7 @@ impl Tool for DelegateParallelTool {
             .unwrap_or_else(|| {
                 self.workspace_root.read().to_string_lossy().into_owned()
             });
+        let inherited_mode_exec = crate::agent::coding_mode::active_coding_mode();
 
         let effective_runtime: Arc<MultiAgentRuntime> = match global_runtime() {
             Some(rt) => rt,
@@ -328,6 +333,7 @@ impl Tool for DelegateParallelTool {
             let workspace_root = Arc::clone(&workspace_root_exec);
             let delegate_cfg = delegate_cfg_exec.clone();
             let delegation_root = delegation_root_for_exec.clone();
+            let inherited_mode = inherited_mode_exec;
             let rt = Arc::clone(&runtime_exec);
             let subagent_ctx = crate::session::subagent_session_context(
                 "delegate-parallel",
@@ -558,11 +564,67 @@ impl Tool for DelegateParallelTool {
                         agentic_timeout_secs
                             .unwrap_or(delegate_cfg.agentic_timeout_secs.max(1)),
                     );
-                    run_role_agentic(
+                    let worktree = {
+                        let nonce = uuid::Uuid::new_v4().simple().to_string();
+                        let short = &nonce[..8.min(nonce.len())];
+                        let safe_id: String = id
+                            .chars()
+                            .map(|c| {
+                                if c.is_ascii_alphanumeric() || matches!(c, '-' | '_') {
+                                    c
+                                } else {
+                                    '-'
+                                }
+                            })
+                            .take(40)
+                            .collect();
+                        let branch = format!("sen-delegate/{safe_id}-{short}");
+                        let dir_name = format!("delegate-{safe_id}-{short}");
+                        let base_lock = crate::workers::worktree::base_merge_lock(
+                            workspace_dir_buf.as_path(),
+                        );
+                        let _create_guard = base_lock.lock().await;
+                        match crate::workers::worktree::create_named_worktree(
+                            workspace_dir_buf.as_path(),
+                            &branch,
+                            &dir_name,
+                        )
+                        .await
+                        {
+                            Ok(info) => Some(info),
+                            Err(err) => {
+                                tracing::debug!(
+                                    target: "tools.delegate_parallel",
+                                    task_id = %id,
+                                    error = %err,
+                                    "worktree isolation unavailable; subagent runs in the \
+                                     shared workspace under file locks"
+                                );
+                                None
+                            }
+                        }
+                    };
+                    let effective_workspace = worktree
+                        .as_ref()
+                        .map(|w| w.path.clone())
+                        .unwrap_or_else(|| workspace_dir_buf.clone());
+                    let prompt_for_run = match worktree.as_ref() {
+                        Some(w) => format!(
+                            "{prompt}\n\nYou are working in an isolated git worktree at `{}` \
+                             on branch `{}`. Do all file work under that directory (use \
+                             absolute paths based on it). Successful changes are committed \
+                             and merged back into the main workspace automatically after \
+                             this task completes.",
+                            w.path.display(),
+                            w.branch
+                        ),
+                        None => prompt.clone(),
+                    };
+                    let run_fut = run_role_agentic(
                         RoleAgenticCtx {
                             agent_id: agent_info.id.clone(),
                             id: id.clone(),
-                            prompt: prompt.clone(),
+                            prompt: prompt_for_run,
                             provider: provider.as_ref(),
                             provider_name: &provider_name,
                             model: &model,
@@ -572,12 +634,58 @@ impl Tool for DelegateParallelTool {
                             max_iterations,
                             timeout: chosen_timeout,
                             multimodal: &multimodal,
-                            workspace_dir: workspace_dir_buf.as_path(),
+                            workspace_dir: effective_workspace.as_path(),
                             parent_tools: parent_tools_ref,
                             cancel: cancel.clone(),
+                            inherited_mode,
                         },
-                    )
-                    .await
+                    );
+                    let loop_result = match worktree.as_ref() {
+                        Some(info) => {
+                            let wt_ctx = crate::session::subagent_session_context_at(
+                                "delegate-parallel",
+                                &id,
+                                info.path.as_path(),
+                            );
+                            crate::session::scope_session_context(wt_ctx, run_fut).await
+                        }
+                        None => run_fut.await,
+                    };
+                    match worktree {
+                        Some(info) => {
+                            let base_lock =
+                                crate::workers::worktree::base_merge_lock(&info.base);
+                            let _base_guard = base_lock.lock().await;
+                            match loop_result {
+                                Ok(output) => {
+                                    match crate::workers::worktree::commit_and_merge_worker(
+                                        &info,
+                                    )
+                                    .await
+                                    {
+                                        Ok(note) => Ok(format!(
+                                            "{output}\n\n[worktree `{}`] {note}",
+                                            info.branch
+                                        )),
+                                        Err(err) => Ok(format!(
+                                            "{output}\n\n[worktree `{}`] MERGE FAILED — {err}",
+                                            info.branch
+                                        )),
+                                    }
+                                }
+                                Err(e) => {
+                                    let salvage =
+                                        crate::workers::worktree::salvage_worktree(&info)
+                                            .await;
+                                    Err(format!(
+                                        "{e} [worktree `{}`: {}]",
+                                        info.branch, salvage.note
+                                    ))
+                                }
+                            }
+                        }
+                        None => loop_result,
+                    }
                 } else {
 
                     let chat_fut = provider.chat_with_system(
@@ -667,8 +775,17 @@ impl Tool for DelegateParallelTool {
                 "delegate_parallel: max_parallel clamped to subagent concurrency ceiling"
             );
         }
+        let parent_cancel = crate::session::current_session_context()
+            .and_then(|ctx| crate::session::get_turn_feed(&ctx.session_id))
+            .map(|feed| feed.current_cancel_token());
         let outcomes = match effective_runtime
-            .submit_task_graph(schedulable, effective_parallel, exec)
+            .submit_task_graph_with_context(
+                schedulable,
+                effective_parallel,
+                exec,
+                None,
+                parent_cancel,
+            )
             .await
         {
             Ok(o) => o,
@@ -884,6 +1001,7 @@ struct RoleAgenticCtx<'a> {
     workspace_dir: &'a std::path::Path,
     parent_tools: &'a Arc<RwLock<Vec<Arc<dyn Tool>>>>,
     cancel: tokio_util::sync::CancellationToken,
+    inherited_mode: crate::agent::coding_mode::CodingMode,
 }
 
 async fn run_role_agentic(ctx: RoleAgenticCtx<'_>) -> Result<String, String> {
@@ -1036,8 +1154,10 @@ async fn run_role_agentic(ctx: RoleAgenticCtx<'_>) -> Result<String, String> {
     .with_cancellation(Some(ctx.cancel.clone()))
     .with_hooks(delegate_hooks.as_deref())
     .with_on_delta(on_delta_for_loop);
-    let loop_fut =
-        crate::agent::loop_::unified::UnifiedLoop::new(delegated_policy).run(&mut history);
+    let loop_fut = crate::agent::coding_mode::scope_coding_mode(
+        ctx.inherited_mode,
+        crate::agent::loop_::unified::UnifiedLoop::new(delegated_policy).run(&mut history),
+    );
 
     let result = tokio::select! {
         biased;

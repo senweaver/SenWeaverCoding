@@ -31,11 +31,14 @@ pub fn record_usage_calibration(model: &str, estimated_tokens: usize, reported_t
         return;
     }
     let family = family_from_model(model);
-    let prev = CALIBRATION.get(&family).map(|v| *v as f64).unwrap_or(1000.0);
     let base_estimate = (estimated_tokens as f64).max(1.0);
     let target_millis = ((reported_tokens as f64) / base_estimate * 1000.0).clamp(250.0, 4000.0);
-    let next = (prev * 0.8 + target_millis * 0.2).clamp(250.0, 4000.0);
-    CALIBRATION.insert(family, next as u64);
+    CALIBRATION
+        .entry(family)
+        .and_modify(|prev| {
+            *prev = ((*prev as f64) * 0.8 + target_millis * 0.2).clamp(250.0, 4000.0) as u64;
+        })
+        .or_insert_with(|| (1000.0_f64 * 0.8 + target_millis * 0.2).clamp(250.0, 4000.0) as u64);
 }
 
 pub fn calibration_factor_for(model: &str) -> f64 {
@@ -44,6 +47,48 @@ pub fn calibration_factor_for(model: &str) -> f64 {
         .get(family.as_str())
         .map(|v| *v as f64 / 1000.0)
         .unwrap_or(1.0)
+}
+
+struct PromptAnchor {
+    reported: u64,
+    estimated_calibrated: usize,
+    at: std::time::Instant,
+}
+
+static PROMPT_ANCHORS: LazyLock<DashMap<String, PromptAnchor>> = LazyLock::new(DashMap::new);
+
+const PROMPT_ANCHOR_MAX_ENTRIES: usize = 512;
+const PROMPT_ANCHOR_TTL: std::time::Duration = std::time::Duration::from_secs(6 * 3600);
+
+pub fn record_prompt_anchor(session_key: &str, reported: u64, estimated_calibrated: usize) {
+    if session_key.is_empty() || reported == 0 || estimated_calibrated == 0 {
+        return;
+    }
+    if PROMPT_ANCHORS.len() > PROMPT_ANCHOR_MAX_ENTRIES {
+        PROMPT_ANCHORS.retain(|_, anchor| anchor.at.elapsed() < PROMPT_ANCHOR_TTL);
+    }
+    PROMPT_ANCHORS.insert(
+        session_key.to_string(),
+        PromptAnchor {
+            reported,
+            estimated_calibrated,
+            at: std::time::Instant::now(),
+        },
+    );
+}
+
+pub fn anchored_history_tokens(session_key: &str, current_estimate: usize) -> usize {
+    let Some(anchor) = PROMPT_ANCHORS.get(session_key) else {
+        return current_estimate;
+    };
+    if anchor.at.elapsed() > PROMPT_ANCHOR_TTL || anchor.estimated_calibrated == 0 {
+        return current_estimate;
+    }
+    let ratio = (anchor.reported as f64 / anchor.estimated_calibrated as f64).clamp(0.25, 4.0);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        ((current_estimate as f64) * ratio).round() as usize
+    }
 }
 
 #[must_use]

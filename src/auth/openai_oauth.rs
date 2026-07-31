@@ -294,7 +294,7 @@ pub fn parse_code_from_redirect(input: &str, expected_state: Option<&str>) -> Re
 
     if let Some(expected_state) = expected_state {
         if let Some(got) = params.get("state") {
-            if got != expected_state {
+            if !crate::security::pairing::constant_time_eq(got, expected_state) {
                 anyhow::bail!("OAuth state mismatch");
             }
         } else if is_callback_payload {

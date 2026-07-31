@@ -11,6 +11,31 @@ pub struct ShellPreflight {
     pub write_guards: Option<Vec<crate::session::resource_lock::ResourceGuard>>,
 }
 
+impl ShellPreflight {
+    pub fn guarded_write_paths(&self) -> Vec<std::path::PathBuf> {
+        let Some(guards) = &self.write_guards else {
+            return Vec::new();
+        };
+        guards
+            .iter()
+            .filter_map(|guard| match guard.kind() {
+                crate::session::resource_lock::ResourceKind::FileWrite { path } => {
+                    Some(path.clone())
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    pub fn record_guarded_writes(&self) {
+        for path in self.guarded_write_paths() {
+            if path.is_file() {
+                crate::session::record_write_for_current_session(&path);
+            }
+        }
+    }
+}
+
 fn deny(error: String) -> ToolResult {
     ToolResult {
         success: false,

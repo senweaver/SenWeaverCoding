@@ -3515,13 +3515,30 @@ impl Agent {
         let mut body: Vec<ConversationMessage> = self.history.drain(..).collect();
 
         let mut dropped_total = 0usize;
+        let mut dropped_messages: Vec<ConversationMessage> = Vec::new();
         if body.len() > max_messages {
             let drop_count = body.len() - max_messages;
-            body.drain(0..drop_count);
+            dropped_messages.extend(body.drain(0..drop_count));
             dropped_total += drop_count;
         }
 
         let lead_chars: usize = lead.iter().map(|m| Self::msg_char_len(m)).sum();
+
+        {
+            const PROTECT_RECENT: usize = 8;
+            const SHRINK_TIERS: &[usize] = &[48_000, 2_000];
+            for keep_chars in SHRINK_TIERS {
+                let body_chars: usize = body.iter().map(|m| Self::msg_char_len(m)).sum();
+                if lead_chars + body_chars <= MAX_CHARS {
+                    break;
+                }
+                let protect_from = body.len().saturating_sub(PROTECT_RECENT);
+                for msg in body.iter_mut().take(protect_from) {
+                    Self::shrink_tool_content_in_place(msg, *keep_chars);
+                }
+            }
+        }
+
         let mut acc = lead_chars;
         let mut keep_from = body.len();
         for i in (0..body.len()).rev() {
@@ -3533,7 +3550,7 @@ impl Agent {
             keep_from = i;
         }
         if keep_from > 0 {
-            body.drain(0..keep_from);
+            dropped_messages.extend(body.drain(0..keep_from));
             dropped_total += keep_from;
         }
 
@@ -3550,19 +3567,101 @@ impl Agent {
                 dropped = dropped_total,
                 "trim_history removed earlier messages beyond hard history limits; inserting truncation notice"
             );
-            body.insert(
-                0,
-                ConversationMessage::Chat(crate::providers::traits::ChatMessage::user(&format!(
+            let notice = match Self::archive_dropped_history(&dropped_messages) {
+                Some(blob_id) => format!(
+                    "{TRIM_NOTICE_PREFIX} {dropped_total} earlier message(s) were removed \
+                     because the conversation exceeded hard history limits; their content was \
+                     archived as blob {blob_id}; call tool_result_expand with this id to \
+                     retrieve it."
+                ),
+                None => format!(
                     "{TRIM_NOTICE_PREFIX} {dropped_total} earlier message(s) were removed \
                      because the conversation exceeded hard history limits; their content is \
                      no longer available."
-                ))),
+                ),
+            };
+            body.insert(
+                0,
+                ConversationMessage::Chat(crate::providers::traits::ChatMessage::user(&notice)),
             );
         }
 
         lead.append(&mut body);
         self.history = lead;
         Self::repair_orphan_tool_result_messages(&mut self.history);
+    }
+
+    fn archive_dropped_history(dropped: &[ConversationMessage]) -> Option<String> {
+        if dropped.is_empty() {
+            return None;
+        }
+        const ARCHIVE_CAP_BYTES: usize = 6 * 1024 * 1024;
+        let mut buf = String::new();
+        'outer: for msg in dropped {
+            let rendered = match msg {
+                ConversationMessage::Chat(chat) => {
+                    format!("[{}]\n{}\n\n", chat.role, chat.content)
+                }
+                ConversationMessage::AssistantToolCalls { text, tool_calls, .. } => {
+                    let calls = tool_calls
+                        .iter()
+                        .map(|c| c.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                    format!(
+                        "[assistant tool_calls: {calls}]\n{}\n\n",
+                        text.as_deref().unwrap_or("")
+                    )
+                }
+                ConversationMessage::ToolResults(rows) => {
+                    let mut section = String::new();
+                    for row in rows {
+                        section.push_str(&format!(
+                            "[tool result {}]\n{}\n\n",
+                            row.tool_call_id, row.content
+                        ));
+                    }
+                    section
+                }
+            };
+            if buf.len() + rendered.len() > ARCHIVE_CAP_BYTES {
+                buf.push_str("[archive truncated: remaining dropped messages exceeded size cap]\n");
+                break 'outer;
+            }
+            buf.push_str(&rendered);
+        }
+        crate::agent::history::blob_store::put(&buf)
+    }
+
+    fn shrink_tool_content_in_place(msg: &mut ConversationMessage, keep_chars: usize) -> bool {
+        match msg {
+            ConversationMessage::Chat(chat) if chat.role == "tool" => {
+                match crate::agent::history::pruner::shrink_text_layered(
+                    &chat.content,
+                    keep_chars,
+                ) {
+                    Some(shrunk) => {
+                        chat.content = shrunk;
+                        true
+                    }
+                    None => false,
+                }
+            }
+            ConversationMessage::ToolResults(rows) => {
+                let mut changed = false;
+                for row in rows.iter_mut() {
+                    if let Some(shrunk) = crate::agent::history::pruner::shrink_text_layered(
+                        &row.content,
+                        keep_chars,
+                    ) {
+                        row.content = shrunk;
+                        changed = true;
+                    }
+                }
+                changed
+            }
+            _ => false,
+        }
     }
 
     fn repair_orphan_tool_result_messages(history: &mut Vec<ConversationMessage>) {
@@ -3895,6 +3994,27 @@ impl Agent {
             return ToolExecutionResult {
                 name: call.name.clone(),
                 output: "[Cancelled by user]".to_string(),
+                success: false,
+                tool_call_id: call.tool_call_id.clone(),
+            };
+        }
+
+        let normalized_call: ParsedToolCall;
+        let call = match crate::agent::tool_authorizer::canonical_tool_alias(&call.name) {
+            Some(canonical) if canonical != call.name => {
+                normalized_call = ParsedToolCall {
+                    name: canonical.to_string(),
+                    ..call.clone()
+                };
+                &normalized_call
+            }
+            _ => call,
+        };
+
+        if let Err(reason) = crate::agent::tool_authorizer::authorize_tool_dispatch(&call.name) {
+            return ToolExecutionResult {
+                name: call.name.clone(),
+                output: reason,
                 success: false,
                 tool_call_id: call.tool_call_id.clone(),
             };

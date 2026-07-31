@@ -489,6 +489,8 @@ impl Tool for MultiEditTool {
 
         let emit_records_for_apply = emit_records;
         let batch_id_for_emit = batch.batch_id.clone();
+        let diag_baseline =
+            crate::code_intel::post_edit_diagnostics::baseline(&summary_paths).await;
         match self.ops_applier.apply_batch(batch).await {
             Ok(_) => {
                 for (p, (before, after)) in
@@ -527,14 +529,24 @@ impl Tool for MultiEditTool {
                         summary.push(format!("  \u{2713} {}{mtime_note}", p.display()));
                     }
                 }
+                let mut output = format!(
+                    "Applied {} edit(s) across {} file(s) atomically:\n{}",
+                    total_edits,
+                    summary_paths.len(),
+                    summary.join("\n")
+                );
+                if let Some(feedback) =
+                    crate::code_intel::post_edit_diagnostics::new_error_feedback(
+                        &summary_paths,
+                        &diag_baseline,
+                    )
+                    .await
+                {
+                    output.push_str(&feedback);
+                }
                 Ok(ToolResult {
                     success: true,
-                    output: format!(
-                        "Applied {} edit(s) across {} file(s) atomically:\n{}",
-                        total_edits,
-                        summary_paths.len(),
-                        summary.join("\n")
-                    ),
+                    output,
                     error: None,
                 })
             }

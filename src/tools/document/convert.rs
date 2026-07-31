@@ -337,6 +337,18 @@ impl Tool for DocumentConvertTool {
             });
         }
 
+        let _write_guard =
+            match crate::session::acquire_file_write_guard(&resolved_target).await {
+                Ok(guard) => guard,
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("{e}")),
+                    });
+                }
+            };
+
         let before_bytes = tokio::fs::read(&resolved_target).await.ok();
 
         let font_bytes = if matches!(target_format, OutputFormat::Pdf) {
@@ -435,6 +447,7 @@ async fn extract_source_markdown(
     source_path: &str,
 ) -> Result<String, String> {
     let resolved = super::common::resolve_read_source(security, source_path)?;
+    crate::session::record_observed_for_current_session(&resolved);
     let ext = resolved
         .extension()
         .and_then(|e| e.to_str())

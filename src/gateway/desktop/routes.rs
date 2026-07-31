@@ -5291,7 +5291,7 @@ async fn gather_prompt_context_signals(
         .args(["status", "--porcelain"]);
     if let Ok(output) = cmd.output().await {
         if output.status.success() {
-            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stdout = crate::util::decode_subprocess_bytes(&output.stdout);
             for line in stdout.lines() {
                 if line.trim().is_empty() {
                     continue;

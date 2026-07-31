@@ -446,32 +446,31 @@ fn logs_windows(config: &Config, lines: usize, follow: bool) -> Result<()> {
         );
     };
 
-    if follow {
-        let status = crate::util::hidden_sync_command("powershell")
-            .args([
-                "-Command",
-                &format!(
-                    "Get-Content -Path '{}' -Tail {} -Wait",
-                    log_file.display(),
-                    lines
-                ),
-            ])
-            .status()
-            .context("Failed to run PowerShell Get-Content")?;
-        if !status.success() {
-            bail!("PowerShell Get-Content exited with non-zero status");
-        }
+    let escaped_path = log_file.display().to_string().replace('\'', "''");
+    let script = if follow {
+        format!("Get-Content -Path '{escaped_path}' -Tail {lines} -Wait")
     } else {
-        let status = crate::util::hidden_sync_command("powershell")
-            .args([
-                "-Command",
-                &format!("Get-Content -Path '{}' -Tail {}", log_file.display(), lines),
-            ])
-            .status()
-            .context("Failed to run PowerShell Get-Content")?;
-        if !status.success() {
-            bail!("PowerShell Get-Content exited with non-zero status");
-        }
+        format!("Get-Content -Path '{escaped_path}' -Tail {lines}")
+    };
+    let encoded_command = {
+        use base64::Engine as _;
+        let utf16le: Vec<u8> = script
+            .encode_utf16()
+            .flat_map(|unit| unit.to_le_bytes())
+            .collect();
+        base64::engine::general_purpose::STANDARD.encode(utf16le)
+    };
+    let status = crate::util::hidden_sync_command("powershell")
+        .args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            &encoded_command,
+        ])
+        .status()
+        .context("Failed to run PowerShell Get-Content")?;
+    if !status.success() {
+        bail!("PowerShell Get-Content exited with non-zero status");
     }
     Ok(())
 }

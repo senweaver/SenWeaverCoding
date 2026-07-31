@@ -199,7 +199,9 @@ pub async fn handle_ws_nodes(
             let authorized =
                 crate::gateway::ws::core::websocket_tokens(&headers, params.token.as_deref())
                     .iter()
-                    .any(|token| token == expected_token);
+                    .any(|token| {
+                        crate::security::pairing::constant_time_eq(token, expected_token)
+                    });
             if !authorized {
                 return (
                     axum::http::StatusCode::UNAUTHORIZED,

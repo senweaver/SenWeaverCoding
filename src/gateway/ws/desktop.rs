@@ -60,6 +60,19 @@ enum OutboundFrame {
     Thinking(String),
 }
 
+fn with_frame_seq(frame: &str, out_seq: &mut u64) -> String {
+    let trimmed = frame.trim_start();
+    let Some(rest) = trimmed.strip_prefix('{') else {
+        return frame.to_string();
+    };
+    *out_seq += 1;
+    let seq = *out_seq;
+    if rest.trim_start().starts_with('}') {
+        return format!("{{\"seq\":{seq}}}");
+    }
+    format!("{{\"seq\":{seq},{rest}")
+}
+
 type OutboundSender = tokio::sync::mpsc::Sender<OutboundFrame>;
 
 pub async fn handle_ws_desktop(
@@ -145,15 +158,18 @@ async fn handle_socket(
         }
         let mut delta_buf = String::new();
         let mut thinking_buf = String::new();
+        let mut out_seq: u64 = 0;
         loop {
             let frame = tokio::select! {
                 biased;
                 Some(ctrl) = control_rx.recv() => {
                     let control_msg = match ctrl {
-                        OutboundFrame::Text(s) => Message::Text(s.into()),
+                        OutboundFrame::Text(s) => {
+                            Message::Text(with_frame_seq(&s, &mut out_seq).into())
+                        }
                         OutboundFrame::Pong(p) => Message::Pong(p.into()),
                         OutboundFrame::ContentDelta(t) | OutboundFrame::Thinking(t) => {
-                            Message::Text(t.into())
+                            Message::Text(with_frame_seq(&t, &mut out_seq).into())
                         }
                     };
                     if send_frame!(control_msg) {
@@ -183,7 +199,9 @@ async fn handle_socket(
             macro_rules! flush_buf {
                 ($kind:expr, $buf:expr) => {{
                     if !$buf.is_empty() {
+                        out_seq += 1;
                         let coalesced = serde_json::json!({
+                            "seq": out_seq,
                             "type": $kind,
                             "text": $buf.clone(),
                         })
@@ -221,7 +239,7 @@ async fn handle_socket(
                         if send_failed {
                             break;
                         }
-                        if send_frame!(Message::Text(s.into())) {
+                        if send_frame!(Message::Text(with_frame_seq(&s, &mut out_seq).into())) {
                             send_failed = true;
                             break;
                         }
@@ -457,7 +475,7 @@ async fn handle_socket(
 
     if state.session_run_state.is_running(&session_id) {
         if let Some(feed) = crate::session::get_turn_feed(&session_id) {
-            let mut rx = feed.subscribe();
+            let (history, mut rx) = feed.subscribe_with_history();
             let attach_outbound = outbound_tx.clone();
             let attach_conn_token = conn_token.clone();
             let _ = send_json(
@@ -468,38 +486,77 @@ async fn handle_socket(
             for frame in crate::approval::pending_replays_for_session(&session_id) {
                 let _ = send_json(&outbound_tx, &frame).await;
             }
+            let attach_feed = std::sync::Arc::clone(&feed);
             crate::runtime::spawn_supervised("ws_desktop.turn_attach", async move {
+                let mut last_replayed: Option<u64> = None;
+                for (index, frame) in history {
+                    if attach_outbound
+                        .send(OutboundFrame::Text(frame.to_string()))
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    last_replayed = Some(index);
+                }
                 loop {
                     tokio::select! {
                         biased;
                         _ = attach_conn_token.cancelled() => break,
                         recv = rx.recv() => match recv {
-                            Ok(frame) => {
+                            Ok((index, frame)) => {
+                                if last_replayed.is_some_and(|last| index <= last) {
+                                    continue;
+                                }
                                 if attach_outbound
-                                    .send(OutboundFrame::Text(frame))
+                                    .send(OutboundFrame::Text(frame.to_string()))
                                     .await
                                     .is_err()
                                 {
                                     break;
                                 }
+                                last_replayed = Some(index);
                             }
                             Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
-                                let notice = serde_json::json!({
-                                    "type": "system_notification",
-                                    "subtype": "stream_lagged",
-                                    "level": "warning",
-                                    "message": format!(
-                                        "Live stream skipped {skipped} frame(s); the full text will be in the saved history when this turn finishes."
-                                    ),
-                                    "data": { "skippedFrames": skipped },
-                                })
-                                .to_string();
-                                if attach_outbound
-                                    .send(OutboundFrame::Text(notice))
-                                    .await
-                                    .is_err()
-                                {
+                                let recovered = attach_feed.frames_after(last_replayed);
+                                let lost = match (last_replayed, recovered.first()) {
+                                    (Some(last), Some((first_idx, _))) => *first_idx > last + 1,
+                                    (None, Some((first_idx, _))) => *first_idx > 0,
+                                    (_, None) => skipped > 0,
+                                };
+                                let mut send_failed = false;
+                                for (index, frame) in recovered {
+                                    if attach_outbound
+                                        .send(OutboundFrame::Text(frame.to_string()))
+                                        .await
+                                        .is_err()
+                                    {
+                                        send_failed = true;
+                                        break;
+                                    }
+                                    last_replayed = Some(index);
+                                }
+                                if send_failed {
                                     break;
+                                }
+                                if lost {
+                                    let notice = serde_json::json!({
+                                        "type": "system_notification",
+                                        "subtype": "stream_lagged",
+                                        "level": "warning",
+                                        "message": format!(
+                                            "Live stream skipped {skipped} frame(s); the full text will be in the saved history when this turn finishes."
+                                        ),
+                                        "data": { "skippedFrames": skipped },
+                                    })
+                                    .to_string();
+                                    if attach_outbound
+                                        .send(OutboundFrame::Text(notice))
+                                        .await
+                                        .is_err()
+                                    {
+                                        break;
+                                    }
                                 }
                                 continue;
                             }
@@ -2704,13 +2761,16 @@ fn register_session_sender(session_id: &str, tx: &OutboundSender) -> u64 {
 }
 
 fn unregister_session_sender(session_id: &str, seq: u64) {
-    let mut guard = session_out_senders().lock();
-    if let Some(senders) = guard.get_mut(session_id) {
-        senders.retain(|(s, _)| *s != seq);
-        if senders.is_empty() {
-            guard.remove(session_id);
+    {
+        let mut guard = session_out_senders().lock();
+        if let Some(senders) = guard.get_mut(session_id) {
+            senders.retain(|(s, _)| *s != seq);
+            if senders.is_empty() {
+                guard.remove(session_id);
+            }
         }
     }
+    clear_critical_overflow(seq);
 }
 
 fn is_critical_broadcast(payload: &serde_json::Value) -> bool {
@@ -2721,8 +2781,109 @@ fn is_critical_broadcast(payload: &serde_json::Value) -> bool {
                 | "workspace_busy"
                 | "permission_request"
                 | "message_complete"
+                | "tool_result"
+                | "status"
         )
     )
+}
+
+const MAX_CRITICAL_OVERFLOW_FRAMES: usize = 1024;
+
+struct CriticalOverflow {
+    frames: std::collections::VecDeque<String>,
+    draining: bool,
+}
+
+fn push_critical_bounded(state: &mut CriticalOverflow, text: String, sender_seq: u64) {
+    if state.frames.len() >= MAX_CRITICAL_OVERFLOW_FRAMES {
+        state.frames.pop_front();
+        tracing::warn!(
+            target: "ws_desktop",
+            sender_seq,
+            cap = MAX_CRITICAL_OVERFLOW_FRAMES,
+            "critical overflow queue full; dropping oldest queued frame"
+        );
+    }
+    state.frames.push_back(text);
+}
+
+fn critical_overflow_registry(
+) -> &'static parking_lot::Mutex<std::collections::HashMap<u64, std::sync::Arc<parking_lot::Mutex<CriticalOverflow>>>>
+{
+    static REG: std::sync::OnceLock<
+        parking_lot::Mutex<
+            std::collections::HashMap<u64, std::sync::Arc<parking_lot::Mutex<CriticalOverflow>>>,
+        >,
+    > = std::sync::OnceLock::new();
+    REG.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn critical_overflow_slot(
+    sender_seq: u64,
+) -> std::sync::Arc<parking_lot::Mutex<CriticalOverflow>> {
+    let mut registry = critical_overflow_registry().lock();
+    std::sync::Arc::clone(registry.entry(sender_seq).or_insert_with(|| {
+        std::sync::Arc::new(parking_lot::Mutex::new(CriticalOverflow {
+            frames: std::collections::VecDeque::new(),
+            draining: false,
+        }))
+    }))
+}
+
+fn spawn_critical_drainer(
+    slot: std::sync::Arc<parking_lot::Mutex<CriticalOverflow>>,
+    tx: OutboundSender,
+) {
+    crate::runtime::spawn_supervised(
+        "ws_desktop.critical_broadcast_backpressure",
+        async move {
+            loop {
+                let next = {
+                    let mut state = slot.lock();
+                    match state.frames.pop_front() {
+                        Some(frame) => frame,
+                        None => {
+                            state.draining = false;
+                            break;
+                        }
+                    }
+                };
+                if tx.send(OutboundFrame::Text(next)).await.is_err() {
+                    let mut state = slot.lock();
+                    state.frames.clear();
+                    state.draining = false;
+                    break;
+                }
+            }
+        },
+    );
+}
+
+fn send_critical_frame(sender_seq: u64, tx: &OutboundSender, text: String) -> bool {
+    let slot = critical_overflow_slot(sender_seq);
+    let mut state = slot.lock();
+    if state.draining {
+        push_critical_bounded(&mut state, text, sender_seq);
+        return true;
+    }
+    match tx.try_send(OutboundFrame::Text(text)) {
+        Ok(()) => true,
+        Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => false,
+        Err(tokio::sync::mpsc::error::TrySendError::Full(frame)) => {
+            let OutboundFrame::Text(text_frame) = frame else {
+                return true;
+            };
+            push_critical_bounded(&mut state, text_frame, sender_seq);
+            state.draining = true;
+            drop(state);
+            spawn_critical_drainer(slot, tx.clone());
+            true
+        }
+    }
+}
+
+fn clear_critical_overflow(sender_seq: u64) {
+    critical_overflow_registry().lock().remove(&sender_seq);
 }
 
 pub fn broadcast_session_event(session_id: &str, payload: &serde_json::Value) {
@@ -2740,26 +2901,37 @@ pub fn broadcast_session_event(session_id: &str, payload: &serde_json::Value) {
     let critical = is_critical_broadcast(payload);
     let mut dead: Vec<u64> = Vec::new();
     for (seq, tx) in senders {
+        if critical {
+            if !send_critical_frame(seq, &tx, text.clone()) {
+                dead.push(seq);
+            }
+            continue;
+        }
+        let draining = {
+            let registry = critical_overflow_registry().lock();
+            registry
+                .get(&seq)
+                .is_some_and(|slot| slot.lock().draining)
+        };
+        if draining {
+            tracing::warn!(
+                target: "ws_desktop",
+                session_id,
+                frame_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("?"),
+                "dropping non-critical session frame: critical frames are queued ahead"
+            );
+            continue;
+        }
         match tx.try_send(OutboundFrame::Text(text.clone())) {
             Ok(()) => {}
             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => dead.push(seq),
-            Err(tokio::sync::mpsc::error::TrySendError::Full(frame)) => {
-                if critical {
-                    let tx_owned = tx.clone();
-                    crate::runtime::spawn_supervised(
-                        "ws_desktop.critical_broadcast_backpressure",
-                        async move {
-                            let _ = tx_owned.send(frame).await;
-                        },
-                    );
-                } else {
-                    tracing::warn!(
-                        target: "ws_desktop",
-                        session_id,
-                        frame_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("?"),
-                        "dropping non-critical session frame: outbound queue full"
-                    );
-                }
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    target: "ws_desktop",
+                    session_id,
+                    frame_type = payload.get("type").and_then(|v| v.as_str()).unwrap_or("?"),
+                    "dropping non-critical session frame: outbound queue full"
+                );
             }
         }
     }
@@ -3679,7 +3851,10 @@ async fn run_turn(
         agent.cancel_token(),
         agent.cancel_signal_handle(),
     );
-    let _turn_feed_guard = crate::session::TurnFeedGuard::new(session_id.to_string());
+    let _turn_feed_guard = crate::session::TurnFeedGuard::new(
+        session_id.to_string(),
+        std::sync::Arc::clone(&feed_for_pump),
+    );
 
     let (tee_tx, mut tee_rx) = mpsc::channel::<OutboundFrame>(1024);
     let real_outbound = outbound.clone();
@@ -3687,12 +3862,12 @@ async fn run_turn(
         while let Some(frame) = tee_rx.recv().await {
             match &frame {
                 OutboundFrame::Text(text) => feed_for_pump.publish(text),
-                OutboundFrame::ContentDelta(t) if feed_for_pump.has_subscribers() => {
+                OutboundFrame::ContentDelta(t) => {
                     feed_for_pump.publish(
                         &serde_json::json!({ "type": "content_delta", "text": t }).to_string(),
                     );
                 }
-                OutboundFrame::Thinking(t) if feed_for_pump.has_subscribers() => {
+                OutboundFrame::Thinking(t) => {
                     feed_for_pump.publish(
                         &serde_json::json!({ "type": "thinking", "text": t }).to_string(),
                     );

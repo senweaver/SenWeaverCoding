@@ -37,6 +37,7 @@ fn current_stream_cancel_token() -> Option<CancellationToken> {
         .try_with(|cell| cell.clone())
         .ok()
         .flatten()
+        .or_else(super::current_session_cancel_token)
 }
 
 pub fn is_non_retryable(err: &anyhow::Error) -> bool {
@@ -957,6 +958,7 @@ impl ReliableProvider {
 
         let rate_limit_enabled = self.client_rate_limit_enabled;
         let rate_limiters = std::sync::Arc::clone(&self.rate_limiters);
+        let cancel_token = current_stream_cancel_token();
 
         let _bg = crate::runtime::spawn_supervised(
             "providers.reliable.stream_chunks_failover",
@@ -974,7 +976,24 @@ impl ReliableProvider {
                     let mut made_progress = false;
                     let mut failed_before_progress = false;
 
-                    while let Some(item) = stream.next().await {
+                    loop {
+                        let item = if let Some(token) = cancel_token.as_ref() {
+                            tokio::select! {
+                                biased;
+                                () = token.cancelled() => {
+                                    let _ = tx
+                                        .send(Err(StreamError::Provider(
+                                            "stream cancelled by user".to_string(),
+                                        )))
+                                        .await;
+                                    return;
+                                }
+                                item = stream.next() => item,
+                            }
+                        } else {
+                            stream.next().await
+                        };
+                        let Some(item) = item else { break };
                         match item {
                             Ok(chunk) => {
                                 made_progress = true;

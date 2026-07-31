@@ -839,6 +839,7 @@ impl BedrockProvider {
             output_tokens: u.output_tokens,
             cached_input_tokens: u.cache_read_input_tokens,
             cache_creation_input_tokens: u.cache_write_input_tokens,
+            reasoning_tokens: None,
         });
 
         if let Some(output) = response.output {
@@ -853,10 +854,15 @@ impl BedrockProvider {
                         }
                         ResponseContentBlock::ToolUse(wrapper) => {
                             if !wrapper.tool_use.name.is_empty() {
+                                let arguments =
+                                    crate::providers::sanitize::normalize_tool_call_arguments(
+                                        &wrapper.tool_use.name,
+                                        wrapper.tool_use.input.to_string(),
+                                    );
                                 tool_calls.push(ProviderToolCall {
                                     id: wrapper.tool_use.tool_use_id,
                                     name: wrapper.tool_use.name,
-                                    arguments: wrapper.tool_use.input.to_string(),
+                                    arguments,
                                 });
                             }
                         }

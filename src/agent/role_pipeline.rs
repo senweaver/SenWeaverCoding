@@ -7,8 +7,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
+use crate::agent::scheduler::core::{SchedulableTask, TaskScheduler};
+use crate::agent::scheduler::runtime::{
+    SchedulerSpanContext, TaskExecutor, TaskSchedulerRuntime,
+};
 use crate::memory::blackboard::Blackboard;
 use crate::providers::Provider;
 
@@ -186,15 +190,11 @@ impl RolePipeline {
     pub async fn run(
         &self,
         goal: &str,
-        provider: &dyn Provider,
+        provider: Arc<dyn Provider>,
         blackboard: Arc<Blackboard>,
         params: PipelineParams,
     ) -> Result<PipelineReport, String> {
         self.validate()?;
-
-        let levels = self
-            .topological_levels()
-            .ok_or_else(|| "pipeline contains a dependency cycle".to_string())?;
 
         let run_id = params
             .run_id
@@ -207,12 +207,9 @@ impl RolePipeline {
             target: "agent.role_pipeline",
             pipeline = %self.name,
             run_id = %run_id,
-            levels = levels.len(),
+            stages = self.stages.len(),
             "role-pipeline run starting"
         );
-
-        let mut artifacts: HashMap<String, String> = HashMap::new();
-        let mut outcomes: Vec<StageOutcome> = Vec::new();
 
         let mut has_child: HashSet<String> = HashSet::new();
         for stage in &self.stages {
@@ -221,112 +218,231 @@ impl RolePipeline {
             }
         }
 
-        for (level_idx, level_stages) in levels.into_iter().enumerate() {
-            debug!(
-                target: "agent.role_pipeline",
-                run_id = %run_id,
-                level = level_idx,
-                size = level_stages.len(),
-                "role-pipeline level dispatching"
-            );
+        let deps_by_id: HashMap<&str, &[String]> = self
+            .stages
+            .iter()
+            .map(|s| (s.id.as_str(), s.depends_on.as_slice()))
+            .collect();
+        let declaration_order: Vec<String> =
+            self.stages.iter().map(|s| s.id.clone()).collect();
+        let ancestors_by_id: Arc<HashMap<String, Vec<String>>> = Arc::new(
+            self.stages
+                .iter()
+                .map(|stage| {
+                    let mut seen: HashSet<&str> = HashSet::new();
+                    let mut frontier: Vec<&str> =
+                        stage.depends_on.iter().map(String::as_str).collect();
+                    while let Some(id) = frontier.pop() {
+                        if seen.insert(id) {
+                            if let Some(parents) = deps_by_id.get(id) {
+                                frontier.extend(parents.iter().map(String::as_str));
+                            }
+                        }
+                    }
+                    let ordered: Vec<String> = declaration_order
+                        .iter()
+                        .filter(|id| seen.contains(id.as_str()))
+                        .cloned()
+                        .collect();
+                    (stage.id.clone(), ordered)
+                })
+                .collect(),
+        );
 
-            let mut prompts: Vec<(RoleStage, String)> =
-                Vec::with_capacity(level_stages.len());
-            for stage in level_stages {
-                let prompt = build_stage_prompt(goal, &stage, &artifacts);
-                prompts.push((stage, prompt));
+        let mut tasks: Vec<SchedulableTask> = Vec::with_capacity(self.stages.len());
+        for stage in &self.stages {
+            let mut task =
+                SchedulableTask::new(stage.id.clone(), stage.label.clone(), String::new());
+            for dep in &stage.depends_on {
+                task = task.with_dependency(dep.clone());
             }
+            tasks.push(task);
+        }
 
-            let provider_ref = provider;
-            let mut futs = Vec::with_capacity(prompts.len());
-            for (stage, prompt) in &prompts {
-                let timeout =
-                    stage.stage_timeout.unwrap_or(default_timeout);
-                let temperature =
-                    stage.temperature.unwrap_or(default_temp);
-                let model = params.model.clone();
-                let stage_id = stage.id.clone();
-                let stage_label = stage.label.clone();
-                let sys = stage.system_prompt.clone();
-                let prompt = prompt.clone();
-                futs.push(async move {
+        let stage_by_id: Arc<HashMap<String, RoleStage>> = Arc::new(
+            self.stages
+                .iter()
+                .map(|s| (s.id.clone(), s.clone()))
+                .collect(),
+        );
+        let artifacts: Arc<parking_lot::Mutex<HashMap<String, String>>> =
+            Arc::new(parking_lot::Mutex::new(HashMap::new()));
+        let executed: Arc<parking_lot::Mutex<Vec<StageOutcome>>> =
+            Arc::new(parking_lot::Mutex::new(Vec::new()));
+
+        let executor: TaskExecutor = {
+            let goal = goal.to_string();
+            let model = params.model.clone();
+            let pipeline_name = self.name.clone();
+            let run_id = run_id.clone();
+            let blackboard = blackboard.clone();
+            let stage_by_id = stage_by_id.clone();
+            let ancestors_by_id = ancestors_by_id.clone();
+            let artifacts = artifacts.clone();
+            let executed = executed.clone();
+            Arc::new(move |task, cancel| {
+                let Some(stage) = stage_by_id.get(task.id.as_str()).cloned() else {
+                    let missing = task.id.clone();
+                    return Box::pin(async move {
+                        Err(format!("unknown pipeline stage `{missing}`"))
+                    });
+                };
+                let goal = goal.clone();
+                let model = model.clone();
+                let pipeline_name = pipeline_name.clone();
+                let run_id = run_id.clone();
+                let blackboard = blackboard.clone();
+                let artifacts = artifacts.clone();
+                let executed = executed.clone();
+                let provider = provider.clone();
+                let ancestor_ids = ancestors_by_id
+                    .get(task.id.as_str())
+                    .cloned()
+                    .unwrap_or_default();
+                Box::pin(async move {
+                    let timeout = stage.stage_timeout.unwrap_or(default_timeout);
+                    let temperature = stage.temperature.unwrap_or(default_temp);
+                    let prompt = {
+                        let snapshot = artifacts.lock();
+                        build_stage_prompt(&goal, &stage, &ancestor_ids, &snapshot)
+                    };
                     let started = std::time::Instant::now();
-                    let chat_fut = provider_ref.chat_with_system(
-                        Some(&sys),
+                    let chat_fut = provider.chat_with_system(
+                        Some(&stage.system_prompt),
                         &prompt,
                         &model,
                         temperature,
                     );
-                    let r = tokio::time::timeout(timeout, chat_fut).await;
+                    let bounded = tokio::time::timeout(timeout, chat_fut);
+                    let result = tokio::select! {
+                        biased;
+                        () = cancel.cancelled() => {
+                            return Err("stage cancelled".to_string());
+                        }
+                        result = bounded => result,
+                    };
                     let elapsed_ms = started.elapsed().as_millis();
-                    match r {
+                    let outcome = match result {
                         Ok(Ok(answer)) => StageOutcome {
-                            stage_id,
-                            label: stage_label,
+                            stage_id: stage.id.clone(),
+                            label: stage.label.clone(),
                             success: true,
                             elapsed_ms,
                             answer,
                             error: None,
                         },
                         Ok(Err(e)) => StageOutcome {
-                            stage_id,
-                            label: stage_label,
+                            stage_id: stage.id.clone(),
+                            label: stage.label.clone(),
                             success: false,
                             elapsed_ms,
                             answer: String::new(),
                             error: Some(format!("provider error: {e}")),
                         },
                         Err(_) => StageOutcome {
-                            stage_id,
-                            label: stage_label,
+                            stage_id: stage.id.clone(),
+                            label: stage.label.clone(),
                             success: false,
                             elapsed_ms,
                             answer: String::new(),
-                            error: Some(format!(
-                                "stage timed out after {:?}",
-                                timeout
-                            )),
+                            error: Some(format!("stage timed out after {timeout:?}")),
                         },
-                    }
-                });
-            }
+                    };
 
-            let level_outcomes = futures_util::future::join_all(futs).await;
-
-            for outcome in level_outcomes {
-                let key = format!(
-                    "{}/{}/{}",
-                    PIPELINE_NAMESPACE, run_id, outcome.stage_id
-                );
-                blackboard.write(
-                    key,
-                    serde_json::json!({
-                        "run_id": &run_id,
-                        "pipeline": &self.name,
-                        "stage_id": &outcome.stage_id,
-                        "label": &outcome.label,
-                        "success": outcome.success,
-                        "elapsed_ms": outcome.elapsed_ms,
-                        "answer": &outcome.answer,
-                        "error": &outcome.error,
-                    }),
-                    format!("role_pipeline:{}", outcome.stage_id),
-                    PIPELINE_NAMESPACE,
-                );
-
-                if outcome.success {
-                    artifacts
-                        .insert(outcome.stage_id.clone(), outcome.answer.clone());
-                } else {
-                    warn!(
-                        target: "agent.role_pipeline",
-                        run_id = %run_id,
-                        stage = %outcome.stage_id,
-                        error = ?outcome.error,
-                        "role-pipeline stage failed"
+                    blackboard.write(
+                        format!("{}/{}/{}", PIPELINE_NAMESPACE, run_id, outcome.stage_id),
+                        serde_json::json!({
+                            "run_id": &run_id,
+                            "pipeline": &pipeline_name,
+                            "stage_id": &outcome.stage_id,
+                            "label": &outcome.label,
+                            "success": outcome.success,
+                            "elapsed_ms": outcome.elapsed_ms,
+                            "answer": &outcome.answer,
+                            "error": &outcome.error,
+                        }),
+                        format!("role_pipeline:{}", outcome.stage_id),
+                        PIPELINE_NAMESPACE,
                     );
-                }
-                outcomes.push(outcome);
+
+                    if outcome.success {
+                        artifacts
+                            .lock()
+                            .insert(outcome.stage_id.clone(), outcome.answer.clone());
+                    } else {
+                        warn!(
+                            target: "agent.role_pipeline",
+                            run_id = %run_id,
+                            stage = %outcome.stage_id,
+                            error = ?outcome.error,
+                            "role-pipeline stage failed"
+                        );
+                    }
+
+                    let success = outcome.success;
+                    let answer = outcome.answer.clone();
+                    let error = outcome.error.clone();
+                    executed.lock().push(outcome);
+                    if success {
+                        Ok(answer)
+                    } else {
+                        Err(error.unwrap_or_else(|| "stage failed".to_string()))
+                    }
+                })
+            })
+        };
+
+        let mut scheduler = TaskScheduler::new(self.stages.len().max(1));
+        scheduler.add_tasks(tasks)?;
+        let runtime = TaskSchedulerRuntime::new(scheduler);
+        let cancel_bridge = crate::providers::current_session_cancel_token().map(|parent| {
+            let scheduler_token = runtime.cancellation_token();
+            crate::runtime::spawn_supervised("role_pipeline.cancel_bridge", async move {
+                parent.cancelled().await;
+                scheduler_token.cancel();
+            })
+        });
+        let scheduler_outcomes = runtime
+            .run_with_context(
+                executor,
+                SchedulerSpanContext::new().with_delegation(run_id.clone()),
+            )
+            .await;
+        if let Some(bridge) = cancel_bridge {
+            bridge.abort();
+        }
+
+        let mut executed_by_id: HashMap<String, StageOutcome> = executed
+            .lock()
+            .drain(..)
+            .map(|o| (o.stage_id.clone(), o))
+            .collect();
+        let scheduler_errors: HashMap<String, String> = scheduler_outcomes
+            .into_iter()
+            .filter(|o| !o.success)
+            .map(|o| (o.task_id, o.result))
+            .collect();
+
+        let mut outcomes: Vec<StageOutcome> = Vec::with_capacity(self.stages.len());
+        for stage in &self.stages {
+            match executed_by_id.remove(&stage.id) {
+                Some(outcome) => outcomes.push(outcome),
+                None => outcomes.push(StageOutcome {
+                    stage_id: stage.id.clone(),
+                    label: stage.label.clone(),
+                    success: false,
+                    elapsed_ms: 0,
+                    answer: String::new(),
+                    error: Some(
+                        scheduler_errors
+                            .get(&stage.id)
+                            .filter(|msg| !msg.is_empty())
+                            .cloned()
+                            .unwrap_or_else(|| {
+                                "stage cancelled before execution".to_string()
+                            }),
+                    ),
+                }),
             }
         }
 
@@ -368,6 +484,7 @@ impl RolePipeline {
 fn build_stage_prompt(
     goal: &str,
     stage: &RoleStage,
+    ancestor_ids: &[String],
     artifacts: &HashMap<String, String>,
 ) -> String {
     let mut out = String::new();
@@ -375,9 +492,9 @@ fn build_stage_prompt(
     out.push_str(goal.trim());
     out.push_str("\n\n");
 
-    if !stage.depends_on.is_empty() {
+    if !ancestor_ids.is_empty() {
         out.push_str("## Prior artifacts\n");
-        for dep in &stage.depends_on {
+        for dep in ancestor_ids {
             let body = artifacts
                 .get(dep)
                 .map(|s| s.trim().to_string())

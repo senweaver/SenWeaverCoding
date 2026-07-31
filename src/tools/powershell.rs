@@ -115,7 +115,20 @@ impl Tool for PowerShellTool {
         };
 
         let mut cmd = crate::util::hidden_async_command("powershell");
-        cmd.args(["-NoProfile", "-NonInteractive", "-Command", command]);
+        let encoded_command = {
+            use base64::Engine as _;
+            let utf16le: Vec<u8> = command
+                .encode_utf16()
+                .flat_map(|unit| unit.to_le_bytes())
+                .collect();
+            base64::engine::general_purpose::STANDARD.encode(utf16le)
+        };
+        cmd.args([
+            "-NoProfile",
+            "-NonInteractive",
+            "-EncodedCommand",
+            &encoded_command,
+        ]);
         cmd.current_dir(self.security.workspace_dir());
 
         if let Some(dir) = working_dir {

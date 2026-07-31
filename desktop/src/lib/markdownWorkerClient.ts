@@ -24,6 +24,7 @@ type PendingEntry = {
   content: string
   key: string
   timer: ReturnType<typeof setTimeout>
+  cacheWrite: boolean
 }
 
 const pending = new Map<number, PendingEntry>()
@@ -67,9 +68,9 @@ function cachePut(key: string, value: ParsedMarkdown, bytes: number): void {
   }
 }
 
-function parseFallback(content: string, key: string): ParsedMarkdown {
+function parseFallback(content: string, key: string, cacheWrite = true): ParsedMarkdown {
   const result = parseMarkdown(content)
-  cachePut(key, result, content.length * 2)
+  if (cacheWrite) cachePut(key, result, content.length * 2)
   return result
 }
 
@@ -78,7 +79,7 @@ function drainPendingViaFallback(): void {
   pending.clear()
   for (const entry of entries) {
     clearTimeout(entry.timer)
-    entry.resolve(parseFallback(entry.content, entry.key))
+    entry.resolve(parseFallback(entry.content, entry.key, entry.cacheWrite))
   }
 }
 
@@ -108,10 +109,10 @@ function ensureWorker(): Worker | null {
       pending.delete(id)
       clearTimeout(entry.timer)
       if (ok && result) {
-        cachePut(entry.key, result, entry.content.length * 2)
+        if (entry.cacheWrite) cachePut(entry.key, result, entry.content.length * 2)
         entry.resolve(result)
       } else {
-        entry.resolve(parseFallback(entry.content, entry.key))
+        entry.resolve(parseFallback(entry.content, entry.key, entry.cacheWrite))
       }
     }
     worker.onerror = () => {
@@ -132,13 +133,17 @@ export function getCachedMarkdown(content: string): ParsedMarkdown | undefined {
   return cacheGet(contentKey(content))
 }
 
-export function parseMarkdownAsync(content: string): Promise<ParsedMarkdown> {
+export function parseMarkdownAsync(
+  content: string,
+  options?: { cacheWrite?: boolean },
+): Promise<ParsedMarkdown> {
+  const cacheWrite = options?.cacheWrite !== false
   const key = contentKey(content)
   const cached = cacheGet(key)
   if (cached) return Promise.resolve(cached)
   const w = ensureWorker()
-  if (!w) return Promise.resolve(parseFallback(content, key))
-  if (pending.size >= PENDING_MAX) return Promise.resolve(parseFallback(content, key))
+  if (!w) return Promise.resolve(parseFallback(content, key, cacheWrite))
+  if (pending.size >= PENDING_MAX) return Promise.resolve(parseFallback(content, key, cacheWrite))
   const request = new Promise<ParsedMarkdown>((resolve, reject) => {
     const id = nextRequestId++
     const timer = setTimeout(() => {
@@ -148,8 +153,8 @@ export function parseMarkdownAsync(content: string): Promise<ParsedMarkdown> {
       entry.reject(new Error('markdown worker request timed out'))
       restartWorkerAfterTimeout()
     }, PENDING_TIMEOUT_MS)
-    pending.set(id, { resolve, reject, content, key, timer })
+    pending.set(id, { resolve, reject, content, key, timer, cacheWrite })
     w.postMessage({ id, content })
   })
-  return request.catch(() => parseFallback(content, key))
+  return request.catch(() => parseFallback(content, key, cacheWrite))
 }

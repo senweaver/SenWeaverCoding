@@ -159,7 +159,7 @@ struct DocMeta {
 }
 
 fn canonical_key(path: &Path) -> PathBuf {
-    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+    crate::util::normalize_path_for_containment(path)
 }
 
 fn scoped_crdt_key(prefix: &str, path: &Path, workspace_key: &str) -> String {

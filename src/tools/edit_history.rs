@@ -19,6 +19,27 @@ static SHARED_HISTORIES: once_cell::sync::Lazy<
     parking_lot::Mutex<HashMap<PathBuf, Arc<EditHistory>>>,
 > = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(HashMap::new()));
 
+fn acquire_write_guard_blocking(path: &Path) -> Option<crate::session::ResourceGuard> {
+    let handle = tokio::runtime::Handle::try_current().ok()?;
+    if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::CurrentThread {
+        return None;
+    }
+    let result = tokio::task::block_in_place(|| {
+        handle.block_on(crate::session::acquire_file_write_guard(path))
+    });
+    match result {
+        Ok(guard) => guard,
+        Err(e) => {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "edit_history: failed to acquire file write lock; proceeding without it"
+            );
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FileSnapshot {
     pub sha256: String,
@@ -364,6 +385,8 @@ impl EditHistory {
             self.workspace_dir.join(path)
         };
 
+        let _write_guard = acquire_write_guard_blocking(&abs_path);
+
         if absent {
             match std::fs::remove_file(&abs_path) {
                 Ok(()) => {}
@@ -386,6 +409,7 @@ impl EditHistory {
             std::fs::create_dir_all(parent)?;
         }
         crate::util::atomic_write(&abs_path, &content)?;
+        crate::session::record_write_for_current_session(&abs_path);
 
         Ok(())
     }
@@ -521,14 +545,17 @@ impl EditHistory {
 
         let mut state = self.state.write();
         for key in &keys {
-            if let Some(ev) = state
-                .timeline
-                .iter_mut()
-                .rev()
-                .find(|e| &e.path == key && e.edit_batch_id.is_none())
-            {
-                ev.edit_batch_id = Some(edit_batch_id.to_string());
-                ev.post_sha256 = post_hashes.get(key).cloned();
+            let mut last_stamped: Option<usize> = None;
+            for (pos, ev) in state.timeline.iter_mut().enumerate() {
+                if &ev.path == key && ev.edit_batch_id.is_none() {
+                    ev.edit_batch_id = Some(edit_batch_id.to_string());
+                    last_stamped = Some(pos);
+                }
+            }
+            if let Some(pos) = last_stamped {
+                if let Some(ev) = state.timeline.get_mut(pos) {
+                    ev.post_sha256 = post_hashes.get(key).cloned();
+                }
             }
         }
         drop(state);
@@ -600,9 +627,26 @@ impl EditHistory {
         force: bool,
     ) -> anyhow::Result<RevertOutcome> {
         let snaps = self.snapshots_for_batch_detailed(edit_batch_id);
-        let mut outcome = RevertOutcome::default();
+        let mut folded: Vec<(String, FileSnapshot, Option<String>)> = Vec::new();
+        let mut slot_by_path: HashMap<String, usize> = HashMap::new();
         for (rel_path, snap, post_sha) in snaps {
+            match slot_by_path.get(&rel_path) {
+                Some(&slot) => {
+                    if post_sha.is_some() {
+                        folded[slot].2 = post_sha;
+                    }
+                }
+                None => {
+                    slot_by_path.insert(rel_path.clone(), folded.len());
+                    folded.push((rel_path, snap, post_sha));
+                }
+            }
+        }
+        let mut outcome = RevertOutcome::default();
+        for (rel_path, snap, post_sha) in folded {
             let abs = self.workspace_dir.join(&rel_path);
+
+            let _write_guard = acquire_write_guard_blocking(&abs);
 
             if !force {
                 if let Some(expected) = post_sha.as_deref() {
@@ -642,6 +686,7 @@ impl EditHistory {
                 let _ = std::fs::create_dir_all(parent);
             }
             if crate::util::atomic_write(&abs, &content).is_ok() {
+                crate::session::record_write_for_current_session(&abs);
                 outcome.reverted.push(rel_path);
             }
         }

@@ -3932,7 +3932,7 @@ async fn handle_gmail_push_webhook(
         .and_then(|auth| auth.strip_prefix("Bearer "))
         .unwrap_or("");
 
-    if provided != secret {
+    if !crate::security::pairing::constant_time_eq(provided, &secret) {
         tracing::warn!("Gmail push webhook: unauthorized request");
         return (
             StatusCode::UNAUTHORIZED,

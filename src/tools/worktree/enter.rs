@@ -140,7 +140,7 @@ impl Tool for WorktreeEnterTool {
                 })
             }
             Ok(out) => {
-                let stderr = String::from_utf8_lossy(&out.stderr);
+                let stderr = crate::util::decode_subprocess_bytes(&out.stderr);
                 Ok(ToolResult {
                     success: false,
                     output: String::new(),

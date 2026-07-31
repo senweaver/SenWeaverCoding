@@ -143,6 +143,17 @@ impl Tool for LspFormatTool {
             });
         }
 
+        let _write_guard = match crate::session::acquire_file_write_guard(&file_path).await {
+            Ok(guard) => guard,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("{e}")),
+                });
+            }
+        };
+
         let file_for_apply = file_path.clone();
         let security = self.security.clone();
         let edits_applied =
@@ -150,6 +161,10 @@ impl Tool for LspFormatTool {
                 .await
                 .unwrap_or(Ok(0))
                 .map_err(|e| anyhow::anyhow!("Failed to apply formatting edits: {e}"))?;
+
+        if edits_applied > 0 {
+            crate::session::record_write_for_current_session(&file_path);
+        }
 
         Ok(ToolResult {
             success: true,

@@ -1073,7 +1073,24 @@ async fn process_chat_message(
                 session_key,
                 "websocket disconnected mid-turn: firing cancel to stop orphaned turn"
             );
-            joined.await
+            const DISCONNECT_CANCEL_GRACE_SECS: u64 = 30;
+            match tokio::time::timeout(
+                std::time::Duration::from_secs(DISCONNECT_CANCEL_GRACE_SECS),
+                &mut joined,
+            )
+            .await
+            {
+                Ok(out) => (out.0, out.1),
+                Err(_) => {
+                    tracing::warn!(
+                        target: "agent_cancel",
+                        session_key,
+                        grace_secs = DISCONNECT_CANCEL_GRACE_SECS,
+                        "orphaned turn did not stop within the cancellation grace period after websocket disconnect; dropping the turn future"
+                    );
+                    (Ok(Err(crate::error::AgentError::TurnCancelled)), String::new())
+                }
+            }
         }
         }
     };

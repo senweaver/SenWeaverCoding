@@ -560,6 +560,7 @@ async fn run_image(
     tokio::fs::write(&abs, &bytes)
         .await
         .map_err(|e| format!("Could not write `{rel_path}`: {e}"))?;
+    crate::session::record_write_for_current_session(&abs);
     crate::agent::designer::record_artifact_if_designer(&abs);
     Ok(format!(
         "Exported node `{node_id}` at {scale}x to `{rel_path}` ({} KB). Use `view_image` on that \

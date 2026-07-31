@@ -93,12 +93,22 @@ pub enum AcquireError {
     Timeout { kind: &'static str, target: String },
     #[error("Resource manager shutting down")]
     Shutdown,
+    #[error(
+        "Cross-process lock failed for `{kind}` ({target}): {message}. \
+         Check that the workspace's .sen/locks directory is writable."
+    )]
+    CrossProcess {
+        kind: &'static str,
+        target: String,
+        message: String,
+    },
 }
 
 #[derive(Clone, Copy, Debug)]
 struct SnapshotRecord {
     mtime: SystemTime,
     written: bool,
+    verbatim: bool,
 }
 
 #[derive(Default)]
@@ -287,6 +297,20 @@ impl WorkspaceResourceManager {
     }
 
     pub fn record_read(&self, workspace_key: &str, session_id: &str, path: &Path) {
+        self.record_snapshot(workspace_key, session_id, path, true);
+    }
+
+    pub fn record_observed(&self, workspace_key: &str, session_id: &str, path: &Path) {
+        self.record_snapshot(workspace_key, session_id, path, false);
+    }
+
+    fn record_snapshot(
+        &self,
+        workspace_key: &str,
+        session_id: &str,
+        path: &Path,
+        verbatim: bool,
+    ) {
         let mtime = fs_mtime(path).unwrap_or(SystemTime::UNIX_EPOCH);
         let key = (
             workspace_key.to_string(),
@@ -297,12 +321,15 @@ impl WorkspaceResourceManager {
         let inner = &mut *guard;
         match inner.read_snapshots.entry(key) {
             std::collections::hash_map::Entry::Occupied(mut e) => {
-                e.get_mut().mtime = mtime;
+                let record = e.get_mut();
+                record.mtime = mtime;
+                record.verbatim = record.verbatim || verbatim;
             }
             std::collections::hash_map::Entry::Vacant(e) => {
                 e.insert(SnapshotRecord {
                     mtime,
                     written: false,
+                    verbatim,
                 });
                 *inner
                     .snapshot_counts
@@ -328,6 +355,7 @@ impl WorkspaceResourceManager {
                 SnapshotRecord {
                     mtime,
                     written: true,
+                    verbatim: true,
                 },
             )
             .is_none()
@@ -396,7 +424,10 @@ impl WorkspaceResourceManager {
             session_id.to_string(),
             snapshot_path_key(path),
         );
-        inner.read_snapshots.contains_key(&snap_key)
+        inner
+            .read_snapshots
+            .get(&snap_key)
+            .is_some_and(|record| record.verbatim || record.written)
     }
 
     pub fn is_stale_for(&self, workspace_key: &str, session_id: &str, path: &Path) -> bool {
@@ -435,6 +466,20 @@ impl WorkspaceResourceManager {
             q.retain(|p| p.session_id != session_id);
             !q.is_empty()
         });
+        let orphaned_keys: Vec<(String, ResourceKind)> = inner
+            .holders
+            .iter()
+            .filter(|(_, h)| !h.confirmed && h.session_id == session_id)
+            .map(|(k, _)| k.clone())
+            .collect();
+        for key in orphaned_keys {
+            inner.holders.remove(&key);
+            promote_next_waiter_locked(&mut inner, &key);
+            if !inner.holders.contains_key(&key) {
+                let released_os = inner.os_locks.remove(&key);
+                drop(released_os);
+            }
+        }
     }
 
     fn cancel_waiter(&self, workspace_key: &str, kind: &ResourceKind, session_id: &str) {
@@ -473,11 +518,23 @@ impl WorkspaceResourceManager {
             return Ok(());
         }
         let os_key = format!("{}|{}", kind.kind_str(), workspace_key);
+        let workspace_root: Option<PathBuf> =
+            if workspace_key.is_empty() || workspace_key.starts_with("__solo::") {
+                None
+            } else {
+                let candidate = PathBuf::from(workspace_key);
+                candidate.is_absolute().then_some(candidate)
+            };
         let deadline = Instant::now() + ACQUIRE_TIMEOUT;
         loop {
             let key_for_task = os_key.clone();
+            let root_for_task = workspace_root.clone();
             let attempt = tokio::task::spawn_blocking(move || {
-                crate::session::os_lock::OsAdvisoryLock::try_acquire_key(&key_for_task)
+                let root = root_for_task.as_ref().filter(|p| p.is_dir());
+                crate::session::os_lock::OsAdvisoryLock::try_acquire_key_in(
+                    root.map(PathBuf::as_path),
+                    &key_for_task,
+                )
             })
             .await;
             match attempt {
@@ -490,11 +547,21 @@ impl WorkspaceResourceManager {
                     tracing::warn!(
                         error = %err,
                         key = %os_key,
-                        "cross-process advisory lock unavailable; continuing with in-process lock only"
+                        "cross-process advisory lock acquisition failed"
                     );
-                    return Ok(());
+                    return Err(AcquireError::CrossProcess {
+                        kind: kind.kind_str(),
+                        target: kind.target_str(),
+                        message: err.to_string(),
+                    });
                 }
-                Err(_) => return Ok(()),
+                Err(join_err) => {
+                    return Err(AcquireError::CrossProcess {
+                        kind: kind.kind_str(),
+                        target: kind.target_str(),
+                        message: format!("lock task failed: {join_err}"),
+                    });
+                }
             }
             if Instant::now() >= deadline {
                 return Err(AcquireError::Timeout {
@@ -771,11 +838,24 @@ where
 }
 
 pub fn subagent_session_context(kind: &str, task_id: &str, fallback_workspace_dir: &Path) -> SessionContext {
-    let session_id = format!("{kind}-{task_id}");
     let workspace_dir = current_session_context()
         .map(|c| c.workspace_dir)
         .filter(|d| !d.trim().is_empty())
         .unwrap_or_else(|| fallback_workspace_dir.to_string_lossy().into_owned());
+    subagent_session_context_at(kind, task_id, Path::new(&workspace_dir))
+}
+
+pub fn subagent_session_context_at(
+    kind: &str,
+    task_id: &str,
+    workspace_dir: &Path,
+) -> SessionContext {
+    let session_id = format!("{kind}-{task_id}");
+    let workspace_dir = workspace_dir.to_string_lossy().into_owned();
+    crate::security::sandbox::register_workspace_root_for_session(
+        &session_id,
+        Path::new(&workspace_dir),
+    );
     SessionContext {
         workspace_key: crate::session::workspace_run::workspace_key_from_path(
             Path::new(&workspace_dir),
@@ -976,6 +1056,14 @@ pub fn record_read_for_current_session(path: &Path) {
     };
     let (workspace_key, session_id) = snapshot_identity();
     manager.record_read(&workspace_key, &session_id, path);
+}
+
+pub fn record_observed_for_current_session(path: &Path) {
+    let Some(manager) = global_workspace_resources() else {
+        return;
+    };
+    let (workspace_key, session_id) = snapshot_identity();
+    manager.record_observed(&workspace_key, &session_id, path);
 }
 
 pub fn record_write_for_current_session(path: &Path) {

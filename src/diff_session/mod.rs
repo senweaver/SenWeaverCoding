@@ -18,16 +18,31 @@ struct FileBackup {
 }
 
 #[derive(Debug, Clone)]
-struct StagedDiff {
-    path: PathBuf,
-    diff: String,
+enum StagedChange {
+    Diff {
+        path: PathBuf,
+        diff: String,
+    },
+    FullContent {
+        path: PathBuf,
+        contents: String,
+        encoding: Option<String>,
+    },
+}
+
+impl StagedChange {
+    fn path(&self) -> &PathBuf {
+        match self {
+            StagedChange::Diff { path, .. } | StagedChange::FullContent { path, .. } => path,
+        }
+    }
 }
 
 #[derive(Debug)]
 pub struct DiffSession {
     root: PathBuf,
     allowed_roots: Vec<PathBuf>,
-    staged: Vec<StagedDiff>,
+    staged: Vec<StagedChange>,
     backups: BTreeMap<PathBuf, FileBackup>,
     applied: bool,
     apply_opts: ApplyOptions,
@@ -144,9 +159,27 @@ impl DiffSession {
             return Err(DiffSessionError::AlreadyApplied);
         }
         let abs = resolve_inside(&self.root, &self.allowed_roots, path.as_ref())?;
-        self.staged.push(StagedDiff {
+        self.staged.push(StagedChange::Diff {
             path: abs,
             diff: diff.into(),
+        });
+        Ok(())
+    }
+
+    pub fn stage_full_content(
+        &mut self,
+        path: impl AsRef<Path>,
+        contents: impl Into<String>,
+        encoding: Option<String>,
+    ) -> Result<(), DiffSessionError> {
+        if self.applied {
+            return Err(DiffSessionError::AlreadyApplied);
+        }
+        let abs = resolve_inside(&self.root, &self.allowed_roots, path.as_ref())?;
+        self.staged.push(StagedChange::FullContent {
+            path: abs,
+            contents: contents.into(),
+            encoding,
         });
         Ok(())
     }
@@ -163,7 +196,7 @@ impl DiffSession {
 
     #[must_use]
     pub fn staged_paths(&self) -> Vec<PathBuf> {
-        let mut out: Vec<PathBuf> = self.staged.iter().map(|s| s.path.clone()).collect();
+        let mut out: Vec<PathBuf> = self.staged.iter().map(|s| s.path().clone()).collect();
         out.sort();
         out.dedup();
         out
@@ -178,7 +211,7 @@ impl DiffSession {
         let to_backup: Vec<PathBuf> = self
             .staged
             .iter()
-            .map(|s| s.path.clone())
+            .map(|s| s.path().clone())
             .filter(|p| !self.backups.contains_key(p) && seen.insert(p.clone()))
             .collect();
         if !to_backup.is_empty() {
@@ -216,12 +249,28 @@ impl DiffSession {
         let mut batch = EditBatch::new(EditOrigin::DiffSession).with_atomic(true);
         let fuzz = self.apply_opts.max_fuzz.min(u8::MAX as usize) as u8;
         for staged in &self.staged {
-            batch.push(EditOp::ApplyHunk {
-                path: staged.path.clone(),
-                diff: staged.diff.clone(),
-                fuzz,
-                scope_anchor: None,
-            });
+            match staged {
+                StagedChange::Diff { path, diff } => {
+                    batch.push(EditOp::ApplyHunk {
+                        path: path.clone(),
+                        diff: diff.clone(),
+                        fuzz,
+                        scope_anchor: None,
+                    });
+                }
+                StagedChange::FullContent {
+                    path,
+                    contents,
+                    encoding,
+                } => {
+                    batch.push(EditOp::CreateFile {
+                        path: path.clone(),
+                        contents: contents.clone(),
+                        overwrite: true,
+                        encoding: encoding.clone(),
+                    });
+                }
+            }
         }
         let touched_paths = batch
             .ops

@@ -114,8 +114,6 @@ impl Tool for FileReadTool {
             });
         }
 
-        crate::session::record_read_for_current_session(&resolved_path);
-
         let mtime_ms: Option<u64> = match tokio::fs::metadata(&resolved_path).await {
             Ok(meta) => {
                 if meta.len() > MAX_FILE_SIZE_BYTES {
@@ -243,6 +241,7 @@ impl Tool for FileReadTool {
                  use level=default for full content]",
                 level.as_str()
             );
+            crate::session::record_observed_for_current_session(&resolved_path);
             return Ok(ToolResult {
                 success: true,
                 output: format!("{compacted}{footer}"),
@@ -254,6 +253,7 @@ impl Tool for FileReadTool {
         let total = lines.len();
 
         if total == 0 {
+            crate::session::record_read_for_current_session(&resolved_path);
             return Ok(ToolResult {
                 success: true,
                 output: String::new(),
@@ -307,6 +307,8 @@ impl Tool for FileReadTool {
             .map(|(i, line)| format!("{}: {}", start + i + 1, line))
             .collect::<Vec<_>>()
             .join("\n");
+
+        crate::session::record_read_for_current_session(&resolved_path);
 
         let partial = start > 0 || end < total;
         let summary = if byte_clipped {

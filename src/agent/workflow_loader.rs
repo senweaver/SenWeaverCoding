@@ -106,10 +106,9 @@ impl WorkflowSpec {
         Ok(())
     }
 
-    pub fn build_scheduler(&self) -> Result<TaskScheduler, String> {
+    pub fn schedulable_tasks(&self) -> Result<Vec<SchedulableTask>, String> {
         self.validate()?;
-        let mut scheduler = TaskScheduler::new(self.max_parallel);
-        let schedulable: Vec<SchedulableTask> = self
+        Ok(self
             .tasks
             .iter()
             .map(|t| {
@@ -121,7 +120,12 @@ impl WorkflowSpec {
                 }
                 s
             })
-            .collect();
+            .collect())
+    }
+
+    pub fn build_scheduler(&self) -> Result<TaskScheduler, String> {
+        let schedulable = self.schedulable_tasks()?;
+        let mut scheduler = TaskScheduler::new(self.max_parallel);
         scheduler.add_tasks(schedulable)?;
         Ok(scheduler)
     }

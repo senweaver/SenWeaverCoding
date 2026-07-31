@@ -125,6 +125,7 @@ impl Tool for DesignerScaffoldTool {
                         error: Some(format!("Could not write `{rel}`: {e}")),
                     });
                 }
+                crate::session::record_write_for_current_session(&abs);
                 crate::agent::designer::record_artifact_if_designer(&abs);
                 Ok(ToolResult {
                     success: true,

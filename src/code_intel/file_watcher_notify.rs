@@ -95,7 +95,10 @@ fn translate_event(ev: &Event) -> Vec<FileEvent> {
                 out.push(FileEvent::Changed(p.clone()));
             }
         }
-        EventKind::Modify(ModifyKind::Data(_)) | EventKind::Modify(ModifyKind::Metadata(_)) => {
+        EventKind::Modify(ModifyKind::Data(_))
+        | EventKind::Modify(ModifyKind::Metadata(_))
+        | EventKind::Modify(ModifyKind::Any)
+        | EventKind::Modify(ModifyKind::Other) => {
             for p in &ev.paths {
                 out.push(FileEvent::Changed(p.clone()));
             }

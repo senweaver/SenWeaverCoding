@@ -413,6 +413,7 @@ impl Tool for GlobEditTool {
                 ));
                 continue;
             }
+            crate::session::record_observed_for_current_session(resolved);
             let (content, encoding_label) =
                 match crate::tools::file::encoding::decode_for_edit(&raw) {
                     Ok(v) => v,

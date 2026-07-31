@@ -801,6 +801,7 @@ impl Provider for OllamaProvider {
                 output_tokens: response.eval_count,
                 cached_input_tokens: None,
                 cache_creation_input_tokens: None,
+                reasoning_tokens: None,
             })
         } else {
             None
@@ -981,6 +982,7 @@ impl Provider for OllamaProvider {
             crate::providers::traits::StreamResult<StreamEvent>,
         >(64);
 
+        let cancel_token = crate::providers::current_session_cancel_token();
         crate::runtime::spawn_supervised("providers.ollama.stream", async move {
             let mut req = client.post(&url).json(&body);
             for (name, value) in &extra_headers {
@@ -1017,8 +1019,15 @@ impl Provider for OllamaProvider {
             const MAX_NDJSON_LINE_BYTES: usize = 64 * 1024 * 1024;
             let mut byte_stream = response.bytes_stream();
             let mut pending: Vec<u8> = Vec::new();
-            while let Some(chunk) = byte_stream.next().await {
-                let chunk = match chunk {
+            loop {
+                let next_chunk = tokio::select! {
+                    _ = crate::providers::stream_cancelled(&cancel_token) => return,
+                    next = byte_stream.next() => match next {
+                        Some(chunk) => chunk,
+                        None => break,
+                    },
+                };
+                let chunk = match next_chunk {
                     Ok(c) => c,
                     Err(e) => {
                         let _ = tx
@@ -1123,6 +1132,7 @@ impl Provider for OllamaProvider {
                                     output_tokens,
                                     cached_input_tokens: None,
                                     cache_creation_input_tokens: None,
+                                    reasoning_tokens: None,
                                 })))
                                 .await;
                         }

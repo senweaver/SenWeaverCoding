@@ -285,6 +285,7 @@ pub fn render_docx_with_diagrams(
     }
     let mut file = std::fs::File::create(output_path)?;
     doc.build().pack(&mut file)?;
+    crate::session::record_write_for_current_session(output_path);
     Ok(())
 }
 

@@ -87,7 +87,43 @@ fn is_native_tool_pair(assistant: &ChatMessage, tool: &ChatMessage) -> bool {
     false
 }
 
-fn truncate_native_tool_result(message: &mut ChatMessage) -> bool {
+const TRUNCATION_MARKER_PREFIX: &str = "[tool result truncated:";
+
+fn truncation_marker(kept: usize, total: usize, blob_id: Option<&str>) -> String {
+    match blob_id {
+        Some(id) => format!(
+            "{TRUNCATION_MARKER_PREFIX} kept {kept} of {total} chars; full output archived \
+             as blob {id}; call tool_result_expand with this id to retrieve the rest]"
+        ),
+        None => format!(
+            "{TRUNCATION_MARKER_PREFIX} kept {kept} of {total} chars; the remainder is no \
+             longer available — re-run the tool if needed]"
+        ),
+    }
+}
+
+pub(crate) fn shrink_text_layered(original: &str, keep_chars: usize) -> Option<String> {
+    if let Some(marker_pos) = original.rfind(TRUNCATION_MARKER_PREFIX) {
+        let body = original[..marker_pos].trim_end();
+        let marker = &original[marker_pos..];
+        let body_chars = body.chars().count();
+        if body_chars <= keep_chars {
+            return None;
+        }
+        let excerpt: String = body.chars().take(keep_chars).collect();
+        return Some(format!("{excerpt}\n{marker}"));
+    }
+    let total_chars = original.chars().count();
+    if total_chars <= keep_chars {
+        return None;
+    }
+    let blob_id = super::blob_store::put(original);
+    let excerpt: String = original.chars().take(keep_chars).collect();
+    let marker = truncation_marker(keep_chars, total_chars, blob_id.as_deref());
+    Some(format!("{excerpt}\n{marker}"))
+}
+
+fn truncate_native_tool_result(message: &mut ChatMessage, keep_chars: usize) -> bool {
     let Ok(mut envelope) = serde_json::from_str::<serde_json::Value>(&message.content) else {
         return false;
     };
@@ -101,13 +137,12 @@ fn truncate_native_tool_result(message: &mut ChatMessage) -> bool {
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
     };
-    let truncated: String = original.chars().take(100).collect();
-    if truncated.len() >= original.len() {
+    let Some(shrunk) = shrink_text_layered(&original, keep_chars) else {
         return false;
-    }
+    };
     obj.insert(
         "content".to_string(),
-        serde_json::Value::String(format!("{truncated}...")),
+        serde_json::Value::String(shrunk),
     );
     message.content = envelope.to_string();
     true
@@ -119,6 +154,74 @@ fn group_is_protected(messages: &[ChatMessage], start: usize, end: usize, keep_r
         return true;
     }
     (start..end).any(|idx| messages[idx].role == "system")
+}
+
+fn collapse_pass(
+    messages: &mut Vec<ChatMessage>,
+    config: &HistoryPrunerConfig,
+    factor: f64,
+    keep_chars: usize,
+    total_tokens: &mut usize,
+) -> usize {
+    let mut collapsed_pairs = 0usize;
+    let mut i = 0;
+    while i < messages.len() && *total_tokens > config.max_tokens {
+        if messages[i].role != "assistant"
+            || i + 1 >= messages.len()
+            || messages[i + 1].role != "tool"
+        {
+            i += 1;
+            continue;
+        }
+
+        let mut run_end = i + 1;
+        while run_end < messages.len() && messages[run_end].role == "tool" {
+            run_end += 1;
+        }
+
+        if group_is_protected(messages, i, run_end, config.keep_recent) {
+            i = run_end;
+            continue;
+        }
+
+        if is_native_tool_pair(&messages[i], &messages[i + 1]) {
+            let mut collapsed_any = false;
+            for message in messages.iter_mut().take(run_end).skip(i + 1) {
+                let before = calibrated_message_tokens(message, factor);
+                if truncate_native_tool_result(message, keep_chars) {
+                    collapsed_any = true;
+                    let after = calibrated_message_tokens(message, factor);
+                    *total_tokens =
+                        total_tokens.saturating_sub(before.saturating_sub(after));
+                }
+            }
+            if collapsed_any {
+                collapsed_pairs += 1;
+            }
+            i = run_end;
+            continue;
+        }
+
+        let group_tokens: usize = (i..run_end)
+            .map(|idx| calibrated_message_tokens(&messages[idx], factor))
+            .sum();
+        let first_tool = messages[i + 1].content.clone();
+        let excerpt = shrink_text_layered(&first_tool, keep_chars)
+            .unwrap_or_else(|| first_tool.clone());
+        let original_text = messages[i].content.trim().to_string();
+        let summary = if original_text.is_empty() {
+            format!("[Tool result]\n{excerpt}")
+        } else {
+            format!("{original_text}\n[Tool result]\n{excerpt}")
+        };
+        messages[i].content = summary;
+        messages.drain(i + 1..run_end);
+        let kept = calibrated_message_tokens(&messages[i], factor);
+        *total_tokens = total_tokens.saturating_sub(group_tokens.saturating_sub(kept));
+        collapsed_pairs += 1;
+        i += 1;
+    }
+    collapsed_pairs
 }
 
 pub fn prune_history(
@@ -151,60 +254,20 @@ pub fn prune_history(
     let mut collapsed_pairs: usize = 0;
 
     if config.collapse_tool_results {
-        let mut i = 0;
-        while i < messages.len() && total_tokens > config.max_tokens {
-            if messages[i].role != "assistant"
-                || i + 1 >= messages.len()
-                || messages[i + 1].role != "tool"
-            {
-                i += 1;
-                continue;
+        let generous_keep_chars =
+            crate::agent::token::budget::default_max_tool_result_tokens().saturating_mul(4);
+        const AGGRESSIVE_KEEP_CHARS: usize = 400;
+        for keep_chars in [generous_keep_chars, AGGRESSIVE_KEEP_CHARS] {
+            if total_tokens <= config.max_tokens {
+                break;
             }
-
-            let mut run_end = i + 1;
-            while run_end < messages.len() && messages[run_end].role == "tool" {
-                run_end += 1;
-            }
-
-            if group_is_protected(messages, i, run_end, config.keep_recent) {
-                i = run_end;
-                continue;
-            }
-
-            if is_native_tool_pair(&messages[i], &messages[i + 1]) {
-                let mut collapsed_any = false;
-                for message in messages.iter_mut().take(run_end).skip(i + 1) {
-                    let before = calibrated_message_tokens(message, factor);
-                    if truncate_native_tool_result(message) {
-                        collapsed_any = true;
-                        let after = calibrated_message_tokens(message, factor);
-                        total_tokens = total_tokens.saturating_sub(before.saturating_sub(after));
-                    }
-                }
-                if collapsed_any {
-                    collapsed_pairs += 1;
-                }
-                i = run_end;
-                continue;
-            }
-
-            let group_tokens: usize = (i..run_end)
-                .map(|idx| calibrated_message_tokens(&messages[idx], factor))
-                .sum();
-            let first_tool = &messages[i + 1].content;
-            let truncated: String = first_tool.chars().take(100).collect();
-            let original_text = messages[i].content.trim().to_string();
-            let summary = if original_text.is_empty() {
-                format!("[Tool result: {truncated}...]")
-            } else {
-                format!("{original_text}\n[Tool result: {truncated}...]")
-            };
-            messages[i].content = summary;
-            messages.drain(i + 1..run_end);
-            let kept = calibrated_message_tokens(&messages[i], factor);
-            total_tokens = total_tokens.saturating_sub(group_tokens.saturating_sub(kept));
-            collapsed_pairs += 1;
-            i += 1;
+            collapsed_pairs += collapse_pass(
+                messages,
+                config,
+                factor,
+                keep_chars,
+                &mut total_tokens,
+            );
         }
     }
 

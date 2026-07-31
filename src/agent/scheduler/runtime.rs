@@ -15,6 +15,7 @@ use tokio_util::sync::CancellationToken;
 use tracing::{Instrument, debug, info_span, warn};
 
 const SCHEDULER_RUN_MAX_SECS: u64 = 3 * 60 * 60;
+const SCHEDULER_CANCEL_GRACE_SECS: u64 = 30;
 
 use super::core::{SchedulableTask, SchedulerEvent, TaskOutcome, TaskScheduler};
 use crate::observability::runtime_trace::{AgentSpanContext, record_event_with_ctx};
@@ -115,19 +116,34 @@ impl TaskSchedulerRuntime {
             handles.push(handle);
         }
 
-        let join_all = async {
-            for h in handles {
-                let _ = h.into_inner().await;
+        let join_handles: Vec<tokio::task::JoinHandle<()>> = handles
+            .into_iter()
+            .map(crate::runtime::TaskHandle::into_inner)
+            .collect();
+        match crate::runtime::task_manager::shutdown_with_grace(
+            Some(&self.cancellation),
+            join_handles,
+            Some(Duration::from_secs(SCHEDULER_RUN_MAX_SECS)),
+            Duration::from_secs(SCHEDULER_CANCEL_GRACE_SECS),
+        )
+        .await
+        {
+            crate::runtime::task_manager::ShutdownOutcome::Completed => {}
+            crate::runtime::task_manager::ShutdownOutcome::CancelledGraceful => {
+                warn!(
+                    max_secs = SCHEDULER_RUN_MAX_SECS,
+                    "scheduler run exceeded absolute deadline; workers stopped within the \
+                     cancellation grace period, returning partial outcomes"
+                );
             }
-        };
-
-        let deadline = Duration::from_secs(SCHEDULER_RUN_MAX_SECS);
-        if tokio::time::timeout(deadline, join_all).await.is_err() {
-            warn!(
-                max_secs = SCHEDULER_RUN_MAX_SECS,
-                "scheduler run exceeded absolute deadline; cancelling and returning partial outcomes"
-            );
-            self.cancellation.cancel();
+            crate::runtime::task_manager::ShutdownOutcome::Aborted => {
+                warn!(
+                    max_secs = SCHEDULER_RUN_MAX_SECS,
+                    grace_secs = SCHEDULER_CANCEL_GRACE_SECS,
+                    "scheduler run exceeded absolute deadline and workers did not stop within \
+                     the cancellation grace period; workers hard-aborted, returning partial outcomes"
+                );
+            }
         }
 
         self.scheduler.lock().outcomes()

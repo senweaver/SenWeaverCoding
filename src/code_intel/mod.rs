@@ -8,6 +8,7 @@ pub mod git_timeline;
 
 pub mod grammars;
 pub mod outline;
+pub mod post_edit_diagnostics;
 pub mod repo_map;
 pub mod review;
 pub mod search;

@@ -204,6 +204,7 @@ impl Tool for EnterCuratorModeTool {
         let slug = init.slug;
 
         for (p, bytes) in &init.created {
+            crate::session::record_write_for_current_session(p);
             crate::agent::file_edit_emitter::emit_file_create(p, bytes, None).await;
         }
 
@@ -618,6 +619,7 @@ impl Tool for CuratorDeepCollectTool {
             .map_err(|e| anyhow::anyhow!("curator_deep_collect internal task error: {e}"))??
         };
         if let Some(after) = notes_after_header.as_deref() {
+            crate::session::record_write_for_current_session(&notes_path);
             crate::agent::file_edit_emitter::emit_file_edit(
                 &notes_path,
                 notes_before.as_deref(),
@@ -840,6 +842,7 @@ impl Tool for CuratorDeepCollectTool {
             };
 
             if let Some(after) = persist.sources_after.as_deref() {
+                crate::session::record_write_for_current_session(&sources_path);
                 crate::agent::file_edit_emitter::emit_file_edit(
                     &sources_path,
                     persist.sources_before.as_deref(),
@@ -849,6 +852,7 @@ impl Tool for CuratorDeepCollectTool {
                 .await;
             }
             if let Some(after) = persist.notes_after.as_deref() {
+                crate::session::record_write_for_current_session(&notes_path);
                 crate::agent::file_edit_emitter::emit_file_edit(
                     &notes_path,
                     persist.notes_before.as_deref(),
@@ -1046,6 +1050,7 @@ impl Tool for CuratorTemplateApplyTool {
                 draft_bytes,
                 blueprint,
             } => {
+                crate::session::record_write_for_current_session(&draft_path);
                 crate::agent::file_edit_emitter::emit_file_edit(
                     &draft_path,
                     draft_before.as_deref(),
@@ -1055,6 +1060,7 @@ impl Tool for CuratorTemplateApplyTool {
                 .await;
                 let mut applied = vec!["draft.md".to_string()];
                 if let Some((blueprint_path, blueprint_before, blueprint_bytes)) = blueprint {
+                    crate::session::record_write_for_current_session(&blueprint_path);
                     crate::agent::file_edit_emitter::emit_file_edit(
                         &blueprint_path,
                         blueprint_before.as_deref(),
@@ -1310,6 +1316,7 @@ impl Tool for ExitCuratorModeTool {
             );
         }
 
+        crate::session::record_write_for_current_session(&final_path);
         crate::agent::file_edit_emitter::emit_file_edit(
             &final_path,
             final_before.as_deref(),
@@ -1317,6 +1324,7 @@ impl Tool for ExitCuratorModeTool {
             None,
         )
         .await;
+        crate::session::record_write_for_current_session(&blueprint_path);
         crate::agent::file_edit_emitter::emit_file_edit(
             &blueprint_path,
             blueprint_before.as_deref(),
@@ -1326,6 +1334,7 @@ impl Tool for ExitCuratorModeTool {
         .await;
         let final_docx_path_opt: Option<std::path::PathBuf> = if docx_ready {
             let docx_bytes_after = docx_bytes.unwrap_or_default();
+            crate::session::record_write_for_current_session(&docx_path);
             crate::agent::file_edit_emitter::emit_file_edit(
                 &docx_path,
                 docx_before.as_deref(),

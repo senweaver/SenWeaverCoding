@@ -33,6 +33,7 @@ pub async fn build_chunks(
         let Ok(text) = tokio::fs::read_to_string(&path).await else {
             continue;
         };
+        crate::session::record_observed_for_current_session(&path);
         let lines: Vec<&str> = text.lines().collect();
         hits.sort_by_key(|h| h.line_number);
         let groups = group_neighbors(&hits, context_lines.max(2) * 2);

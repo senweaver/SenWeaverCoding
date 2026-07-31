@@ -105,6 +105,138 @@ impl PatchApplyTool {
         Ok(())
     }
 
+    async fn report_patch_outcome(
+        &self,
+        outcome: crate::apply_model::BatchOutcome,
+        patch_files: &[PatchFile],
+        pre_contents: &[Option<Vec<u8>>],
+        diag_baseline: &crate::code_intel::post_edit_diagnostics::DiagnosticsBaseline,
+    ) -> ToolResult {
+        let batch_id = outcome.batch_id.clone();
+        let mut applied = 0usize;
+        let mut failed = 0usize;
+        let mut details: Vec<String> = Vec::with_capacity(outcome.per_op.len());
+        for (idx, op) in outcome.per_op.iter().enumerate() {
+            let path = patch_files
+                .get(idx)
+                .map(|f| f.path.display().to_string())
+                .unwrap_or_else(|| op.touched_path.display().to_string());
+            if op.success {
+                applied += 1;
+                crate::session::record_write_for_current_session(&op.touched_path);
+                let after_bytes = tokio::fs::read(&op.touched_path).await.ok();
+                let before_bytes = pre_contents.get(idx).cloned().flatten();
+                if let Some(after) = after_bytes.as_deref() {
+                    crate::agent::file_edit_emitter::emit_file_edit(
+                        &op.touched_path,
+                        before_bytes.as_deref(),
+                        Some(after),
+                        Some(batch_id.clone()),
+                    )
+                    .await;
+                }
+                details.push(format!("  Successfully applied hunk(s) to {path}"));
+            } else {
+                failed += 1;
+                details.push(format!(
+                    "  Failed to apply hunk(s) to {path}: {}",
+                    op.error.as_deref().unwrap_or("unknown")
+                ));
+            }
+        }
+
+        let mut out = vec![format!("Applying patch to {} file(s):\n", patch_files.len())];
+        out.extend(details);
+        out.push(format!(
+            "\nApplied {}/{} file(s) ({} failed){}",
+            applied,
+            patch_files.len(),
+            failed,
+            if outcome.degraded { ", degraded=true" } else { "" },
+        ));
+        if let Some(jp) = outcome.journal_path.as_ref() {
+            out.push(format!("Journal: {}", jp.display()));
+        }
+        let success = failed == 0;
+        let mut output = out.join("\n");
+        if success {
+            let touched: Vec<std::path::PathBuf> =
+                patch_files.iter().map(|f| f.path.clone()).collect();
+            if let Some(feedback) =
+                crate::code_intel::post_edit_diagnostics::new_error_feedback(
+                    &touched,
+                    diag_baseline,
+                )
+                .await
+            {
+                output.push_str(&feedback);
+            }
+        }
+        ToolResult {
+            success,
+            output,
+            error: None,
+        }
+    }
+
+    async fn retry_batch_with_ladder(
+        &self,
+        patch_files: &[PatchFile],
+        fuzz: u8,
+        atomic: bool,
+    ) -> Option<EditBatch> {
+        let refiner = crate::apply_model::fast_apply::runtime_ladder_refiner()?;
+        let mut batch = EditBatch::new(EditOrigin::PatchTool).with_atomic(atomic);
+        let mut refined_any = false;
+        for file in patch_files {
+            match &file.action {
+                PatchFileAction::Create { contents } => {
+                    batch.push(EditOp::CreateFile {
+                        path: file.path.clone(),
+                        contents: contents.clone(),
+                        overwrite: false,
+                        encoding: None,
+                    });
+                }
+                PatchFileAction::Delete => {
+                    batch.push(EditOp::DeleteFile {
+                        path: file.path.clone(),
+                        missing_ok: false,
+                    });
+                }
+                PatchFileAction::Modify => {
+                    match crate::apply_model::fast_apply::refine_failing_diff_to_content(
+                        refiner.as_ref(),
+                        &file.path,
+                        &file.diff_text,
+                        fuzz as usize,
+                    )
+                    .await
+                    {
+                        Some(refined) => {
+                            refined_any = true;
+                            batch.push(EditOp::CreateFile {
+                                path: file.path.clone(),
+                                contents: refined.contents,
+                                overwrite: true,
+                                encoding: refined.encoding,
+                            });
+                        }
+                        None => {
+                            batch.push(EditOp::ApplyHunk {
+                                path: file.path.clone(),
+                                diff: file.diff_text.clone(),
+                                fuzz,
+                                scope_anchor: None,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        refined_any.then_some(batch)
+    }
+
     async fn verify_no_symlink(&self, path: &Path) -> anyhow::Result<()> {
         if let Ok(meta) = tokio::fs::symlink_metadata(path).await {
             if meta.file_type().is_symlink() {
@@ -596,6 +728,23 @@ impl Tool for PatchApplyTool {
                             });
                         }
                     }
+                    for file in &patch_files {
+                        if matches!(file.action, PatchFileAction::Modify)
+                            && file.path.exists()
+                            && !crate::session::has_read_in_current_session(&file.path)
+                        {
+                            return Ok(ToolResult {
+                                success: false,
+                                output: String::new(),
+                                error: Some(format!(
+                                    "Refusing to patch '{}': this session has not read the \
+                                     file yet. Use file_read on it first (the patch must be \
+                                     based on the file's CURRENT contents), then retry.",
+                                    file.path.display()
+                                )),
+                            });
+                        }
+                    }
                 }
 
                 let mut batch = EditBatch::new(EditOrigin::PatchTool).with_atomic(atomic);
@@ -662,75 +811,52 @@ impl Tool for PatchApplyTool {
                             pre_paths.iter().map(|p| std::fs::read(p).ok()).collect()
                         })
                         .await?;
+                    let diag_baseline =
+                        crate::code_intel::post_edit_diagnostics::baseline(&planned_paths)
+                            .await;
                     match self.ops_applier.apply_batch(batch).await {
-                        Ok(outcome) => {
-                            let batch_id = outcome.batch_id.clone();
-                            let mut applied = 0usize;
-                            let mut failed = 0usize;
-                            let mut details: Vec<String> =
-                                Vec::with_capacity(outcome.per_op.len());
-                            for (idx, op) in outcome.per_op.iter().enumerate() {
-                                let path = patch_files
-                                    .get(idx)
-                                    .map(|f| f.path.display().to_string())
-                                    .unwrap_or_else(|| op.touched_path.display().to_string());
-                                if op.success {
-                                    applied += 1;
-                                    crate::session::record_write_for_current_session(
-                                        &op.touched_path,
-                                    );
-                                    let after_bytes =
-                                        tokio::fs::read(&op.touched_path).await.ok();
-                                    let before_bytes = pre_contents.get(idx).cloned().flatten();
-                                    if let Some(after) = after_bytes.as_deref() {
-                                        crate::agent::file_edit_emitter::emit_file_edit(
-                                            &op.touched_path,
-                                            before_bytes.as_deref(),
-                                            Some(after),
-                                            Some(batch_id.clone()),
-                                        )
-                                        .await;
+                        Ok(outcome) => Ok(self
+                            .report_patch_outcome(
+                                outcome,
+                                &patch_files,
+                                &pre_contents,
+                                &diag_baseline,
+                            )
+                            .await),
+                        Err(ApplyBatchError::Hunk { source, path, .. }) => {
+                            if let Some(retry_batch) = self
+                                .retry_batch_with_ladder(&patch_files, fuzz, atomic)
+                                .await
+                            {
+                                match self.ops_applier.apply_batch(retry_batch).await {
+                                    Ok(outcome) => {
+                                        return Ok(self
+                                            .report_patch_outcome(
+                                                outcome,
+                                                &patch_files,
+                                                &pre_contents,
+                                                &diag_baseline,
+                                            )
+                                            .await);
                                     }
-                                    details.push(format!(
-                                        "  Successfully applied hunk(s) to {path}"
-                                    ));
-                                } else {
-                                    failed += 1;
-                                    details.push(format!(
-                                        "  Failed to apply hunk(s) to {path}: {}",
-                                        op.error.as_deref().unwrap_or("unknown")
-                                    ));
+                                    Err(retry_err) => {
+                                        tracing::debug!(
+                                            target: "apply_model.fast_apply",
+                                            error = %retry_err,
+                                            "ladder retry batch failed; reporting original error"
+                                        );
+                                    }
                                 }
                             }
-
-                            let mut out =
-                                vec![format!("Applying patch to {} file(s):\n", patch_files.len())];
-                            out.extend(details);
-                            out.push(format!(
-                                "\nApplied {}/{} file(s) ({} failed){}",
-                                applied,
-                                patch_files.len(),
-                                failed,
-                                if outcome.degraded { ", degraded=true" } else { "" },
-                            ));
-                            if let Some(jp) = outcome.journal_path.as_ref() {
-                                out.push(format!("Journal: {}", jp.display()));
-                            }
-                            let success = failed == 0;
                             Ok(ToolResult {
-                                success,
-                                output: out.join("\n"),
-                                error: None,
+                                success: false,
+                                output: String::new(),
+                                error: Some(format!(
+                                    "Failed to apply patch to {}: {source}",
+                                    path.display()
+                                )),
                             })
                         }
-                        Err(ApplyBatchError::Hunk { source, path, .. }) => Ok(ToolResult {
-                            success: false,
-                            output: String::new(),
-                            error: Some(format!(
-                                "Failed to apply patch to {}: {source}",
-                                path.display()
-                            )),
-                        }),
                         Err(e) => Ok(ToolResult {
                             success: false,
                             output: String::new(),
