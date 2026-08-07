@@ -48,6 +48,12 @@ pub use schema::{
 };
 pub use hot_reload::{ConfigChangedEvent, LiveConfig, SharedConfig};
 
+pub(crate) use schema::{
+    api_format_to_wire_api, apply_desktop_permission_mode_to_autonomy,
+    desktop_permission_blocks_tool, normalize_desktop_permission_mode, normalize_wire_api,
+    permission_mode_allows_auto_approve, provider_requires_openai_auth, wire_api_to_api_format,
+};
+
 pub fn name_and_presence<T: traits::ChannelConfig>(channel: Option<&T>) -> (&'static str, bool) {
     (T::name(), channel.is_some())
 }

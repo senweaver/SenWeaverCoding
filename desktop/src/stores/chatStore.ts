@@ -4805,15 +4805,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             data && typeof data.sessionId === 'string' && data.sessionId.length > 0
               ? (data.sessionId as string)
               : undefined
-          const scope =
-            data && typeof data.scope === 'string' ? (data.scope as string) : undefined
           const mode =
             data && typeof data.mode === 'string'
               ? (data.mode as string)
               : typeof msg.message === 'string'
                 ? msg.message.replace(/^Permission mode: /, '')
                 : undefined
-          if (mode && scope === 'global') {
+          if (mode) {
             import('../stores/settingsStore').then(({ useSettingsStore }) => {
               useSettingsStore.getState().applyPermissionMode(mode as PermissionMode)
             }).catch(() => {})

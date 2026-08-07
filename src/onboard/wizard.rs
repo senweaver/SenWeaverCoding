@@ -1561,14 +1561,28 @@ async fn fetch_openrouter_models(api_key: Option<&str>) -> Result<Vec<String>> {
     Ok(parse_openai_compatible_model_ids(&payload))
 }
 
-pub(crate) async fn fetch_anthropic_models(api_key: Option<&str>) -> Result<Vec<String>> {
+pub(crate) async fn fetch_anthropic_models(
+    api_key: Option<&str>,
+    base_url: Option<&str>,
+) -> Result<Vec<String>> {
     let Some(api_key) = api_key else {
         bail!("Anthropic model fetch requires API key or OAuth token");
     };
 
+    let trimmed = base_url
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .unwrap_or("https://api.anthropic.com");
+    let trimmed = trimmed.trim_end_matches('/');
+    let models_url = if trimmed.ends_with("/v1") {
+        format!("{trimmed}/models")
+    } else {
+        format!("{trimmed}/v1/models")
+    };
+
     let client = build_model_fetch_client()?;
     let mut request = client
-        .get("https://api.anthropic.com/v1/models")
+        .get(&models_url)
         .header("anthropic-version", "2023-06-01");
 
     if api_key.starts_with("sk-ant-oat01-") {
@@ -1582,7 +1596,7 @@ pub(crate) async fn fetch_anthropic_models(api_key: Option<&str>) -> Result<Vec<
     let response = request
         .send()
         .await
-        .context("model fetch failed: GET https://api.anthropic.com/v1/models")?;
+        .with_context(|| format!("model fetch failed: GET {models_url}"))?;
 
     let status = response.status();
     if !status.is_success() {
@@ -1745,7 +1759,7 @@ async fn fetch_live_models_for_provider(
 
     let models = match provider_name {
         "openrouter" => fetch_openrouter_models(api_key.as_deref()).await?,
-        "anthropic" => fetch_anthropic_models(api_key.as_deref()).await?,
+        "anthropic" => fetch_anthropic_models(api_key.as_deref(), None).await?,
         "gemini" => fetch_gemini_models(api_key.as_deref()).await?,
         "ollama" => {
             if ollama_remote {

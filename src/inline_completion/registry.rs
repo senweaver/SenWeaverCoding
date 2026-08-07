@@ -153,6 +153,7 @@ pub fn default_provider(config: &crate::config::Config) -> Option<RegistryHandle
         api_path,
         provider_max_tokens,
         model_context_windows,
+        model_providers: config.model_providers.clone(),
     };
     let provider = crate::providers::create_provider_with_options(
         &provider_name,

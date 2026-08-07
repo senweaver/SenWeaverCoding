@@ -201,6 +201,7 @@ fn provider_runtime_options_for(
         api_path: profile.api_path.clone().or_else(|| config.api_path.clone()),
         provider_max_tokens: profile.max_tokens.or(config.provider_max_tokens),
         model_context_windows: profile.model_context_windows.clone(),
+        model_providers: config.model_providers.clone(),
     }
 }
 
@@ -231,8 +232,9 @@ fn register_per_provider_reflection_factories(
         let credential = profile.api_key.as_deref();
         let runtime_options = provider_runtime_options_for(profile, config);
         let provider_url = profile.base_url.as_deref();
+        let runtime_name = providers::resolve_runtime_provider_name(pid, config);
         match providers::create_provider_with_url_and_options(
-            pid,
+            &runtime_name,
             credential,
             provider_url,
             &runtime_options,
@@ -491,6 +493,7 @@ fn build_runtime_provider_from_cfg(cfg: &Config) -> Option<(Arc<dyn Provider>, S
         api_path: cfg.api_path.clone(),
         provider_max_tokens: cfg.provider_max_tokens,
         model_context_windows: cfg.model_context_windows.clone(),
+        model_providers: cfg.model_providers.clone(),
     };
 
     let provider_arc: Arc<dyn Provider> = match providers::create_resilient_provider_with_options(
@@ -891,6 +894,7 @@ async fn run_gateway_inner(
         api_path: config.api_path.clone(),
         provider_max_tokens: config.provider_max_tokens,
         model_context_windows: config.model_context_windows.clone(),
+        model_providers: config.model_providers.clone(),
     };
     let provider_inner: Arc<dyn Provider> =
         match providers::create_resilient_provider_with_options_async(

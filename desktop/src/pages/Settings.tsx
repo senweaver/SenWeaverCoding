@@ -24,6 +24,7 @@ import type {
   ModelPricingEntry,
   DiscoveredModel,
 } from '../types/provider'
+import { normalizeApiFormat, apiFormatLabel } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
 import type { CodingModeId } from '../types/codingMode'
 import { sortByCodingModeOrder } from '../types/codingMode'
@@ -433,9 +434,9 @@ function ProviderSettings() {
                       <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[var(--color-surface-container-high)] text-[var(--color-text-tertiary)] leading-none">
                         {t('settings.providers.modelCount', { count: String(provider.models.length) })}
                       </span>
-                      {provider.apiFormat && provider.apiFormat !== 'anthropic' && (
+                      {provider.apiFormat && (
                         <span className="px-1.5 py-0.5 text-[10px] font-medium rounded bg-[var(--color-surface-container-high)] text-[var(--color-warning)] leading-none">
-                          {provider.apiFormat === 'openai_chat' ? 'OpenAI Chat' : 'OpenAI Responses'}
+                          {apiFormatLabel(provider.apiFormat)}
                         </span>
                       )}
                       {isActive && (
@@ -535,7 +536,7 @@ function buildFallbackPreset(provider?: SavedProvider): ProviderPreset {
     id: provider?.presetId ?? 'custom',
     name: provider?.name ?? 'Custom',
     baseUrl: provider?.baseUrl ?? '',
-    apiFormat: provider?.apiFormat ?? 'openai_chat',
+    apiFormat: normalizeApiFormat(provider?.apiFormat ?? 'openai_chat'),
     defaultModels: provider?.models ?? [],
     needsApiKey: true,
     websiteUrl: '',
@@ -699,7 +700,9 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
   const [selectedPreset, setSelectedPreset] = useState<ProviderPreset>(initialPreset)
   const [name, setName] = useState(provider?.name ?? presetInitialName(initialPreset))
   const [baseUrl, setBaseUrl] = useState(provider?.baseUrl ?? initialPreset.baseUrl)
-  const [apiFormat, setApiFormat] = useState<ApiFormat>(provider?.apiFormat ?? initialPreset.apiFormat ?? 'openai_chat')
+  const [apiFormat, setApiFormat] = useState<ApiFormat>(
+    normalizeApiFormat(provider?.apiFormat ?? initialPreset.apiFormat ?? 'openai_chat'),
+  )
   const [apiKey, setApiKey] = useState('')
   const [notes, setNotes] = useState(provider?.notes ?? '')
   const [modelRows, setModelRows] = useState<ModelRow[]>(() =>
@@ -783,7 +786,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
     setSelectedPreset(preset)
     setName(presetInitialName(preset))
     setBaseUrl(preset.baseUrl)
-    setApiFormat(preset.apiFormat ?? 'openai_chat')
+    setApiFormat(normalizeApiFormat(preset.apiFormat ?? 'openai_chat'))
     setModelRows(toModelRows([...preset.defaultModels]))
 
     setModelContextWindows({})
@@ -1232,7 +1235,7 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           <label className="text-xs font-medium text-[var(--color-text-primary)] mb-1 block">{t('settings.providers.apiFormat')}</label>
           <select
             value={apiFormat}
-            onChange={(e) => setApiFormat(e.target.value as ApiFormat)}
+            onChange={(e) => setApiFormat(normalizeApiFormat(e.target.value))}
             className="w-full text-xs px-2.5 py-1.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
           >
             <option value="openai_chat">{t('settings.providers.apiFormatOpenaiChat')}</option>

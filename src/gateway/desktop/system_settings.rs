@@ -105,12 +105,8 @@ fn build_service_tokens_payload(config: &crate::config::Config) -> serde_json::V
 }
 
 fn parse_proxy_scope(raw: &str) -> Result<ProxyScope, String> {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "environment" => Ok(ProxyScope::Environment),
-        "internal" => Ok(ProxyScope::Internal),
-        "services" => Ok(ProxyScope::Services),
-        other => Err(format!("unsupported proxy scope: {other}")),
-    }
+    crate::config::schema::parse_proxy_scope(raw)
+        .ok_or_else(|| format!("unsupported proxy scope: {raw}"))
 }
 
 fn optional_trimmed_string(value: Option<&serde_json::Value>) -> Option<String> {

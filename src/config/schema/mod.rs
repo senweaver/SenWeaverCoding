@@ -1239,6 +1239,26 @@ pub fn classify_model_type(model_id: &str) -> Vec<String> {
     {
         return vec!["image-generation".to_string()];
     }
+    if has("suno")
+        || has("lyria")
+        || has("musicgen")
+        || has("music-generation")
+        || id.split(|c: char| !c.is_ascii_alphanumeric())
+            .any(|tok| tok == "udio")
+        || (has("music") && (has("gen") || has("create") || has("compose")))
+    {
+        return vec!["music-generation".to_string()];
+    }
+    if (has("video")
+        && (has("understanding")
+            || has("caption")
+            || has("vlm")
+            || has("describe")
+            || has("analyze")))
+        || has("video-understanding")
+    {
+        return vec!["video-understanding".to_string()];
+    }
     if has("video") || has("sora") || has("veo") || has("kling") || has("seedance") {
         return vec!["video-generation".to_string()];
     }
@@ -1430,9 +1450,21 @@ pub(crate) fn normalize_reasoning_effort(value: &str) -> std::result::Result<Str
     let normalized = value.trim().to_ascii_lowercase();
     match normalized.as_str() {
         "minimal" | "low" | "medium" | "high" | "xhigh" => Ok(normalized),
+        "max" => Ok("xhigh".to_string()),
         _ => Err(format!(
-            "reasoning_effort {value:?} is invalid (expected one of: minimal, low, medium, high, xhigh)"
+            "reasoning_effort {value:?} is invalid (expected one of: minimal, low, medium, high, xhigh, max)"
         )),
+    }
+}
+
+pub(crate) fn reasoning_effort_to_ui(value: &str) -> &'static str {
+    match value.trim().to_ascii_lowercase().as_str() {
+        "xhigh" | "max" => "max",
+        "minimal" => "low",
+        "low" => "low",
+        "high" => "high",
+        "medium" => "medium",
+        _ => "medium",
     }
 }
 
@@ -1464,6 +1496,18 @@ fn default_transcription_max_duration_secs() -> u64 {
 
 fn default_transcription_provider() -> String {
     "groq".into()
+}
+
+pub(crate) fn normalize_transcription_provider(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "groq" => Some("groq"),
+        "openai" | "whisper" | "openai-whisper" => Some("openai"),
+        "deepgram" => Some("deepgram"),
+        "assemblyai" | "assembly-ai" => Some("assemblyai"),
+        "google" | "google-stt" => Some("google"),
+        "local_whisper" | "local-whisper" | "localwhisper" => Some("local_whisper"),
+        _ => None,
+    }
 }
 
 fn default_openai_stt_model() -> String {
@@ -1542,6 +1586,56 @@ impl Default for TranscriptionConfig {
             local_whisper: None,
             transcribe_non_ptt_audio: false,
         }
+    }
+}
+
+impl TranscriptionConfig {
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if !self.enabled {
+            return errors;
+        }
+        let dp = self.default_provider.trim();
+        let Some(provider) = normalize_transcription_provider(dp) else {
+            errors.push(format!(
+                "transcription.default_provider must be one of: groq, openai, deepgram, assemblyai, google, local_whisper (got '{dp}')"
+            ));
+            return errors;
+        };
+        match provider {
+            "openai" if self.openai.is_none() => {
+                errors.push(
+                    "transcription.default_provider='openai' requires [transcription.openai]"
+                        .into(),
+                );
+            }
+            "deepgram" if self.deepgram.is_none() => {
+                errors.push(
+                    "transcription.default_provider='deepgram' requires [transcription.deepgram]"
+                        .into(),
+                );
+            }
+            "assemblyai" if self.assemblyai.is_none() => {
+                errors.push(
+                    "transcription.default_provider='assemblyai' requires [transcription.assemblyai]"
+                        .into(),
+                );
+            }
+            "google" if self.google.is_none() => {
+                errors.push(
+                    "transcription.default_provider='google' requires [transcription.google]"
+                        .into(),
+                );
+            }
+            "local_whisper" if self.local_whisper.is_none() => {
+                errors.push(
+                    "transcription.default_provider='local_whisper' requires [transcription.local_whisper]"
+                        .into(),
+                );
+            }
+            _ => {}
+        }
+        errors
     }
 }
 
@@ -1754,6 +1848,17 @@ fn default_tts_provider() -> String {
     "openai".into()
 }
 
+pub(crate) fn normalize_tts_provider(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "openai" | "openai-tts" | "openai_tts" => Some("openai"),
+        "elevenlabs" | "eleven-labs" | "eleven_labs" | "11labs" => Some("elevenlabs"),
+        "google" | "google-tts" | "google_tts" => Some("google"),
+        "edge" | "edge-tts" | "edge_tts" => Some("edge"),
+        "piper" => Some("piper"),
+        _ => None,
+    }
+}
+
 fn default_tts_voice() -> String {
     "alloy".into()
 }
@@ -1849,6 +1954,44 @@ impl Default for TtsConfig {
     }
 }
 
+impl TtsConfig {
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if !self.enabled {
+            return errors;
+        }
+        let dp = self.default_provider.trim();
+        let Some(provider) = normalize_tts_provider(dp) else {
+            errors.push(format!(
+                "tts.default_provider must be one of: openai, elevenlabs, google, edge, piper (got '{dp}')"
+            ));
+            return errors;
+        };
+        if self.max_text_length == 0 {
+            errors.push("tts.max_text_length must be greater than 0".into());
+        }
+        match provider {
+            "openai" if self.openai.is_none() => {
+                errors.push("tts.default_provider='openai' requires [tts.openai]".into());
+            }
+            "elevenlabs" if self.elevenlabs.is_none() => {
+                errors.push("tts.default_provider='elevenlabs' requires [tts.elevenlabs]".into());
+            }
+            "google" if self.google.is_none() => {
+                errors.push("tts.default_provider='google' requires [tts.google]".into());
+            }
+            "edge" if self.edge.is_none() => {
+                errors.push("tts.default_provider='edge' requires [tts.edge]".into());
+            }
+            "piper" if self.piper.is_none() => {
+                errors.push("tts.default_provider='piper' requires [tts.piper]".into());
+            }
+            _ => {}
+        }
+        errors
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct OpenAiTtsConfig {
 
@@ -1926,6 +2069,37 @@ pub struct ToolFilterGroup {
 
     #[serde(default)]
     pub filter_builtins: bool,
+}
+
+impl Default for ToolFilterGroup {
+    fn default() -> Self {
+        Self {
+            mode: ToolFilterGroupMode::default(),
+            tools: Vec::new(),
+            keywords: Vec::new(),
+            filter_builtins: false,
+        }
+    }
+}
+
+impl ToolFilterGroup {
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        for (i, tool) in self.tools.iter().enumerate() {
+            if tool.is_empty() {
+                errors.push(format!(
+                    "agent.tool_filter_groups[{i}].tools contains empty pattern"
+                ));
+            }
+        }
+        if matches!(self.mode, ToolFilterGroupMode::Dynamic) && self.keywords.is_empty() {
+            errors.push(
+                "agent.tool_filter_groups entry with mode='dynamic' should have at least one keyword"
+                    .into(),
+            );
+        }
+        errors
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
@@ -2930,6 +3104,27 @@ impl Default for WebFetchConfig {
     }
 }
 
+impl WebFetchConfig {
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.max_response_size == 0 {
+            errors.push(
+                "web_fetch.max_response_size = 0 disables size limits (may cause memory issues)"
+                    .into(),
+            );
+        }
+        if self.timeout_secs == 0 {
+            errors.push("web_fetch.timeout_secs = 0 is not allowed".into());
+        }
+        for domain in &self.allowed_domains {
+            if domain.is_empty() {
+                errors.push("web_fetch.allowed_domains contains empty string".into());
+            }
+        }
+        errors
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct LinkEnricherConfig {
 
@@ -2985,6 +3180,16 @@ impl Default for TextBrowserConfig {
             preferred_browser: None,
             timeout_secs: default_text_browser_timeout_secs(),
         }
+    }
+}
+
+impl TextBrowserConfig {
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if self.timeout_secs == 0 {
+            errors.push("text_browser.timeout_secs = 0 is not allowed".into());
+        }
+        errors
     }
 }
 
@@ -4070,6 +4275,35 @@ pub struct QueryClassificationConfig {
     pub rules: Vec<ClassificationRule>,
 }
 
+impl QueryClassificationConfig {
+    pub fn validate(&self) -> Vec<String> {
+        let mut errors = Vec::new();
+        if !self.enabled {
+            return errors;
+        }
+        for (i, rule) in self.rules.iter().enumerate() {
+            if rule.hint.trim().is_empty() {
+                errors.push(format!(
+                    "query_classification.rules[{i}].hint must not be empty"
+                ));
+            }
+            if rule.keywords.is_empty() && rule.patterns.is_empty() {
+                errors.push(format!(
+                    "query_classification.rules[{i}] must have keywords or patterns"
+                ));
+            }
+            if let (Some(min), Some(max)) = (rule.min_length, rule.max_length) {
+                if min > max {
+                    errors.push(format!(
+                        "query_classification.rules[{i}].min_length must be <= max_length"
+                    ));
+                }
+            }
+        }
+        errors
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
 pub struct ClassificationRule {
 
@@ -4860,10 +5094,13 @@ pub use crate::config::domain::security::{SecurityConfig, WebAuthnConfig};
 pub enum OtpMethod {
 
     #[default]
+    #[serde(alias = "totp", alias = "Totp")]
     Totp,
 
+    #[serde(alias = "pairing", alias = "Pairing")]
     Pairing,
 
+    #[serde(alias = "cli-prompt", alias = "cli_prompt", alias = "CliPrompt")]
     CliPrompt,
 }
 
@@ -6414,17 +6651,148 @@ pub fn parse_extra_headers_env(raw: &str) -> Vec<(String, String)> {
     result
 }
 
-fn normalize_wire_api(raw: &str) -> Option<&'static str> {
+pub(crate) fn normalize_wire_api(raw: &str) -> Option<&'static str> {
     match raw.trim().to_ascii_lowercase().as_str() {
-        "responses" | "openai-responses" | "open-ai-responses" => Some("responses"),
+        "responses"
+        | "openai-responses"
+        | "open-ai-responses"
+        | "openai_responses"
+        | "openai-responses-api"
+        | "openai_responses_api" => Some("responses"),
         "chat_completions"
         | "chat-completions"
         | "chat"
         | "chatcompletions"
         | "openai-chat-completions"
-        | "open-ai-chat-completions" => Some("chat_completions"),
+        | "open-ai-chat-completions"
+        | "openai-chat"
+        | "openai_chat" => Some("chat_completions"),
+        "anthropic"
+        | "anthropic-messages"
+        | "anthropic-chat"
+        | "anthropic_messages"
+        | "anthropic_chat" => Some("anthropic"),
         _ => None,
     }
+}
+
+pub(crate) fn api_format_to_wire_api(format: &str) -> Option<&'static str> {
+    normalize_wire_api(format)
+}
+
+pub(crate) fn wire_api_to_api_format(wire: Option<&str>) -> &'static str {
+    match wire.and_then(normalize_wire_api) {
+        Some("anthropic") => "anthropic",
+        Some("responses") => "openai_responses",
+        Some("chat_completions") => "openai_chat",
+        None => "openai_chat",
+        _ => "openai_chat",
+    }
+}
+
+pub(crate) fn provider_requires_openai_auth(preset_id: Option<&str>, _wire: &str) -> bool {
+    matches!(
+        preset_id.map(str::trim),
+        Some("openai-codex") | Some("openai_codex") | Some("codex")
+    )
+}
+
+pub(crate) fn normalize_desktop_permission_mode(raw: &str) -> Option<&'static str> {
+    match raw.trim() {
+        "default" => Some("default"),
+        "acceptEdits" | "accept_edits" | "accept-edits" => Some("acceptEdits"),
+        "plan" | "planOnly" | "plan_only" => Some("plan"),
+        "bypassPermissions" | "bypass" | "bypass_permissions" | "full" => {
+            Some("bypassPermissions")
+        }
+        "dontAsk" | "dont_ask" | "don'tAsk" => Some("dontAsk"),
+        "askEveryTime" | "ask_every_time" | "ask" => Some("askEveryTime"),
+        _ => None,
+    }
+}
+
+pub(crate) fn apply_desktop_permission_mode_to_autonomy(
+    autonomy: &mut crate::config::AutonomyConfig,
+    permission_mode: Option<&str>,
+) {
+    let Some(raw) = permission_mode.map(str::trim).filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let Some(mode) = normalize_desktop_permission_mode(raw) else {
+        tracing::warn!(
+            mode = raw,
+            "unknown desktop permission mode; autonomy left unchanged"
+        );
+        return;
+    };
+    match mode {
+        "bypassPermissions" | "dontAsk" => {
+            autonomy.level = AutonomyLevel::Full;
+        }
+        "acceptEdits" => {
+            autonomy.level = AutonomyLevel::Supervised;
+            for t in [
+                "file_write",
+                "file_edit",
+                "multi_edit",
+                "glob_edit",
+                "notebook_edit",
+                "patch_apply",
+                "diff_apply",
+            ] {
+                let s = (*t).to_string();
+                if !autonomy.auto_approve.iter().any(|x| x == &s) {
+                    autonomy.auto_approve.push(s);
+                }
+            }
+        }
+        "plan" => {
+            autonomy.level = AutonomyLevel::ReadOnly;
+        }
+        "default" | "askEveryTime" => {
+            autonomy.level = AutonomyLevel::Supervised;
+        }
+        _ => {}
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopPermissionAutoPolicy {
+    ForceAuto,
+    ForceAsk,
+    FollowCodingMode,
+}
+
+pub(crate) fn desktop_permission_auto_policy(raw: &str) -> DesktopPermissionAutoPolicy {
+    match normalize_desktop_permission_mode(raw) {
+        Some("bypassPermissions") | Some("dontAsk") => DesktopPermissionAutoPolicy::ForceAuto,
+        Some("askEveryTime") | Some("plan") => DesktopPermissionAutoPolicy::ForceAsk,
+        _ => DesktopPermissionAutoPolicy::FollowCodingMode,
+    }
+}
+
+pub(crate) fn permission_mode_allows_auto_approve(
+    permission_mode: &str,
+    coding_mode_would_auto: bool,
+) -> bool {
+    match desktop_permission_auto_policy(permission_mode) {
+        DesktopPermissionAutoPolicy::ForceAuto => true,
+        DesktopPermissionAutoPolicy::ForceAsk => false,
+        DesktopPermissionAutoPolicy::FollowCodingMode => coding_mode_would_auto,
+    }
+}
+
+pub(crate) fn desktop_permission_blocks_tool(raw: &str, tool_name: &str) -> Option<String> {
+    if normalize_desktop_permission_mode(raw) != Some("plan") {
+        return None;
+    }
+    if crate::security::permissions::is_read_only_tool(tool_name) {
+        return None;
+    }
+    Some(format!(
+        "Tool '{tool_name}' is blocked by permission mode 'plan' (read-only). \
+         Switch permission mode or use a read-only tool."
+    ))
 }
 
 fn read_codex_openai_api_key() -> Option<String> {
@@ -6762,7 +7130,8 @@ impl Config {
             config.autonomy.ensure_default_auto_approve();
             config.cost.merge_default_prices();
 
-            let migration_applied = config.migrate_legacy_low_caps();
+            let migration_applied =
+                config.migrate_legacy_low_caps() | config.canonicalize_model_provider_wire_apis();
 
             if let Ok(de) = toml::de::Deserializer::parse(&contents) {
                 const RETIRED_KEYS: &[&str] = &["node_transport"];
@@ -7190,6 +7559,26 @@ impl Config {
         }
     }
 
+    fn persist_config_sync_best_effort(config: &Config) -> Option<anyhow::Error> {
+        let cfg = config.clone();
+        match std::thread::Builder::new()
+            .name("config-migration-save".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|e| anyhow::anyhow!("failed to build runtime for config save: {e}"))?;
+                rt.block_on(cfg.save())
+            }) {
+            Ok(handle) => match handle.join() {
+                Ok(Ok(())) => None,
+                Ok(Err(e)) => Some(e),
+                Err(_) => Some(anyhow::anyhow!("config migration save thread panicked")),
+            },
+            Err(e) => Some(anyhow::anyhow!("failed to spawn config migration save: {e}")),
+        }
+    }
+
     pub fn load_or_init_sync() -> Self {
         let Ok((default_sen_dir, default_workspace_dir)) = default_config_and_workspace_dirs()
         else {
@@ -7245,13 +7634,25 @@ impl Config {
         config.workspace_dir = workspace_dir;
 
         config.cost.merge_default_prices();
-        config.migrate_legacy_low_caps();
+        let migration_applied =
+            config.migrate_legacy_low_caps() | config.canonicalize_model_provider_wire_apis();
 
         config.strip_redacted_secret_artifacts();
 
         config.apply_env_overrides_tracked();
         if let Err(e) = config.validate() {
             tracing::warn!("Config validation failed: {}", e);
+        }
+
+        if migration_applied {
+            let save_err = Self::persist_config_sync_best_effort(&config);
+            if let Some(err) = save_err {
+                tracing::warn!(
+                    target: "config.migration",
+                    error = %err,
+                    "Failed to persist migrated config on sync load; values are lifted in-memory only"
+                );
+            }
         }
 
         tracing::info!(
@@ -7366,6 +7767,39 @@ impl Config {
 
     }
 
+    fn canonicalize_model_provider_wire_apis(&mut self) -> bool {
+        let mut changed = false;
+        for profile in self.model_providers.values_mut() {
+            let Some(raw) = profile.wire_api.as_deref().map(str::trim) else {
+                continue;
+            };
+            if raw.is_empty() {
+                if profile.wire_api.is_some() {
+                    profile.wire_api = None;
+                    changed = true;
+                }
+                continue;
+            }
+            match normalize_wire_api(raw) {
+                Some(canon) => {
+                    if profile.wire_api.as_deref() != Some(canon) {
+                        profile.wire_api = Some(canon.to_string());
+                        changed = true;
+                    }
+                }
+                None => {
+                    tracing::warn!(
+                        wire_api = raw,
+                        "clearing unrecognized model_providers.*.wire_api; runtime will infer from preset/base_url"
+                    );
+                    profile.wire_api = None;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     fn migrate_legacy_low_caps(&mut self) -> bool {
         let mut changed = false;
         if self.autonomy.max_actions_per_hour > 0 && self.autonomy.max_actions_per_hour <= 100 {
@@ -7425,6 +7859,42 @@ impl Config {
             if openvpn.connect_timeout_secs == 0 {
                 anyhow::bail!("tunnel.openvpn.connect_timeout_secs must be greater than 0");
             }
+        } else {
+            let provider = self.tunnel.provider.trim();
+            if !provider.is_empty()
+                && !matches!(
+                    provider,
+                    "none"
+                        | "cloudflare"
+                        | "tailscale"
+                        | "ngrok"
+                        | "openvpn"
+                        | "pinggy"
+                        | "custom"
+                )
+            {
+                anyhow::bail!(
+                    "tunnel.provider must be one of: none, cloudflare, tailscale, ngrok, openvpn, pinggy, custom (got '{provider}')"
+                );
+            }
+            match provider {
+                "cloudflare" if self.tunnel.cloudflare.is_none() => {
+                    anyhow::bail!("tunnel.provider='cloudflare' requires [tunnel.cloudflare]");
+                }
+                "tailscale" if self.tunnel.tailscale.is_none() => {
+                    anyhow::bail!("tunnel.provider='tailscale' requires [tunnel.tailscale]");
+                }
+                "ngrok" if self.tunnel.ngrok.is_none() => {
+                    anyhow::bail!("tunnel.provider='ngrok' requires [tunnel.ngrok]");
+                }
+                "pinggy" if self.tunnel.pinggy.is_none() => {
+                    anyhow::bail!("tunnel.provider='pinggy' requires [tunnel.pinggy]");
+                }
+                "custom" if self.tunnel.custom.is_none() => {
+                    anyhow::bail!("tunnel.provider='custom' requires [tunnel.custom]");
+                }
+                _ => {}
+            }
         }
 
         if self.gateway.host.trim().is_empty() {
@@ -7475,9 +7945,6 @@ impl Config {
             anyhow::bail!(
                 "security.otp.cache_valid_secs must be greater than or equal to security.otp.token_ttl_secs"
             );
-        }
-        if self.security.otp.challenge_max_attempts == 0 {
-            anyhow::bail!("security.otp.challenge_max_attempts must be greater than 0");
         }
         for (i, action) in self.security.otp.gated_actions.iter().enumerate() {
             let normalized = action.trim();
@@ -7546,6 +8013,19 @@ impl Config {
                 );
             }
 
+            let preset_id = profile
+                .preset_id
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if let Some(pid) = preset_id {
+                if matches!(pid, "custom" | "anthropic-custom") && !has_base_url {
+                    anyhow::bail!(
+                        "model_providers.{profile_name} with preset `{pid}` requires `base_url`"
+                    );
+                }
+            }
+
             if let Some(base_url) = profile.base_url.as_deref().map(str::trim) {
                 if !base_url.is_empty() {
                     let parsed = reqwest::Url::parse(base_url).with_context(|| {
@@ -7562,7 +8042,7 @@ impl Config {
             if let Some(wire_api) = profile.wire_api.as_deref().map(str::trim) {
                 if !wire_api.is_empty() && normalize_wire_api(wire_api).is_none() {
                     anyhow::bail!(
-                        "model_providers.{profile_name}.wire_api must be one of: responses, chat_completions"
+                        "model_providers.{profile_name}.wire_api must be one of: responses, chat_completions, anthropic"
                     );
                 }
             }
@@ -7666,53 +8146,32 @@ impl Config {
 
         {
             let kind = self.runtime.kind.trim();
-            match kind {
-                "native" | "docker" => {}
-                "wasm" | "cloudflare" => {
-                    tracing::warn!(
-                        "runtime.kind='{kind}' is experimental and not fully supported yet"
-                    );
-                }
-                other => {
-                    anyhow::bail!("runtime.kind must be one of: native, docker (got '{other}')");
-                }
+            if matches!(kind, "wasm" | "cloudflare") {
+                tracing::warn!(
+                    "runtime.kind='{kind}' is experimental; create_runtime may fall back to native"
+                );
+            }
+            for err in self.runtime.validate() {
+                anyhow::bail!("{err}");
             }
         }
 
         {
-            let known = [
-                "none",
-                "noop",
-                "log",
-                "verbose",
-                "prometheus",
-                "otel",
-                "opentelemetry",
-                "otlp",
-            ];
-            for token in self.observability.backend.split(',').map(str::trim) {
-                if token.is_empty() {
-                    continue;
-                }
-                if !known.contains(&token) {
-                    anyhow::bail!(
-                        "observability.backend contains unknown backend '{token}'; \
-                         known backends: {}",
-                        known.join(", ")
-                    );
-                }
+            for err in self.observability.validate() {
+                anyhow::bail!("{err}");
             }
         }
 
         if self.peripherals.enabled {
             for (i, board_cfg) in self.peripherals.boards.iter().enumerate() {
-                if board_cfg.board.trim().is_empty() {
+                let board = board_cfg.board.trim();
+                if board.is_empty() {
                     anyhow::bail!("peripherals.boards[{i}].board must not be empty");
                 }
                 let transport = board_cfg.transport.trim();
-                if !matches!(transport, "serial" | "native" | "websocket") {
+                if !matches!(transport, "serial" | "native" | "bridge") {
                     anyhow::bail!(
-                        "peripherals.boards[{i}].transport must be one of: serial, native, websocket (got '{transport}')"
+                        "peripherals.boards[{i}].transport must be one of: serial, native, bridge (got '{transport}')"
                     );
                 }
                 if transport == "serial"
@@ -7723,6 +8182,20 @@ impl Config {
                 {
                     anyhow::bail!(
                         "peripherals.boards[{i}].path must not be empty when transport is 'serial'"
+                    );
+                }
+                if transport == "bridge"
+                    && !matches!(board, "arduino-uno-q" | "uno-q")
+                {
+                    anyhow::bail!(
+                        "peripherals.boards[{i}].transport='bridge' is only supported for board 'arduino-uno-q' or 'uno-q' (got '{board}')"
+                    );
+                }
+                if transport == "native"
+                    && !matches!(board, "rpi-gpio" | "raspberry-pi")
+                {
+                    anyhow::bail!(
+                        "peripherals.boards[{i}].transport='native' is only supported for board 'rpi-gpio' or 'raspberry-pi' (got '{board}')"
                     );
                 }
             }
@@ -7939,12 +8412,18 @@ impl Config {
                     "jira.api_token must be set (or JIRA_API_TOKEN env var) when jira.enabled = true"
                 );
             }
-            let valid_actions = ["get_ticket", "search_tickets", "comment_ticket"];
+            let valid_actions = [
+                "get_ticket",
+                "search_tickets",
+                "comment_ticket",
+                "list_projects",
+                "myself",
+            ];
             for action in &self.jira.allowed_actions {
                 if !valid_actions.contains(&action.as_str()) {
                     anyhow::bail!(
                         "jira.allowed_actions contains unknown action: '{}'. \
-                         Valid: get_ticket, search_tickets, comment_ticket",
+                         Valid: get_ticket, search_tickets, comment_ticket, list_projects, myself",
                         action
                     );
                 }
@@ -7981,14 +8460,19 @@ impl Config {
 
         {
             let dp = self.transcription.default_provider.trim();
-            match dp {
-                "groq" | "openai" | "deepgram" | "assemblyai" | "google" | "local_whisper" => {}
-                other => {
-                    anyhow::bail!(
-                        "transcription.default_provider must be one of: groq, openai, deepgram, assemblyai, google, local_whisper (got '{other}')"
+            if !self.transcription.enabled {
+                if normalize_transcription_provider(dp).is_none() {
+                    tracing::warn!(
+                        target: "config.validate",
+                        provider = %dp,
+                        "transcription.enabled=false; ignoring invalid transcription.default_provider (must be one of: groq, openai, deepgram, assemblyai, google, local_whisper)"
                     );
                 }
             }
+        }
+
+        if let Some(ref mqtt) = self.sop.mqtt {
+            mqtt.validate().context("Invalid sop.mqtt configuration")?;
         }
 
         if self.delegate.timeout_secs == 0 {
@@ -8459,6 +8943,7 @@ impl Config {
     pub async fn save(&self) -> Result<()> {
 
         let mut config_to_save = self.clone();
+        config_to_save.canonicalize_model_provider_wire_apis();
         if let Some(baseline) = self.env_override_baseline.clone() {
             match toml::Value::try_from(&config_to_save) {
                 Ok(current) => {

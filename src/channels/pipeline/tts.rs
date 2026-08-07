@@ -563,9 +563,23 @@ impl TtsManager {
             config.max_text_length
         };
 
+        let default_provider = crate::config::schema::normalize_tts_provider(
+            &config.default_provider,
+        )
+        .unwrap_or("openai")
+        .to_string();
+
+        if config.enabled && !providers.contains_key(&default_provider) {
+            let available: Vec<&str> = providers.keys().map(|k| k.as_str()).collect();
+            bail!(
+                "Default TTS provider '{}' is not configured. Available: {available:?}",
+                default_provider
+            );
+        }
+
         Ok(Self {
             providers,
-            default_provider: config.default_provider.clone(),
+            default_provider,
             default_voice: config.default_voice.clone(),
             max_text_length,
         })

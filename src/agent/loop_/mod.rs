@@ -2143,6 +2143,36 @@ async fn execute_one_tool(
         let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
         let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
         let tool_lc = call_name.to_ascii_lowercase();
+        if let Some(reason) =
+            crate::config::desktop_permission_blocks_tool(&perm_mode_lc, call_name)
+        {
+            let duration = start.elapsed();
+            observer.record_event(&ObserverEvent::ToolCall {
+                tool: call_name.to_string(),
+                duration,
+                success: false,
+            });
+            return Ok(ToolExecutionOutcome {
+                output: reason.clone(),
+                success: false,
+                error_reason: Some(reason),
+                duration,
+            });
+        }
+        if let Err(reason) = crate::security::otp::ensure_tool_allowed(call_name) {
+            let duration = start.elapsed();
+            observer.record_event(&ObserverEvent::ToolCall {
+                tool: call_name.to_string(),
+                duration,
+                success: false,
+            });
+            return Ok(ToolExecutionOutcome {
+                output: reason.clone(),
+                success: false,
+                error_reason: Some(reason),
+                duration,
+            });
+        }
         let guardrail_ctx = crate::guardrails::GuardrailContext {
             coding_mode: coding_label_lc.as_deref(),
             permission_mode: Some(&perm_mode_lc),
@@ -2165,9 +2195,13 @@ async fn execute_one_tool(
                 });
             }
             crate::guardrails::GuardrailDecision::RequireApproval(reason) => {
-                let mode_auto_approved = crate::agent::mode::effects::mode_auto_approves(
+                let coding_would_auto = crate::agent::mode::effects::mode_auto_approves(
                     crate::agent::coding_mode::active_coding_mode(),
                 ) && approval.is_none_or(|m| m.mode_auto_approve_allows(call_name));
+                let mode_auto_approved = crate::config::permission_mode_allows_auto_approve(
+                    &perm_mode_lc,
+                    coding_would_auto,
+                );
                 let mut timeout_denial: Option<String> = None;
                 let approved = if mode_auto_approved {
                     true
@@ -2644,9 +2678,14 @@ fn should_execute_tools_in_parallel(
     let mode = DispatchMode::select(
         &names,
         |name| {
-            approval
-                .map(|mgr| mgr.needs_approval(name))
-                .unwrap_or(false)
+            let perm = crate::gateway::ws::desktop::active_permission_mode();
+            match crate::config::schema::desktop_permission_auto_policy(&perm) {
+                crate::config::schema::DesktopPermissionAutoPolicy::ForceAsk => true,
+                crate::config::schema::DesktopPermissionAutoPolicy::ForceAuto => false,
+                crate::config::schema::DesktopPermissionAutoPolicy::FollowCodingMode => approval
+                    .map(|mgr| mgr.needs_approval(name))
+                    .unwrap_or(false),
+            }
         },
         resolve_parallel_tool_cap(),
     );
@@ -5313,6 +5352,48 @@ pub(crate) async fn run_unified_loop_impl(
                 let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
                 let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
                 let tool_lc = tool_name.to_ascii_lowercase();
+                let early_denial = crate::config::desktop_permission_blocks_tool(
+                    &perm_mode_lc,
+                    &tool_name,
+                )
+                .or_else(|| crate::security::otp::ensure_tool_allowed(&tool_name).err());
+                if let Some(denial) = early_denial {
+                    runtime_trace::record_event(
+                        "tool_call_result",
+                        Some(channel_name),
+                        Some(provider_name),
+                        Some(model),
+                        Some(&turn_id),
+                        Some(false),
+                        Some(&denial),
+                        serde_json::json!({
+                            "iteration": iteration + 1,
+                            "tool": call.name.clone(),
+                            "arguments": scrub_credentials(&call.arguments.to_string()),
+                            "guardrail_pre_hook": true,
+                        }),
+                    );
+                    if let Some(ref tx) = on_delta {
+                        let _ = tx
+                            .send(DraftEvent::Progress(format!(
+                                "\u{274c} {}: {}\n",
+                                call.name,
+                                truncate_with_ellipsis(&denial, 200)
+                            )))
+                            .await;
+                    }
+                    ordered_results[idx] = Some((
+                        call.name.clone(),
+                        call.tool_call_id.clone(),
+                        ToolExecutionOutcome {
+                            output: denial.clone(),
+                            success: false,
+                            error_reason: Some(denial),
+                            duration: Duration::ZERO,
+                        },
+                    ));
+                    continue;
+                }
                 let guardrail_ctx = crate::guardrails::GuardrailContext {
                     coding_mode: coding_label_lc.as_deref(),
                     permission_mode: Some(&perm_mode_lc),
@@ -5327,11 +5408,16 @@ pub(crate) async fn run_unified_loop_impl(
                         Some(format!("Blocked by guardrails: {reason}"))
                     }
                     crate::guardrails::GuardrailDecision::RequireApproval(reason) => {
-                        let mode_auto_approved =
+                        let coding_would_auto =
                             crate::agent::mode::effects::mode_auto_approves(
                                 crate::agent::coding_mode::active_coding_mode(),
                             ) && approval
                                 .is_none_or(|m| m.mode_auto_approve_allows(&tool_name));
+                        let mode_auto_approved =
+                            crate::config::permission_mode_allows_auto_approve(
+                                &perm_mode_lc,
+                                coding_would_auto,
+                            );
                         if mode_auto_approved {
                             None
                         } else if let Some(mgr) = approval {
@@ -5694,9 +5780,14 @@ pub(crate) async fn run_unified_loop_impl(
                 continue;
             }
 
-            let mode_auto_approved = crate::agent::mode::effects::mode_auto_approves(
+            let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
+            let coding_would_auto = crate::agent::mode::effects::mode_auto_approves(
                 crate::agent::coding_mode::active_coding_mode(),
             ) && approval.is_none_or(|m| m.mode_auto_approve_allows(&tool_name));
+            let mode_auto_approved = crate::config::permission_mode_allows_auto_approve(
+                &perm_mode_lc,
+                coding_would_auto,
+            );
 
             let already_user_approved = pre_hook_user_approved
                 && tool_name == canonical_name

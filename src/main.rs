@@ -1401,12 +1401,13 @@ async fn async_main() -> Result<()> {
             .parent()
             .context("Config path must have a parent directory")?;
         let store = security::SecretStore::new(config_dir, config.secrets.encrypt);
-        let (_validator, enrollment_uri) =
+        let (validator, enrollment_uri) =
             security::OtpValidator::from_config(&config.security.otp, config_dir, &store)?;
         if let Some(uri) = enrollment_uri {
             println!("Initialized OTP secret for SenWeaverCoding.");
             println!("Enrollment URI: {uri}");
         }
+        security::otp::install_otp_gate(validator);
     }
 
     let command = cli.command.unwrap_or_else(|| Commands::Agent {

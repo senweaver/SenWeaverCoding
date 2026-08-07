@@ -43,28 +43,51 @@ impl RuntimeConfig {
 
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
-        let valid = ["native", "docker", "wasm"];
-        if !valid.contains(&self.kind.as_str()) {
-            errors.push(format!(
-                "runtime.kind '{}' must be one of {:?}",
-                self.kind, valid
-            ));
+        let kind = self.kind.trim();
+        match kind {
+            "native" | "docker" => {}
+            "wasm" => {
+                #[cfg(not(feature = "runtime-wasm"))]
+                {
+                    errors.push(
+                        "runtime.kind='wasm' requires the `runtime-wasm` feature \
+                         (rebuild with --features runtime-wasm)"
+                            .to_string(),
+                    );
+                }
+            }
+            "cloudflare" => {
+                if std::env::var("SEN_CF_EXPERIMENTAL").is_err() {
+                    errors.push(
+                        "runtime.kind='cloudflare' is experimental and requires \
+                         SEN_CF_EXPERIMENTAL=1"
+                            .to_string(),
+                    );
+                }
+            }
+            "" => {
+                errors.push(
+                    "runtime.kind cannot be empty. Supported values: native, docker, wasm \
+                     (cloudflare requires SEN_CF_EXPERIMENTAL=1)"
+                        .to_string(),
+                );
+            }
+            other => {
+                errors.push(format!(
+                    "runtime.kind '{other}' must be one of: native, docker, wasm \
+                     (cloudflare requires SEN_CF_EXPERIMENTAL=1)"
+                ));
+            }
         }
-        if self.kind == "docker" {
+        if self.kind.trim() == "docker" {
             errors.extend(self.docker.validate());
         }
-        if self.kind == "wasm" {
+        if self.kind.trim() == "wasm" {
             errors.extend(self.wasm.validate());
         }
         if let Some(ref effort) = self.reasoning_effort {
-            let normalised = effort.trim().to_ascii_lowercase();
-            if !matches!(
-                normalised.as_str(),
-                "minimal" | "low" | "medium" | "high" | "xhigh"
-            ) {
-                errors.push(format!(
-                    "runtime.reasoning_effort '{effort}' is not a recognised level"
-                ));
+            if let Err(msg) = crate::config::schema::normalize_reasoning_effort(effort) {
+                errors.push(msg);
             }
         }
         errors

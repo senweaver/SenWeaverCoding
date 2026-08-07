@@ -170,6 +170,19 @@ const AUTO_RUN_OPTIONS: AutoRunOption[] = [
     icon: 'rule',
   },
   {
+    value: 'plan',
+    labelKey: 'settings.agents.autoRun.opt.plan',
+    hintKey: 'settings.agents.autoRun.opt.planHint',
+    icon: 'architecture',
+  },
+  {
+    value: 'dontAsk',
+    labelKey: 'settings.agents.autoRun.opt.dontAsk',
+    hintKey: 'settings.agents.autoRun.opt.dontAskHint',
+    icon: 'gavel',
+    danger: true,
+  },
+  {
     value: 'bypassPermissions',
     labelKey: 'settings.agents.autoRun.opt.runEverything',
     hintKey: 'settings.agents.autoRun.opt.runEverythingHint',
@@ -379,8 +392,7 @@ function AutoRunSection() {
     }
   }
 
-  const uiSelectedValue: PermissionMode =
-    permissionMode === 'plan' ? 'default' : (permissionMode as PermissionMode)
+  const uiSelectedValue: PermissionMode = permissionMode
 
   const enabledTransitions = new Set(data?.autoApproveModeTransitions ?? [])
 

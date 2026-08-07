@@ -43,15 +43,45 @@ impl ObservabilityConfig {
 
     pub fn validate(&self) -> Vec<String> {
         let mut errors = Vec::new();
-        let valid_backends = ["none", "log", "verbose", "prometheus", "otel"];
-        if !valid_backends.contains(&self.backend.as_str()) {
-            errors.push(format!(
-                "observability.backend '{}' must be one of {:?}",
-                self.backend, valid_backends
-            ));
+        let known = [
+            "none",
+            "noop",
+            "log",
+            "verbose",
+            "prometheus",
+            "otel",
+            "opentelemetry",
+            "otlp",
+        ];
+        for token in self.backend.split(',').map(str::trim) {
+            if token.is_empty() {
+                continue;
+            }
+            if !known.contains(&token) {
+                errors.push(format!(
+                    "observability.backend contains unknown backend '{token}'; \
+                     known backends: {}",
+                    known.join(", ")
+                ));
+            }
         }
-        if self.backend == "otel" && self.otel_endpoint.is_none() {
-            errors.push("observability.backend=otel requires otel_endpoint".into());
+        if self
+            .backend
+            .split(',')
+            .map(str::trim)
+            .any(|t| matches!(t, "otel" | "opentelemetry" | "otlp"))
+        {
+            let endpoint = self
+                .otel_endpoint
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty());
+            if endpoint.is_none() {
+                errors.push(
+                    "observability.backend otel/opentelemetry/otlp requires a non-empty otel_endpoint"
+                        .into(),
+                );
+            }
         }
         let valid_trace_modes = ["none", "rolling", "full"];
         if !valid_trace_modes.contains(&self.runtime_trace_mode.as_str()) {

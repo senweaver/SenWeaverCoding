@@ -9,12 +9,16 @@ use serde::{Deserialize, Serialize};
 pub enum HardwareTransport {
 
     #[default]
+    #[serde(rename = "none", alias = "None")]
     None,
 
+    #[serde(rename = "native", alias = "Native")]
     Native,
 
+    #[serde(rename = "serial", alias = "Serial")]
     Serial,
 
+    #[serde(rename = "probe", alias = "Probe")]
     Probe,
 }
 

@@ -18,58 +18,6 @@ fn default_provider_timeout_secs() -> u64 {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-pub struct ClassificationRule {
-
-    pub name: String,
-
-    pub pattern: String,
-
-    pub hint: String,
-}
-
-impl Default for ClassificationRule {
-    fn default() -> Self {
-        Self {
-            name: String::new(),
-            pattern: String::new(),
-            hint: String::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, Default, JsonSchema)]
-pub struct QueryClassificationConfig {
-
-    #[serde(default)]
-    pub enabled: bool,
-
-    #[serde(default)]
-    pub rules: Vec<ClassificationRule>,
-}
-
-impl QueryClassificationConfig {
-
-    pub fn validate(&self) -> Vec<String> {
-        let mut errors = Vec::new();
-        for (i, rule) in self.rules.iter().enumerate() {
-            if rule.pattern.is_empty() {
-                errors.push(format!(
-                    "query_classification.rules[{}].pattern must not be empty",
-                    i
-                ));
-            }
-            if rule.hint.is_empty() {
-                errors.push(format!(
-                    "query_classification.rules[{}].hint must not be empty",
-                    i
-                ));
-            }
-        }
-        errors
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct ModelRouteConfig {
 
     pub hint: String,

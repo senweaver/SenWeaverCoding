@@ -2715,6 +2715,10 @@ export const zh: Record<TranslationKey, string> = {
   'settings.agents.autoRun.opt.useAllowlistHint': '允许列表内的工具静默执行，其它一律弹窗。',
   'settings.agents.autoRun.opt.runEverything': '全部放行',
   'settings.agents.autoRun.opt.runEverythingHint': '不弹窗、Shell 与文件系统全开。',
+  'settings.agents.autoRun.opt.plan': '计划模式',
+  'settings.agents.autoRun.opt.planHint': '只读探索；写入与 Shell 需切换模式后才能执行。',
+  'settings.agents.autoRun.opt.dontAsk': '不询问',
+  'settings.agents.autoRun.opt.dontAskHint': '与「全部放行」相同：跳过工具确认弹窗。',
 
   'settings.agents.autoRun.allowlist.title': '允许列表',
   'settings.agents.autoRun.allowlist.hint': '"按允许列表"模式下，列表中的工具会静默执行。填入 "*" 表示放行所有工具。',

@@ -115,6 +115,16 @@ impl Tool for BrowserOpenTool {
             }
         };
 
+        if crate::security::otp::domain_requires_otp(&url) {
+            if let Err(reason) = crate::security::otp::ensure_tool_allowed("browser_open") {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(reason),
+                });
+            }
+        }
+
         match open_in_system_browser(&url).await {
             Ok(()) => Ok(ToolResult {
                 success: true,

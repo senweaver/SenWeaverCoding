@@ -4145,16 +4145,38 @@ impl Agent {
         let coding_label_lc = coding_label.as_deref().map(str::to_ascii_lowercase);
         let perm_mode_lc = crate::gateway::ws::desktop::active_permission_mode();
         let tool_lc = call.name.to_ascii_lowercase();
+        if let Some(reason) =
+            crate::config::desktop_permission_blocks_tool(&perm_mode_lc, &call.name)
+        {
+            return ToolExecutionResult {
+                name: call.name.clone(),
+                output: reason,
+                success: false,
+                tool_call_id: call.tool_call_id.clone(),
+            };
+        }
+        if let Err(reason) = crate::security::otp::ensure_tool_allowed(&call.name) {
+            return ToolExecutionResult {
+                name: call.name.clone(),
+                output: reason,
+                success: false,
+                tool_call_id: call.tool_call_id.clone(),
+            };
+        }
         let guardrail_ctx = crate::guardrails::GuardrailContext {
             coding_mode: coding_label_lc.as_deref(),
             permission_mode: Some(&perm_mode_lc),
             tool_name: Some(&tool_lc),
         };
-        let mode_auto_approved = effective_coding_mode
+        let coding_would_auto = effective_coding_mode
             .map(crate::agent::mode::effects::mode_auto_approves)
             .unwrap_or(false)
             && crate::approval::session_surface_approval_manager()
                 .is_none_or(|m| m.mode_auto_approve_allows(&call.name));
+        let mode_auto_approved = crate::config::permission_mode_allows_auto_approve(
+            &perm_mode_lc,
+            coding_would_auto,
+        );
         match crate::guardrails::evaluate_tool_guardrails(&call.name, Some(&guardrail_ctx)) {
             crate::guardrails::GuardrailDecision::Allow => {}
             crate::guardrails::GuardrailDecision::Deny(reason) => {

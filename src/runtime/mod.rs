@@ -51,10 +51,16 @@ pub fn create_runtime(config: &RuntimeConfig) -> anyhow::Result<Box<dyn RuntimeA
             }
         }
         other if other.trim().is_empty() => {
-            anyhow::bail!("runtime.kind cannot be empty. Supported values: native, docker, wasm")
+            anyhow::bail!(
+                "runtime.kind cannot be empty. Supported values: native, docker, wasm \
+                 (cloudflare requires SEN_CF_EXPERIMENTAL=1)"
+            )
         }
         other => {
-            anyhow::bail!("Unknown runtime kind '{other}'. Supported values: native, docker, wasm")
+            anyhow::bail!(
+                "Unknown runtime kind '{other}'. Supported values: native, docker, wasm \
+                 (cloudflare requires SEN_CF_EXPERIMENTAL=1)"
+            )
         }
     }
 }

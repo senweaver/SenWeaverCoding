@@ -436,8 +436,10 @@ async fn handle_socket(
         set_coding_mode_scoped(&mut agent, &session_id, &connection_id, resolved_mode).await;
         let derived =
             super::super::desktop::routes::derive_permission_from_coding(&resolved_mode);
-        desktop_runtime_state().set_session_permission_mode(&session_key, derived);
         let is_auto = svc.is_session_auto_coding_mode(&session_key);
+        let candidate = if is_auto { "default" } else { derived };
+        let permission_mode = desktop_runtime_state()
+            .ensure_session_permission_mode(&session_key, candidate);
         let _ = send_json(
             &outbound_tx,
             &serde_json::json!({
@@ -452,7 +454,7 @@ async fn handle_socket(
                 "data": {
                     "mode": if is_auto { "auto" } else { resolved_mode.display_name() },
                     "label": if is_auto { "Auto" } else { resolved_mode.label() },
-                    "permissionMode": derived,
+                    "permissionMode": permission_mode,
                     "sessionId": session_id,
                     "scope": "session",
                     "auto": is_auto,
@@ -685,16 +687,35 @@ async fn handle_socket(
                         }
                     }
                     if msg_type.as_str() == "set_permission_mode" {
-                        let mode = parsed
+                        let raw_mode = parsed
                             .get("mode")
                             .and_then(|v| v.as_str())
-                            .unwrap_or("ask");
+                            .unwrap_or("default");
+                        let Some(mode) =
+                            crate::config::normalize_desktop_permission_mode(raw_mode)
+                        else {
+                            let err = serde_json::json!({
+                                "type": "error",
+                                "code": "INVALID_PERMISSION_MODE",
+                                "message": format!(
+                                    "unknown permission mode: {raw_mode}; expected one of: default, acceptEdits, plan, bypassPermissions, dontAsk, askEveryTime"
+                                ),
+                            });
+                            let _ = control_tx_reader
+                                .try_send(OutboundFrame::Text(err.to_string()));
+                            continue;
+                        };
                         let session_key = format!("{GW_SESSION_PREFIX}{session_id_for_reader}");
                         desktop_runtime_state().set_session_permission_mode(&session_key, mode);
                         let note = serde_json::json!({
                             "type": "system_notification",
                             "subtype": "permission_mode_updated",
                             "message": format!("Permission mode: {mode}"),
+                            "data": {
+                                "mode": mode,
+                                "scope": "session",
+                                "sessionId": session_id_for_reader,
+                            },
                         });
                         let _ = control_tx_reader
                             .try_send(OutboundFrame::Text(note.to_string()));
@@ -2561,28 +2582,41 @@ impl DesktopRuntimeState {
     }
 
     fn prewarm(&self, path: std::path::PathBuf) {
-        use std::sync::atomic::Ordering;
-        if self.hydrated.load(Ordering::Acquire) {
-            return;
-        }
         let hydrate = move || {
             let state = desktop_runtime_state();
-            if state.hydrated.load(Ordering::Acquire) {
-                return;
-            }
-            if let Some(mode) = read_permission_mode_from_disk(&path) {
-                *state.permission_mode.write() = mode;
-            }
-            state.hydrated.store(true, Ordering::Release);
+            state.ensure_hydrated_from(Some(&path));
         };
         if tokio::runtime::Handle::try_current().is_ok() {
-            tokio::task::spawn_blocking(hydrate);
+            tokio::task::block_in_place(hydrate);
         } else {
             hydrate();
         }
     }
 
+    fn ensure_hydrated(&self) {
+        let path = self.settings_path.read().clone();
+        self.ensure_hydrated_from(path.as_deref());
+    }
+
+    fn ensure_hydrated_from(&self, path: Option<&std::path::Path>) {
+        use std::sync::atomic::Ordering;
+        if self.hydrated.load(Ordering::Acquire) {
+            return;
+        }
+        let disk_mode = path.and_then(read_permission_mode_from_disk);
+        let mut guard = self.permission_mode.write();
+        if self.hydrated.load(Ordering::Acquire) {
+            return;
+        }
+        if let Some(mode) = disk_mode {
+            *guard = mode;
+        }
+        drop(guard);
+        self.hydrated.store(true, Ordering::Release);
+    }
+
     pub fn permission_mode(&self) -> String {
+        self.ensure_hydrated();
         self.permission_mode.read().clone()
     }
 
@@ -2591,6 +2625,22 @@ impl DesktopRuntimeState {
             return mode.clone();
         }
         self.permission_mode()
+    }
+
+    pub fn session_permission_mode_opt(&self, session_key: &str) -> Option<String> {
+        self.session_permission_modes
+            .read()
+            .get(session_key)
+            .cloned()
+    }
+
+    pub fn ensure_session_permission_mode(&self, session_key: &str, mode: &str) -> String {
+        let mut map = self.session_permission_modes.write();
+        if let Some(existing) = map.get(session_key) {
+            return existing.clone();
+        }
+        map.insert(session_key.to_string(), mode.to_string());
+        mode.to_string()
     }
 
     pub fn set_session_permission_mode(&self, session_key: &str, mode: &str) {
@@ -2607,10 +2657,13 @@ impl DesktopRuntimeState {
 
         self.hydrated
             .store(true, std::sync::atomic::Ordering::Release);
-        *self.permission_mode.write() = mode.to_string();
+        let canonical = crate::config::normalize_desktop_permission_mode(mode)
+            .unwrap_or("default")
+            .to_string();
+        *self.permission_mode.write() = canonical.clone();
         let path = self.settings_path.read().clone();
         if let Some(p) = path {
-            let mode_owned = mode.to_string();
+            let mode_owned = canonical;
             let path_for_log = p.clone();
             tokio::task::spawn(async move {
                 let res = tokio::task::spawn_blocking(move || {
@@ -2633,11 +2686,7 @@ fn read_permission_mode_from_disk(path: &std::path::Path) -> Option<String> {
     let contents = std::fs::read_to_string(path).ok()?;
     let json = serde_json::from_str::<serde_json::Value>(&contents).ok()?;
     let mode = json.get("permissionMode").and_then(|v| v.as_str())?;
-    if mode.is_empty() {
-        None
-    } else {
-        Some(mode.to_string())
-    }
+    crate::config::normalize_desktop_permission_mode(mode).map(|s| s.to_string())
 }
 
 fn persist_permission_mode_to_disk(

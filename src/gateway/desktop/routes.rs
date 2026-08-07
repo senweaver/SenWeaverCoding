@@ -277,14 +277,16 @@ pub async fn handle_effort_get(
         return e.into_response();
     }
     let config = state.live_config.load_ref();
-    let level = config
-        .runtime
-        .reasoning_effort
-        .clone()
-        .unwrap_or_else(|| "medium".to_string());
+    let level = crate::config::schema::reasoning_effort_to_ui(
+        config
+            .runtime
+            .reasoning_effort
+            .as_deref()
+            .unwrap_or("medium"),
+    );
     Json(serde_json::json!({
         "level": level,
-        "available": ["low", "medium", "high"],
+        "available": ["low", "medium", "high", "max"],
     }))
     .into_response()
 }
@@ -302,9 +304,19 @@ pub async fn handle_effort_set(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
+    let Ok(normalized) = crate::config::schema::normalize_reasoning_effort(&body.level) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_effort_level",
+                "detail": "level must be one of: low, medium, high, max",
+            })),
+        )
+            .into_response();
+    };
     let snapshot = {
         let mut cfg = state.config.lock();
-        cfg.runtime.reasoning_effort = Some(body.level.clone());
+        cfg.runtime.reasoning_effort = Some(normalized.clone());
         cfg.clone()
     };
     if let Err(e) = crate::gateway::persist_config(&snapshot).await {
@@ -319,7 +331,11 @@ pub async fn handle_effort_set(
     }
     state.push_live_config(snapshot);
     state.rebuild_runtime_from_config_async().await;
-    Json(serde_json::json!({ "ok": true, "level": body.level })).into_response()
+    Json(serde_json::json!({
+        "ok": true,
+        "level": crate::config::schema::reasoning_effort_to_ui(&normalized),
+    }))
+    .into_response()
 }
 
 fn provider_has_key(id: &str, config: &crate::config::Config) -> bool {
@@ -387,21 +403,17 @@ fn resolve_provider_api_key(id: &str, config: &crate::config::Config) -> Option<
     std::env::var(env_var).ok().filter(|s| !s.is_empty())
 }
 
-fn api_format_to_wire(format: &str) -> &'static str {
-    match format {
-        "anthropic" => "anthropic",
-        "openai_responses" => "responses",
-
-        _ => "chat_completions",
-    }
+fn api_format_to_wire(format: &str) -> Option<&'static str> {
+    crate::config::api_format_to_wire_api(format)
 }
 
 fn wire_to_api_format(wire: Option<&str>) -> &'static str {
-    match wire {
-        Some("anthropic") => "anthropic",
-        Some("responses") => "openai_responses",
-        _ => "openai_chat",
-    }
+    crate::config::wire_api_to_api_format(wire)
+}
+
+fn normalize_provider_api_format(raw: &str) -> Option<&'static str> {
+    crate::config::normalize_wire_api(raw)
+        .map(|_| crate::config::wire_api_to_api_format(Some(raw)))
 }
 
 fn normalize_display_name_key(value: &str) -> String {
@@ -1084,7 +1096,16 @@ pub async fn handle_providers_create(
     }
 
     let api_format = body.api_format.as_deref().unwrap_or("openai_chat");
-    let wire_api = api_format_to_wire(api_format).to_string();
+    let Some(wire_api) = api_format_to_wire(api_format) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_api_format",
+                "detail": "apiFormat must be one of: openai_chat, openai_responses, anthropic",
+            })),
+        )
+            .into_response();
+    };
 
     let mut profile = crate::config::ModelProviderConfig {
         name: Some(trimmed_name.clone()),
@@ -1094,7 +1115,7 @@ pub async fn handle_providers_create(
             .map(str::trim)
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string()),
-        wire_api: Some(wire_api),
+        wire_api: Some(wire_api.to_string()),
         preset_id: Some(preset_id.clone()),
         notes: body
             .notes
@@ -1110,7 +1131,7 @@ pub async fn handle_providers_create(
             .map(|s| s.to_string()),
         ..crate::config::ModelProviderConfig::default()
     };
-    if preset_id == "openai-codex" {
+    if crate::config::provider_requires_openai_auth(Some(preset_id.as_str()), wire_api) {
         profile.requires_openai_auth = true;
     }
     if let Some(ref models) = body.models {
@@ -1201,8 +1222,21 @@ pub async fn handle_providers_update(
                 };
             }
             if let Some(api_format) = body.api_format.as_deref() {
-                profile.wire_api = Some(api_format_to_wire(api_format).to_string());
-                profile.requires_openai_auth = api_format == "openai_responses";
+                let Some(wire) = api_format_to_wire(api_format) else {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": "invalid_api_format",
+                            "detail": "apiFormat must be one of: openai_chat, openai_responses, anthropic",
+                        })),
+                    )
+                        .into_response();
+                };
+                profile.wire_api = Some(wire.to_string());
+                profile.requires_openai_auth = crate::config::provider_requires_openai_auth(
+                    profile.preset_id.as_deref(),
+                    wire,
+                );
             }
             if let Some(notes) = body.notes.as_deref().map(str::trim) {
                 profile.notes = if notes.is_empty() {
@@ -1460,9 +1494,21 @@ async fn probe_provider(
             "error": "missing baseUrl",
         });
     }
+    let Some(api_format) = normalize_provider_api_format(api_format) else {
+        return serde_json::json!({
+            "success": false,
+            "latencyMs": started.elapsed().as_millis() as u64,
+            "error": format!("invalid apiFormat: {api_format}"),
+        });
+    };
     let url = match api_format {
-        "anthropic" => format!("{trimmed}/v1/models"),
-
+        "anthropic" => {
+            if trimmed.ends_with("/v1") {
+                format!("{trimmed}/models")
+            } else {
+                format!("{trimmed}/v1/models")
+            }
+        }
         _ => format!("{trimmed}/models"),
     };
 
@@ -1570,27 +1616,26 @@ pub async fn handle_providers_test(
         .map(|s| s.to_string())
         .or(profile.base_url.clone())
         .unwrap_or_default();
-    let api_format = body
-        .get("apiFormat")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
-        .unwrap_or_else(|| wire_to_api_format(profile.wire_api.as_deref()).to_string());
+    let api_format = match body.get("apiFormat").and_then(|v| v.as_str()) {
+        Some(raw) if !raw.trim().is_empty() => match normalize_provider_api_format(raw) {
+            Some(fmt) => fmt.to_string(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("invalid apiFormat: {raw}"),
+                    })),
+                )
+                    .into_response();
+            }
+        },
+        _ => wire_to_api_format(profile.wire_api.as_deref()).to_string(),
+    };
     let api_key = resolve_provider_api_key(&id, &config);
 
     let connectivity = probe_provider(&base_url, api_key.as_deref(), &api_format).await;
 
-    let mut result = serde_json::json!({ "connectivity": connectivity });
-    if api_format.starts_with("openai") {
-
-        let proxy = probe_provider(&base_url, api_key.as_deref(), &api_format).await;
-        if let Some(obj) = result.as_object_mut() {
-            obj.insert("proxy".to_string(), proxy);
-        } else {
-            tracing::warn!(
-                "providers/test: probe result is not a JSON object; skipping proxy field"
-            );
-        }
-    }
+    let result = serde_json::json!({ "connectivity": connectivity });
 
     Json(serde_json::json!({ "result": result })).into_response()
 }
@@ -1613,24 +1658,24 @@ pub async fn handle_providers_test_config(
         .get("apiKey")
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
-    let api_format = body
-        .get("apiFormat")
-        .and_then(|v| v.as_str())
-        .unwrap_or("openai_chat")
-        .to_string();
+    let api_format = match body.get("apiFormat").and_then(|v| v.as_str()) {
+        Some(raw) if !raw.trim().is_empty() => match normalize_provider_api_format(raw) {
+            Some(fmt) => fmt.to_string(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("invalid apiFormat: {raw}"),
+                    })),
+                )
+                    .into_response();
+            }
+        },
+        _ => "openai_chat".to_string(),
+    };
 
     let connectivity = probe_provider(&base_url, api_key.as_deref(), &api_format).await;
-    let mut result = serde_json::json!({ "connectivity": connectivity });
-    if api_format.starts_with("openai") {
-        let proxy = probe_provider(&base_url, api_key.as_deref(), &api_format).await;
-        if let Some(obj) = result.as_object_mut() {
-            obj.insert("proxy".to_string(), proxy);
-        } else {
-            tracing::warn!(
-                "providers/test-config: probe result is not a JSON object; skipping proxy field"
-            );
-        }
-    }
+    let result = serde_json::json!({ "connectivity": connectivity });
     Json(serde_json::json!({ "result": result })).into_response()
 }
 
@@ -1650,11 +1695,21 @@ pub async fn handle_providers_discover_models(
         .trim()
         .trim_end_matches('/')
         .to_string();
-    let api_format = body
-        .get("apiFormat")
-        .and_then(|v| v.as_str())
-        .unwrap_or("openai_chat")
-        .to_string();
+    let api_format = match body.get("apiFormat").and_then(|v| v.as_str()) {
+        Some(raw) if !raw.trim().is_empty() => match normalize_provider_api_format(raw) {
+            Some(fmt) => fmt.to_string(),
+            None => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("invalid apiFormat: {raw}"),
+                    })),
+                )
+                    .into_response();
+            }
+        },
+        _ => "openai_chat".to_string(),
+    };
     let preset_id = body
         .get("presetId")
         .and_then(|v| v.as_str())
@@ -1685,7 +1740,12 @@ pub async fn handle_providers_discover_models(
     };
 
     let fetched: anyhow::Result<Vec<String>> = if api_format == "anthropic" {
-        crate::onboard::wizard::fetch_anthropic_models(api_key.as_deref()).await
+        let anthropic_base = if base_url.is_empty() {
+            None
+        } else {
+            Some(base_url.as_str())
+        };
+        crate::onboard::wizard::fetch_anthropic_models(api_key.as_deref(), anthropic_base).await
     } else if preset_id == "gemini" {
         crate::onboard::wizard::fetch_gemini_models(api_key.as_deref()).await
     } else if base_url.is_empty() {
@@ -2910,11 +2970,14 @@ fn mcp_transport_str(t: &crate::config::McpTransport) -> &'static str {
     }
 }
 
-fn parse_mcp_transport(s: &str) -> crate::config::McpTransport {
-    match s.to_ascii_lowercase().as_str() {
-        "http" | "streamable" => crate::config::McpTransport::Http,
-        "sse" => crate::config::McpTransport::Sse,
-        _ => crate::config::McpTransport::Stdio,
+fn parse_mcp_transport(s: &str) -> Result<crate::config::McpTransport, String> {
+    match s.trim().to_ascii_lowercase().as_str() {
+        "stdio" | "std-io" | "standard" => Ok(crate::config::McpTransport::Stdio),
+        "http" | "streamable" | "streamable-http" => Ok(crate::config::McpTransport::Http),
+        "sse" | "server-sent-events" => Ok(crate::config::McpTransport::Sse),
+        other => Err(format!(
+            "unsupported MCP transport '{other}'; expected one of: stdio, http, sse"
+        )),
     }
 }
 
@@ -3042,10 +3105,13 @@ pub struct McpUpsertBody {
     pub cwd: Option<String>,
 }
 
-fn body_to_server(name: &str, body: &McpUpsertBody) -> crate::config::McpServerConfig {
+fn body_to_server(
+    name: &str,
+    body: &McpUpsertBody,
+) -> Result<crate::config::McpServerConfig, String> {
     let cfg = &body.config;
-    let transport = parse_mcp_transport(cfg.kind.as_deref().unwrap_or("stdio"));
-    crate::config::McpServerConfig {
+    let transport = parse_mcp_transport(cfg.kind.as_deref().unwrap_or("stdio"))?;
+    let server = crate::config::McpServerConfig {
         name: name.to_string(),
         transport,
         url: cfg.url.clone(),
@@ -3056,7 +3122,14 @@ fn body_to_server(name: &str, body: &McpUpsertBody) -> crate::config::McpServerC
         tool_timeout_secs: None,
 
         enabled: true,
-    }
+    };
+    let temp = crate::config::McpConfig {
+        enabled: true,
+        deferred_loading: true,
+        servers: vec![server.clone()],
+    };
+    crate::config::schema::validate_mcp_config(&temp).map_err(|e| e.to_string())?;
+    Ok(server)
 }
 
 fn config_path_string(state: &AppState) -> String {
@@ -3128,6 +3201,17 @@ pub async fn handle_mcp_create(
             .into_response();
     };
 
+    let server = match body_to_server(&name, &body) {
+        Ok(server) => server,
+        Err(e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({"error": e})),
+            )
+                .into_response();
+        }
+    };
+
     let snapshot = {
         let mut cfg = state.config.lock();
         if cfg.mcp.servers.iter().any(|s| s.name == name) {
@@ -3138,7 +3222,7 @@ pub async fn handle_mcp_create(
                 .into_response();
         }
         cfg.mcp.enabled = true;
-        cfg.mcp.servers.push(body_to_server(&name, &body));
+        cfg.mcp.servers.push(server);
         cfg.clone()
     };
     if let Err(e) = crate::gateway::persist_config(&snapshot).await {
@@ -3185,7 +3269,16 @@ pub async fn handle_mcp_update(
         };
 
         let preserved_enabled = cfg.mcp.servers[idx].enabled;
-        let mut new_server = body_to_server(&name, &body);
+        let mut new_server = match body_to_server(&name, &body) {
+            Ok(server) => server,
+            Err(e) => {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({"error": e})),
+                )
+                    .into_response();
+            }
+        };
         new_server.enabled = preserved_enabled;
         cfg.mcp.servers[idx] = new_server;
         cfg.clone()
@@ -4788,16 +4881,41 @@ pub async fn handle_permissions_mode_put(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
+    let Some(mode) = crate::config::normalize_desktop_permission_mode(&body.mode) else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({
+                "error": "invalid_permission_mode",
+                "detail": "mode must be one of: default, acceptEdits, plan, bypassPermissions, dontAsk, askEveryTime",
+            })),
+        )
+            .into_response();
+    };
     match body.session_key.as_deref() {
         Some(session_key) if !session_key.is_empty() => {
             super::super::ws::desktop::desktop_runtime_state()
-                .set_session_permission_mode(session_key, &body.mode);
+                .set_session_permission_mode(session_key, mode);
         }
         _ => {
-            super::super::ws::desktop::desktop_runtime_state().set_permission_mode(&body.mode);
+            super::super::ws::desktop::desktop_runtime_state().set_permission_mode(mode);
+            if let Some(svc) = crate::services::try_get_services() {
+                let mut cfg = (*svc.config()).clone();
+                crate::config::apply_desktop_permission_mode_to_autonomy(
+                    &mut cfg.autonomy,
+                    Some(mode),
+                );
+                svc.update_config(cfg);
+            } else {
+                let mut cfg = state.live_config.load_ref().as_ref().clone();
+                crate::config::apply_desktop_permission_mode_to_autonomy(
+                    &mut cfg.autonomy,
+                    Some(mode),
+                );
+                state.push_live_config(cfg);
+            }
         }
     }
-    Json(serde_json::json!({ "ok": true, "mode": body.mode })).into_response()
+    Json(serde_json::json!({ "ok": true, "mode": mode })).into_response()
 }
 
 fn autonomy_view_json(cfg: &crate::config::schema::Config) -> serde_json::Value {
@@ -5099,7 +5217,29 @@ pub async fn handle_coding_mode_get(
     if let Err(e) = require_auth(&state, &headers) {
         return e.into_response();
     }
-    let mode = match crate::services::try_get_services() {
+    let svc = crate::services::try_get_services();
+    if svc.is_some_and(|s| s.is_global_auto_coding_mode()) {
+        let mode = svc
+            .map(|s| *s.coding_mode.read())
+            .unwrap_or_default();
+        let profile = mode.resource_profile();
+        return Json(serde_json::json!({
+            "mode": "auto",
+            "label": "Auto",
+            "description": mode.description(),
+            "icon": mode.icon(),
+            "permissionMode": "default",
+            "auto": true,
+            "allowedTools": build_allowed_tools_for_mode(mode),
+            "resourceProfile": {
+                "browser": profile.browser,
+                "shell": profile.shell,
+                "mayWrite": profile.may_write,
+            },
+        }))
+        .into_response();
+    }
+    let mode = match svc {
         Some(svc) => *svc.coding_mode.read(),
         None => crate::agent::coding_mode::CodingMode::default(),
     };
@@ -5110,6 +5250,7 @@ pub async fn handle_coding_mode_get(
         "description": mode.description(),
         "icon": mode.icon(),
         "permissionMode": derive_permission_from_coding(&mode),
+        "auto": false,
         "allowedTools": build_allowed_tools_for_mode(mode),
         "resourceProfile": {
             "browser": profile.browser,
@@ -5666,15 +5807,42 @@ pub async fn handle_scheduled_tasks_create(
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let permission_mode = body
-        .get("permissionMode")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let permission_mode = match body.get("permissionMode").and_then(|v| v.as_str()) {
+        Some(raw) if !raw.trim().is_empty() => {
+            match crate::config::normalize_desktop_permission_mode(raw) {
+                Some(mode) => Some(mode.to_string()),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": format!("invalid permissionMode: {raw}"),
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        }
+        _ => None,
+    };
 
-    let coding_mode = body
-        .get("codingMode")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
+    let coding_mode = match body.get("codingMode").and_then(|v| v.as_str()) {
+        Some(raw) if !raw.trim().is_empty() => {
+            if raw.eq_ignore_ascii_case("auto")
+                || crate::agent::coding_mode::CodingMode::from_str_loose(raw).is_some()
+            {
+                Some(raw.to_string())
+            } else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("invalid codingMode: {raw}"),
+                    })),
+                )
+                    .into_response();
+            }
+        }
+        _ => None,
+    };
 
     let folder_path = body
         .get("folderPath")
@@ -5852,10 +6020,41 @@ pub async fn handle_scheduled_tasks_update(
         patch.task_description = Some(description.to_string());
     }
     if let Some(v) = body.get("permissionMode").and_then(|x| x.as_str()) {
-        patch.permission_mode = Some(v.to_string());
+        if !v.trim().is_empty() {
+            match crate::config::normalize_desktop_permission_mode(v) {
+                Some(mode) => patch.permission_mode = Some(mode.to_string()),
+                None => {
+                    return (
+                        StatusCode::BAD_REQUEST,
+                        Json(serde_json::json!({
+                            "error": format!("invalid permissionMode: {v}"),
+                        })),
+                    )
+                        .into_response();
+                }
+            }
+        } else {
+            patch.permission_mode = Some(String::new());
+        }
     }
     if let Some(v) = body.get("codingMode").and_then(|x| x.as_str()) {
-        patch.coding_mode = Some(v.to_string());
+        if !v.trim().is_empty() {
+            if v.eq_ignore_ascii_case("auto")
+                || crate::agent::coding_mode::CodingMode::from_str_loose(v).is_some()
+            {
+                patch.coding_mode = Some(v.to_string());
+            } else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(serde_json::json!({
+                        "error": format!("invalid codingMode: {v}"),
+                    })),
+                )
+                    .into_response();
+            }
+        } else {
+            patch.coding_mode = Some(String::new());
+        }
     }
     if let Some(v) = body.get("folderPath").and_then(|x| x.as_str()) {
         patch.folder_path = Some(v.to_string());

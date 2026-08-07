@@ -674,7 +674,11 @@ impl TranscriptionManager {
             }
         }
 
-        let default_provider = config.default_provider.clone();
+        let default_provider = crate::config::schema::normalize_transcription_provider(
+            &config.default_provider,
+        )
+        .unwrap_or("groq")
+        .to_string();
 
         if config.enabled && !providers.contains_key(&default_provider) {
             let available: Vec<&str> = providers.keys().map(|k| k.as_str()).collect();
@@ -724,7 +728,10 @@ pub async fn transcribe_audio(
 
     validate_audio(&audio_data, file_name)?;
 
-    match config.default_provider.as_str() {
+    let provider = crate::config::schema::normalize_transcription_provider(&config.default_provider)
+        .unwrap_or(config.default_provider.trim());
+
+    match provider {
         "groq" => {
             let groq = GroqProvider::from_config(config)?;
             groq.transcribe(&audio_data, file_name).await
@@ -756,6 +763,13 @@ pub async fn transcribe_audio(
             )?;
             let google = GoogleSttProvider::from_config(google_cfg)?;
             google.transcribe(&audio_data, file_name).await
+        }
+        "local_whisper" => {
+            let local_cfg = config.local_whisper.as_ref().context(
+                "Default transcription provider 'local_whisper' is not configured. Add [transcription.local_whisper]",
+            )?;
+            let local = LocalWhisperProvider::from_config(local_cfg)?;
+            local.transcribe(&audio_data, file_name).await
         }
         other => bail!("Unsupported transcription provider '{other}'"),
     }

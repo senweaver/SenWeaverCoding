@@ -17,7 +17,7 @@ use crate::cron::{
     due_jobs, next_run_for_schedule, record_last_run, record_run, remove_job,
     reschedule_after_run, sync_declarative_jobs, update_job,
 };
-use crate::security::{AutonomyLevel, SecurityPolicy};
+use crate::security::SecurityPolicy;
 use anyhow::Result;
 use chrono::{DateTime, Utc};
 use std::path::PathBuf;
@@ -61,31 +61,7 @@ fn stale_running_threshold(config: &Config) -> chrono::Duration {
 }
 
 fn apply_cron_permission_mode(autonomy: &mut AutonomyConfig, permission_mode: Option<&str>) {
-    let Some(raw) = permission_mode.map(str::trim).filter(|s| !s.is_empty()) else {
-        return;
-    };
-    match raw {
-        "bypassPermissions" => autonomy.level = AutonomyLevel::Full,
-        "acceptEdits" => {
-            autonomy.level = AutonomyLevel::Supervised;
-            for t in [
-                "file_write",
-                "file_edit",
-                "multi_edit",
-                "glob_edit",
-                "notebook_edit",
-                "patch_apply",
-                "diff_apply",
-            ] {
-                let s = (*t).to_string();
-                if !autonomy.auto_approve.iter().any(|x| x == &s) {
-                    autonomy.auto_approve.push(s);
-                }
-            }
-        }
-        "default" | "askEveryTime" => autonomy.level = AutonomyLevel::Supervised,
-        _ => {}
-    }
+    crate::config::apply_desktop_permission_mode_to_autonomy(autonomy, permission_mode);
 }
 
 fn resolved_cron_workspace_dir(config: &Config, job: &CronJob) -> PathBuf {
@@ -565,10 +541,14 @@ async fn run_agent_job(
         }
     }
 
-    let coding_override = job
-        .coding_mode
-        .as_deref()
-        .and_then(CodingMode::from_str_loose);
+    let coding_override = match job.coding_mode.as_deref().map(str::trim).filter(|s| !s.is_empty())
+    {
+        None => None,
+        Some(raw) if raw.eq_ignore_ascii_case("auto") => {
+            Some(crate::agent::intent::auto_select_coding_mode(&prefixed_prompt))
+        }
+        Some(raw) => CodingMode::from_str_loose(raw),
+    };
 
     let run_future = crate::agent::run(
         effective_config,

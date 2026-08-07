@@ -2760,7 +2760,13 @@ export const en = {
     'Allowlisted tools auto-run; everything else asks.',
   'settings.agents.autoRun.opt.runEverything': 'Run Everything',
   'settings.agents.autoRun.opt.runEverythingHint':
-    'Full tool access for shell and file system without prompting.',
+    'No prompts; shell and filesystem tools all allowed.',
+  'settings.agents.autoRun.opt.plan': 'Plan mode',
+  'settings.agents.autoRun.opt.planHint':
+    'Read-only exploration; write and shell tools require switching modes.',
+  'settings.agents.autoRun.opt.dontAsk': "Don't ask",
+  'settings.agents.autoRun.opt.dontAskHint':
+    'Same as Run Everything: skip confirmation prompts for tool use.',
 
   'settings.agents.autoRun.allowlist.title': 'Allowlist',
   'settings.agents.autoRun.allowlist.hint':

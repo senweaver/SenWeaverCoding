@@ -27,12 +27,20 @@ type Props = {
   workDir?: string
 }
 
-const PERMISSION_ROWS: PermissionMode[] = ['askEveryTime', 'acceptEdits', 'default', 'bypassPermissions']
+const PERMISSION_ROWS: PermissionMode[] = [
+  'askEveryTime',
+  'acceptEdits',
+  'default',
+  'plan',
+  'dontAsk',
+  'bypassPermissions',
+]
 
 export function PermissionModeSelector({ value, onChange, workDir }: Props) {
   const t = useTranslation()
   const [open, setOpen] = useState(false)
   const [confirmDialog, setConfirmDialog] = useState(false)
+  const [pendingDangerMode, setPendingDangerMode] = useState<PermissionMode | null>(null)
   useDockSuspend(confirmDialog)
   const ref = useRef<HTMLDivElement>(null)
 
@@ -53,6 +61,17 @@ export function PermissionModeSelector({ value, onChange, workDir }: Props) {
           label: t('settings.agents.autoRun.opt.useAllowlist'),
           description: t('settings.agents.autoRun.opt.useAllowlistHint'),
           icon: 'rule',
+        },
+        plan: {
+          label: t('settings.agents.autoRun.opt.plan'),
+          description: t('settings.agents.autoRun.opt.planHint'),
+          icon: 'architecture',
+        },
+        dontAsk: {
+          label: t('settings.agents.autoRun.opt.dontAsk'),
+          description: t('settings.agents.autoRun.opt.dontAskHint'),
+          icon: 'gavel',
+          color: 'text-[var(--color-error)]',
         },
         bypassPermissions: {
           label: t('settings.agents.autoRun.opt.runEverything'),
@@ -123,8 +142,9 @@ export function PermissionModeSelector({ value, onChange, workDir }: Props) {
                     type="button"
                     key={perm}
                     onClick={() => {
-                      if (perm === 'bypassPermissions') {
+                      if (perm === 'bypassPermissions' || perm === 'dontAsk') {
                         setOpen(false)
+                        setPendingDangerMode(perm)
                         setConfirmDialog(true)
                         return
                       }
@@ -237,7 +257,8 @@ export function PermissionModeSelector({ value, onChange, workDir }: Props) {
               <button
                 type="button"
                 onClick={() => {
-                  onChange('bypassPermissions')
+                  onChange(pendingDangerMode ?? 'bypassPermissions')
+                  setPendingDangerMode(null)
                   setConfirmDialog(false)
                 }}
                 className="px-4 py-2 text-xs font-semibold text-white bg-[var(--color-error)] hover:opacity-90 rounded-lg transition-colors"

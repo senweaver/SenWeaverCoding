@@ -783,6 +783,7 @@ impl SpawnWorkersTool {
             api_path: self.config.api_path.clone(),
             provider_max_tokens: self.config.provider_max_tokens,
             model_context_windows: self.config.model_context_windows.clone(),
+            model_providers: self.config.model_providers.clone(),
         };
         let provider = crate::providers::create_provider_with_options_async(
             provider_name,

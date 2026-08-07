@@ -800,6 +800,8 @@ pub struct ProviderRuntimeOptions {
     pub provider_max_tokens: Option<u32>,
 
     pub model_context_windows: std::collections::HashMap<String, u32>,
+
+    pub model_providers: std::collections::HashMap<String, crate::config::ModelProviderConfig>,
 }
 
 impl Default for ProviderRuntimeOptions {
@@ -816,6 +818,7 @@ impl Default for ProviderRuntimeOptions {
             api_path: None,
             provider_max_tokens: None,
             model_context_windows: std::collections::HashMap::new(),
+            model_providers: std::collections::HashMap::new(),
         }
     }
 }
@@ -835,6 +838,7 @@ pub fn provider_runtime_options_from_config(
         api_path: config.api_path.clone(),
         provider_max_tokens: config.provider_max_tokens,
         model_context_windows: config.model_context_windows.clone(),
+        model_providers: config.model_providers.clone(),
     }
 }
 
@@ -1449,7 +1453,12 @@ pub fn create_provider_with_options(
         "openai-codex" | "openai_codex" | "codex" => Ok(Box::new(
             openai::codex::OpenAiCodexProvider::new(options, api_key)?,
         )),
-        _ => create_provider_with_url_and_options(name, api_key, None, options),
+        _ => create_provider_with_url_and_options(
+            name,
+            api_key,
+            options.provider_api_url.as_deref(),
+            options,
+        ),
     }
 }
 
@@ -1486,6 +1495,7 @@ pub fn create_provider_with_url_and_options(
     api_url: Option<&str>,
     options: &ProviderRuntimeOptions,
 ) -> anyhow::Result<Box<dyn Provider>> {
+    let api_url = api_url.or(options.provider_api_url.as_deref());
 
     let compat = {
         let timeout = options.provider_timeout_secs;
@@ -1612,7 +1622,12 @@ pub fn create_provider_with_url_and_options(
             }
             Ok(Box::new(p))
         }
-        "openai-responses" | "openai_responses" | "openai_responses_api" => {
+        "openai-responses"
+        | "openai_responses"
+        | "openai_responses_api"
+        | "open-ai-responses"
+        | "openai-responses-api"
+        | "responses" => {
             let mut p = openai::responses::OpenAiResponsesProvider::with_base_url(api_url, key);
             if let Some(mt) = options.provider_max_tokens {
                 p = p.with_max_output_tokens(Some(mt));
@@ -2231,6 +2246,13 @@ pub fn resolve_runtime_provider_name(
     saved_id: &str,
     cfg: &crate::config::Config,
 ) -> String {
+    resolve_runtime_provider_name_with_profiles(saved_id, &cfg.model_providers)
+}
+
+pub fn resolve_runtime_provider_name_with_profiles(
+    saved_id: &str,
+    model_providers: &std::collections::HashMap<String, crate::config::ModelProviderConfig>,
+) -> String {
     let trimmed = saved_id.trim();
     if trimmed.is_empty() {
         return saved_id.to_string();
@@ -2240,7 +2262,7 @@ pub fn resolve_runtime_provider_name(
         return trimmed.to_string();
     }
 
-    let Some(profile) = cfg.model_providers.get(trimmed) else {
+    let Some(profile) = model_providers.get(trimmed) else {
         return trimmed.to_string();
     };
 
@@ -2260,53 +2282,73 @@ pub fn resolve_runtime_provider_name(
         .wire_api
         .as_deref()
         .map(str::trim)
+        .filter(|s| !s.is_empty())
         .map(str::to_ascii_lowercase);
     let wire_lower = wire_api_lower.as_deref();
+    let wire_canon = wire_lower.and_then(crate::config::normalize_wire_api);
 
-    let is_responses_wire = matches!(
-        wire_lower,
-        Some("responses") | Some("openai-responses") | Some("open-ai-responses")
-    );
-    let is_anthropic_wire = matches!(
-        wire_lower,
-        Some("anthropic") | Some("anthropic-messages") | Some("anthropic-chat")
-    );
-    let is_chat_wire = matches!(
-        wire_lower,
-        Some("chat_completions")
-            | Some("chat-completions")
-            | Some("openai-chat")
-            | Some("openai_chat")
-    );
+    let is_responses_wire = matches!(wire_canon, Some("responses"));
+    let is_anthropic_wire = matches!(wire_canon, Some("anthropic"));
+    let is_chat_wire = matches!(wire_canon, Some("chat_completions"));
     let wire_is_explicit = wire_lower.is_some();
     let preset_is_codex = matches!(
         preset,
         Some("openai-codex") | Some("openai_codex") | Some("codex")
     );
     let preset_is_anthropic = matches!(preset, Some("anthropic"));
+    let preset_is_anthropic_custom = matches!(preset, Some("anthropic-custom"));
+    let preset_is_custom = matches!(preset, Some("custom"));
 
-    if is_responses_wire || (!wire_is_explicit && preset_is_codex) {
+    if is_responses_wire {
+        if preset_is_codex {
+            return "openai-codex".to_string();
+        }
+        if is_anthropic_wire || preset_is_anthropic || preset_is_anthropic_custom {
+            if let Some(url) = base_url {
+                if is_official_anthropic_base_url(url) {
+                    return "anthropic".to_string();
+                }
+                return format!("anthropic-custom:{url}");
+            }
+            if preset_is_anthropic_custom {
+                return trimmed.to_string();
+            }
+            return "anthropic".to_string();
+        }
+        if preset_is_custom {
+            if base_url.is_some() {
+                return "openai-responses".to_string();
+            }
+            return trimmed.to_string();
+        }
+        return "openai-responses".to_string();
+    }
+    if !wire_is_explicit && preset_is_codex {
         return "openai-codex".to_string();
     }
 
-    if matches!(preset, Some("anthropic-custom")) {
+    if preset_is_anthropic_custom {
         if let Some(url) = base_url {
             return format!("anthropic-custom:{url}");
         }
+        return trimmed.to_string();
     }
 
     if is_anthropic_wire {
         if let Some(url) = base_url {
-            if !matches!(preset, Some("anthropic")) || !is_official_anthropic_base_url(url) {
-                return format!("anthropic-custom:{url}");
+            if is_official_anthropic_base_url(url) {
+                return "anthropic".to_string();
             }
+            return format!("anthropic-custom:{url}");
         }
+        return "anthropic".to_string();
     }
 
-    if matches!(preset, Some("custom")) {
+    if preset_is_custom {
         if let Some(url) = base_url {
             return format!("custom:{url}");
         }
+        return trimmed.to_string();
     }
 
     if is_chat_wire && (preset_is_codex || preset_is_anthropic) {
@@ -2494,6 +2536,9 @@ pub fn create_resilient_provider_with_options(
 
         let (provider_name, profile_override) = parse_provider_profile(fallback);
 
+        let runtime_name =
+            resolve_runtime_provider_name_with_profiles(provider_name, &options.model_providers);
+
         let fallback_options = match profile_override {
             Some(profile) => {
                 let mut opts = options.clone();
@@ -2503,16 +2548,30 @@ pub fn create_resilient_provider_with_options(
             None => options.clone(),
         };
 
+        let profile = options.model_providers.get(provider_name);
+        let profile_key = profile
+            .and_then(|p| p.api_key.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let profile_url = profile
+            .and_then(|p| p.base_url.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+
         let resolved_fallback_credential;
-        let (fallback_key, fallback_url) = if provider_name == primary_base_name {
-            (api_key, api_url)
-        } else {
-            resolved_fallback_credential = resolve_provider_credential(provider_name, None);
-            (resolved_fallback_credential.as_deref(), None)
-        };
+        let (fallback_key, fallback_url) =
+            if provider_name == primary_base_name || runtime_name == primary_name {
+                (api_key.or(profile_key), profile_url.or(api_url))
+            } else if let Some(key) = profile_key {
+                (Some(key), profile_url)
+            } else {
+                resolved_fallback_credential =
+                    resolve_provider_credential(&runtime_name, None);
+                (resolved_fallback_credential.as_deref(), profile_url)
+            };
 
         match create_provider_with_endpoint_resolution(
-            provider_name,
+            &runtime_name,
             fallback_key,
             fallback_url,
             &fallback_options,
@@ -2598,6 +2657,8 @@ pub fn create_routed_provider_with_options(
 
     let mut providers: Vec<(String, Box<dyn Provider>)> = Vec::new();
     for name in &needed {
+        let runtime_name =
+            resolve_runtime_provider_name_with_profiles(name, &options.model_providers);
         let route_for_provider = model_routes.iter().find(|r| &r.provider == name);
         let routed_credential = route_for_provider.and_then(|r| {
             r.api_key.as_ref().and_then(|raw_key| {
@@ -2605,7 +2666,12 @@ pub fn create_routed_provider_with_options(
                 (!trimmed_key.is_empty()).then_some(trimmed_key)
             })
         });
-        let key = routed_credential.or(api_key);
+        let profile = options.model_providers.get(name.as_str());
+        let profile_key = profile
+            .and_then(|p| p.api_key.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let key = routed_credential.or(profile_key).or(api_key);
 
         let routed_url = route_for_provider.and_then(|r| {
             r.base_url.as_ref().and_then(|raw_url| {
@@ -2613,8 +2679,24 @@ pub fn create_routed_provider_with_options(
                 (!trimmed_url.is_empty()).then_some(trimmed_url)
             })
         });
-        let url = routed_url.or(if name == primary_name { api_url } else { None });
-        match create_resilient_provider_with_options(name, key, url, reliability, options) {
+        let profile_url = profile
+            .and_then(|p| p.base_url.as_deref())
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
+        let url = routed_url.or(profile_url).or(if name.as_str() == primary_name
+            || runtime_name.as_str() == primary_name
+        {
+            api_url
+        } else {
+            None
+        });
+        match create_resilient_provider_with_options(
+            &runtime_name,
+            key,
+            url,
+            reliability,
+            options,
+        ) {
             Ok(provider) => providers.push((name.clone(), provider)),
             Err(e) => {
                 if name == primary_name {

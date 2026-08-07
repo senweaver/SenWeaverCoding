@@ -1070,6 +1070,7 @@ pub fn all_tools_with_runtime(
                     api_path: root_config.api_path.clone(),
                     provider_max_tokens: root_config.provider_max_tokens,
                     model_context_windows: root_config.model_context_windows.clone(),
+                    model_providers: root_config.model_providers.clone(),
                 };
                 let autoresearch_runtime = Arc::new(AutoresearchRuntime::new(
                     security.clone(),
@@ -1563,6 +1564,7 @@ pub fn all_tools_with_runtime(
         extra_headers: crate::providers::merged_extra_headers_for_config(root_config),
         api_path: root_config.api_path.clone(),
         model_context_windows: root_config.model_context_windows.clone(),
+        model_providers: root_config.model_providers.clone(),
     };
 
     let delegate_handle: Option<DelegateParentToolsHandle> = if agents.is_empty() {

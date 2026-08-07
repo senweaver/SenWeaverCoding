@@ -56,7 +56,7 @@ impl ThinkingParam {
     fn for_effort(effort: &str) -> Self {
         let budget_tokens = match effort.trim().to_ascii_lowercase().as_str() {
             "low" | "minimal" => 4_096,
-            "high" | "max" => 24_576,
+            "high" | "max" | "xhigh" => 24_576,
             _ => 10_240,
         };
         Self {
