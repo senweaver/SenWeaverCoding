@@ -529,8 +529,11 @@ impl ApprovalManager {
 
     pub fn needs_approval(&self, tool_name: &str) -> bool {
 
+        let domain_regressed =
+            !self.non_interactive && crate::trust::domain_regressed(tool_name);
+
         if self.autonomy_level == AutonomyLevel::Full {
-            return false;
+            return domain_regressed;
         }
 
         if self.autonomy_level == AutonomyLevel::ReadOnly {
@@ -545,7 +548,7 @@ impl ApprovalManager {
             return false;
         }
 
-        if !self.non_interactive && crate::trust::domain_regressed(tool_name) {
+        if domain_regressed {
             return true;
         }
 
@@ -586,11 +589,11 @@ impl ApprovalManager {
                         .or_default()
                         .insert(prefix);
                 } else {
-                    self.session_allowlist
-                        .lock()
-                        .entry(scope)
-                        .or_default()
-                        .insert(tool_name.to_string());
+                    tracing::info!(
+                        target: "approval",
+                        "\"Always\" on a shell command with metacharacters is treated as approve-once \
+                         (not allowlisting the whole shell tool) to avoid a session-wide bypass"
+                    );
                 }
             } else {
                 self.session_allowlist
@@ -612,12 +615,28 @@ impl ApprovalManager {
 
         let path = self.audit_log_path.lock().clone();
         if let Some(path) = path {
-            if let Err(e) = append_audit_entry_to_disk(&path, &entry) {
-                tracing::warn!(
-                    error = %e,
-                    path = %path.display(),
-                    "failed to persist approval audit log entry"
-                );
+            match tokio::runtime::Handle::try_current() {
+                Ok(handle) => {
+                    let entry_for_disk = entry.clone();
+                    handle.spawn_blocking(move || {
+                        if let Err(e) = append_audit_entry_to_disk(&path, &entry_for_disk) {
+                            tracing::warn!(
+                                error = %e,
+                                path = %path.display(),
+                                "failed to persist approval audit log entry"
+                            );
+                        }
+                    });
+                }
+                Err(_) => {
+                    if let Err(e) = append_audit_entry_to_disk(&path, &entry) {
+                        tracing::warn!(
+                            error = %e,
+                            path = %path.display(),
+                            "failed to persist approval audit log entry"
+                        );
+                    }
+                }
             }
         }
 
@@ -741,6 +760,9 @@ fn command_prefix(command: &str) -> Option<String> {
         || cmd.contains('>')
         || cmd.contains('<')
         || cmd.contains('\n')
+        || cmd.contains('&')
+        || cmd.contains('^')
+        || cmd.contains('%')
     {
         return None;
     }

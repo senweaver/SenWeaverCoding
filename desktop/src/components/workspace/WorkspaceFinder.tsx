@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { workspaceFilesApi } from '../../api/workspaceFiles'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n/locales/en'
+import { useUIStore } from '../../stores/uiStore'
 import { useWorkspaceFilesStore } from '../../stores/workspaceFilesStore'
 import { hasServerForLanguage, lspBridge } from '../../lib/lspBridge'
 import type { FileSearchHit } from '../../types/workspaceFile'
@@ -41,7 +42,7 @@ function uriToRel(uri: string, workDir: string): string | null {
   if (!uri || !uri.startsWith('file://')) return null
   let p = uri.slice('file://'.length)
   try {
-    p = decodeURI(p)
+    p = decodeURIComponent(p)
   } catch {
   }
   let abs = p
@@ -67,6 +68,19 @@ export function WorkspaceFinder({ mode, workDir, onClose }: Props) {
   const requestId = useRef(0)
   const requestNavigation = useWorkspaceFilesStore((s) => s.requestNavigation)
   const selectFile = useWorkspaceFilesStore((s) => s.selectFile)
+  const scopeFromStore = useUIStore((s) => s.workspaceFinderScopeDir)
+  const [scopeDir, setScopeDir] = useState<string | null>(scopeFromStore)
+  useEffect(() => {
+    setScopeDir(scopeFromStore)
+  }, [scopeFromStore, mode])
+
+  const visibleHits = useMemo(() => {
+    if (!scopeDir) return hits
+    const prefix = `${scopeDir}/`
+    return hits.filter(
+      (hit) => hit.relPath === scopeDir || hit.relPath.startsWith(prefix),
+    )
+  }, [hits, scopeDir])
 
   useEffect(() => {
     inputRef.current?.focus()
@@ -154,10 +168,10 @@ export function WorkspaceFinder({ mode, workDir, onClose }: Props) {
 
   useEffect(() => {
     setActiveIndex(0)
-  }, [hits, symbolHits, mode])
+  }, [visibleHits, symbolHits, mode])
 
   const totalCount =
-    mode === 'workspace-symbol' ? symbolHits.length : hits.length
+    mode === 'workspace-symbol' ? symbolHits.length : visibleHits.length
 
   const handleSelectFile = async (hit: FileSearchHit) => {
     onClose()
@@ -201,7 +215,7 @@ export function WorkspaceFinder({ mode, workDir, onClose }: Props) {
         const hit = symbolHits[activeIndex]
         if (hit) void handleSelectSymbol(hit)
       } else {
-        const hit = hits[activeIndex]
+        const hit = visibleHits[activeIndex]
         if (hit) void handleSelectFile(hit)
       }
       return
@@ -256,6 +270,25 @@ export function WorkspaceFinder({ mode, workDir, onClose }: Props) {
             placeholder={t(PLACEHOLDERS[mode])}
             className="h-8 w-full rounded border border-[var(--color-border)] bg-[var(--color-surface)] px-2 text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-accent)]"
           />
+          {scopeDir && mode !== 'workspace-symbol' && (
+            <div className="mt-1.5 flex items-center gap-1">
+              <span className="flex items-center gap-1 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container)] px-2 py-0.5 text-[10px] text-[var(--color-text-secondary)]">
+                <span className="material-symbols-outlined text-[12px]">folder</span>
+                <span className="max-w-[280px] truncate" title={scopeDir}>
+                  {scopeDir}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setScopeDir(null)}
+                  aria-label={t('finder.scopeClear')}
+                  title={t('finder.scopeClear')}
+                  className="flex h-3.5 w-3.5 items-center justify-center rounded-full text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]"
+                >
+                  <span className="material-symbols-outlined text-[11px]">close</span>
+                </button>
+              </span>
+            </div>
+          )}
         </div>
         <div className="max-h-[420px] overflow-y-auto border-t border-[var(--color-border)]">
           {summary && (
@@ -264,7 +297,7 @@ export function WorkspaceFinder({ mode, workDir, onClose }: Props) {
             </div>
           )}
           {!summary && mode !== 'workspace-symbol' &&
-            hits.map((hit, i) => (
+            visibleHits.map((hit, i) => (
               <button
                 key={`${hit.relPath}:${hit.line ?? -1}:${i}`}
                 type="button"

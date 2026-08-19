@@ -386,6 +386,13 @@ pub fn spawn_agent_task(config: Config) -> AgentBridge {
                     let hub = crate::session::SessionSyncHub::global();
                     let actor =
                         crate::session::SessionActor::open_or_create(session_id.clone(), log, hub);
+                    if config.gateway.cross_process_session_sync {
+                        crate::session::rpc::enable_cross_process_sync(
+                            &log_root,
+                            &session_id,
+                            &actor,
+                        );
+                    }
 
                     let _ = slot_for_task.set(actor.clone());
                     let mirror = std::sync::Arc::new(parking_lot::Mutex::new(

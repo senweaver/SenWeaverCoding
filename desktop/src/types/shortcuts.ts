@@ -9,6 +9,11 @@ export type ShortcutActionId =
   | 'toggle-terminal'
   | 'quick-mode-switcher'
   | 'mode-plan'
+  | 'command-palette'
+  | 'quick-open'
+  | 'search-in-files'
+  | 'workspace-symbol'
+  | 'close-editor-tab'
   | 'close-modal'
 
 export type ShortcutBinding = {
@@ -27,6 +32,11 @@ export const SHORTCUT_ACTIONS: ShortcutActionId[] = [
   'toggle-terminal',
   'quick-mode-switcher',
   'mode-plan',
+  'command-palette',
+  'quick-open',
+  'search-in-files',
+  'workspace-symbol',
+  'close-editor-tab',
   'close-modal',
 ]
 
@@ -36,7 +46,12 @@ export const DEFAULT_SHORTCUT_BINDINGS: ShortcutBindings = {
   'stop-generation': { ctrl: true, shift: false, alt: false, key: '.' },
   'toggle-terminal': { ctrl: true, shift: false, alt: false, key: '`' },
   'quick-mode-switcher': { ctrl: true, shift: true, alt: false, key: 'M' },
-  'mode-plan': { ctrl: true, shift: true, alt: false, key: 'P' },
+  'mode-plan': { ctrl: true, shift: false, alt: true, key: 'P' },
+  'command-palette': { ctrl: true, shift: true, alt: false, key: 'P' },
+  'quick-open': { ctrl: true, shift: false, alt: false, key: 'P' },
+  'search-in-files': { ctrl: true, shift: true, alt: false, key: 'F' },
+  'workspace-symbol': { ctrl: true, shift: false, alt: false, key: 'T' },
+  'close-editor-tab': { ctrl: true, shift: false, alt: false, key: 'W' },
   'close-modal': { ctrl: false, shift: false, alt: false, key: 'Escape' },
 }
 

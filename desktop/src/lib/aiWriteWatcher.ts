@@ -3,9 +3,14 @@
 // Licensed under the MIT License.
 
 import { useChatStore } from '../stores/chatStore'
+import { useSessionStore } from '../stores/sessionStore'
 import { useWorkspaceFilesStore } from '../stores/workspaceFilesStore'
 import type { PerSessionState } from '../stores/chatStore'
 import type { UIMessage } from '../types/chat'
+
+function normalizeDirForCompare(dir: string): string {
+  return dir.replace(/\\/g, '/').replace(/\/+$/, '').toLowerCase()
+}
 
 type SessionWatchState = { seen: Set<string>; scannedLen: number }
 const watchStateBySession: Map<string, SessionWatchState> = new Map()
@@ -70,11 +75,19 @@ function handleSessions(
   if (!root) return
 
   const notify = useWorkspaceFilesStore.getState().notifyAiFileChanged
+  const rootNorm = normalizeDirForCompare(root)
+  const sessionList = useSessionStore.getState().sessions
 
   for (const [sessionId, state] of Object.entries(sessions)) {
     const messages = state.messages
     const prevMessages = prevSessions[sessionId]?.messages
     if (messages === prevMessages) continue
+
+    const sessionWorkDir = sessionList.find((entry) => entry.id === sessionId)?.workDir
+    const sessionMatchesRoot =
+      typeof sessionWorkDir === 'string' &&
+      sessionWorkDir.length > 0 &&
+      normalizeDirForCompare(sessionWorkDir) === rootNorm
 
     let ws = watchStateBySession.get(sessionId)
     if (!ws) {
@@ -94,6 +107,7 @@ function handleSessions(
       if (msg.type === 'file_edit') {
         if (ws.seen.has(msg.id)) continue
         ws.seen.add(msg.id)
+        if (!sessionMatchesRoot) continue
         const rel = normalizeRelPath(msg.path, root)
         if (rel) {
           notify(rel)
@@ -106,6 +120,7 @@ function handleSessions(
         if (ws.seen.has(key)) continue
         if (msg.isError) continue
         ws.seen.add(key)
+        if (!sessionMatchesRoot) continue
         if (!toolPaths) toolPaths = buildToolPathIndex(messages)
         const paths = toolPaths.get(msg.toolUseId)
         if (!paths) continue

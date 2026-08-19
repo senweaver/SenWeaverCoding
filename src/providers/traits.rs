@@ -346,6 +346,13 @@ pub enum StreamEvent {
 
     ToolCall(ToolCall),
 
+    ToolCallArgsDelta {
+        call_index: u32,
+        name: String,
+        args_delta: String,
+        args_total_len: u32,
+    },
+
     PreExecutedToolCall { name: String, args: String },
 
     PreExecutedToolResult { name: String, output: String },
@@ -410,8 +417,80 @@ pub enum StreamError {
     #[error("Provider error: {0}")]
     Provider(String),
 
+    #[error("{message}")]
+    Upstream {
+        provider: String,
+        status: Option<u16>,
+        code: Option<String>,
+        retry_after_ms: Option<u64>,
+        message: String,
+    },
+
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
+}
+
+pub fn is_official_rate_limit_code(code: &str) -> bool {
+    matches!(
+        code,
+        "rate_limit_error"
+            | "rate_limit_exceeded"
+            | "rate_limited"
+            | "too_many_requests"
+            | "429"
+    )
+}
+
+pub fn is_official_overload_code(code: &str) -> bool {
+    matches!(
+        code,
+        "overloaded_error"
+            | "overloaded"
+            | "engine_overloaded"
+            | "server_overloaded"
+            | "service_overloaded"
+            | "529"
+    )
+}
+
+impl StreamError {
+    pub fn http_status(&self) -> Option<u16> {
+        match self {
+            StreamError::Http(e) => e.status().map(|s| s.as_u16()),
+            StreamError::Upstream { status, .. } => *status,
+            _ => None,
+        }
+    }
+
+    pub fn provider_error_code(&self) -> Option<&str> {
+        match self {
+            StreamError::Upstream { code, .. } => code.as_deref(),
+            _ => None,
+        }
+    }
+
+    pub fn retry_after_ms(&self) -> Option<u64> {
+        match self {
+            StreamError::Upstream { retry_after_ms, .. } => *retry_after_ms,
+            _ => None,
+        }
+    }
+
+    pub fn is_official_rate_limit(&self) -> bool {
+        if self.http_status() == Some(429) {
+            return true;
+        }
+        self.provider_error_code()
+            .is_some_and(is_official_rate_limit_code)
+    }
+
+    pub fn is_official_overload(&self) -> bool {
+        if self.http_status() == Some(529) {
+            return true;
+        }
+        self.provider_error_code()
+            .is_some_and(is_official_overload_code)
+    }
 }
 
 impl crate::error::ErrorClassification for StreamError {
@@ -444,6 +523,23 @@ impl crate::error::ErrorClassification for StreamError {
             }
             StreamError::Json(_) | StreamError::InvalidSse(_) => ErrorCategory::Provider,
             StreamError::Provider(_) => ErrorCategory::Provider,
+            StreamError::Upstream { status, code, .. } => {
+                if status == &Some(429)
+                    || code
+                        .as_deref()
+                        .is_some_and(is_official_rate_limit_code)
+                {
+                    ErrorCategory::RateLimit
+                } else {
+                    match status {
+                        Some(401) | Some(403) => ErrorCategory::Permission,
+                        Some(404) => ErrorCategory::NotFound,
+                        Some(s) if (500..600).contains(s) => ErrorCategory::Provider,
+                        Some(s) if (400..500).contains(s) => ErrorCategory::Validation,
+                        _ => ErrorCategory::Provider,
+                    }
+                }
+            }
             StreamError::Io(e) => crate::error::ErrorClassification::category(e),
         }
     }

@@ -23,6 +23,7 @@ function createMemberSessionState() {
     chatState: 'idle' as const,
     connectionState: 'connected' as const,
     streamingText: '',
+    streamingToolArgs: null,
     activeToolUseId: null,
     activeToolName: null,
     activeThinkingId: null,

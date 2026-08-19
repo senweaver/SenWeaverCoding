@@ -84,7 +84,7 @@ pub use whatsapp::WhatsAppChannel;
 pub use whatsapp::WhatsAppWebChannel;
 
 use crate::approval::ApprovalManager;
-pub use crate::channels::bridge::agent::{AgentLoopCore, TurnEvent};
+pub use crate::channels::bridge::agent::TurnEvent;
 use crate::config::Config;
 use crate::memory::{self, Memory};
 use crate::observability::{self, Observer};
@@ -1821,6 +1821,9 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
             team_sync_enabled: config.teams.sync_enabled,
             ..Default::default()
         });
+        if let Some(svc) = crate::services::try_get_services() {
+            svc.update_config(config.clone());
+        }
     }
 
     let security = Arc::new(SecurityPolicy::from_config(&config.autonomy, &workspace_dir));
@@ -2199,6 +2202,13 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
     if let Some(ref cfg) = config.channels_config.lark {
         let ch = Arc::new(LarkChannel::from_config(cfg));
         channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
+    }
+    #[cfg(feature = "channel-lark")]
+    if let Some(ref cfg) = config.channels_config.feishu {
+        if !channels_map.contains_key("feishu") {
+            let ch = Arc::new(LarkChannel::from_feishu_config(cfg));
+            channels_map.insert(ch.name().to_string(), ch as Arc<dyn Channel>);
+        }
     }
     #[cfg(feature = "channel-nostr")]
     if let Some(ref cfg) = config.channels_config.nostr {
@@ -3211,6 +3221,7 @@ fn channel_list(config: &Config) -> anyhow::Result<()> {
     report_channel!("telnyx", &cfg.telnyx);
     #[cfg(feature = "channel-lark")]
     report_channel!("lark", &cfg.lark);
+    report_channel!("feishu", &cfg.feishu);
     #[cfg(feature = "channel-matrix")]
     report_channel!("matrix", &cfg.matrix);
     #[cfg(feature = "channel-nostr")]
@@ -3632,6 +3643,27 @@ async fn channel_send(
                 wt.allowed_numbers.clone(),
             ))
         }
+        #[cfg(feature = "channel-lark")]
+        "lark" => {
+            let lk = cfg
+                .lark
+                .as_ref()
+                .context("No [channels_config.lark] configured")?;
+            Arc::new(LarkChannel::from_config(lk))
+        }
+        #[cfg(feature = "channel-lark")]
+        "feishu" => {
+            if let Some(fs) = cfg.feishu.as_ref() {
+                Arc::new(LarkChannel::from_feishu_config(fs))
+            } else {
+                let lk = cfg
+                    .lark
+                    .as_ref()
+                    .filter(|lark_cfg| lark_cfg.use_feishu)
+                    .context("No [channels_config.feishu] configured")?;
+                Arc::new(LarkChannel::from_config(lk))
+            }
+        }
         other => {
             if let Some(feature) = channel_missing_feature(other) {
                 anyhow::bail!(
@@ -3644,7 +3676,7 @@ async fn channel_send(
             anyhow::bail!(
                 "Unknown channel-id '{}'. Valid values: telegram, slack, discord, \
                  mattermost, webhook, signal, whatsapp, email, qq, dingtalk, wecom, \
-                 twitter, bluesky, nextcloud_talk, linq, wati",
+                 twitter, bluesky, nextcloud_talk, linq, wati, lark, feishu",
                 other
             );
         }

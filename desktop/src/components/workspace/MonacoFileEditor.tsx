@@ -12,6 +12,7 @@ import { lspBridge } from '../../lib/lspBridge'
 import {
   AI_FRESH_WINDOW_MS,
   nameOf,
+  registerEditorDraftFlusher,
   useWorkspaceFilesStore,
   type MonacoEditOperation,
   type MonacoModelHandle,
@@ -23,7 +24,9 @@ import { isTauriRuntime } from '../../lib/desktopRuntime'
 import { revealInExplorer } from '../../lib/revealInExplorer'
 import { joinWorkspaceAbsPath, workspaceAbsPathToUri } from '../../lib/workspacePath'
 import type { LspDiagnostic, LspPosition } from '../../types/lsp'
+import { useFileDragStore } from '../../stores/fileDragStore'
 import { copyTextToClipboard } from '../chat/clipboard'
+import { selectionRefLabel, selectionRefPath } from '../chat/composerRefs'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import { MonacoDiffOverlay } from './MonacoDiffOverlay'
 import { MediaPreview, classifyMedia } from './MediaPreview'
@@ -32,6 +35,12 @@ import { StaticCodeViewer } from './StaticCodeViewer'
 import '../../lib/monacoSetup'
 
 const EDITOR_PREFS_STORAGE_KEY = 'sen-workspace-editor-prefs'
+
+const IS_MAC =
+  typeof navigator !== 'undefined' && /mac/i.test(navigator.platform ?? '')
+const SELECTION_MENU_DEBOUNCE_MS = 250
+const SELECTION_MENU_WIDTH_PX = 250
+const SELECTION_MENU_HEIGHT_PX = 30
 
 const lspProvidersRegistered = new Set<string>()
 
@@ -180,7 +189,7 @@ const FILENAME_LANGUAGE: Record<string, string> = {
   'todo.md': 'markdown',
 }
 
-function languageIdFor(filename: string): string {
+export function languageIdFor(filename: string): string {
   if (!filename) return 'plaintext'
   const lower = filename.toLowerCase()
   const byName = FILENAME_LANGUAGE[lower]
@@ -952,7 +961,9 @@ export function MonacoFileEditor({ workDir }: Props) {
     }, 150)
   }, [])
   useEffect(() => {
+    registerEditorDraftFlusher(flushPendingDraft)
     return () => {
+      registerEditorDraftFlusher(null)
       flushPendingDraft()
     }
   }, [flushPendingDraft])
@@ -1133,10 +1144,11 @@ export function MonacoFileEditor({ workDir }: Props) {
   }, [])
 
   const handleSave = useCallback(async () => {
-    if (!activeTab || !buffer || buffer.isBinary) return
+    if (!activeTab || !buffer || buffer.isBinary || buffer.lossy) return
     flushPendingDraft()
     if (formatOnSave) {
       await runFormatBeforeSave()
+      flushPendingDraft()
       if (fileUri) {
         const latest =
           useWorkspaceFilesStore.getState().files[`${root}::${activeTab}`]
@@ -1320,8 +1332,57 @@ export function MonacoFileEditor({ workDir }: Props) {
     [],
   )
 
+  const [selectionMenu, setSelectionMenu] = useState<{
+    top: number
+    left: number
+  } | null>(null)
+  const selectionMenuRef = useRef(selectionMenu)
+  selectionMenuRef.current = selectionMenu
+
+  const addSelectionToChat = useCallback(() => {
+    const editor = editorRef.current
+    if (!editor) return
+    const rel = useWorkspaceFilesStore.getState().activeTab
+    if (!rel) return
+    const zone = useFileDragStore
+      .getState()
+      .zones.find((z) => z.id === 'chat-composer')
+    if (!zone) {
+      addToast({
+        type: 'warning',
+        message: t('files.tree.addToChatUnavailable'),
+      })
+      return
+    }
+    const fileName = nameOf(rel)
+    const selection = editor.getSelection()
+    if (!selection || selection.isEmpty()) {
+      zone.onDrop({ relPath: rel, name: fileName, isDir: false }, 0, 0)
+      setSelectionMenu(null)
+      return
+    }
+    const startLine = selection.startLineNumber
+    let endLine = selection.endLineNumber
+    if (selection.endColumn === 1 && endLine > startLine) {
+      endLine -= 1
+    }
+    zone.onDrop(
+      {
+        relPath: selectionRefPath(rel, startLine, endLine),
+        name: selectionRefLabel(fileName, startLine, endLine),
+        isDir: false,
+      },
+      0,
+      0,
+    )
+    setSelectionMenu(null)
+  }, [addToast, t])
+  const addSelectionToChatRef = useRef(addSelectionToChat)
+  addSelectionToChatRef.current = addSelectionToChat
+
   useEffect(() => {
     setInlineEditState(null)
+    setSelectionMenu(null)
   }, [activeTab])
 
   const [now, setNow] = useState(() => Date.now())
@@ -1333,10 +1394,11 @@ export function MonacoFileEditor({ workDir }: Props) {
 
   useEffect(() => {
     if (!pendingDiff) return
+    if (diffOverlayOpen) return
     if (now - pendingDiff.landedAt >= AI_FRESH_WINDOW_MS) {
       setPendingDiff(null)
     }
-  }, [now, pendingDiff])
+  }, [now, pendingDiff, diffOverlayOpen])
 
   useEffect(() => {
     const editor = editorRef.current
@@ -1520,6 +1582,9 @@ export function MonacoFileEditor({ workDir }: Props) {
   const applyLspCodeActionRef = useRef(applyLspCodeAction)
   applyLspCodeActionRef.current = applyLspCodeAction
 
+  const handleSaveRef = useRef(handleSave)
+  handleSaveRef.current = handleSave
+
   useEffect(() => {
     if (!activeTab) {
       useUIStore.getState().setEditorCursor(null)
@@ -1561,11 +1626,15 @@ export function MonacoFileEditor({ workDir }: Props) {
     applyCodeActionCmdId.current = cmdId ?? null
 
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyS, () => {
-      void handleSave()
+      void handleSaveRef.current()
     })
 
     editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyK, () => {
       openInlineEditRef.current()
+    })
+
+    editor.addCommand(monaco.KeyMod.CtrlCmd | monaco.KeyCode.KeyL, () => {
+      addSelectionToChatRef.current()
     })
 
     editor.addAction({
@@ -2758,15 +2827,88 @@ export function MonacoFileEditor({ workDir }: Props) {
       })
     }
 
-    editor.onDidChangeCursorSelection(() => {
+    let selectionMenuTimer: number | null = null
+
+    const computeSelectionMenuPosition = (): {
+      top: number
+      left: number
+    } | null => {
+      if (editorRef.current !== editor) return null
+      const sel = editor.getSelection()
+      if (!sel || sel.isEmpty()) return null
+      const domNode = editor.getDomNode()
+      if (!domNode) return null
+      const container = domNode.closest(
+        '[data-workspace-editor="true"]',
+      ) as HTMLElement | null
+      if (!container) return null
+      const pos = editor.getScrolledVisiblePosition(sel.getEndPosition())
+      if (!pos) return null
+      const layout = editor.getLayoutInfo()
+      if (pos.top < 0 || pos.top > layout.height) return null
+      const editorRect = domNode.getBoundingClientRect()
+      const containerRect = container.getBoundingClientRect()
+      const offsetTop = editorRect.top - containerRect.top
+      const offsetLeft = editorRect.left - containerRect.left
+      let top = offsetTop + pos.top + pos.height + 6
+      if (top + SELECTION_MENU_HEIGHT_PX > containerRect.height) {
+        top = offsetTop + pos.top - SELECTION_MENU_HEIGHT_PX - 6
+      }
+      if (top < 0) return null
+      let left = offsetLeft + pos.left
+      const maxLeft = Math.max(8, containerRect.width - SELECTION_MENU_WIDTH_PX)
+      left = Math.min(Math.max(8, left), maxLeft)
+      return { top, left }
+    }
+
+    const scheduleSelectionMenu = () => {
+      if (selectionMenuTimer !== null) {
+        window.clearTimeout(selectionMenuTimer)
+        selectionMenuTimer = null
+      }
+      const sel = editor.getSelection()
+      if (!sel || sel.isEmpty()) {
+        setSelectionMenu(null)
+        return
+      }
+      selectionMenuTimer = window.setTimeout(() => {
+        selectionMenuTimer = null
+        if (editorRef.current !== editor) return
+        setSelectionMenu(computeSelectionMenuPosition())
+      }, SELECTION_MENU_DEBOUNCE_MS)
+    }
+
+    const cancelSelectionMenu = () => {
+      if (selectionMenuTimer !== null) {
+        window.clearTimeout(selectionMenuTimer)
+        selectionMenuTimer = null
+      }
+      setSelectionMenu(null)
+    }
+
+    editor.onDidChangeCursorSelection((e) => {
       saveViewState(useWorkspaceFilesStore.getState().activeTab)
       pushEditorCursor()
+      if (e.source === 'mouse' || e.source === 'keyboard') {
+        scheduleSelectionMenu()
+      } else {
+        cancelSelectionMenu()
+      }
     })
     editor.onDidChangeCursorPosition(() => {
       pushEditorCursor()
     })
     editor.onDidScrollChange(() => {
       saveViewState(useWorkspaceFilesStore.getState().activeTab)
+      if (selectionMenuRef.current !== null || selectionMenuTimer !== null) {
+        scheduleSelectionMenu()
+      }
+    })
+    editor.onDidBlurEditorWidget(() => {
+      cancelSelectionMenu()
+    })
+    editor.onDidDispose(() => {
+      cancelSelectionMenu()
     })
 
     pushEditorCursor()
@@ -2803,7 +2945,7 @@ export function MonacoFileEditor({ workDir }: Props) {
       const rel = useWorkspaceFilesStore.getState().activeTab
       window.setTimeout(() => restoreViewStateFor(rel), 0)
     }
-  }, [addToast, handleSave, t])
+  }, [addToast, t])
 
   useEffect(() => {
     if (!pendingNavigation) return
@@ -2876,6 +3018,21 @@ export function MonacoFileEditor({ workDir }: Props) {
   }
 
   if (buffer.error) {
+    const errorKind = classifyMedia(nameOf(activeTab), buffer.mimeType)
+    if (/too large/i.test(buffer.error) && errorKind !== 'unknown') {
+      return (
+        <MediaPreview
+          content=""
+          encoding="base64"
+          mimeType={buffer.mimeType}
+          fileName={nameOf(activeTab)}
+          relPath={activeTab}
+          sizeBytes={buffer.sizeBytes}
+          workspaceRoot={root}
+          modifiedAt={buffer.modifiedAt}
+        />
+      )
+    }
     return (
       <div className="flex h-full items-center justify-center px-4 text-center text-xs text-[var(--color-danger)]">
         {t('files.errorLoading', { message: buffer.error })}
@@ -2894,6 +3051,8 @@ export function MonacoFileEditor({ workDir }: Props) {
           fileName={nameOf(activeTab)}
           relPath={activeTab}
           sizeBytes={buffer.sizeBytes}
+          workspaceRoot={root}
+          modifiedAt={buffer.modifiedAt}
         />
       )
     }
@@ -2986,22 +3145,34 @@ export function MonacoFileEditor({ workDir }: Props) {
           </span>
         </div>
       )}
+      {buffer?.lossy && !buffer.isBinary && (
+        <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 px-2 py-1.5 text-[11px] text-[var(--color-text-primary)]">
+          <span className="material-symbols-outlined text-[14px] text-[var(--color-warning)]">
+            lock
+          </span>
+          <span className="flex-1">{t('files.lossyReadOnly')}</span>
+        </div>
+      )}
       {externalChangedTs !== undefined && (
         <div className="flex flex-shrink-0 items-center gap-2 border-b border-[var(--color-warning)]/30 bg-[var(--color-warning)]/10 px-2 py-1.5 text-[11px] text-[var(--color-text-primary)]">
           <span className="material-symbols-outlined text-[14px] text-[var(--color-warning)]">
             error
           </span>
-          <span className="flex-1">{t('files.externalChanged')}</span>
-          <button
-            type="button"
-            onClick={() => {
-              void reloadFile(activeTab)
-              acknowledgeExternalChange(activeTab)
-            }}
-            className="rounded px-2 py-0.5 text-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
-          >
-            {t('files.externalChangedReload')}
-          </button>
+          <span className="flex-1">
+            {buffer?.missing ? t('files.missingOnDisk') : t('files.externalChanged')}
+          </span>
+          {!buffer?.missing && (
+            <button
+              type="button"
+              onClick={() => {
+                void reloadFile(activeTab)
+                acknowledgeExternalChange(activeTab)
+              }}
+              className="rounded px-2 py-0.5 text-[var(--color-accent)] hover:bg-[var(--color-surface-hover)]"
+            >
+              {t('files.externalChangedReload')}
+            </button>
+          )}
           <button
             type="button"
             onClick={() => acknowledgeExternalChange(activeTab)}
@@ -3087,7 +3258,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               renderLineHighlight: 'all',
               folding: true,
               showFoldingControls: 'mouseover',
-              readOnly: truncated,
+              readOnly: truncated || buffer?.lossy === true,
               formatOnPaste: true,
               formatOnType: true,
               inlayHints: { enabled: inlayHintsEnabled ? 'on' : 'off' },
@@ -3111,6 +3282,51 @@ export function MonacoFileEditor({ workDir }: Props) {
               setPendingDiff(null)
             }}
           />
+        )}
+        {selectionMenu && !inlineEditState && !diffOverlayOpen && (
+          <div
+            className="absolute z-30 flex items-center overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-surface-elevated)] shadow-lg"
+            style={{ top: selectionMenu.top, left: selectionMenu.left }}
+          >
+            <button
+              type="button"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={addSelectionToChat}
+              className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+            >
+              <span
+                aria-hidden="true"
+                className="material-symbols-outlined text-[13px] text-[var(--color-accent)]"
+              >
+                forum
+              </span>
+              {t('editor.selectionMenu.addToChat')}
+              <kbd className="rounded bg-[var(--color-surface-container-high)] px-1 text-[10px] font-normal text-[var(--color-text-tertiary)]">
+                {IS_MAC ? '⌘L' : 'Ctrl+L'}
+              </kbd>
+            </button>
+            <span aria-hidden="true" className="h-4 w-px bg-[var(--color-border)]" />
+            <button
+              type="button"
+              onPointerDown={(e) => e.preventDefault()}
+              onClick={() => {
+                setSelectionMenu(null)
+                openInlineEdit()
+              }}
+              className="flex items-center gap-1.5 px-2 py-1 text-[11px] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+            >
+              <span
+                aria-hidden="true"
+                className="material-symbols-outlined text-[13px] text-[var(--color-accent)]"
+              >
+                auto_fix_high
+              </span>
+              {t('editor.selectionMenu.quickEdit')}
+              <kbd className="rounded bg-[var(--color-surface-container-high)] px-1 text-[10px] font-normal text-[var(--color-text-tertiary)]">
+                {IS_MAC ? '⌘K' : 'Ctrl+K'}
+              </kbd>
+            </button>
+          </div>
         )}
         {inlineEditState && inlineEditState.relPath === activeTab && !inlineEditState.result && (
           <div className="absolute left-1/2 top-3 z-30 w-[min(560px,92%)] -translate-x-1/2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-elevated)] p-2 shadow-lg">

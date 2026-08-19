@@ -6,7 +6,7 @@ members = [
 resolver = "2"
 
 [workspace.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_Globalization", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Power", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_UI_HiDpi", "Win32_Globalization", "Win32_Security_Cryptography", "Win32_System_Memory", "Win32_Storage_FileSystem", "Win32_System_IO", "Win32_System_Console", "Win32_UI_Shell"] }
 
 [lints.rust]
 unsafe_code = "allow"
@@ -97,6 +97,8 @@ inventory = "0.3"
 
 notify = { version = "8.2", optional = true }
 
+portable-pty = { version = "0.8", optional = true }
+
 
 tempfile = "3.26"
 
@@ -109,6 +111,8 @@ anyhow = "1.0"
 thiserror = "2.0"
 
 globset = "0.4"
+grep = "0.3"
+ignore = "0.4"
 
 uuid = { version = "1.22", default-features = false, features = ["v4", "std"] }
 
@@ -327,6 +331,7 @@ probe = ["dep:probe-rs"]
 rag-pdf = ["dep:pdf-extract"]
 skill-creation = []
 fs-watch = ["dep:notify"]
+pty = ["dep:portable-pty"]
 whatsapp-web = ["dep:wa-rs", "dep:wa-rs-core", "dep:wa-rs-binary", "dep:wa-rs-proto", "dep:wa-rs-ureq-http", "dep:wa-rs-tokio-transport", "dep:serde-big-array", "dep:prost", "dep:qrcode"]
 voice-wake = ["dep:cpal"]
 plugins-wasm = ["dep:extism"]

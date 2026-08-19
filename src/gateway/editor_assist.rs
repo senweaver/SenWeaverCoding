@@ -340,3 +340,185 @@ pub async fn handle_editor_inline_edit(
             .into_response(),
     }
 }
+
+fn nep_registry_cache() -> &'static parking_lot::RwLock<
+    Option<(u64, std::sync::Arc<crate::inline_completion::nep::NepRegistry>)>,
+> {
+    static CACHE: OnceLock<
+        parking_lot::RwLock<
+            Option<(u64, std::sync::Arc<crate::inline_completion::nep::NepRegistry>)>,
+        >,
+    > = OnceLock::new();
+    CACHE.get_or_init(|| parking_lot::RwLock::new(None))
+}
+
+async fn resolve_nep_registry(
+    state: &AppState,
+) -> Option<std::sync::Arc<crate::inline_completion::nep::NepRegistry>> {
+    let config = state.live_config.load_ref();
+    let fingerprint = completion_config_fingerprint(&config);
+    if let Some((cached_fp, handle)) = nep_registry_cache().read().as_ref()
+        && *cached_fp == fingerprint
+    {
+        return Some(handle.clone());
+    }
+    let cfg = (*config).clone();
+    let built = tokio::task::spawn_blocking(move || {
+        crate::inline_completion::nep::registry::default_registry(&cfg)
+    })
+    .await
+    .ok()?;
+    *nep_registry_cache().write() = Some((fingerprint, built.clone()));
+    Some(built)
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NextEditRecentEdit {
+    pub file_path: String,
+    pub diff: String,
+    #[serde(default)]
+    pub instruction: Option<String>,
+    #[serde(default)]
+    pub since_start_ms: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct NextEditBody {
+    pub active_file: String,
+    #[serde(default)]
+    pub source: String,
+    #[serde(default)]
+    pub cursor_line: u32,
+    #[serde(default)]
+    pub recent_edits: Vec<NextEditRecentEdit>,
+    #[serde(default)]
+    pub root: Option<String>,
+    #[serde(default)]
+    pub apply: bool,
+}
+
+pub async fn handle_editor_next_edit(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(body): Json<NextEditBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    let workspace_root = body
+        .root
+        .as_ref()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| state.live_config.load_ref().workspace_dir.clone());
+    let active_file = {
+        let p = PathBuf::from(&body.active_file);
+        if p.is_absolute() { p } else { workspace_root.join(p) }
+    };
+    if !crate::util::path_is_within(&active_file, &workspace_root) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({ "error": "activeFile escapes workspace root" })),
+        )
+            .into_response();
+    }
+    if body.source.len() > MAX_INLINE_EDIT_SELECTION_BYTES {
+        return (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({ "error": "source too large for next-edit prediction" })),
+        )
+            .into_response();
+    }
+    let Some(registry) = resolve_nep_registry(&state).await else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(serde_json::json!({ "error": "next-edit prediction unavailable" })),
+        )
+            .into_response();
+    };
+
+    let req = crate::inline_completion::nep::NepRequest {
+        active_file: active_file.clone(),
+        source: body.source.clone(),
+        cursor_line: body.cursor_line,
+        recent_edits: body
+            .recent_edits
+            .iter()
+            .map(|e| crate::inline_completion::nep::RecentEdit {
+                file_path: {
+                    let p = PathBuf::from(&e.file_path);
+                    if p.is_absolute() { p } else { workspace_root.join(p) }
+                },
+                diff: e.diff.clone(),
+                instruction: e.instruction.clone(),
+                since_start_ms: e.since_start_ms,
+            })
+            .collect(),
+        workspace_root: workspace_root.clone(),
+        request_id: uuid::Uuid::new_v4(),
+    };
+
+    match tokio::time::timeout(COMPLETION_TIMEOUT, registry.predict(req)).await {
+        Ok(Ok(resp)) => {
+            let mut applied = Vec::new();
+            if body.apply {
+                if let Some(suggestion) = resp.suggestions.first() {
+                    let refiner = crate::apply_model::fast_apply::runtime_ladder_refiner();
+                    let options = crate::apply_model::ApplyOptions {
+                        max_fuzz: 2,
+                        dry_run: false,
+                        validate: true,
+                        path: Some(suggestion.file_path.clone()),
+                    };
+                    match crate::inline_completion::nep::apply_suggestion(
+                        suggestion,
+                        refiner.as_deref(),
+                        &options,
+                        &workspace_root,
+                    )
+                    .await
+                    {
+                        Ok((_outcome, tier)) => applied.push(serde_json::json!({
+                            "filePath": suggestion.file_path.display().to_string(),
+                            "applied": true,
+                            "tier": format!("{tier:?}"),
+                        })),
+                        Err(e) => applied.push(serde_json::json!({
+                            "filePath": suggestion.file_path.display().to_string(),
+                            "applied": false,
+                            "error": e.to_string(),
+                        })),
+                    }
+                }
+            }
+            Json(serde_json::json!({
+                "provider": resp.provider,
+                "latencyMs": resp.latency_ms,
+                "suggestions": resp
+                    .suggestions
+                    .iter()
+                    .map(|s| serde_json::json!({
+                        "filePath": s.file_path.display().to_string(),
+                        "diff": s.diff,
+                        "rationale": s.rationale,
+                        "confidence": s.confidence,
+                        "origin": s.origin,
+                    }))
+                    .collect::<Vec<_>>(),
+                "applied": applied,
+            }))
+            .into_response()
+        }
+        Ok(Err(e)) => (
+            StatusCode::BAD_GATEWAY,
+            Json(serde_json::json!({ "error": e.to_string() })),
+        )
+            .into_response(),
+        Err(_) => (
+            StatusCode::GATEWAY_TIMEOUT,
+            Json(serde_json::json!({ "error": "next-edit prediction timed out" })),
+        )
+            .into_response(),
+    }
+}

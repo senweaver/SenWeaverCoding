@@ -488,9 +488,10 @@ impl DelegateTool {
             None => agent_config.provider.clone(),
         };
 
-        let provider: Box<dyn Provider> = match providers::create_provider_with_options_async(
+        let provider: Box<dyn Provider> = match providers::create_resilient_runtime_provider_async(
             runtime_provider_name,
             provider_credential.map(str::to_string),
+            None,
             self.provider_runtime_options.clone(),
         )
         .await

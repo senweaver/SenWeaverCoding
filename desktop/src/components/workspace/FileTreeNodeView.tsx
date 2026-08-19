@@ -17,6 +17,7 @@ import {
   useGitStatusStore,
   type GitStatusSeverity,
 } from '../../stores/gitStatusStore'
+import { useFileHistoryStore } from '../../stores/fileHistoryStore'
 import { ensureVscodeIcons, getFileIconId, isVscodeIconsReady } from '../../lib/fileIcons'
 import { formatBytes } from '../../lib/formatBytes'
 import { formatAbsoluteTime, formatRelativeTime } from '../../lib/formatRelativeTime'
@@ -53,15 +54,22 @@ type Props = {
   selectedRelPath: string | null
   focusedRelPath?: string | null
 
+  multiSelected?: boolean
+
+  dropTarget?: boolean
+
   renameTarget: RenameTargetState | null
 
   filter?: FilterState
-  onSelect: (node: FileTreeNode) => void
-  onFocus?: (relPath: string) => void
+  onRowClick: (
+    node: FileTreeNode,
+    mods: { toggle: boolean; range: boolean },
+  ) => void
   onContextMenu: (event: React.MouseEvent, node: FileTreeNode) => void
   onDrop: (event: React.DragEvent, target: FileTreeNode) => void
   onRenameSubmit: (value: string) => void
   onRenameCancel: () => void
+  onShowHistory?: (node: FileTreeNode) => void
 }
 
 function renderHighlight(text: string, needle: string) {
@@ -121,14 +129,16 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   depth,
   selectedRelPath,
   focusedRelPath,
+  multiSelected,
+  dropTarget,
   renameTarget,
   filter,
-  onSelect,
-  onFocus,
+  onRowClick,
   onContextMenu,
   onDrop,
   onRenameSubmit,
   onRenameCancel,
+  onShowHistory,
 }: Props) {
   const t = useTranslation()
   const iconsReady = useEnsureVscodeIcons()
@@ -143,7 +153,9 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
   )
   const workspaceRoot = useWorkspaceFilesStore((s) => s.root)
   const isCut = useWorkspaceFilesStore(
-    (s) => s.clipboard?.mode === 'cut' && s.clipboard.relPath === node.relPath,
+    (s) =>
+      s.clipboard?.mode === 'cut' &&
+      s.clipboard.entries.some((entry) => entry.relPath === node.relPath),
   )
   const gitSeverity = useGitStatusStore((s): GitStatusSeverity => {
     if (!workspaceRoot) return 'unmodified'
@@ -157,6 +169,10 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
     return classifyEntry(entry)
   })
   const gitBadgeChar = useMemo(() => statusBadgeChar(gitSeverity), [gitSeverity])
+  const historyCount = useFileHistoryStore((s) => {
+    if (node.isDir || !workspaceRoot) return 0
+    return s.byRoot[workspaceRoot]?.files[node.relPath]?.count ?? 0
+  })
 
   const [now, setNow] = useState(() => Date.now())
   const aiAge = aiModifiedTs !== undefined ? now - aiModifiedTs : Number.POSITIVE_INFINITY
@@ -210,18 +226,19 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
 
   const suppressClickRef = useRef(false)
 
-  const handleClick = useCallback(() => {
-    if (suppressClickRef.current) {
-      suppressClickRef.current = false
-      return
-    }
-    onFocus?.(node.relPath)
-    if (node.isDir) {
-      void toggleExpanded(node.relPath)
-    } else {
-      onSelect(node)
-    }
-  }, [node, onFocus, onSelect, toggleExpanded])
+  const handleClick = useCallback(
+    (event: React.MouseEvent) => {
+      if (suppressClickRef.current) {
+        suppressClickRef.current = false
+        return
+      }
+      onRowClick(node, {
+        toggle: event.ctrlKey || event.metaKey,
+        range: event.shiftKey,
+      })
+    },
+    [node, onRowClick],
+  )
 
   const handlePointerDown = useCallback(
     (event: React.PointerEvent) => {
@@ -265,28 +282,40 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
 
   const handleChevron = useCallback(
     (event: React.MouseEvent) => {
+      if (!node.isDir) return
       event.stopPropagation()
-      if (node.isDir) {
-        void toggleExpanded(node.relPath)
-      }
+      void toggleExpanded(node.relPath)
     },
     [node, toggleExpanded],
   )
+
+  const hoverExpandTimerRef = useRef<number | null>(null)
+  const clearHoverExpand = useCallback(() => {
+    if (hoverExpandTimerRef.current !== null) {
+      window.clearTimeout(hoverExpandTimerRef.current)
+      hoverExpandTimerRef.current = null
+    }
+  }, [])
+  useEffect(() => clearHoverExpand, [clearHoverExpand])
 
   const handleDragOver = useCallback(
     (event: React.DragEvent) => {
       if (!node.isDir) return
       event.preventDefault()
-      event.dataTransfer.dropEffect = 'move'
-      if (!expanded) {
-        setExpanded(node.relPath, true)
-        if (!dirState?.loaded && !dirState?.loading) {
-          void useWorkspaceFilesStore.getState().loadDirectory(node.relPath)
-        }
+      event.dataTransfer.dropEffect = 'copy'
+      if (!expanded && hoverExpandTimerRef.current === null) {
+        hoverExpandTimerRef.current = window.setTimeout(() => {
+          hoverExpandTimerRef.current = null
+          setExpanded(node.relPath, true)
+        }, 600)
       }
     },
-    [dirState?.loaded, dirState?.loading, expanded, node.isDir, node.relPath, setExpanded],
+    [expanded, node.isDir, node.relPath, setExpanded],
   )
+
+  const handleDragLeave = useCallback(() => {
+    clearHoverExpand()
+  }, [clearHoverExpand])
 
   if (renameTarget && renameTarget.relPath === node.relPath) {
     return (
@@ -304,22 +333,28 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
     <>
       <div
         role="treeitem"
-        aria-selected={isSelected}
+        aria-selected={isSelected || multiSelected}
         aria-expanded={node.isDir ? expanded : undefined}
         data-tree-relpath={node.relPath}
         data-tree-isdir={node.isDir ? '1' : '0'}
         onPointerDown={handlePointerDown}
         onDragOver={handleDragOver}
-        onDrop={(e) => onDrop(e, node)}
+        onDragLeave={handleDragLeave}
+        onDrop={(e) => {
+          clearHoverExpand()
+          onDrop(e, node)
+        }}
         onClick={handleClick}
         onContextMenu={(e) => onContextMenu(e, node)}
         className={`group relative flex items-center gap-1 h-6 px-1 cursor-pointer text-xs select-none ${
-          isSelected
+          isSelected || multiSelected
             ? 'bg-[var(--color-accent)]/15 text-[var(--color-text-primary)]'
             : 'hover:bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]'
         }${isFocused ? ' ring-1 ring-inset ring-[var(--color-accent)]/60' : ''}${
-          isCut ? ' opacity-50' : ''
-        }`}
+          dropTarget
+            ? ' ring-1 ring-inset ring-[var(--color-accent)] bg-[var(--color-accent)]/10'
+            : ''
+        }${isCut ? ' opacity-50' : ''}`}
         style={{ paddingLeft: `${depth * 12 + 4}px` }}
         title={tooltip}
       >
@@ -394,6 +429,26 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
             >
               {gitBadgeChar}
             </span>
+          )}
+          {!node.isDir && historyCount > 0 && onShowHistory && (
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                onShowHistory(node)
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+              title={t('files.history.badgeTitle', { count: historyCount })}
+              aria-label={t('files.history.badgeTitle', { count: historyCount })}
+              className="flex h-3.5 w-3.5 flex-shrink-0 items-center justify-center rounded-sm text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-accent)]"
+            >
+              <span
+                aria-hidden="true"
+                className="material-symbols-outlined text-[12px] leading-none"
+              >
+                history
+              </span>
+            </button>
           )}
           {loading && (
             <span

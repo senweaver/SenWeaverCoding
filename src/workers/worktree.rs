@@ -67,6 +67,9 @@ pub fn porcelain_has_real_changes(stdout: &str) -> bool {
 }
 
 pub async fn parent_workspace_is_dirty(base: &Path) -> Result<bool, String> {
+    if !base.join(".git").exists() {
+        return Ok(false);
+    }
     let out = crate::util::hidden_async_command("git")
         .args(["status", "--porcelain"])
         .current_dir(base)
@@ -128,6 +131,9 @@ pub async fn commit_worker_changes(info: &WorktreeInfo) -> Result<WorktreeCommit
 }
 
 pub async fn salvage_worktree(info: &WorktreeInfo) -> WorktreeSalvage {
+    if crate::workers::overlay::is_overlay_info(info) {
+        return crate::workers::overlay::salvage_worker_overlay(info).await;
+    }
     match commit_worker_changes(info).await {
         Ok(WorktreeCommit::Committed) => {
             let note = remove_worktree_keep_branch(info).await;
@@ -176,6 +182,9 @@ pub async fn remove_worktree_keep_branch(info: &WorktreeInfo) -> String {
 }
 
 pub async fn commit_and_merge_worker(info: &WorktreeInfo) -> Result<String, String> {
+    if crate::workers::overlay::is_overlay_info(info) {
+        return crate::workers::overlay::merge_worker_overlay(info).await;
+    }
     let base = info.base.to_string_lossy().to_string();
 
     if let Err(err) = commit_worker_changes(info).await {
@@ -313,6 +322,9 @@ pub async fn merge_tree_conflicts(base: &str, branch: &str) -> Option<String> {
 }
 
 pub async fn remove_worker_worktree(info: &WorktreeInfo) -> String {
+    if crate::workers::overlay::is_overlay_info(info) {
+        return crate::workers::overlay::remove_worker_overlay(info).await;
+    }
     let base = info.base.to_string_lossy().to_string();
     let path = info.path.to_string_lossy().to_string();
     let removed = crate::util::hidden_async_command("git")
@@ -409,6 +421,9 @@ pub async fn create_named_worktree(
 }
 
 pub async fn create_worker_worktree(base: &Path, idx: usize) -> Result<WorktreeInfo, String> {
+    if !base.join(".git").exists() {
+        return crate::workers::overlay::create_worker_overlay(base, idx).await;
+    }
     let batch_id = uuid::Uuid::new_v4().simple().to_string();
     let short_id = &batch_id[..12.min(batch_id.len())];
     let branch = format!("sen-worker/{short_id}-{idx}");
@@ -571,6 +586,9 @@ fn copy_dir_recursive_sync(src: &Path, dst: &Path) {
 }
 
 pub async fn worktree_change_report(info: &WorktreeInfo) -> String {
+    if crate::workers::overlay::is_overlay_info(info) {
+        return crate::workers::overlay::overlay_change_report(info).await;
+    }
     let output = crate::util::hidden_async_command("git")
         .args(["-C", &info.path.to_string_lossy(), "status", "--short"])
         .current_dir(&info.base)

@@ -3,26 +3,26 @@
 // Licensed under the MIT License.
 
 import { useEffect, useRef } from 'react'
-import { useSessionStore } from '../stores/sessionStore'
 import { useChatStore } from '../stores/chatStore'
 import { useTabStore } from '../stores/tabStore'
 import { useUIStore } from '../stores/uiStore'
-import { useSettingsStore } from '../stores/settingsStore'
-import { useTerminalPanelStore } from '../stores/terminalPanelStore'
 import { useKeyboardShortcutsStore } from '../stores/keyboardShortcutsStore'
 import { useWorkspaceFilesStore } from '../stores/workspaceFilesStore'
 import { matchesBinding } from '../types/shortcuts'
-import { getActiveTabWorkDir } from '../lib/activeWorkDir'
+import {
+  runModePlan,
+  runNewSession,
+  runQuickModeSwitcher,
+  runSidebarSearch,
+  runStopGeneration,
+  runToggleCommandPalette,
+  runToggleTerminal,
+} from '../lib/commandRegistry'
 
 export function useKeyboardShortcuts() {
-  const setActiveSession = useSessionStore((s) => s.setActiveSession)
-  const setActiveView = useUIStore((s) => s.setActiveView)
-  const setSidebarOpen = useUIStore((s) => s.setSidebarOpen)
   const closeModal = useUIStore((s) => s.closeModal)
-  const openModal = useUIStore((s) => s.openModal)
   const activeModal = useUIStore((s) => s.activeModal)
   const stopGeneration = useChatStore((s) => s.stopGeneration)
-  const setSessionCodingMode = useChatStore((s) => s.setSessionCodingMode)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const chatState = useChatStore((s) =>
     activeTabId ? s.sessions[activeTabId]?.chatState ?? 'idle' : 'idle',
@@ -59,22 +59,14 @@ export function useKeyboardShortcuts() {
       if (matchesBinding(e, bindings['new-session'])) {
         if (isTypingContext) return
         e.preventDefault()
-        setActiveSession(null)
-        setActiveView('code')
+        runNewSession()
         return
       }
 
       if (matchesBinding(e, bindings['sidebar-search'])) {
         if (isTypingContext || isMonacoEarly) return
         e.preventDefault()
-        setSidebarOpen(true)
-        requestAnimationFrame(() => {
-          const searchInput = document.querySelector(
-            '#sidebar-search',
-          ) as HTMLInputElement | null
-          searchInput?.focus()
-          searchInput?.select()
-        })
+        runSidebarSearch()
         return
       }
 
@@ -102,7 +94,7 @@ export function useKeyboardShortcuts() {
       if (matchesBinding(e, bindings['stop-generation'])) {
         if (chatStateRef.current !== 'idle' && activeTabIdRef.current) {
           e.preventDefault()
-          stopGeneration(activeTabIdRef.current)
+          runStopGeneration()
         }
         return
       }
@@ -110,17 +102,7 @@ export function useKeyboardShortcuts() {
       if (matchesBinding(e, bindings['toggle-terminal'])) {
         e.preventDefault()
         e.stopPropagation()
-        const store = useTerminalPanelStore.getState()
-        const wasOpen = store.open
-        store.togglePanel()
-        if (!wasOpen) {
-          const after = useTerminalPanelStore.getState()
-          const hasInteractive = after.tabs.some((t) => t.kind === 'pty')
-          if (!hasInteractive) {
-            const cwd = getActiveTabWorkDir() ?? undefined
-            after.openNewTab({ cwd })
-          }
-        }
+        runToggleTerminal()
         return
       }
 
@@ -128,12 +110,14 @@ export function useKeyboardShortcuts() {
         if (isTypingContext) return
         e.preventDefault()
         e.stopPropagation()
-        const ui = useUIStore.getState()
-        if (ui.activeModal === 'quick-mode-switcher') {
-          ui.closeModal()
-        } else {
-          ui.openModal('quick-mode-switcher')
-        }
+        runQuickModeSwitcher()
+        return
+      }
+
+      if (matchesBinding(e, bindings['command-palette'])) {
+        e.preventDefault()
+        e.stopPropagation()
+        runToggleCommandPalette()
         return
       }
 
@@ -141,13 +125,7 @@ export function useKeyboardShortcuts() {
         if (isTypingContext) return
         e.preventDefault()
         e.stopPropagation()
-        const settings = useSettingsStore.getState()
-        const tabId = activeTabIdRef.current
-        void settings.requestSetCodingMode('plan').then(() => {
-          if (tabId && useSettingsStore.getState().codingMode === 'plan') {
-            setSessionCodingMode(tabId, 'plan')
-          }
-        })
+        runModePlan()
         return
       }
 
@@ -163,13 +141,13 @@ export function useKeyboardShortcuts() {
       const isEditing = isFormInput && !isMonacoEditor
       const isEditingForGlobalSearch = isChatInput
 
-      if (ctrlOrMeta && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'p') {
+      if (matchesBinding(e, bindings['quick-open'])) {
         e.preventDefault()
         e.stopPropagation()
         useUIStore.getState().openWorkspaceFinder('quick-open')
         return
       }
-      if (ctrlOrMeta && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'f') {
+      if (matchesBinding(e, bindings['search-in-files'])) {
         if (isEditingForGlobalSearch) {
           return
         }
@@ -178,14 +156,14 @@ export function useKeyboardShortcuts() {
         useUIStore.getState().openWorkspaceFinder('search-in-files')
         return
       }
-      if (ctrlOrMeta && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 't') {
+      if (matchesBinding(e, bindings['workspace-symbol'])) {
         if (isEditing) return
         e.preventDefault()
         e.stopPropagation()
         useUIStore.getState().openWorkspaceFinder('workspace-symbol')
         return
       }
-      if (ctrlOrMeta && !e.altKey && !e.shiftKey && e.key.toLowerCase() === 'w') {
+      if (matchesBinding(e, bindings['close-editor-tab'])) {
         const workspaceState = useWorkspaceFilesStore.getState()
         const tab = workspaceState.activeTab
         const finderOpen = useUIStore.getState().workspaceFinderMode !== null
@@ -252,13 +230,5 @@ export function useKeyboardShortcuts() {
       document.removeEventListener('keydown', handler, {
         capture: true,
       } as EventListenerOptions)
-  }, [
-    closeModal,
-    openModal,
-    setActiveSession,
-    setActiveView,
-    setSidebarOpen,
-    setSessionCodingMode,
-    stopGeneration,
-  ])
+  }, [closeModal, stopGeneration])
 }

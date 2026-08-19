@@ -138,7 +138,6 @@ async fn handle_socket(
     let conn_token = tokio_util::sync::CancellationToken::new();
     let turn_abort_token = tokio_util::sync::CancellationToken::new();
     let writer_conn_token = conn_token.clone();
-    let writer_abort_token = turn_abort_token.clone();
 
     let writer_handle = crate::runtime::spawn_supervised("ws_desktop.writer", async move {
         const COALESCE_WINDOW_MS: u64 = 24;
@@ -149,7 +148,6 @@ async fn handle_socket(
                 match tokio::time::timeout(WRITER_SEND_TIMEOUT, sink.send($msg)).await {
                     Ok(Ok(())) => false,
                     _ => {
-                        writer_abort_token.cancel();
                         writer_conn_token.cancel();
                         true
                     }
@@ -353,24 +351,6 @@ async fn handle_socket(
 
     state.hooks.fire_session_start(&session_id, "ws_desktop").await;
 
-    {
-        static SEARCH_DEGRADED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        static SEARCH_DEGRADED_NOTIFIED: std::sync::OnceLock<()> = std::sync::OnceLock::new();
-        let degraded = *SEARCH_DEGRADED
-            .get_or_init(|| which::which("rg").is_err() && which::which("grep").is_err());
-        if degraded && SEARCH_DEGRADED_NOTIFIED.set(()).is_ok() {
-            let _ = send_json(
-                &outbound_tx,
-                &serde_json::json!({
-                    "type": "system_notification",
-                    "subtype": "search_degraded",
-                    "level": "warning",
-                    "message": "ripgrep (rg) was not detected; content search will fall back to a slower built-in implementation. Install rg for the best search performance.",
-                }),
-            )
-            .await;
-        }
-    }
     if let Some(backend) = state.session_backend.clone() {
         let session_key_dir = session_key.clone();
         let dir_opt = tokio::task::spawn_blocking(move || {
@@ -1020,7 +1000,16 @@ async fn handle_socket(
                             Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => break,
                         }
                     }
-                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(dropped)) => {
+                        let notice = serde_json::json!({
+                            "type": "system_notification",
+                            "subtype": "stream_lagged",
+                            "level": "warning",
+                            "data": { "dropped": dropped, "channel": "gateway_events" },
+                        });
+                        let _ = tx.try_send(notice);
+                        continue;
+                    }
                     Err(_) => break,
                 }
             }
@@ -3945,6 +3934,8 @@ async fn run_turn(
         std::collections::HashMap::new();
     let mut last_tool_use_id_for_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
+    let mut streaming_tool_args: std::collections::HashMap<u32, (String, usize, bool)> =
+        std::collections::HashMap::new();
     let mut accumulated_text = String::new();
     let mut streamed_turn_error: Option<String> = None;
     let started = std::time::Instant::now();
@@ -4193,6 +4184,7 @@ async fn run_turn(
                 }
                 TurnEvent::StreamReset => {
                     accumulated_text.clear();
+                    streaming_tool_args.clear();
                     if let Ok(mut pg) = sqlite_persist_forward.lock() {
                         pg.reset_stream();
                     }
@@ -4216,6 +4208,7 @@ async fn run_turn(
                     tool_call_id,
                 } => {
                     text_block_open = false;
+                    streaming_tool_args.clear();
                     let id = tool_call_id
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(next_tool_use_id);
@@ -4247,6 +4240,67 @@ async fn run_turn(
                         }),
                     )
                     .await;
+                }
+                TurnEvent::ToolArgsDelta {
+                    call_index,
+                    name,
+                    args_delta,
+                    args_total_len,
+                } => {
+                    const MAX_STREAMING_ARGS_BUFFER_BYTES: usize = 512 * 1024;
+                    const STREAMING_ARGS_SEND_STEP_BYTES: usize = 1024;
+                    const STREAMING_ARGS_TAIL_HOLDBACK_BYTES: usize = 1024;
+                    let (buffer, last_sent_len, poisoned) =
+                        streaming_tool_args.entry(call_index).or_default();
+                    if *poisoned {
+                        continue;
+                    }
+                    if buffer.len() + args_delta.len() != args_total_len as usize {
+                        *poisoned = true;
+                        buffer.clear();
+                        *last_sent_len = 0;
+                        tracing::debug!(
+                            target: "gateway.ws",
+                            call_index,
+                            tool = %name,
+                            "tool args delta gap detected (dropped event under backpressure); live preview disabled for this call"
+                        );
+                        continue;
+                    }
+                    if buffer.len() + args_delta.len() <= MAX_STREAMING_ARGS_BUFFER_BYTES {
+                        buffer.push_str(&args_delta);
+                        let first_send = *last_sent_len == 0;
+                        if first_send
+                            || buffer.len().saturating_sub(*last_sent_len)
+                                >= STREAMING_ARGS_SEND_STEP_BYTES
+                        {
+                            *last_sent_len = buffer.len();
+                            let safe_snapshot =
+                                crate::services::governance::credential_vault::redact_for_audit_optional(
+                                    buffer,
+                                );
+                            let mut visible_end = safe_snapshot
+                                .len()
+                                .saturating_sub(STREAMING_ARGS_TAIL_HOLDBACK_BYTES);
+                            while visible_end > 0 && !safe_snapshot.is_char_boundary(visible_end)
+                            {
+                                visible_end -= 1;
+                            }
+                            if visible_end > 0 {
+                                let _ = send_json(
+                                    outbound,
+                                    &serde_json::json!({
+                                        "type": "tool_use_args_delta",
+                                        "toolName": name,
+                                        "callIndex": call_index,
+                                        "argsSnapshot": &safe_snapshot[..visible_end],
+                                        "sessionId": session_id,
+                                    }),
+                                )
+                                .await;
+                            }
+                        }
+                    }
                 }
                 TurnEvent::ToolResult {
                     name,

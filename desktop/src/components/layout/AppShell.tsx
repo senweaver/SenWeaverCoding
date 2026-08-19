@@ -9,6 +9,7 @@ import { ToastContainer } from '../shared/Toast'
 import { UpdateChecker } from '../shared/UpdateChecker'
 import { CodingModeTransitionGuard } from '../controls/CodingModeTransitionGuard'
 import { QuickModeSwitcher } from '../controls/QuickModeSwitcher'
+import { CommandPalette } from '../controls/CommandPalette'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { RIGHT_SIDEBAR_BOUNDS, useUIStore } from '../../stores/uiStore'
 import { useKeyboardShortcuts } from '../../hooks/useKeyboardShortcuts'
@@ -48,9 +49,6 @@ const Settings = lazy(() =>
 )
 const TemplateLibrary = lazy(() =>
   import('../../pages/TemplateLibrary').then((m) => ({ default: m.TemplateLibrary })),
-)
-const GroupsPanel = lazy(() =>
-  import('../lanGroup/GroupsPanel').then((m) => ({ default: m.GroupsPanel })),
 )
 const SharePanel = lazy(() =>
   import('../lanShare/SharePanel').then((m) => ({ default: m.SharePanel })),
@@ -106,7 +104,6 @@ import { useChatStore } from '../../stores/chatStore'
 import { useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useComputerUseStore } from '../../stores/computerUseStore'
 import { useComputerRecorderStore } from '../../stores/computerRecorderStore'
-import { useLanGroupStore } from '../../stores/lanGroupStore'
 import { useLanShareStore } from '../../stores/lanShareStore'
 import { useReviewPanelStore } from '../../stores/reviewPanelStore'
 import { CloseChoiceModal } from './CloseChoiceModal'
@@ -122,7 +119,6 @@ export function AppShell() {
   const activeWorkDir = useActiveTabWorkDir()
   const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
   const templateLibraryOpen = useUIStore((s) => s.templateLibraryOpen)
-  const lanGroupPanelOpen = useLanGroupStore((s) => s.panelOpen)
   const lanSharePanelOpen = useLanShareStore((s) => s.panelOpen)
   const reviewPanelOpen = useReviewPanelStore((s) => s.open)
   const appMode = useUIStore((s) => s.appMode)
@@ -825,14 +821,8 @@ export function AppShell() {
       ? t('app.launchingFailed')
       : t('app.launching')
     const slowText = bootFailed
-      ? t('app.launchingFailedDetail').replace(
-          '{{seconds}}',
-          String(bootElapsedSecs),
-        )
-      : t('app.launchingSlow').replace(
-          '{{seconds}}',
-          String(bootElapsedSecs),
-        )
+      ? t('app.launchingFailedDetail', { seconds: bootElapsedSecs })
+      : t('app.launchingSlow', { seconds: bootElapsedSecs })
     return (
       <>
         <div
@@ -936,13 +926,6 @@ export function AppShell() {
                 </Suspense>
               </div>
             )}
-            {lanGroupPanelOpen && (
-              <div className="absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]">
-                <Suspense fallback={null}>
-                  <GroupsPanel />
-                </Suspense>
-              </div>
-            )}
             {lanSharePanelOpen && (
               <div className="absolute inset-0 z-30 flex flex-col bg-[var(--color-surface)]">
                 <Suspense fallback={null}>
@@ -994,6 +977,7 @@ export function AppShell() {
       <UpdateChecker />
       <CodingModeTransitionGuard />
       <QuickModeSwitcher />
+      <CommandPalette />
       {workspaceFinderMode && (
         <WorkspaceFinder
           mode={workspaceFinderMode}

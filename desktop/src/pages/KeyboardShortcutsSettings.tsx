@@ -25,6 +25,11 @@ const ACTION_ICON: Record<ShortcutActionId, string> = {
   'toggle-terminal': 'terminal',
   'quick-mode-switcher': 'tune',
   'mode-plan': 'architecture',
+  'command-palette': 'keyboard_command_key',
+  'quick-open': 'file_open',
+  'search-in-files': 'manage_search',
+  'workspace-symbol': 'data_object',
+  'close-editor-tab': 'tab_close',
   'close-modal': 'close',
 }
 

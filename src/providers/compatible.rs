@@ -1136,7 +1136,11 @@ impl OpenAiCompatibleProvider {
                 );
                 anyhow::bail!(RESPONSES_ENDPOINT_MISSING_MARKER);
             }
-            anyhow::bail!("{} Responses API error: {error}", self.name);
+            return Err(super::provider_http_error(
+                &format!("{} Responses API", self.name),
+                status,
+                &error,
+            ));
         }
 
         let body = response.text().await?;
@@ -1836,8 +1840,7 @@ impl Provider for OpenAiCompatibleProvider {
         };
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error = response.text().await?;
+            let (status, error) = super::stream_error_body_with_retry_after(response).await;
             let sanitized = super::sanitize_api_error(&error);
 
             if !self.is_thinking_blacklisted(model)
@@ -1870,18 +1873,20 @@ impl Provider for OpenAiCompatibleProvider {
                     .await
                     .map_err(|responses_err| {
                         if is_responses_endpoint_missing_error(&responses_err) {
-                            anyhow::anyhow!(
-                                "{provider_name} API error ({status}): {sanitized}"
-                            )
+                            super::provider_http_error(&provider_name, status, &error)
                         } else {
-                            anyhow::anyhow!(
-                                "{provider_name} API error ({status}): {sanitized} (chat completions unavailable; responses fallback failed: {responses_err})"
+                            super::provider_http_error(
+                                &provider_name,
+                                status,
+                                &format!(
+                                    "{error} (chat completions unavailable; responses fallback failed: {responses_err})"
+                                ),
                             )
                         }
                     });
             }
 
-            anyhow::bail!("{} API error ({status}): {sanitized}", self.name);
+            return Err(super::provider_http_error(&self.name, status, &error));
         }
 
         let body = response.text().await?;
@@ -2003,8 +2008,7 @@ impl Provider for OpenAiCompatibleProvider {
         };
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_body = response.text().await.unwrap_or_default();
+            let (status, error_body) = super::stream_error_body_with_retry_after(response).await;
             let sanitized = super::sanitize_api_error(&error_body);
 
             if !self.is_thinking_blacklisted(model)
@@ -2031,18 +2035,20 @@ impl Provider for OpenAiCompatibleProvider {
                     .await
                     .map_err(|responses_err| {
                         if is_responses_endpoint_missing_error(&responses_err) {
-                            anyhow::anyhow!(
-                                "{provider_name} API error ({status}): {sanitized}"
-                            )
+                            super::provider_http_error(&provider_name, status, &error_body)
                         } else {
-                            anyhow::anyhow!(
-                                "{provider_name} API error ({status}): {sanitized} (chat completions unavailable; responses fallback failed: {responses_err})"
+                            super::provider_http_error(
+                                &provider_name,
+                                status,
+                                &format!(
+                                    "{error_body} (chat completions unavailable; responses fallback failed: {responses_err})"
+                                ),
                             )
                         }
                     });
             }
 
-            anyhow::bail!("{} API error ({status}): {sanitized}", self.name);
+            return Err(super::provider_http_error(&self.name, status, &error_body));
         }
 
         let body = response.text().await?;
@@ -2193,8 +2199,7 @@ impl Provider for OpenAiCompatibleProvider {
         };
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_body = response.text().await.unwrap_or_default();
+            let (status, error_body) = super::stream_error_body_with_retry_after(response).await;
             let sanitized = super::sanitize_api_error(&error_body);
 
             if !self.is_thinking_blacklisted(model)
@@ -2224,7 +2229,7 @@ impl Provider for OpenAiCompatibleProvider {
                 return Ok(ProviderChatResponse::text_only(Some(text), None));
             }
 
-            anyhow::bail!("{} API error ({status}): {sanitized}", self.name);
+            return Err(super::provider_http_error(&self.name, status, &error_body));
         }
 
         let body = response.text().await?;
@@ -2376,8 +2381,7 @@ impl Provider for OpenAiCompatibleProvider {
         };
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error = response.text().await?;
+            let (status, error) = super::stream_error_body_with_retry_after(response).await;
             let sanitized = super::sanitize_api_error(&error);
 
             if !self.is_thinking_blacklisted(model)
@@ -2416,18 +2420,20 @@ impl Provider for OpenAiCompatibleProvider {
                     .map(|text| ProviderChatResponse::text_only(Some(text), None))
                     .map_err(|responses_err| {
                         if is_responses_endpoint_missing_error(&responses_err) {
-                            anyhow::anyhow!(
-                                "{provider_name} API error ({status}): {sanitized}"
-                            )
+                            super::provider_http_error(&provider_name, status, &error)
                         } else {
-                            anyhow::anyhow!(
-                                "{provider_name} API error ({status}): {sanitized} (chat completions unavailable; responses fallback failed: {responses_err})"
+                            super::provider_http_error(
+                                &provider_name,
+                                status,
+                                &format!(
+                                    "{error} (chat completions unavailable; responses fallback failed: {responses_err})"
+                                ),
                             )
                         }
                     });
             }
 
-            anyhow::bail!("{} API error ({status}): {sanitized}", self.name);
+            return Err(super::provider_http_error(&self.name, status, &error));
         }
 
         let native_response: ApiChatResponse = response.json().await?;
@@ -2543,7 +2549,7 @@ impl Provider for OpenAiCompatibleProvider {
                     .chat_structured_prompt_fallback(messages, schema, model, temperature)
                     .await;
             }
-            anyhow::bail!("{} structured chat error ({status}): {sanitized_err}", self.name);
+            return Err(super::provider_http_error(&self.name, status, &error_body));
         }
 
         let native: ApiChatResponse = response.json().await?;
@@ -2848,10 +2854,18 @@ impl Provider for OpenAiCompatibleProvider {
                             }
                             Err(fallback_err) => {
                                 let _ = tx
-                                    .send(Err(StreamError::Provider(format!(
-                                        "{}: {} (fallback chat_with_history failed: {fallback_err})",
-                                        status, sanitized
-                                    ))))
+                                    .send(Err(StreamError::Upstream {
+                                        provider: provider_clone.name.clone(),
+                                        status: Some(status.as_u16()),
+                                        code: super::extract_provider_error_code(&error_body),
+                                        retry_after_ms: super::retry_after_ms_from_prefixed_body(
+                                            &error_body,
+                                        ),
+                                        message: format!(
+                                            "{}: {} (fallback chat_with_history failed: {fallback_err})",
+                                            status, sanitized
+                                        ),
+                                    }))
                                     .await;
                             }
                         }
@@ -2859,10 +2873,12 @@ impl Provider for OpenAiCompatibleProvider {
                     }
 
                     let _ = tx
-                        .send(Err(StreamError::Provider(format!(
-                            "{}: {}",
-                            status, sanitized
-                        ))))
+                        .send(Err(super::stream_upstream_error(
+                            &provider_clone.name,
+                            status,
+                            &error_body,
+                            &sanitized,
+                        )))
                         .await;
                     return;
                 }
@@ -3020,7 +3036,12 @@ impl Provider for OpenAiCompatibleProvider {
                 }
 
                 let _ = tx
-                    .send(Err(StreamError::Provider(format!("{}: {}", status, error))))
+                    .send(Err(super::stream_upstream_error(
+                        &provider_clone.name,
+                        status,
+                        &error,
+                        &sanitized,
+                    )))
                     .await;
                 return;
             }
@@ -3146,11 +3167,8 @@ impl Provider for OpenAiCompatibleProvider {
                 };
 
                 if !response.status().is_success() {
-                    let status = response.status();
-                    let error = match response.text().await {
-                        Ok(e) => e,
-                        Err(_) => format!("HTTP error: {}", status),
-                    };
+                    let (status, error) =
+                        super::stream_error_body_with_retry_after(response).await;
                     let sanitized = super::sanitize_api_error(&error);
 
                     if !provider_clone.is_thinking_blacklisted(&model_owned)
@@ -3186,7 +3204,12 @@ impl Provider for OpenAiCompatibleProvider {
                     }
 
                     let _ = tx
-                        .send(Err(StreamError::Provider(format!("{}: {}", status, error))))
+                        .send(Err(super::stream_upstream_error(
+                            &provider_clone.name,
+                            status,
+                            &error,
+                            &sanitized,
+                        )))
                         .await;
                     return;
                 }

@@ -539,10 +539,11 @@ impl Tool for DelegateParallelTool {
                     }
                     None => provider_name.clone(),
                 };
-                let provider = match crate::providers::create_provider_with_url_async(
+                let provider = match crate::providers::create_resilient_runtime_provider_async(
                     resolved_provider_name,
                     api_key,
                     api_url,
+                    crate::providers::ProviderRuntimeOptions::default(),
                 )
                 .await
                 {
@@ -825,10 +826,11 @@ impl Tool for DelegateParallelTool {
                     match crate::providers::resolve_default_model(&cfg) {
                         Ok(model) => {
                             let temperature = cfg.default_temperature;
-                            let provider = crate::providers::create_provider_with_url_async(
+                            let provider = crate::providers::create_resilient_runtime_provider_async(
                                 resolved_provider_name,
                                 cfg.api_key.clone(),
                                 cfg.api_url.clone(),
+                                crate::providers::ProviderRuntimeOptions::default(),
                             )
                             .await
                             .ok()
@@ -948,10 +950,11 @@ async fn single_agent_fallback(
             }
             None => return Ok(format!("[{}] {}", id, prompt)),
         };
-    let provider = match crate::providers::create_provider_with_url_async(
+    let provider = match crate::providers::create_resilient_runtime_provider_async(
         provider_name.clone(),
         api_key,
         api_url,
+        crate::providers::ProviderRuntimeOptions::default(),
     )
     .await
     {

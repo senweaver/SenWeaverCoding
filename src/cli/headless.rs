@@ -125,22 +125,16 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
             Some(config.allowed_tools.clone())
         }
     } else {
-        let all_tool_names: Vec<String> = vec![
-            "shell",
-            "file_read",
-            "file_write",
-            "file_edit",
-            "glob_search",
-            "grep_search",
-            "dir_list",
-            "git_operations",
-            "browser",
-        ]
-        .into_iter()
-        .map(String::from)
-        .collect();
-
-        let filtered: Vec<String> = all_tool_names
+        let mut universe: Vec<String> = crate::tools::handler::tier::known_tool_names()
+            .into_iter()
+            .map(String::from)
+            .collect();
+        for allowed in &config.allowed_tools {
+            if !universe.iter().any(|t| t == allowed) {
+                universe.push(allowed.clone());
+            }
+        }
+        let filtered: Vec<String> = universe
             .into_iter()
             .filter(|t| !config.denied_tools.contains(t))
             .collect();
@@ -156,6 +150,9 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
     }
 
     let mut current_message: Option<String> = Some(config.initial_prompt.clone());
+
+    let session_state_file = std::env::temp_dir()
+        .join(format!("sen-headless-{}.session.json", config.session_id));
 
     let ctrl_c_guard = super::one_shot::CtrlCAbortGuard::install();
 
@@ -177,7 +174,7 @@ pub async fn run_headless(config: HeadlessConfig, io: &mut StructuredIO) -> Resu
                 loaded_config.default_temperature,
                 Vec::new(),
                 false,
-                None,
+                Some(session_state_file.clone()),
                 allowed_tools.clone(),
                 None,
             ))

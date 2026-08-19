@@ -22,7 +22,6 @@ import { useWorkspaceQueueStore } from '../../stores/workspaceQueueStore'
 import { AgentMonitorPanel } from './AgentMonitorPanel'
 import { searchApi } from '../../api/search'
 import { useLanStore } from '../../stores/lanStore'
-import { useLanGroupStore } from '../../stores/lanGroupStore'
 import { useLanShareStore } from '../../stores/lanShareStore'
 import { UserPanel } from '../lan/UserPanel'
 import { useFileDragStore } from '../../stores/fileDragStore'
@@ -66,13 +65,11 @@ export function Sidebar() {
   const lanPanelOpen = useLanStore((s) => s.panelOpen)
   const lanInit = useLanStore((s) => s.init)
   const toggleLanPanel = useLanStore((s) => s.togglePanel)
-  const lanGroupInit = useLanGroupStore((s) => s.init)
   const lanShareInit = useLanShareStore((s) => s.init)
   useEffect(() => {
     void lanInit()
-    void lanGroupInit()
     void lanShareInit()
-  }, [lanInit, lanGroupInit, lanShareInit])
+  }, [lanInit, lanShareInit])
   const fetchSessions = useSessionStore((s) => s.fetchSessions)
   const deleteSession = useSessionStore((s) => s.deleteSession)
   const deleteSessions = useSessionStore((s) => s.deleteSessions)

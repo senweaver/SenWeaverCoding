@@ -136,8 +136,7 @@ function CodeArea({ code, language, showLineNumbers }: { code: string; language?
             fontFamily: 'var(--font-mono)',
             fontSize: '12px',
             lineHeight: String(CODE_LINE_HEIGHT),
-            whiteSpace: 'pre-wrap',
-            wordBreak: 'break-word',
+            whiteSpace: 'pre',
             color: 'var(--color-code-fg)',
           }}
         >

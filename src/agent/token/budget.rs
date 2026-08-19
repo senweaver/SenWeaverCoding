@@ -197,6 +197,50 @@ impl Default for TokenBudgetConfig {
     }
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct InjectionBudget {
+    pub memory_entry_chars: usize,
+    pub rag_section_bytes: usize,
+    pub repo_map_bytes: usize,
+    pub outline_bytes: usize,
+}
+
+impl InjectionBudget {
+    const BASE_WINDOW: f64 = 128_000.0;
+
+    #[must_use]
+    pub fn for_context_window(window: usize) -> Self {
+        let scale = ((window.max(1) as f64) / Self::BASE_WINDOW).clamp(0.5, 4.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let s = |base: usize| -> usize { ((base as f64) * scale).round() as usize };
+        Self {
+            memory_entry_chars: s(700),
+            rag_section_bytes: s(6144),
+            repo_map_bytes: s(4096),
+            outline_bytes: s(4096),
+        }
+    }
+
+    #[must_use]
+    pub fn current() -> Self {
+        let window = crate::services::try_get_services()
+            .map(|svc| svc.config())
+            .and_then(|cfg| {
+                let model = crate::providers::resolve_default_model(&cfg).ok()?;
+                let configured = cfg
+                    .model_context_windows
+                    .get(&model)
+                    .copied()
+                    .map(|w| w as usize);
+                Some(configured.unwrap_or_else(|| {
+                    crate::constants::api_limits::context_window_for_model(&model) as usize
+                }))
+            })
+            .unwrap_or(128_000);
+        Self::for_context_window(window)
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct BudgetAllocation {
     pub total_tokens: usize,

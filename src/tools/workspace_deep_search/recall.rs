@@ -5,7 +5,6 @@
 use super::planner::QueryPlan;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use tokio::io::AsyncReadExt;
 
 #[derive(Debug, Clone)]
 pub struct RawHit {
@@ -31,7 +30,6 @@ pub async fn run_recall(
     exclude_globs: &[String],
     _context_lines: usize,
 ) -> anyhow::Result<RecallReport> {
-    let rg_available = which::which("rg").is_ok();
     let mut report = RecallReport::default();
 
     let mut tokens: Vec<String> = plan
@@ -49,43 +47,28 @@ pub async fn run_recall(
         return Ok(report);
     }
 
-    if rg_available {
-        let mut total_files: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
-        for token in &tokens {
-            let pattern = build_pattern_for_token(token);
-            let raw_hits =
-                rg_search(workspace_root, scope_path, &pattern, include_globs, exclude_globs)
-                    .await?;
-            *report
-                .token_doc_counts
-                .entry(token.clone())
-                .or_insert(0) += raw_hits
-                .iter()
-                .map(|h| h.path.clone())
-                .collect::<std::collections::HashSet<_>>()
-                .len();
-            for hit in &raw_hits {
-                total_files.insert(hit.path.clone());
-            }
-            for mut hit in raw_hits {
-                hit.token = token.clone();
-                report.hits.push(hit);
-            }
+    let mut total_files: std::collections::HashSet<PathBuf> = std::collections::HashSet::new();
+    for token in &tokens {
+        let pattern = build_pattern_for_token(token);
+        let raw_hits =
+            engine_search(scope_path, &pattern, include_globs, exclude_globs).await?;
+        *report
+            .token_doc_counts
+            .entry(token.clone())
+            .or_insert(0) += raw_hits
+            .iter()
+            .map(|h| h.path.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .len();
+        for hit in &raw_hits {
+            total_files.insert(hit.path.clone());
         }
-        report.total_files = total_files.len();
-    } else {
-        let token_refs: Vec<&str> = tokens.iter().map(|s| s.as_str()).collect();
-        report.hits = pure_rust_recall(workspace_root, scope_path, &token_refs).await?;
-        let files: std::collections::HashSet<PathBuf> =
-            report.hits.iter().map(|h| h.path.clone()).collect();
-        report.total_files = files.len();
-        for hit in &report.hits {
-            *report
-                .token_doc_counts
-                .entry(hit.token.clone())
-                .or_insert(0) += 1;
+        for mut hit in raw_hits {
+            hit.token = token.clone();
+            report.hits.push(hit);
         }
     }
+    report.total_files = total_files.len();
 
     report.structural_paths = structural_recall(workspace_root, scope_path, plan, include_globs).await?;
     Ok(report)
@@ -103,36 +86,21 @@ fn build_pattern_for_token(token: &str) -> String {
     format!(r"\b{}\b", escaped)
 }
 
-async fn rg_search(
-    workspace_root: &Path,
+async fn engine_search(
     scope_path: &Path,
     pattern: &str,
     include_globs: &[String],
     exclude_globs: &[String],
 ) -> anyhow::Result<Vec<RawHit>> {
-    let mut cmd = crate::util::hidden_async_command("rg");
-    cmd.current_dir(workspace_root)
-        .arg("--no-heading")
-        .arg("--line-number")
-        .arg("--smart-case")
-        .arg("--color=never")
-        .arg("--max-count")
-        .arg("12")
-        .arg("--max-filesize")
-        .arg("2M")
-        .arg("--hidden")
-        .arg("--glob")
-        .arg("!.git/")
-        .arg("--glob")
-        .arg("!node_modules/")
-        .arg("--glob")
-        .arg("!target/")
-        .arg("--glob")
-        .arg("!dist/")
-        .arg("--glob")
-        .arg("!build/");
+    let mut globs: Vec<String> = vec![
+        "!.git/".to_string(),
+        "!node_modules/".to_string(),
+        "!target/".to_string(),
+        "!dist/".to_string(),
+        "!build/".to_string(),
+    ];
     for inc in include_globs {
-        cmd.arg("--glob").arg(inc);
+        globs.push(inc.clone());
     }
     for exc in exclude_globs {
         let pat = if exc.starts_with('!') {
@@ -140,72 +108,44 @@ async fn rg_search(
         } else {
             format!("!{exc}")
         };
-        cmd.arg("--glob").arg(pat);
+        globs.push(pat);
     }
-    cmd.arg("-e").arg(pattern).arg(scope_path);
-    cmd.stdout(std::process::Stdio::piped());
-    cmd.stderr(std::process::Stdio::piped());
-    cmd.kill_on_drop(true);
-    let mut child = cmd.spawn()?;
-    let Some(mut stdout) = child.stdout.take() else {
-        anyhow::bail!("ripgrep spawn succeeded but stdout was not piped");
+    let request = crate::tools::content_search::engine::SearchRequest {
+        root: scope_path.to_path_buf(),
+        pattern: pattern.to_string(),
+        fixed_string: false,
+        case_sensitive: false,
+        smart_case: true,
+        whole_word: false,
+        multiline: false,
+        include_globs: globs,
+        respect_ignore: true,
+        include_hidden: true,
+        max_file_size: Some(2 * 1024 * 1024),
+        max_count_per_file: Some(12),
+        context_before: 0,
+        context_after: 0,
+        encoding: None,
+        timeout: Some(std::time::Duration::from_secs(20)),
+        max_total_matches: u64::MAX,
+        collect_lines: true,
     };
-    let mut buf = Vec::new();
-    let read_and_wait = async {
-        let _ = stdout.read_to_end(&mut buf).await;
-        let _ = child.wait().await;
-    };
-    if tokio::time::timeout(std::time::Duration::from_secs(20), read_and_wait)
-        .await
-        .is_err()
-    {
-        let _ = child.start_kill();
-        let _ = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
-        anyhow::bail!("ripgrep search timed out after 20s");
-    }
-    let text = String::from_utf8_lossy(&buf);
-    parse_rg_output(&text, workspace_root)
-}
-
-fn split_rg_line(line: &str) -> Option<(&str, &str, &str)> {
-    let last_colon = line.rfind(':')?;
-    let before_last = &line[..last_colon];
-    let hit_text = &line[last_colon + 1..];
-    let line_colon = before_last.rfind(':')?;
-    let path_str = &before_last[..line_colon];
-    let lineno_str = &before_last[line_colon + 1..];
-    if path_str.is_empty()
-        || lineno_str.is_empty()
-        || !lineno_str.chars().all(|c| c.is_ascii_digit())
-    {
-        return None;
-    }
-    Some((path_str, lineno_str, hit_text))
-}
-
-fn parse_rg_output(text: &str, workspace_root: &Path) -> anyhow::Result<Vec<RawHit>> {
-    let mut hits = Vec::new();
-    for line in text.lines() {
-        let Some((path_str, lineno_str, hit_text)) = split_rg_line(line) else {
-            continue;
-        };
-        let line_number = match lineno_str.parse::<usize>() {
-            Ok(n) => n,
-            Err(_) => continue,
-        };
-        let raw_path = PathBuf::from(path_str);
-        let abs = if raw_path.is_absolute() {
-            raw_path
-        } else {
-            workspace_root.join(&raw_path)
-        };
-        hits.push(RawHit {
-            path: abs,
-            line_number,
-            token: String::new(),
-            line_text: hit_text.trim().to_string(),
-        });
-    }
+    let hits = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<RawHit>> {
+        let outcome = crate::tools::content_search::engine::search(&request)?;
+        let mut hits = Vec::new();
+        for file in outcome.files {
+            for lm in &file.lines {
+                hits.push(RawHit {
+                    path: file.path.clone(),
+                    line_number: usize::try_from(lm.line_number).unwrap_or(usize::MAX),
+                    token: String::new(),
+                    line_text: lm.text.trim().to_string(),
+                });
+            }
+        }
+        Ok(hits)
+    })
+    .await??;
     Ok(hits)
 }
 
@@ -301,64 +241,3 @@ fn walk_into(
     Ok(())
 }
 
-async fn pure_rust_recall(
-    workspace_root: &Path,
-    scope_path: &Path,
-    tokens: &[&str],
-) -> anyhow::Result<Vec<RawHit>> {
-    let _ = workspace_root;
-    let scope = scope_path.to_path_buf();
-    let tokens_owned: Vec<String> = tokens.iter().map(|s| (*s).to_string()).collect();
-    let hits = tokio::task::spawn_blocking(move || -> Vec<RawHit> {
-        let mut hits = Vec::new();
-        let mut stack = vec![scope];
-        while let Some(dir) = stack.pop() {
-            let entries = match std::fs::read_dir(&dir) {
-                Ok(e) => e,
-                Err(_) => continue,
-            };
-            for entry in entries.flatten() {
-                let path = entry.path();
-                if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
-                    if matches!(name, ".git" | "node_modules" | "target" | "dist" | "build" | ".venv" | "__pycache__") {
-                        continue;
-                    }
-                }
-                let metadata = match entry.metadata() {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                if metadata.is_dir() {
-                    stack.push(path);
-                    continue;
-                }
-                if metadata.len() > 2 * 1024 * 1024 {
-                    continue;
-                }
-                let Ok(text) = std::fs::read_to_string(&path) else {
-                    continue;
-                };
-                for (idx, line) in text.lines().enumerate() {
-                    let lc = line.to_lowercase();
-                    for token in &tokens_owned {
-                        if lc.contains(&token.to_lowercase()) {
-                            hits.push(RawHit {
-                                path: path.clone(),
-                                line_number: idx + 1,
-                                token: token.clone(),
-                                line_text: line.trim().to_string(),
-                            });
-                            if hits.len() > 3000 {
-                                return hits;
-                            }
-                            break;
-                        }
-                    }
-                }
-            }
-        }
-        hits
-    })
-    .await?;
-    Ok(hits)
-}

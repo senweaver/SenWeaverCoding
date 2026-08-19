@@ -255,8 +255,6 @@ async fn stream_background_output<R>(
     use tokio::io::BufReader;
     let mut buffered = BufReader::new(reader);
     let mut line_bytes: Vec<u8> = Vec::new();
-    let mut emitted = 0usize;
-    let mut truncated = false;
     loop {
         line_bytes.clear();
         match super::foreground::read_line_capped(
@@ -267,25 +265,7 @@ async fn stream_background_output<R>(
         .await
         {
             Ok(0) => break,
-            Ok(n) => {
-                if truncated {
-                    continue;
-                }
-                emitted = emitted.saturating_add(n);
-                if emitted > BACKGROUND_STREAM_CAP {
-                    truncated = true;
-                    super::super::background::registry::publish(
-                        super::super::background::registry::BackgroundShellSignal::Chunk {
-                            id: id.clone(),
-                            stream,
-                            line:
-                                "... [background output truncated at 1MB; process still running]"
-                                    .to_string(),
-                            session_id: session_id.clone(),
-                        },
-                    );
-                    continue;
-                }
+            Ok(_) => {
                 let mut text = crate::util::decode_subprocess_bytes(&line_bytes);
                 while text.ends_with('\n') || text.ends_with('\r') {
                     text.pop();
@@ -571,17 +551,12 @@ pub(crate) fn validate_shell_write_targets(
     None
 }
 
-pub(crate) fn prepare_isolated_command(
-    cmd: &mut tokio::process::Command,
-    security: &SecurityPolicy,
-    sandbox: &dyn Sandbox,
-) -> std::io::Result<()> {
-    sandbox.wrap_command(cmd.as_std_mut())?;
+pub(crate) fn collect_isolated_shell_env(security: &SecurityPolicy) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
     if security.should_filter_shell_env() {
-        cmd.env_clear();
         for var in collect_allowed_shell_env_vars(security) {
             if let Ok(val) = std::env::var(&var) {
-                cmd.env(&var, val);
+                out.push((var, val));
             }
         }
     } else {
@@ -590,18 +565,34 @@ pub(crate) fn prepare_isolated_command(
             .iter()
             .map(|s| s.as_str())
             .collect();
-        for (key, _) in std::env::vars_os() {
-            if let Some(k) = key.to_str() {
-                if is_sensitive_env_var(k) && !passthrough.contains(k) {
-                    cmd.env_remove(k);
-                }
+        for (key_os, value_os) in std::env::vars_os() {
+            let (Some(key), Some(value)) = (key_os.to_str(), value_os.to_str()) else {
+                continue;
+            };
+            if is_sensitive_env_var(key) && !passthrough.contains(key) {
+                continue;
             }
+            out.push((key.to_string(), value.to_string()));
         }
     }
     for (k, v) in crate::python_env::activation_env(&security.workspace_dir()) {
+        out.retain(|(existing, _)| existing != &k);
+        out.push((k, v));
+    }
+    out.retain(|(k, _)| k != "PYTHONHOME");
+    out
+}
+
+pub(crate) fn prepare_isolated_command(
+    cmd: &mut tokio::process::Command,
+    security: &SecurityPolicy,
+    sandbox: &dyn Sandbox,
+) -> std::io::Result<()> {
+    sandbox.wrap_command(cmd.as_std_mut())?;
+    cmd.env_clear();
+    for (k, v) in collect_isolated_shell_env(security) {
         cmd.env(k, v);
     }
-    cmd.env_remove("PYTHONHOME");
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
     cmd.stdin(std::process::Stdio::null());
@@ -691,6 +682,11 @@ impl Tool for ShellTool {
                     "type": "boolean",
                     "description": "When true, spawn the command in the background and return immediately with a 'bg-<id>' handle. The GUI shows live stdout/stderr via the BackgroundShell card and the agent can issue further tool calls in parallel. Use for long-running watchers like `cargo watch`, `ping`, dev servers.",
                     "default": false
+                },
+                "pty": {
+                    "type": "boolean",
+                    "description": "Run the command inside a pseudo-terminal (ConPTY on Windows). Use for programs that need a TTY (interactive CLIs, progress bars, programs that hang with piped stdio). Foreground only; combined stdout/stderr is returned with ANSI codes stripped.",
+                    "default": false
                 }
             },
             "required": ["command"]
@@ -743,6 +739,75 @@ impl Tool for ShellTool {
         } else {
             Duration::from_secs(self.timeout_secs)
         };
+
+        let want_pty = args.get("pty").and_then(|v| v.as_bool()).unwrap_or(false);
+        if want_pty {
+            #[cfg(feature = "pty")]
+            {
+                let sandbox_name = self.sandbox.name();
+                if sandbox_name != "none" && sandbox_name != "windows-job-object" {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "pty mode cannot run under the '{sandbox_name}' sandbox (the PTY child cannot be wrapped); rerun without pty:true"
+                        )),
+                    });
+                }
+                let env = collect_isolated_shell_env(&self.security);
+                let outcome = super::pty::run_command_in_pty(
+                    command.to_string(),
+                    self.security.workspace_dir(),
+                    env,
+                    timeout_duration,
+                )
+                .await;
+                drop(preflight);
+                return Ok(match outcome {
+                    Ok(run) => {
+                        let mut output = run.output;
+                        if run.truncated {
+                            output.push_str("\n[pty output truncated at 4MB]");
+                        }
+                        if run.timed_out {
+                            ToolResult {
+                                success: false,
+                                output,
+                                error: Some(format!(
+                                    "command timed out after {}s in pty mode and was killed",
+                                    timeout_duration.as_secs()
+                                )),
+                            }
+                        } else {
+                            let code = run.exit_code.unwrap_or(-1);
+                            ToolResult {
+                                success: code == 0,
+                                output,
+                                error: (code != 0)
+                                    .then(|| format!("command exited with code {code}")),
+                            }
+                        }
+                    }
+                    Err(e) => ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("pty execution failed: {e}")),
+                    },
+                });
+            }
+            #[cfg(not(feature = "pty"))]
+            {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(
+                        "this build was compiled without the `pty` feature; rebuild with `--features pty` or omit pty:true"
+                            .to_string(),
+                    ),
+                });
+            }
+        }
+
         let timeout_secs = timeout_duration.as_secs();
         let job_limits = self.job_limits;
 

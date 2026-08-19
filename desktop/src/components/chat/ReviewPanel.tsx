@@ -8,7 +8,6 @@ import { useReviewPanelStore } from '../../stores/reviewPanelStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
-import { useLanGroupStore } from '../../stores/lanGroupStore'
 import { useLanShareStore } from '../../stores/lanShareStore'
 import { useTranslation } from '../../i18n'
 import { splitPathForDisplay } from '../../utils/toolFormatters'
@@ -58,7 +57,6 @@ export function ReviewPanel() {
   )
   const settingsOverlayOpen = useUIStore((s) => s.settingsOverlayOpen)
   const templateLibraryOpen = useUIStore((s) => s.templateLibraryOpen)
-  const lanGroupPanelOpen = useLanGroupStore((s) => s.panelOpen)
   const lanSharePanelOpen = useLanShareStore((s) => s.panelOpen)
   const [undoErrorPath, setUndoErrorPath] = useState<string | null>(null)
 
@@ -78,7 +76,7 @@ export function ReviewPanel() {
   }, [activeTabId, closePanel, view.open, view.sessionId])
 
   const siblingOverlayOpen =
-    settingsOverlayOpen || templateLibraryOpen || lanGroupPanelOpen || lanSharePanelOpen
+    settingsOverlayOpen || templateLibraryOpen || lanSharePanelOpen
   useEffect(() => {
     if (view.open && siblingOverlayOpen) {
       closePanel()
@@ -264,12 +262,27 @@ function ReviewFileRow({
   )
   const loadDiff = useReviewPanelStore((s) => s.loadDiff)
   const retryDiff = useReviewPanelStore((s) => s.retryDiff)
+  const hunkData = useReviewPanelStore((s) => s.hunks[file.path])
+  const hunkLoading = useReviewPanelStore((s) => Boolean(s.hunkLoading[file.path]))
+  const hunkDecisions = useReviewPanelStore((s) => s.hunkDecisions[file.path])
+  const hunkApplying = useReviewPanelStore((s) => Boolean(s.hunkApplying[file.path]))
+  const loadHunks = useReviewPanelStore((s) => s.loadHunks)
+  const toggleHunkRejected = useReviewPanelStore((s) => s.toggleHunkRejected)
+  const applyHunkDecisions = useReviewPanelStore((s) => s.applyHunkDecisions)
+  const [hunkMode, setHunkMode] = useState(false)
+  const rejectedCount = Object.keys(hunkDecisions ?? {}).length
 
   useEffect(() => {
     if (expanded && diff === undefined && !diffLoading) {
       void loadDiff(file.path)
     }
   }, [expanded, diff, diffLoading, loadDiff, file.path])
+
+  useEffect(() => {
+    if (expanded && hunkMode && hunkData === undefined && !hunkLoading) {
+      void loadHunks(file.path)
+    }
+  }, [expanded, hunkMode, hunkData, hunkLoading, loadHunks, file.path])
 
   const { dir, tail, separator } = splitPathForDisplay(file.path)
 
@@ -352,36 +365,132 @@ function ReviewFileRow({
       )}
       {expanded && (
         <div className="max-h-[480px] overflow-y-auto border-t border-[var(--color-border)]/20 bg-[var(--color-surface-container-lowest)]">
-          {diffLoading && (
-            <div className="px-4 py-3 text-center text-[11px] text-[var(--color-text-tertiary)]">
-              {t('review.loading')}
-            </div>
-          )}
-          {!diffLoading && diff != null && (
-            <>
-              {(diff.beforeTruncated || diff.afterTruncated) && (
-                <div className="px-4 py-1 text-[10px] text-[var(--color-text-tertiary)]">
-                  {t('review.diffTruncated')}
-                </div>
-              )}
-              <DiffViewer
-                filePath={file.path}
-                oldString={diff.before}
-                newString={diff.after}
-              />
-            </>
-          )}
-          {!diffLoading && diff === null && (
-            <div className="flex items-center justify-center gap-2 px-4 py-3 text-[11px] text-[var(--color-text-tertiary)]">
-              <span>{t('review.diffUnavailable')}</span>
+          {!readOnly && file.status === 'modified' && (
+            <div className="flex items-center gap-1 px-3 pt-1.5">
               <button
                 type="button"
-                onClick={() => retryDiff(file.path)}
-                className="rounded-md border border-[var(--color-border)]/60 px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-container-high)]"
+                onClick={() => setHunkMode(false)}
+                className={`rounded-md px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                  !hunkMode
+                    ? 'bg-[var(--color-surface-container-high)] text-[var(--color-text-primary)]'
+                    : 'text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]'
+                }`}
               >
-                {t('review.diffRetry')}
+                {t('review.wholeFileMode')}
+              </button>
+              <button
+                type="button"
+                onClick={() => setHunkMode(true)}
+                className={`rounded-md px-2 py-0.5 text-[10px] font-medium transition-colors ${
+                  hunkMode
+                    ? 'bg-[var(--color-surface-container-high)] text-[var(--color-text-primary)]'
+                    : 'text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]'
+                }`}
+              >
+                {t('review.hunkMode')}
               </button>
             </div>
+          )}
+          {hunkMode && !readOnly && file.status === 'modified' ? (
+            <>
+              {hunkLoading && (
+                <div className="px-4 py-3 text-center text-[11px] text-[var(--color-text-tertiary)]">
+                  {t('review.loading')}
+                </div>
+              )}
+              {!hunkLoading && hunkData === null && (
+                <div className="px-4 py-3 text-center text-[11px] text-[var(--color-text-tertiary)]">
+                  {t('review.hunksUnavailable')}
+                </div>
+              )}
+              {!hunkLoading && hunkData != null && (
+                <>
+                  {hunkData.hunks.map((hunk) => {
+                    const rejected = Boolean(hunkDecisions?.[hunk.index])
+                    return (
+                      <div
+                        key={hunk.index}
+                        className={`mx-3 my-2 overflow-hidden rounded-lg border ${
+                          rejected
+                            ? 'border-[var(--color-error)]/50'
+                            : 'border-[var(--color-border)]/50'
+                        }`}
+                      >
+                        <div className="flex items-center gap-2 border-b border-[var(--color-border)]/30 bg-[var(--color-surface-container-low)] px-2.5 py-1">
+                          <span className="font-[var(--font-mono)] text-[10px] text-[var(--color-text-tertiary)]">
+                            {t('review.hunkLabel', { n: String(hunk.index + 1) })}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={() => toggleHunkRejected(file.path, hunk.index)}
+                            disabled={hunkApplying}
+                            className={`ml-auto rounded-md px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-40 ${
+                              rejected
+                                ? 'bg-[var(--color-error)] text-white'
+                                : 'border border-[var(--color-border)]/60 text-[var(--color-text-secondary)] hover:bg-[var(--color-error)]/10 hover:text-[var(--color-error)]'
+                            }`}
+                          >
+                            {rejected ? t('review.hunkMarkedReject') : t('review.hunkReject')}
+                          </button>
+                        </div>
+                        <DiffViewer
+                          filePath={file.path}
+                          oldString={hunk.beforeText}
+                          newString={hunk.afterText}
+                        />
+                      </div>
+                    )
+                  })}
+                  <div className="sticky bottom-0 flex items-center justify-end gap-2 border-t border-[var(--color-border)]/30 bg-[var(--color-surface-container-low)] px-3 py-1.5">
+                    <span className="text-[10px] text-[var(--color-text-tertiary)]">
+                      {t('review.hunksRejectedCount', { count: String(rejectedCount) })}
+                    </span>
+                    <button
+                      type="button"
+                      onClick={() => void applyHunkDecisions(file.path)}
+                      disabled={rejectedCount === 0 || hunkApplying}
+                      className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+                    >
+                      {hunkApplying ? t('review.loading') : t('review.applyHunks')}
+                    </button>
+                  </div>
+                </>
+              )}
+            </>
+          ) : (
+            <>
+              {diffLoading && (
+                <div className="px-4 py-3 text-center text-[11px] text-[var(--color-text-tertiary)]">
+                  {t('review.loading')}
+                </div>
+              )}
+              {!diffLoading && diff != null && (
+                <>
+                  {(diff.beforeTruncated || diff.afterTruncated) && (
+                    <div className="px-4 py-1 text-[10px] text-[var(--color-text-tertiary)]">
+                      {t('review.diffTruncated')}
+                    </div>
+                  )}
+                  <DiffViewer
+                    filePath={file.path}
+                    oldString={diff.before}
+                    newString={diff.after}
+                  />
+                </>
+              )}
+              {!diffLoading && diff === null && (
+                <div className="flex items-center justify-center gap-2 px-4 py-3 text-[11px] text-[var(--color-text-tertiary)]">
+                  <span>{t('review.diffUnavailable')}</span>
+                  <button
+                    type="button"
+                    onClick={() => retryDiff(file.path)}
+                    className="rounded-md border border-[var(--color-border)]/60 px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-container-high)]"
+                  >
+                    {t('review.diffRetry')}
+                  </button>
+                </div>
+              )}
+            </>
           )}
         </div>
       )}

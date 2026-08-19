@@ -4,6 +4,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Icon } from '@iconify/react/dist/offline'
 import { useTranslation } from '../../i18n'
+import { workspaceFilesApi } from '../../api/workspaceFiles'
 import { ensureVscodeIcons, getFileIconId, isVscodeIconsReady } from '../../lib/fileIcons'
 
 export type MediaKind =
@@ -27,6 +28,10 @@ type Props = {
   relPath: string
 
   sizeBytes: number
+
+  workspaceRoot?: string
+
+  modifiedAt?: string
 }
 
 const IMAGE_EXTS = new Set([
@@ -200,6 +205,8 @@ function nextZoom(current: number, dir: 1 | -1): number {
   return ZOOM_STEPS[0]!
 }
 
+const RAW_STREAM_IMAGE_THRESHOLD = 512 * 1024
+
 export function MediaPreview({
   content,
   encoding,
@@ -207,6 +214,8 @@ export function MediaPreview({
   fileName,
   relPath,
   sizeBytes,
+  workspaceRoot,
+  modifiedAt,
 }: Props) {
   const t = useTranslation()
   const kind = classifyMedia(fileName, mimeType)
@@ -214,6 +223,43 @@ export function MediaPreview({
     () => buildDataUrl(kind, content, encoding, fileName, mimeType),
     [kind, content, encoding, fileName, mimeType],
   )
+
+  const wantsRawStream =
+    !!workspaceRoot &&
+    (kind === 'video' ||
+      kind === 'audio' ||
+      kind === 'pdf' ||
+      ((kind === 'image' || kind === 'svg') &&
+        (sizeBytes > RAW_STREAM_IMAGE_THRESHOLD || content.length === 0)))
+
+  const [rawSrc, setRawSrc] = useState<string | null>(null)
+  const [rawFailed, setRawFailed] = useState(false)
+  useEffect(() => {
+    setRawSrc(null)
+    setRawFailed(false)
+    if (!wantsRawStream || !workspaceRoot) return
+    let cancelled = false
+    workspaceFilesApi
+      .rawHandle({ root: workspaceRoot })
+      .then(({ rawId }) => {
+        if (cancelled) return
+        const version = modifiedAt ? Date.parse(modifiedAt) || undefined : undefined
+        setRawSrc(workspaceFilesApi.rawUrl(rawId, relPath, version))
+      })
+      .catch(() => {
+        if (!cancelled) setRawFailed(true)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [wantsRawStream, workspaceRoot, relPath, modifiedAt])
+
+  const mediaSrc = wantsRawStream
+    ? rawSrc ?? (rawFailed && content.length > 0 ? dataUrl : null)
+    : content.length > 0
+      ? dataUrl
+      : null
+  const mediaFailed = mediaSrc === null && (rawFailed || !wantsRawStream)
 
   const [iconsReady, setIconsReady] = useState(() => isVscodeIconsReady())
   useEffect(() => {
@@ -237,14 +283,24 @@ export function MediaPreview({
         iconsReady={iconsReady}
       />
       <div className="relative flex min-h-0 flex-1 items-center justify-center overflow-auto bg-[var(--color-surface-elevated)]">
-        {kind === 'image' || kind === 'svg' ? (
-          <ImageViewer src={dataUrl} alt={fileName} />
+        {mediaSrc === null && kind !== 'unknown' ? (
+          <div className="px-4 text-center text-xs text-[var(--color-text-tertiary)]">
+            {mediaFailed ? t('files.preview.loadFailed') : t('rightSidebar.loading')}
+          </div>
+        ) : kind === 'image' || kind === 'svg' ? (
+          <ImageViewer src={mediaSrc ?? dataUrl} alt={fileName} />
         ) : kind === 'video' ? (
-          <VideoViewer src={dataUrl} mime={inferVideoMime(fileName, mimeType)} />
+          <VideoViewer
+            src={mediaSrc ?? dataUrl}
+            mime={inferVideoMime(fileName, mimeType)}
+          />
         ) : kind === 'audio' ? (
-          <AudioViewer src={dataUrl} mime={inferAudioMime(fileName, mimeType)} />
+          <AudioViewer
+            src={mediaSrc ?? dataUrl}
+            mime={inferAudioMime(fileName, mimeType)}
+          />
         ) : kind === 'pdf' ? (
-          <PdfViewer src={dataUrl} title={fileName} />
+          <PdfViewer src={mediaSrc ?? dataUrl} title={fileName} />
         ) : (
           <div className="px-4 text-center text-xs text-[var(--color-text-tertiary)]">
             {t('files.binaryNotPreviewable')}

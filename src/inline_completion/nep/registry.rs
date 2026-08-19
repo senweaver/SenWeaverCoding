@@ -32,10 +32,14 @@ impl NepRegistry {
         let mut last_error: Option<NepError> = None;
         for provider in &self.providers {
             match provider.predict(req.clone()).await {
-                Ok(response) if !response.suggestions.is_empty() => {
-                    return Ok(response);
+                Ok(mut response) => {
+                    response
+                        .suggestions
+                        .retain(|s| !s.diff.trim().is_empty());
+                    if !response.suggestions.is_empty() {
+                        return Ok(response);
+                    }
                 }
-                Ok(_) => continue,
                 Err(err) => {
                     tracing::debug!(
                         target: "nep.registry",
@@ -50,11 +54,15 @@ impl NepRegistry {
         }
         if let Some(fallback) = self.fallback.as_ref() {
             match fallback.predict(req).await {
-                Ok(mut response) if !response.suggestions.is_empty() => {
-                    response.latency_ms = start.elapsed().as_millis() as u64;
-                    return Ok(response);
+                Ok(mut response) => {
+                    response
+                        .suggestions
+                        .retain(|s| !s.diff.trim().is_empty());
+                    if !response.suggestions.is_empty() {
+                        response.latency_ms = start.elapsed().as_millis() as u64;
+                        return Ok(response);
+                    }
                 }
-                Ok(_) => {}
                 Err(err) => {
                     tracing::debug!(
                         target: "nep.registry",
@@ -79,7 +87,7 @@ impl NepRegistry {
 
 pub fn default_registry(config: &crate::config::Config) -> Arc<NepRegistry> {
     let heuristic: NepHandle = Arc::new(super::HeuristicNep::new());
-    let mut providers: Vec<NepHandle> = vec![heuristic.clone()];
+    let mut providers: Vec<NepHandle> = Vec::new();
     if let Some(provider_name_raw) = config.default_provider.clone() {
         let provider_name =
             crate::providers::resolve_runtime_provider_name(&provider_name_raw, config);

@@ -116,6 +116,31 @@ fn root_block_range(lower: &str) -> Option<(usize, usize)> {
     None
 }
 
+fn is_custom_property_value(content: &str, hash_idx: usize) -> bool {
+    let bytes = content.as_bytes();
+    let mut start = hash_idx;
+    while start > 0 {
+        let c = bytes[start - 1];
+        if c == b'{' || c == b';' || c == b'}' {
+            break;
+        }
+        start -= 1;
+    }
+    let segment = content[start..hash_idx].trim_start();
+    let Some(rest) = segment.strip_prefix("--") else {
+        return false;
+    };
+    for ch in rest.chars() {
+        if ch == ':' {
+            return true;
+        }
+        if !(ch.is_ascii_alphanumeric() || ch == '-' || ch == '_') {
+            return false;
+        }
+    }
+    false
+}
+
 fn count_raw_hex_outside_root(content: &str, lower: &str) -> usize {
     let root = root_block_range(lower);
     let bytes = content.as_bytes();
@@ -131,7 +156,7 @@ fn count_raw_hex_outside_root(content: &str, lower: &str) -> usize {
             }
             if hexlen == 6 || hexlen == 3 || hexlen == 8 {
                 let inside_root = root.map(|(s, e)| i >= s && i < e).unwrap_or(false);
-                if !inside_root {
+                if !inside_root && !is_custom_property_value(content, i) {
                     count += 1;
                 }
             }

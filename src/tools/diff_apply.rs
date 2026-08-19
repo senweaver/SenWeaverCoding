@@ -58,9 +58,12 @@ impl DiffApplyTool {
                     .await
                 {
                     refined_any = true;
-                    if let Err(e) =
-                        session.stage_full_content(path, refined.contents, refined.encoding)
-                    {
+                    if let Err(e) = session.stage_full_content(
+                        path,
+                        refined.contents,
+                        refined.encoding,
+                        refined.pre_sha256,
+                    ) {
                         return Some(Err(e));
                     }
                     continue;
@@ -263,6 +266,24 @@ impl Tool for DiffApplyTool {
                         p.display()
                     )),
                 });
+            }
+        }
+
+        const MAX_DIFF_FILE_BYTES: u64 = 10 * 1024 * 1024;
+        for p in &resolved_paths {
+            if let Ok(meta) = std::fs::metadata(p) {
+                if meta.len() > MAX_DIFF_FILE_BYTES {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "refusing to patch '{}' ({} bytes exceeds the {} byte limit); split the change or edit a smaller region",
+                            p.display(),
+                            meta.len(),
+                            MAX_DIFF_FILE_BYTES
+                        )),
+                    });
+                }
             }
         }
 

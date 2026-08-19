@@ -2666,6 +2666,9 @@ pub struct GatewayConfig {
     pub session_persistence: bool,
 
     #[serde(default)]
+    pub cross_process_session_sync: bool,
+
+    #[serde(default)]
     pub session_ttl_hours: u32,
 
     #[serde(default)]
@@ -2733,6 +2736,7 @@ impl Default for GatewayConfig {
             idempotency_ttl_secs: default_idempotency_ttl_secs(),
             idempotency_max_keys: default_gateway_idempotency_max_keys(),
             session_persistence: true,
+            cross_process_session_sync: false,
             session_ttl_hours: 0,
             pairing_dashboard: PairingDashboardConfig::default(),
             tls: None,
@@ -3974,10 +3978,14 @@ pub use crate::config::domain::observability::ObservabilityConfig;
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 pub struct HooksConfig {
 
+    #[serde(default = "default_true")]
     pub enabled: bool,
 
     #[serde(default)]
     pub allow_workspace_hooks: bool,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_mode: Option<String>,
 
     #[serde(default)]
     pub builtin: BuiltinHooksConfig,
@@ -3988,6 +3996,7 @@ impl Default for HooksConfig {
         Self {
             enabled: true,
             allow_workspace_hooks: false,
+            fail_mode: None,
             builtin: BuiltinHooksConfig::default(),
         }
     }
@@ -3996,6 +4005,7 @@ impl Default for HooksConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, Default)]
 pub struct BuiltinHooksConfig {
 
+    #[serde(default)]
     pub command_logger: bool,
 
     #[serde(default)]
@@ -7634,10 +7644,29 @@ impl Config {
         config.workspace_dir = workspace_dir;
 
         config.cost.merge_default_prices();
+        config.autonomy.ensure_default_auto_approve();
         let migration_applied =
             config.migrate_legacy_low_caps() | config.canonicalize_model_provider_wire_apis();
 
         config.strip_redacted_secret_artifacts();
+
+        {
+            let store = crate::security::SecretStore::new(&sen_dir, config.secrets.encrypt);
+            if let Err(e) =
+                decrypt_optional_secret(&store, &mut config.api_key, "config.api_key")
+            {
+                tracing::warn!(error = %e, "sync config load: failed to decrypt config.api_key");
+            }
+            for provider in config.model_providers.values_mut() {
+                if let Err(e) = decrypt_optional_secret(
+                    &store,
+                    &mut provider.api_key,
+                    "config.model_providers.*.api_key",
+                ) {
+                    tracing::warn!(error = %e, "sync config load: failed to decrypt model provider api_key");
+                }
+            }
+        }
 
         config.apply_env_overrides_tracked();
         if let Err(e) = config.validate() {

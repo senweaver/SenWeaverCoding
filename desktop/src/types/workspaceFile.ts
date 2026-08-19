@@ -19,6 +19,7 @@ export type FileContent = {
   content: string
   encoding: 'utf8' | 'base64'
   isBinary: boolean
+  lossy?: boolean
   sizeBytes: number
   modifiedAt?: string
   mimeType?: string

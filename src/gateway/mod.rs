@@ -18,6 +18,7 @@ pub mod oauth_routes;
 pub mod desktop;
 pub mod editor_assist;
 pub mod evolution_routes;
+pub mod file_history_routes;
 pub mod git_routes;
 #[cfg(feature = "lan-comms")]
 pub mod lan_routes;
@@ -233,10 +234,11 @@ fn register_per_provider_reflection_factories(
         let runtime_options = provider_runtime_options_for(profile, config);
         let provider_url = profile.base_url.as_deref();
         let runtime_name = providers::resolve_runtime_provider_name(pid, config);
-        match providers::create_provider_with_url_and_options(
+        match providers::create_resilient_provider_with_options(
             &runtime_name,
             credential,
             provider_url,
+            &config.reliability,
             &runtime_options,
         ) {
             Ok(boxed) => {
@@ -781,9 +783,45 @@ async fn run_gateway_inner(
             .unwrap_or(false);
         if lan_enabled {
             if let Some(lan) = crate::services::try_get_services().and_then(|svc| svc.lan.clone()) {
-                if let Err(err) = lan.start().await {
-                    tracing::warn!(error = %err, "failed to auto-start LAN discovery");
-                }
+                crate::runtime::spawn_supervised("gateway.lan_autostart", async move {
+                    const RETRY_DELAYS_SECS: [u64; 4] = [0, 10, 30, 90];
+                    for (attempt, delay) in RETRY_DELAYS_SECS.iter().enumerate() {
+                        if *delay > 0 {
+                            tokio::time::sleep(std::time::Duration::from_secs(*delay)).await;
+                        }
+                        if lan.is_running() {
+                            return;
+                        }
+                        match lan.start().await {
+                            Ok(()) => {
+                                if attempt > 0 {
+                                    tracing::info!(
+                                        attempt = attempt + 1,
+                                        "LAN discovery auto-start recovered after retry"
+                                    );
+                                }
+                                return;
+                            }
+                            Err(err) => {
+                                let detail = format!("{err:#}");
+                                let last = attempt + 1 == RETRY_DELAYS_SECS.len();
+                                if last {
+                                    tracing::warn!(
+                                        error = %detail,
+                                        attempts = RETRY_DELAYS_SECS.len(),
+                                        "failed to auto-start LAN discovery; giving up until toggled manually (check firewall/multicast availability)"
+                                    );
+                                } else {
+                                    tracing::info!(
+                                        error = %detail,
+                                        attempt = attempt + 1,
+                                        "LAN discovery auto-start failed; will retry"
+                                    );
+                                }
+                            }
+                        }
+                    }
+                });
             }
         }
     }
@@ -1019,6 +1057,14 @@ async fn run_gateway_inner(
         config_subscriptions.push(handle);
     }
 
+    if let Some(handle) = crate::config::file_watch::spawn_config_file_watcher(
+        config.config_path.clone(),
+        live_config_state.clone(),
+        Arc::clone(&config_state),
+    ) {
+        config_subscriptions.push(handle);
+    }
+
     let (composio_key, composio_entity_id) = if config.composio.enabled {
         (
             config.composio.api_key.as_deref(),
@@ -1182,7 +1228,7 @@ async fn run_gateway_inner(
 
     let cost_tracker = CostTracker::get_or_init_global(config.cost.clone(), &config.workspace_dir);
 
-    let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<serde_json::Value>(256);
+    let (event_tx, _event_rx) = tokio::sync::broadcast::channel::<serde_json::Value>(2048);
     install_gateway_event_tx(event_tx.clone());
 
     {
@@ -1662,7 +1708,12 @@ async fn run_gateway_inner(
 
     let config_put_router = Router::new()
         .route("/api/config", put(api::handle_api_config_put))
-        .layer(RequestBodyLimitLayer::new(1_048_576));
+        .layer(RequestBodyLimitLayer::new(1_048_576))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(gateway_request_timeout_secs()),
+        ))
+        .layer(desktop_cors_layer());
 
     #[cfg(feature = "computer-use")]
     let computer_router: Router<AppState> = Router::new()
@@ -1723,70 +1774,6 @@ async fn run_gateway_inner(
         .route("/api/lan/files/save", post(lan_routes::handle_lan_files_save_post))
         .route("/api/lan/transfers", get(lan_routes::handle_lan_transfers_get))
         .route(
-            "/api/lan/groups",
-            get(lan_routes::handle_lan_groups_get).post(lan_routes::handle_lan_groups_post),
-        )
-        .route(
-            "/api/lan/groups/snapshot",
-            get(lan_routes::handle_lan_group_snapshot_get),
-        )
-        .route(
-            "/api/lan/groups/messages",
-            get(lan_routes::handle_lan_group_messages_get)
-                .post(lan_routes::handle_lan_group_messages_post),
-        )
-        .route(
-            "/api/lan/groups/messages/read",
-            post(lan_routes::handle_lan_group_read_post),
-        )
-        .route("/api/lan/groups/meta", post(lan_routes::handle_lan_group_meta_post))
-        .route(
-            "/api/lan/groups/invite",
-            post(lan_routes::handle_lan_group_invite_post),
-        )
-        .route(
-            "/api/lan/groups/members/role",
-            post(lan_routes::handle_lan_group_role_post),
-        )
-        .route(
-            "/api/lan/groups/members/remove",
-            post(lan_routes::handle_lan_group_member_remove_post),
-        )
-        .route("/api/lan/groups/leave", post(lan_routes::handle_lan_group_leave_post))
-        .route(
-            "/api/lan/groups/phases",
-            post(lan_routes::handle_lan_group_phase_post),
-        )
-        .route(
-            "/api/lan/groups/phases/remove",
-            post(lan_routes::handle_lan_group_phase_remove_post),
-        )
-        .route(
-            "/api/lan/groups/documents",
-            post(lan_routes::handle_lan_group_document_post),
-        )
-        .route(
-            "/api/lan/groups/documents/raw",
-            get(lan_routes::handle_lan_group_document_raw_get),
-        )
-        .route(
-            "/api/lan/groups/documents/download",
-            post(lan_routes::handle_lan_group_document_download_post),
-        )
-        .route(
-            "/api/lan/groups/documents/save",
-            post(lan_routes::handle_lan_group_document_save_post),
-        )
-        .route(
-            "/api/lan/groups/documents/remove",
-            post(lan_routes::handle_lan_group_document_remove_post),
-        )
-        .route("/api/lan/groups/tasks", post(lan_routes::handle_lan_group_task_post))
-        .route(
-            "/api/lan/groups/tasks/remove",
-            post(lan_routes::handle_lan_group_task_remove_post),
-        )
-        .route(
             "/api/lan/shares",
             get(lan_routes::handle_lan_shares_get).post(lan_routes::handle_lan_shares_post),
         )
@@ -1814,7 +1801,12 @@ async fn run_gateway_inner(
             "/api/workspace/upload",
             post(workspace_files::handle_workspace_upload),
         )
-        .layer(RequestBodyLimitLayer::new(16 * 1024 * 1024));
+        .layer(RequestBodyLimitLayer::new(16 * 1024 * 1024))
+        .layer(TimeoutLayer::with_status_code(
+            StatusCode::REQUEST_TIMEOUT,
+            Duration::from_secs(gateway_request_timeout_secs()),
+        ))
+        .layer(desktop_cors_layer());
 
     let a2a_config = state.config.clone();
     let a2a_state = a2a::build_a2a_state("sen", format!("http://{}:{}", host, actual_port))
@@ -1949,6 +1941,14 @@ async fn run_gateway_inner(
         .route(
             "/api/sessions/{id}/edit-review/file",
             get(api::handle_api_session_edit_review_file),
+        )
+        .route(
+            "/api/sessions/{id}/edit-review/hunks",
+            get(api::handle_api_session_edit_review_hunks),
+        )
+        .route(
+            "/api/sessions/{id}/edit-review/apply-hunks",
+            post(api::handle_api_session_edit_review_apply_hunks),
         )
         .route(
             "/api/sessions/{id}/revert-files",
@@ -2375,6 +2375,22 @@ async fn run_gateway_inner(
         .route("/api/workspace/search", get(workspace_files::handle_workspace_search))
         .route("/api/workspace/watch", get(workspace_files::handle_workspace_watch))
         .route(
+            "/api/workspace/history/files",
+            get(file_history_routes::handle_file_history_files),
+        )
+        .route(
+            "/api/workspace/history/list",
+            get(file_history_routes::handle_file_history_list),
+        )
+        .route(
+            "/api/workspace/history/snapshot",
+            get(file_history_routes::handle_file_history_snapshot),
+        )
+        .route(
+            "/api/workspace/history/revert",
+            post(file_history_routes::handle_file_history_revert),
+        )
+        .route(
             "/api/editor/inline-completion",
             post(editor_assist::handle_editor_inline_completion),
         )
@@ -2389,6 +2405,10 @@ async fn run_gateway_inner(
         .route(
             "/api/editor/inline-edit",
             post(editor_assist::handle_editor_inline_edit),
+        )
+        .route(
+            "/api/editor/next-edit",
+            post(editor_assist::handle_editor_next_edit),
         )
         .route("/api/git/status", get(git_routes::handle_git_status))
         .route("/api/python/status", get(python_env_routes::handle_status))
@@ -2552,6 +2572,7 @@ async fn run_gateway_inner(
 
     let inner = Router::new()
 
+        .route("/", get(handle_root))
         .route("/admin/shutdown", post(handle_admin_shutdown))
         .route("/admin/paircode", get(handle_admin_paircode))
         .route("/admin/paircode/new", post(handle_admin_paircode_new))
@@ -2639,10 +2660,7 @@ async fn run_gateway_inner(
 
         .route("/approval/{id}/respond", post(ws::handle_approval_respond))
 
-        .route("/ws/nodes", get(nodes::handle_ws_nodes))
-
-        .merge(config_put_router)
-        .merge(workspace_files_writes_router);
+        .route("/ws/nodes", get(nodes::handle_ws_nodes));
 
     #[cfg(feature = "computer-use")]
     let inner = inner.merge(computer_router);
@@ -2685,7 +2703,7 @@ async fn run_gateway_inner(
 
     let state_for_loopback_auth = state.clone();
     let inner = inner
-        .with_state(state)
+        .with_state(state.clone())
 
         .merge(workers_router)
         .merge(a2a_router)
@@ -2695,16 +2713,14 @@ async fn run_gateway_inner(
             Duration::from_secs(gateway_request_timeout_secs()),
         ))
         .layer(desktop_cors_layer())
-        .merge(long_running_router);
+        .merge(long_running_router)
+        .merge(config_put_router.with_state(state.clone()))
+        .merge(workspace_files_writes_router.with_state(state));
 
     #[cfg(feature = "lan-comms")]
     let inner = {
         let lan_media_router: Router = Router::new()
             .route("/api/lan/files/image", post(lan_routes::handle_lan_image_post))
-            .route(
-                "/api/lan/groups/documents/image",
-                post(lan_routes::handle_lan_group_image_post),
-            )
             .with_state(lan_media_state)
             .layer(RequestBodyLimitLayer::new(32 * 1024 * 1024))
             .layer(TimeoutLayer::with_status_code(
@@ -2952,6 +2968,19 @@ async fn run_gateway_post_shutdown_cleanup() {
     );
 }
 
+async fn handle_root() -> impl IntoResponse {
+    let version = env!("CARGO_PKG_VERSION");
+    let html = format!(
+        "<!doctype html><html><head><meta charset=\"utf-8\"><title>SenWeaverCoding Gateway</title>\
+         <style>body{{font-family:system-ui,sans-serif;margin:3rem;color:#222}}code{{background:#f4f4f5;padding:2px 6px;border-radius:4px}}</style></head>\
+         <body><h1>SenWeaverCoding Gateway</h1>\
+         <p>The loopback gateway is running (v{version}). This endpoint is a status page; the full IDE lives in the desktop app.</p>\
+         <ul><li>Health: <code>/health</code></li><li>Metrics: <code>/metrics</code></li><li>JSON-RPC: <code>/rpc</code></li><li>WebSocket: <code>/ws/&lt;session_id&gt;</code></li></ul>\
+         </body></html>"
+    );
+    axum::response::Html(html)
+}
+
 async fn handle_health(State(state): State<AppState>) -> impl IntoResponse {
     let snapshot = crate::health::snapshot();
     let degraded: Vec<&str> = snapshot
@@ -2986,20 +3015,26 @@ fn prometheus_disabled_hint() -> String {
 fn prometheus_observer_from_state(
     observer: &dyn crate::observability::Observer,
 ) -> Option<&crate::observability::PrometheusObserver> {
-    observer
+    if let Some(prom) = observer
         .as_any()
         .downcast_ref::<crate::observability::PrometheusObserver>()
-        .or_else(|| {
-            observer
-                .as_any()
-                .downcast_ref::<sse::BroadcastObserver>()
-                .and_then(|broadcast| {
-                    broadcast
-                        .inner()
-                        .as_any()
-                        .downcast_ref::<crate::observability::PrometheusObserver>()
-                })
-        })
+    {
+        return Some(prom);
+    }
+    if let Some(multi) = observer
+        .as_any()
+        .downcast_ref::<crate::observability::MultiObserver>()
+    {
+        for inner in multi.observers() {
+            if let Some(prom) = prometheus_observer_from_state(inner.as_ref()) {
+                return Some(prom);
+            }
+        }
+    }
+    if let Some(broadcast) = observer.as_any().downcast_ref::<sse::BroadcastObserver>() {
+        return prometheus_observer_from_state(broadcast.inner());
+    }
+    None
 }
 
 async fn handle_metrics(State(state): State<AppState>) -> impl IntoResponse {
@@ -3009,7 +3044,14 @@ async fn handle_metrics(State(state): State<AppState>) -> impl IntoResponse {
             if let Some(prom) = prometheus_observer_from_state(state.observer.as_ref()) {
                 prom.encode()
             } else {
-                prometheus_disabled_hint()
+                let global_arc = crate::observability::global_observer();
+                match global_arc
+                    .as_ref()
+                    .and_then(|o| prometheus_observer_from_state(o.as_ref()))
+                {
+                    Some(prom) => prom.encode(),
+                    None => prometheus_disabled_hint(),
+                }
             }
         }
         #[cfg(not(feature = "observability-prometheus"))]

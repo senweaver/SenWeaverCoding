@@ -57,9 +57,10 @@ impl AutoresearchRuntime {
     }
 
     pub async fn build_provider(&self) -> Result<Box<dyn Provider>, anyhow::Error> {
-        providers::create_provider_with_options_async(
+        providers::create_resilient_runtime_provider_async(
             self.provider_name.clone(),
             self.api_key.clone(),
+            None,
             self.provider_runtime_options.clone(),
         )
         .await
@@ -104,9 +105,10 @@ pub async fn fan_out_personas(
         let model = model.clone();
         join_set.spawn(async move {
             let started = std::time::Instant::now();
-            let provider_result = providers::create_provider_with_options_async(
+            let provider_result = providers::create_resilient_runtime_provider_async(
                 provider_name,
                 api_key,
+                None,
                 runtime_options,
             )
             .await;

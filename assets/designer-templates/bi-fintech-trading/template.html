@@ -20,6 +20,16 @@
   --font-num: ui-monospace, 'SF Mono', 'Cascadia Mono', Menlo, monospace;
   --font-body: 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
 }
+html[data-od-mode="light"] {
+  --od-accent: #1f6ff0;
+  --bg: #f2f4f8;
+  --panel: #ffffff;
+  --line: #dce1ea;
+  --fg: #17202e;
+  --muted: #67707f;
+  --up: #148f56;
+  --down: #d43a3a;
+}
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 html, body { width: 100%; height: 100%; overflow: hidden; }
 body {
@@ -50,13 +60,13 @@ body {
   border-bottom: 1px solid var(--line);
   padding-bottom: 10px;
 }
-.topbar h1 { font-size: 20px; font-weight: 700; letter-spacing: 0.04em; white-space: nowrap; }
-.topbar .clock { margin-left: auto; font-family: var(--font-num); font-size: 16px; color: var(--muted); white-space: nowrap; }
+.topbar h1 { font-size: calc(20px * var(--od-scale)); font-weight: 700; letter-spacing: 0.04em; white-space: nowrap; }
+.topbar .clock { margin-left: auto; font-family: var(--font-num); font-size: calc(16px * var(--od-scale)); color: var(--muted); white-space: nowrap; }
 .ticker-strip { display: flex; gap: 28px; overflow: hidden; flex: 1; min-width: 0; }
 .ticker { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; font-family: var(--font-num); }
-.ticker .name { font-family: var(--font-body); color: var(--muted); font-size: 12px; }
-.ticker .px { font-size: 16px; }
-.ticker .chg { font-size: 12px; }
+.ticker .name { font-family: var(--font-body); color: var(--muted); font-size: calc(12px * var(--od-scale)); }
+.ticker .px { font-size: calc(16px * var(--od-scale)); }
+.ticker .chg { font-size: calc(12px * var(--od-scale)); }
 .up { color: var(--up); }
 .down { color: var(--down); }
 .grid {
@@ -81,19 +91,19 @@ body {
   justify-content: space-between;
   margin-bottom: calc(10px * var(--od-density));
 }
-.panel-head .title { font-size: 13px; letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
-.panel-head .meta { font-family: var(--font-num); font-size: 12px; color: var(--muted); }
+.panel-head .title { font-size: calc(13px * var(--od-scale)); letter-spacing: 0.1em; color: var(--muted); text-transform: uppercase; }
+.panel-head .meta { font-family: var(--font-num); font-size: calc(12px * var(--od-scale)); color: var(--muted); }
 .hero { grid-column: 1; grid-row: 1 / 3; }
 .hero .quote { display: flex; align-items: baseline; gap: 14px; margin-bottom: 8px; }
-.hero .quote .sym { font-size: 15px; color: var(--muted); }
-.hero .quote .px { font-family: var(--font-num); font-size: 34px; font-weight: 600; }
-.hero .quote .chg { font-family: var(--font-num); font-size: 15px; }
+.hero .quote .sym { font-size: calc(15px * var(--od-scale)); color: var(--muted); }
+.hero .quote .px { font-family: var(--font-num); font-size: calc(34px * var(--od-scale)); font-weight: 600; }
+.hero .quote .chg { font-family: var(--font-num); font-size: calc(15px * var(--od-scale)); }
 .hero .chart { flex: 1; min-height: 0; }
 .hero .chart svg { width: 100%; height: 100%; }
 table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
 th {
   text-align: right;
-  font-size: 11px;
+  font-size: calc(11px * var(--od-scale));
   font-weight: 500;
   letter-spacing: 0.08em;
   color: var(--muted);
@@ -105,12 +115,12 @@ th:first-child, td:first-child { text-align: left; }
 td {
   text-align: right;
   font-family: var(--font-num);
-  font-size: 13px;
+  font-size: calc(13px * var(--od-scale));
   padding: 6px 8px;
   border-bottom: 1px solid rgba(35, 40, 51, 0.55);
 }
 td.name { font-family: var(--font-body); }
-td .tag { color: var(--muted); font-size: 11px; margin-left: 6px; }
+td .tag { color: var(--muted); font-size: calc(11px * var(--od-scale)); margin-left: 6px; }
 .depth { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; flex: 1; min-height: 0; }
 .depth .col { display: flex; flex-direction: column; gap: 5px; min-height: 0; overflow: hidden; }
 .depth .lvl {
@@ -125,13 +135,13 @@ td .tag { color: var(--muted); font-size: 11px; margin-left: 6px; }
 .depth .bid .fillbg { background: var(--up); right: auto; }
 .depth .ask .fillbg { background: var(--down); left: auto; }
 .heat { flex: 1; display: grid; grid-template-columns: repeat(4, 1fr); grid-auto-rows: 1fr; gap: 8px; min-height: 0; }
-.tile { display: flex; flex-direction: column; justify-content: space-between; padding: 10px; font-size: 12px; }
-.tile .v { font-family: var(--font-num); font-size: 15px; font-weight: 600; }
+.tile { display: flex; flex-direction: column; justify-content: space-between; padding: 10px; font-size: calc(12px * var(--od-scale)); }
+.tile .v { font-family: var(--font-num); font-size: calc(15px * var(--od-scale)); font-weight: 600; }
 .footer {
   flex: 0 0 20px;
   display: flex;
   justify-content: space-between;
-  font-size: 11px;
+  font-size: calc(11px * var(--od-scale));
   color: var(--muted);
   letter-spacing: 0.08em;
 }
@@ -140,7 +150,7 @@ td .tag { color: var(--muted); font-size: 11px; margin-left: 6px; }
   border: 1px solid var(--line);
   color: var(--od-accent);
   font: inherit;
-  font-size: 11px;
+  font-size: calc(11px * var(--od-scale));
   padding: 1px 12px;
   cursor: pointer;
 }
@@ -183,7 +193,7 @@ td .tag { color: var(--muted); font-size: 11px; margin-left: 6px; }
             <line x1="50" y1="360" x2="960" y2="360"/>
             <line x1="50" y1="460" x2="960" y2="460"/>
           </g>
-          <g fill="#7c8694" font-size="14" font-family="ui-monospace, monospace">
+          <g fill="var(--muted)" font-size="14" font-family="ui-monospace, monospace">
             <text x="44" y="66" text-anchor="end">1720</text>
             <text x="44" y="266" text-anchor="end">1680</text>
             <text x="44" y="466" text-anchor="end">1640</text>
@@ -194,40 +204,40 @@ td .tag { color: var(--muted); font-size: 11px; margin-left: 6px; }
             <text x="930" y="500">15:00</text>
           </g>
           <g>
-            <line x1="90" y1="330" x2="90" y2="420" stroke="#f04444" stroke-width="2"/>
-            <rect x="78" y="350" width="24" height="52" fill="#f04444"/>
-            <line x1="140" y1="300" x2="140" y2="392" stroke="#22c373" stroke-width="2"/>
-            <rect x="128" y="312" width="24" height="58" fill="none" stroke="#22c373" stroke-width="2"/>
-            <line x1="190" y1="262" x2="190" y2="348" stroke="#22c373" stroke-width="2"/>
-            <rect x="178" y="276" width="24" height="50" fill="none" stroke="#22c373" stroke-width="2"/>
-            <line x1="240" y1="282" x2="240" y2="366" stroke="#f04444" stroke-width="2"/>
-            <rect x="228" y="296" width="24" height="48" fill="#f04444"/>
-            <line x1="290" y1="252" x2="290" y2="336" stroke="#22c373" stroke-width="2"/>
-            <rect x="278" y="264" width="24" height="50" fill="none" stroke="#22c373" stroke-width="2"/>
-            <line x1="340" y1="216" x2="340" y2="300" stroke="#22c373" stroke-width="2"/>
-            <rect x="328" y="230" width="24" height="48" fill="none" stroke="#22c373" stroke-width="2"/>
-            <line x1="390" y1="196" x2="390" y2="282" stroke="#f04444" stroke-width="2"/>
-            <rect x="378" y="214" width="24" height="44" fill="#f04444"/>
-            <line x1="440" y1="170" x2="440" y2="252" stroke="#22c373" stroke-width="2"/>
-            <rect x="428" y="182" width="24" height="46" fill="none" stroke="#22c373" stroke-width="2"/>
-            <line x1="490" y1="142" x2="490" y2="226" stroke="#22c373" stroke-width="2"/>
-            <rect x="478" y="156" width="24" height="46" fill="none" stroke="#22c373" stroke-width="2"/>
-            <line x1="540" y1="158" x2="540" y2="240" stroke="#f04444" stroke-width="2"/>
-            <rect x="528" y="172" width="24" height="44" fill="#f04444"/>
-            <line x1="590" y1="128" x2="590" y2="212" stroke="#22c373" stroke-width="2"/>
-            <rect x="578" y="140" width="24" height="48" fill="none" stroke="#22c373" stroke-width="2"/>
-            <line x1="640" y1="106" x2="640" y2="188" stroke="#22c373" stroke-width="2"/>
-            <rect x="628" y="118" width="24" height="44" fill="none" stroke="#22c373" stroke-width="2"/>
-            <line x1="690" y1="126" x2="690" y2="206" stroke="#f04444" stroke-width="2"/>
-            <rect x="678" y="138" width="24" height="44" fill="#f04444"/>
-            <line x1="740" y1="98" x2="740" y2="180" stroke="#22c373" stroke-width="2"/>
-            <rect x="728" y="110" width="24" height="44" fill="none" stroke="#22c373" stroke-width="2"/>
-            <line x1="790" y1="84" x2="790" y2="162" stroke="#22c373" stroke-width="2"/>
-            <rect x="778" y="96" width="24" height="42" fill="none" stroke="#22c373" stroke-width="2"/>
-            <line x1="840" y1="104" x2="840" y2="180" stroke="#f04444" stroke-width="2"/>
-            <rect x="828" y="116" width="24" height="40" fill="#f04444"/>
-            <line x1="890" y1="78" x2="890" y2="156" stroke="#22c373" stroke-width="2"/>
-            <rect x="878" y="90" width="24" height="42" fill="none" stroke="#22c373" stroke-width="2"/>
+            <line x1="90" y1="330" x2="90" y2="420" stroke="var(--down)" stroke-width="2"/>
+            <rect x="78" y="350" width="24" height="52" fill="var(--down)"/>
+            <line x1="140" y1="300" x2="140" y2="392" stroke="var(--up)" stroke-width="2"/>
+            <rect x="128" y="312" width="24" height="58" fill="none" stroke="var(--up)" stroke-width="2"/>
+            <line x1="190" y1="262" x2="190" y2="348" stroke="var(--up)" stroke-width="2"/>
+            <rect x="178" y="276" width="24" height="50" fill="none" stroke="var(--up)" stroke-width="2"/>
+            <line x1="240" y1="282" x2="240" y2="366" stroke="var(--down)" stroke-width="2"/>
+            <rect x="228" y="296" width="24" height="48" fill="var(--down)"/>
+            <line x1="290" y1="252" x2="290" y2="336" stroke="var(--up)" stroke-width="2"/>
+            <rect x="278" y="264" width="24" height="50" fill="none" stroke="var(--up)" stroke-width="2"/>
+            <line x1="340" y1="216" x2="340" y2="300" stroke="var(--up)" stroke-width="2"/>
+            <rect x="328" y="230" width="24" height="48" fill="none" stroke="var(--up)" stroke-width="2"/>
+            <line x1="390" y1="196" x2="390" y2="282" stroke="var(--down)" stroke-width="2"/>
+            <rect x="378" y="214" width="24" height="44" fill="var(--down)"/>
+            <line x1="440" y1="170" x2="440" y2="252" stroke="var(--up)" stroke-width="2"/>
+            <rect x="428" y="182" width="24" height="46" fill="none" stroke="var(--up)" stroke-width="2"/>
+            <line x1="490" y1="142" x2="490" y2="226" stroke="var(--up)" stroke-width="2"/>
+            <rect x="478" y="156" width="24" height="46" fill="none" stroke="var(--up)" stroke-width="2"/>
+            <line x1="540" y1="158" x2="540" y2="240" stroke="var(--down)" stroke-width="2"/>
+            <rect x="528" y="172" width="24" height="44" fill="var(--down)"/>
+            <line x1="590" y1="128" x2="590" y2="212" stroke="var(--up)" stroke-width="2"/>
+            <rect x="578" y="140" width="24" height="48" fill="none" stroke="var(--up)" stroke-width="2"/>
+            <line x1="640" y1="106" x2="640" y2="188" stroke="var(--up)" stroke-width="2"/>
+            <rect x="628" y="118" width="24" height="44" fill="none" stroke="var(--up)" stroke-width="2"/>
+            <line x1="690" y1="126" x2="690" y2="206" stroke="var(--down)" stroke-width="2"/>
+            <rect x="678" y="138" width="24" height="44" fill="var(--down)"/>
+            <line x1="740" y1="98" x2="740" y2="180" stroke="var(--up)" stroke-width="2"/>
+            <rect x="728" y="110" width="24" height="44" fill="none" stroke="var(--up)" stroke-width="2"/>
+            <line x1="790" y1="84" x2="790" y2="162" stroke="var(--up)" stroke-width="2"/>
+            <rect x="778" y="96" width="24" height="42" fill="none" stroke="var(--up)" stroke-width="2"/>
+            <line x1="840" y1="104" x2="840" y2="180" stroke="var(--down)" stroke-width="2"/>
+            <rect x="828" y="116" width="24" height="40" fill="var(--down)"/>
+            <line x1="890" y1="78" x2="890" y2="156" stroke="var(--up)" stroke-width="2"/>
+            <rect x="878" y="90" width="24" height="42" fill="none" stroke="var(--up)" stroke-width="2"/>
           </g>
           <line x1="50" y1="132" x2="960" y2="132" stroke="var(--od-accent)" stroke-width="1" stroke-dasharray="6 4"/>
           <text x="954" y="124" text-anchor="end" fill="var(--od-accent)" font-size="13" font-family="ui-monospace, monospace">现价 1688.00</text>

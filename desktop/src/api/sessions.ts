@@ -177,6 +177,33 @@ export const sessionsApi = {
       { timeout: 60_000 },
     )
   },
+
+  getEditReviewHunks(sessionId: string, path: string) {
+    const qs = new URLSearchParams({ path }).toString()
+    return api.get<EditReviewHunks>(
+      `/api/sessions/${sessionId}/edit-review/hunks?${qs}`,
+    )
+  },
+
+  applyEditReviewHunks(
+    sessionId: string,
+    path: string,
+    rejectedHunkIndices: number[],
+    expectedAfterSha256: string,
+  ) {
+    return api.post<{
+      ok: boolean
+      path: string
+      newSha256: string
+      rejectedHunks: number
+      revertBatchId?: string
+      changed: boolean
+    }>(
+      `/api/sessions/${sessionId}/edit-review/apply-hunks`,
+      { path, rejectedHunkIndices, expectedAfterSha256 },
+      { timeout: 60_000 },
+    )
+  },
 }
 
 export type EditReviewFile = {
@@ -195,4 +222,21 @@ export type EditReviewFileDiff = {
   beforeTruncated: boolean
   afterTruncated: boolean
   createdInSession: boolean
+}
+
+export type EditReviewHunk = {
+  index: number
+  oldStart: number
+  oldEnd: number
+  newStart: number
+  newEnd: number
+  beforeText: string
+  afterText: string
+}
+
+export type EditReviewHunks = {
+  path: string
+  afterSha256: string
+  createdInSession: boolean
+  hunks: EditReviewHunk[]
 }

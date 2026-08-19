@@ -8,7 +8,6 @@ import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { useTerminalPanelStore } from '../../stores/terminalPanelStore'
 import { useLanStore } from '../../stores/lanStore'
-import { useLanGroupStore } from '../../stores/lanGroupStore'
 import { useLanShareStore } from '../../stores/lanShareStore'
 import {
   joinPath,
@@ -25,10 +24,13 @@ import { inferLanguageFromPath, languageToMarkdownLang } from '../../lib/extLang
 import { workspaceFilesApi } from '../../api/workspaceFiles'
 import { FileTreeContextMenu, type ContextMenuTarget } from './FileTreeContextMenu'
 import { FileTreeNodeView, type FilterState } from './FileTreeNodeView'
+import { FileHistoryPanel } from './FileHistoryPanel'
 import { useFileDragStore } from '../../stores/fileDragStore'
 import type { FileRefDragPayload } from '../chat/composerRefs'
 import { InlineNamePrompt } from './InlineNamePrompt'
 import { DeleteConfirmModal } from './DeleteConfirmModal'
+import { Modal } from '../shared/Modal'
+import { Button } from '../shared/Button'
 
 type Props = {
   workDir: string
@@ -69,8 +71,6 @@ function treeRowKey(row: TreeRow): string {
 
 const VIRTUALIZE_ROW_THRESHOLD = 300
 
-const DRAG_MIME = 'application/x-sen-workspace-rel-path'
-
 export function FileTree({ workDir, onSelect }: Props) {
   const t = useTranslation()
   const root = useWorkspaceFilesStore((s) => s.root)
@@ -90,6 +90,8 @@ export function FileTree({ workDir, onSelect }: Props) {
   const uploadFiles = useWorkspaceFilesStore((s) => s.uploadFiles)
   const clipboard = useWorkspaceFilesStore((s) => s.clipboard)
   const copyJob = useWorkspaceFilesStore((s) => s.copyJob)
+  const showHidden = useWorkspaceFilesStore((s) => s.showHidden)
+  const setShowHidden = useWorkspaceFilesStore((s) => s.setShowHidden)
   const copyToClipboard = useWorkspaceFilesStore((s) => s.copyToClipboard)
   const cutToClipboard = useWorkspaceFilesStore((s) => s.cutToClipboard)
   const pasteInto = useWorkspaceFilesStore((s) => s.pasteInto)
@@ -127,13 +129,41 @@ export function FileTree({ workDir, onSelect }: Props) {
   } | null>(null)
   const [renameTarget, setRenameTarget] = useState<RenameTarget | null>(null)
   const [createTarget, setCreateTarget] = useState<CreateTarget | null>(null)
-  const [deleteTarget, setDeleteTarget] = useState<FileTreeNode | null>(null)
+  const [deleteTargets, setDeleteTargets] = useState<FileTreeNode[] | null>(null)
+  const [historyTarget, setHistoryTarget] = useState<FileTreeNode | null>(null)
   const [isDraggingExternal, setIsDraggingExternal] = useState(false)
   const [filterText, setFilterText] = useState('')
   const [focusedRelPath, setFocusedRelPath] = useState<string | null>(null)
+  const [multiSelected, setMultiSelected] = useState<Map<string, FileTreeNode>>(
+    () => new Map(),
+  )
+  const [dropTargetRel, setDropTargetRel] = useState<string | null>(null)
+  const [overwritePrompt, setOverwritePrompt] = useState<{
+    parentRelPath: string
+    files: File[]
+  } | null>(null)
+  const selectAnchorRef = useRef<string | null>(null)
+  const externalDragDepthRef = useRef(0)
+  const typeaheadRef = useRef<{ text: string; at: number }>({ text: '', at: 0 })
   const fileInputRef = useRef<HTMLInputElement | null>(null)
   const uploadParentRef = useRef<string>('')
   const treeRef = useRef<HTMLDivElement | null>(null)
+
+  useEffect(() => {
+    setContextMenu(null)
+    setRenameTarget(null)
+    setCreateTarget(null)
+    setDeleteTargets(null)
+    setHistoryTarget(null)
+    setOverwritePrompt(null)
+    setMultiSelected(new Map())
+    setFocusedRelPath(null)
+    setDropTargetRel(null)
+    setFilterText('')
+    selectAnchorRef.current = null
+    externalDragDepthRef.current = 0
+    setIsDraggingExternal(false)
+  }, [root])
 
   const filterNeedle = filterText.trim()
   const dirsForFilter = useWorkspaceFilesStore((s) =>
@@ -205,7 +235,7 @@ export function FileTree({ workDir, onSelect }: Props) {
           const target = queue.shift()
           if (!target) continue
           inFlight += 1
-          loadDirectory(target)
+          loadDirectory(target, { silent: true })
             .catch(() => {
             })
             .finally(() => {
@@ -244,50 +274,49 @@ export function FileTree({ workDir, onSelect }: Props) {
     setContextMenu({ x: event.clientX, y: event.clientY, target: { kind: 'root' } })
   }, [])
 
+  const runUpload = useCallback(
+    (parentRelPath: string, files: File[], overwrite = false) => {
+      uploadFiles(parentRelPath, files, { overwrite })
+        .then(({ uploaded, conflicts }) => {
+          if (uploaded > 0) {
+            addToast({
+              type: 'success',
+              message: t('files.uploadSuccess', { count: uploaded }),
+            })
+          }
+          if (conflicts.length > 0) {
+            setOverwritePrompt({ parentRelPath, files: conflicts })
+          }
+        })
+        .catch((err) => {
+          addToast({
+            type: 'error',
+            message: t('files.uploadError', {
+              message: err instanceof Error ? err.message : String(err),
+            }),
+          })
+        })
+    },
+    [addToast, t, uploadFiles],
+  )
+
   const handleDrop = useCallback(
     (event: React.DragEvent, targetNode: FileTreeNode | null) => {
       event.preventDefault()
       event.stopPropagation()
+      externalDragDepthRef.current = 0
       setIsDraggingExternal(false)
-      const fromRel = event.dataTransfer.getData(DRAG_MIME)
       const targetParentRel = targetNode
         ? targetNode.isDir
           ? targetNode.relPath
           : parentOf(targetNode.relPath)
         : ''
-      if (fromRel) {
-        if (fromRel === '' || fromRel === targetParentRel) return
-        if (targetParentRel === fromRel || targetParentRel.startsWith(`${fromRel}/`)) {
-          addToast({ type: 'warning', message: t('files.dropTargetInvalid') })
-          return
-        }
-        const name = nameOf(fromRel)
-        const next = joinPath(targetParentRel, name)
-        renameAction(fromRel, next).catch((err) => {
-          addToast({ type: 'error', message: err instanceof Error ? err.message : String(err) })
-        })
-        return
-      }
-
       const files = Array.from(event.dataTransfer.files ?? [])
       if (files.length > 0) {
-        uploadFiles(targetParentRel, files)
-          .then((count) => {
-            if (count > 0) {
-              addToast({ type: 'success', message: t('files.uploadSuccess', { count }) })
-            }
-          })
-          .catch((err) => {
-            addToast({
-              type: 'error',
-              message: t('files.uploadError', {
-                message: err instanceof Error ? err.message : String(err),
-              }),
-            })
-          })
+        runUpload(targetParentRel, files)
       }
     },
-    [addToast, renameAction, t, uploadFiles],
+    [runUpload],
   )
 
   const handleTreeMoveDrop = useCallback(
@@ -299,19 +328,45 @@ export function FileTree({ workDir, onSelect }: Props) {
       const targetIsDir = targetEl?.getAttribute('data-tree-isdir') === '1'
       const targetParentRel = targetEl ? (targetIsDir ? targetRel : parentOf(targetRel)) : ''
       const fromRel = payload.relPath
-      if (!fromRel || fromRel === targetParentRel) return
-      if (targetParentRel === fromRel || targetParentRel.startsWith(`${fromRel}/`)) {
+      if (!fromRel) return
+      const sources =
+        multiSelected.size > 1 && multiSelected.has(fromRel)
+          ? [...multiSelected.values()].map((entry) => ({
+              relPath: entry.relPath,
+              isDir: entry.isDir,
+            }))
+          : [{ relPath: fromRel, isDir: payload.isDir }]
+      const invalid = sources.some(
+        (item) =>
+          item.isDir &&
+          (targetParentRel === item.relPath ||
+            targetParentRel.startsWith(`${item.relPath}/`)),
+      )
+      if (invalid) {
         addToast({ type: 'warning', message: t('files.dropTargetInvalid') })
         return
       }
-      const name = nameOf(fromRel)
-      const next = joinPath(targetParentRel, name)
-      if (next === fromRel) return
-      renameAction(fromRel, next).catch((err) => {
-        addToast({ type: 'error', message: err instanceof Error ? err.message : String(err) })
-      })
+      const moves = sources.filter(
+        (item) => item.relPath !== targetParentRel && parentOf(item.relPath) !== targetParentRel,
+      )
+      if (moves.length === 0) return
+      void (async () => {
+        for (const item of moves) {
+          const next = joinPath(targetParentRel, nameOf(item.relPath))
+          if (next === item.relPath) continue
+          try {
+            await renameAction(item.relPath, next)
+          } catch (err) {
+            addToast({
+              type: 'error',
+              message: err instanceof Error ? err.message : String(err),
+            })
+          }
+        }
+        setMultiSelected((prev) => (prev.size > 0 ? new Map() : prev))
+      })()
     },
-    [addToast, renameAction, t],
+    [addToast, multiSelected, renameAction, t],
   )
 
   useEffect(() => {
@@ -324,40 +379,66 @@ export function FileTree({ workDir, onSelect }: Props) {
     return () => store.unregisterZone('file-tree')
   }, [handleTreeMoveDrop])
 
-  const handleNewFile = useCallback((parent: FileTreeNode | null) => {
-    setCreateTarget({ parentRelPath: parent?.relPath ?? '', kind: 'file' })
+  const ensureParentExpanded = useCallback((parentRelPath: string) => {
+    if (!parentRelPath) return
+    useWorkspaceFilesStore.getState().setExpanded(parentRelPath, true)
   }, [])
 
-  const handleNewFolder = useCallback((parent: FileTreeNode | null) => {
-    setCreateTarget({ parentRelPath: parent?.relPath ?? '', kind: 'folder' })
-  }, [])
+  const handleNewFile = useCallback(
+    (parentRelPath: string) => {
+      ensureParentExpanded(parentRelPath)
+      setCreateTarget({ parentRelPath, kind: 'file' })
+    },
+    [ensureParentExpanded],
+  )
 
-  const handleUpload = useCallback((parent: FileTreeNode | null) => {
-    uploadParentRef.current = parent?.relPath ?? ''
+  const handleNewFolder = useCallback(
+    (parentRelPath: string) => {
+      ensureParentExpanded(parentRelPath)
+      setCreateTarget({ parentRelPath, kind: 'folder' })
+    },
+    [ensureParentExpanded],
+  )
+
+  const handleUpload = useCallback((parentRelPath: string) => {
+    uploadParentRef.current = parentRelPath
     fileInputRef.current?.click()
   }, [])
 
   const handleRename = useCallback((node: FileTreeNode) => {
+    setFocusedRelPath(node.relPath)
     setRenameTarget({ relPath: node.relPath, initial: node.name })
   }, [])
 
-  const handleDelete = useCallback((node: FileTreeNode) => {
-    setDeleteTarget(node)
-  }, [])
+  const handleDelete = useCallback(
+    (node: FileTreeNode) => {
+      if (multiSelected.size > 1 && multiSelected.has(node.relPath)) {
+        setDeleteTargets([...multiSelected.values()])
+        return
+      }
+      setDeleteTargets([node])
+    },
+    [multiSelected],
+  )
 
   const confirmDelete = useCallback(async () => {
-    if (!deleteTarget) return
-    const node = deleteTarget
+    if (!deleteTargets || deleteTargets.length === 0) return
+    const targets = [...deleteTargets].sort(
+      (a, b) => b.relPath.length - a.relPath.length,
+    )
     try {
-      await removeAction(node.relPath, node.isDir)
-      setDeleteTarget(null)
+      for (const node of targets) {
+        await removeAction(node.relPath, node.isDir)
+      }
+      setDeleteTargets(null)
+      setMultiSelected(new Map())
     } catch (err) {
       addToast({
         type: 'error',
         message: err instanceof Error ? err.message : String(err),
       })
     }
-  }, [addToast, deleteTarget, removeAction])
+  }, [addToast, deleteTargets, removeAction])
 
   const handleCreateSubmit = useCallback(
     async (value: string) => {
@@ -502,27 +583,53 @@ export function FileTree({ workDir, onSelect }: Props) {
     [addToast, lanSendFile, t, workDir],
   )
 
-  const handleUploadToGroup = useCallback(
-    (node: FileTreeNode) => {
-      const abs = joinWorkspaceAbsPath(workDir, node.relPath)
-      useLanShareStore.getState().closePanel()
-      useUIStore.getState().closeTemplateLibrary()
-      useLanGroupStore.getState().stageUpload(abs)
-    },
-    [workDir],
-  )
-
   const handleShareToLan = useCallback(
     (node: FileTreeNode) => {
       const abs = joinWorkspaceAbsPath(workDir, node.relPath)
       void useLanShareStore.getState().addShare(abs)
-      useLanGroupStore.getState().closePanel()
       useUIStore.getState().closeTemplateLibrary()
       useLanShareStore.getState().openPanel()
       addToast({ type: 'success', message: t('lanShare.sharedToast', { name: node.name }) })
     },
     [addToast, t, workDir],
   )
+
+  const handleAddToChat = useCallback(
+    (node: FileTreeNode) => {
+      const zones = useFileDragStore.getState().zones
+      const zone = zones.find((z) => z.id === 'chat-composer')
+      if (!zone) {
+        addToast({ type: 'warning', message: t('files.tree.addToChatUnavailable') })
+        return
+      }
+      const targets =
+        multiSelected.size > 1 && multiSelected.has(node.relPath)
+          ? [...multiSelected.values()]
+          : [node]
+      for (const target of targets) {
+        zone.onDrop(
+          { relPath: target.relPath, name: target.name, isDir: target.isDir },
+          0,
+          0,
+        )
+      }
+      addToast({
+        type: 'success',
+        message: t('files.tree.addToChatDone', { count: targets.length }),
+      })
+    },
+    [addToast, multiSelected, t],
+  )
+
+  const handleFindInFolder = useCallback((node: FileTreeNode) => {
+    const dir = node.isDir ? node.relPath : parentOf(node.relPath)
+    useUIStore.getState().openWorkspaceFinder('search-in-files', { scopeDir: dir })
+  }, [])
+
+  const handleShowHistory = useCallback((node: FileTreeNode) => {
+    if (node.isDir) return
+    setHistoryTarget(node)
+  }, [])
 
   const handleOpenInTerminal = useCallback(
     (node: FileTreeNode) => {
@@ -637,20 +744,183 @@ export function FileTree({ workDir, onSelect }: Props) {
 
   const setExpanded = useWorkspaceFilesStore((s) => s.setExpanded)
 
+  const pendingReveal = useWorkspaceFilesStore((s) => s.pendingReveal)
+  useEffect(() => {
+    if (!pendingReveal) return
+    if (!visibleByPath.has(pendingReveal.relPath)) return
+    setFocusedRelPath(pendingReveal.relPath)
+    useWorkspaceFilesStore.getState().consumeReveal()
+  }, [pendingReveal, visibleByPath])
+
+  useEffect(() => {
+    let raf: number | null = null
+    let hoverRel: string | null = null
+    let hoverTimer: number | null = null
+    const clearHover = () => {
+      hoverRel = null
+      if (hoverTimer !== null) {
+        window.clearTimeout(hoverTimer)
+        hoverTimer = null
+      }
+    }
+    const unsub = useFileDragStore.subscribe((state) => {
+      if (!state.payload || !state.pointer) {
+        clearHover()
+        setDropTargetRel(null)
+        return
+      }
+      const el = treeRef.current
+      if (!el) return
+      const rect = el.getBoundingClientRect()
+      const { x, y } = state.pointer
+      const inside =
+        x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+      if (!inside) {
+        clearHover()
+        setDropTargetRel(null)
+        return
+      }
+      const EDGE = 28
+      if (y < rect.top + EDGE) {
+        if (raf === null) {
+          raf = window.requestAnimationFrame(() => {
+            raf = null
+            el.scrollTop -= 14
+          })
+        }
+      } else if (y > rect.bottom - EDGE) {
+        if (raf === null) {
+          raf = window.requestAnimationFrame(() => {
+            raf = null
+            el.scrollTop += 14
+          })
+        }
+      }
+      const targetEl = (document.elementFromPoint(x, y) as HTMLElement | null)?.closest(
+        '[data-tree-relpath]',
+      ) as HTMLElement | null
+      const rel = targetEl?.getAttribute('data-tree-relpath') ?? ''
+      const isDir = targetEl?.getAttribute('data-tree-isdir') === '1'
+      const dirRel = targetEl ? (isDir ? rel : parentOf(rel)) : ''
+      const dragged = state.payload.relPath
+      const invalid =
+        dirRel === dragged || dirRel.startsWith(`${dragged}/`)
+      const nextTarget = invalid ? null : dirRel
+      setDropTargetRel((prev) => (prev === nextTarget ? prev : nextTarget))
+      if (isDir && rel && rel !== hoverRel && !invalid) {
+        clearHover()
+        hoverRel = rel
+        hoverTimer = window.setTimeout(() => {
+          hoverTimer = null
+          const store = useWorkspaceFilesStore.getState()
+          const key = `${store.root ?? ''}::${rel}`
+          const dir = store.dirs[key]
+          if (!dir?.expanded) {
+            store.setExpanded(rel, true)
+          }
+        }, 600)
+      } else if ((!isDir || invalid) && hoverRel !== null) {
+        clearHover()
+      }
+    })
+    return () => {
+      unsub()
+      clearHover()
+      if (raf !== null) window.cancelAnimationFrame(raf)
+    }
+  }, [])
+
+  const handleRowClick = useCallback(
+    (node: FileTreeNode, mods: { toggle: boolean; range: boolean }) => {
+      if (mods.toggle) {
+        setMultiSelected((prev) => {
+          const next = new Map(prev)
+          if (next.has(node.relPath)) {
+            next.delete(node.relPath)
+          } else {
+            if (next.size === 0) {
+              const anchorRel = selectAnchorRef.current
+              const anchorNode = anchorRel ? visibleByPath.get(anchorRel) : undefined
+              if (anchorNode && anchorNode.relPath !== node.relPath) {
+                next.set(anchorNode.relPath, anchorNode)
+              }
+            }
+            next.set(node.relPath, node)
+          }
+          return next
+        })
+        selectAnchorRef.current = node.relPath
+        setFocusedRelPath(node.relPath)
+        return
+      }
+      if (mods.range && selectAnchorRef.current) {
+        const anchorIdx = visibleNodes.findIndex(
+          (n) => n.relPath === selectAnchorRef.current,
+        )
+        const targetIdx = visibleNodes.findIndex((n) => n.relPath === node.relPath)
+        if (anchorIdx >= 0 && targetIdx >= 0) {
+          const [lo, hi] =
+            anchorIdx <= targetIdx ? [anchorIdx, targetIdx] : [targetIdx, anchorIdx]
+          const next = new Map<string, FileTreeNode>()
+          for (let i = lo; i <= hi; i += 1) {
+            const n = visibleNodes[i]
+            if (n) next.set(n.relPath, n)
+          }
+          setMultiSelected(next)
+          setFocusedRelPath(node.relPath)
+          return
+        }
+      }
+      setMultiSelected((prev) => (prev.size > 0 ? new Map() : prev))
+      selectAnchorRef.current = node.relPath
+      setFocusedRelPath(node.relPath)
+      if (node.isDir) {
+        void useWorkspaceFilesStore.getState().toggleExpanded(node.relPath)
+      } else {
+        handleSelect(node)
+      }
+    },
+    [handleSelect, visibleByPath, visibleNodes],
+  )
+
+  useEffect(() => {
+    if (multiSelected.size === 0) return
+    let changed = false
+    const next = new Map<string, FileTreeNode>()
+    for (const [rel, node] of multiSelected) {
+      if (visibleByPath.has(rel)) next.set(rel, node)
+      else changed = true
+    }
+    if (changed) setMultiSelected(next)
+  }, [multiSelected, visibleByPath])
+
+  const collectClipboardItems = useCallback(
+    (node: FileTreeNode) => {
+      if (multiSelected.size > 1 && multiSelected.has(node.relPath)) {
+        return [...multiSelected.values()].map((entry) => ({
+          relPath: entry.relPath,
+          isDir: entry.isDir,
+        }))
+      }
+      return [{ relPath: node.relPath, isDir: node.isDir }]
+    },
+    [multiSelected],
+  )
+
   const handleCopyNode = useCallback(
     (node: FileTreeNode) => {
       if (!node || node.relPath === '') return
-      copyToClipboard(node.relPath, node.isDir)
+      copyToClipboard(collectClipboardItems(node))
     },
-    [copyToClipboard],
+    [collectClipboardItems, copyToClipboard],
   )
 
   const handleCutNode = useCallback(
     (node: FileTreeNode) => {
       if (!node || node.relPath === '') return
-      cutToClipboard(node.relPath, node.isDir)
+      cutToClipboard(collectClipboardItems(node))
     },
-    [cutToClipboard],
+    [collectClipboardItems, cutToClipboard],
   )
 
   const handlePasteInto = useCallback(
@@ -663,7 +933,13 @@ export function FileTree({ workDir, onSelect }: Props) {
 
   const handleTreeKeyDown = useCallback(
     (event: React.KeyboardEvent<HTMLDivElement>) => {
-      if (renameTarget || createTarget) return
+      if (renameTarget || createTarget) {
+        if (event.key === 'Escape') {
+          setRenameTarget(null)
+          setCreateTarget(null)
+        }
+        return
+      }
       const tag = (event.target as HTMLElement | null)?.tagName?.toLowerCase()
       if (tag === 'input' || tag === 'textarea') return
 
@@ -763,6 +1039,18 @@ export function FileTree({ workDir, onSelect }: Props) {
         }
         return
       }
+      if (event.key === 'Home') {
+        event.preventDefault()
+        const first = visibleNodes[0]
+        if (first) setFocusedRelPath(first.relPath)
+        return
+      }
+      if (event.key === 'End') {
+        event.preventDefault()
+        const last = visibleNodes[visibleNodes.length - 1]
+        if (last) setFocusedRelPath(last.relPath)
+        return
+      }
       if (event.key === 'F2') {
         if (!node) return
         event.preventDefault()
@@ -774,6 +1062,33 @@ export function FileTree({ workDir, onSelect }: Props) {
         if (event.key === 'Backspace' && !(event.metaKey || event.ctrlKey)) return
         event.preventDefault()
         void handleDelete(node)
+        return
+      }
+      if (
+        event.key.length === 1 &&
+        !event.ctrlKey &&
+        !event.metaKey &&
+        !event.altKey &&
+        /[\w.\-]/.test(event.key)
+      ) {
+        const now = Date.now()
+        const prev = typeaheadRef.current
+        const text =
+          now - prev.at < 700 ? prev.text + event.key.toLowerCase() : event.key.toLowerCase()
+        typeaheadRef.current = { text, at: now }
+        const startIdx = idx >= 0 ? idx : 0
+        const total = visibleNodes.length
+        for (let step = 1; step <= total; step += 1) {
+          const candidate = visibleNodes[(startIdx + step) % total]
+          if (candidate && candidate.name.toLowerCase().startsWith(text)) {
+            setFocusedRelPath(candidate.relPath)
+            return
+          }
+        }
+        const current = visibleNodes[startIdx]
+        if (current && current.name.toLowerCase().startsWith(text)) {
+          setFocusedRelPath(current.relPath)
+        }
       }
     },
     [
@@ -810,20 +1125,28 @@ export function FileTree({ workDir, onSelect }: Props) {
   }, [])
   const virtuosoRef = useRef<VirtuosoHandle>(null)
   const virtualize =
-    treeRows.length > VIRTUALIZE_ROW_THRESHOLD &&
-    !renameTarget &&
-    !createTarget &&
-    scrollParent !== null
+    treeRows.length > VIRTUALIZE_ROW_THRESHOLD && scrollParent !== null
 
   useEffect(() => {
-    if (!virtualize || !focusedRelPath) return
-    const idx = treeRows.findIndex(
-      (r) => r.kind === 'node' && r.node.relPath === focusedRelPath,
+    if (!focusedRelPath) return
+    if (virtualize) {
+      const idx = treeRows.findIndex(
+        (r) => r.kind === 'node' && r.node.relPath === focusedRelPath,
+      )
+      if (idx >= 0) {
+        virtuosoRef.current?.scrollIntoView({ index: idx })
+      }
+      return
+    }
+    const el = treeRef.current?.querySelector(
+      `[data-tree-relpath="${CSS.escape(focusedRelPath)}"]`,
     )
-    if (idx >= 0) {
-      virtuosoRef.current?.scrollIntoView({ index: idx })
+    if (el instanceof HTMLElement) {
+      el.scrollIntoView({ block: 'nearest' })
     }
   }, [virtualize, focusedRelPath, treeRows])
+
+  const handleRenameCancel = useCallback(() => setRenameTarget(null), [])
 
   const renderTreeRow = useCallback(
     (row: TreeRow) => {
@@ -835,14 +1158,20 @@ export function FileTree({ workDir, onSelect }: Props) {
               depth={row.depth}
               selectedRelPath={selectedRelPath}
               focusedRelPath={focusedRelPath}
+              multiSelected={multiSelected.has(row.node.relPath)}
+              dropTarget={
+                dropTargetRel !== null &&
+                row.node.isDir &&
+                dropTargetRel === row.node.relPath
+              }
               renameTarget={renameTarget}
               filter={filterState}
-              onSelect={handleSelect}
-              onFocus={setFocusedRelPath}
+              onRowClick={handleRowClick}
               onContextMenu={handleContextMenu}
               onDrop={handleDrop}
               onRenameSubmit={handleRenameSubmit}
-              onRenameCancel={() => setRenameTarget(null)}
+              onRenameCancel={handleRenameCancel}
+              onShowHistory={handleShowHistory}
             />
           )
         case 'create':
@@ -904,13 +1233,17 @@ export function FileTree({ workDir, onSelect }: Props) {
     },
     [
       createTarget,
+      dropTargetRel,
       filterState,
       focusedRelPath,
       handleContextMenu,
       handleCreateSubmit,
       handleDrop,
+      handleRenameCancel,
       handleRenameSubmit,
-      handleSelect,
+      handleRowClick,
+      handleShowHistory,
+      multiSelected,
       renameTarget,
       retryDirectory,
       selectedRelPath,
@@ -920,14 +1253,23 @@ export function FileTree({ workDir, onSelect }: Props) {
 
   const containerProps = useMemo(
     () => ({
+      onDragEnter: (event: React.DragEvent) => {
+        if (!event.dataTransfer.types.includes('Files')) return
+        externalDragDepthRef.current += 1
+        setIsDraggingExternal(true)
+      },
       onDragOver: (event: React.DragEvent) => {
         event.preventDefault()
         if (event.dataTransfer.types.includes('Files')) {
-          setIsDraggingExternal(true)
           event.dataTransfer.dropEffect = 'copy'
         }
       },
-      onDragLeave: () => setIsDraggingExternal(false),
+      onDragLeave: () => {
+        externalDragDepthRef.current = Math.max(0, externalDragDepthRef.current - 1)
+        if (externalDragDepthRef.current === 0) {
+          setIsDraggingExternal(false)
+        }
+      },
       onDrop: (event: React.DragEvent) => handleDrop(event, null),
     }),
     [handleDrop],
@@ -955,23 +1297,7 @@ export function FileTree({ workDir, onSelect }: Props) {
         onChange={(event) => {
           const files = Array.from(event.target.files ?? [])
           if (files.length > 0) {
-            uploadFiles(uploadParentRef.current, files)
-              .then((count) => {
-                if (count > 0) {
-                  addToast({
-                    type: 'success',
-                    message: t('files.uploadSuccess', { count }),
-                  })
-                }
-              })
-              .catch((err) => {
-                addToast({
-                  type: 'error',
-                  message: t('files.uploadError', {
-                    message: err instanceof Error ? err.message : String(err),
-                  }),
-                })
-              })
+            runUpload(uploadParentRef.current, files)
           }
           event.target.value = ''
         }}
@@ -988,17 +1314,32 @@ export function FileTree({ workDir, onSelect }: Props) {
           <ToolbarButton
             icon="note_add"
             label={t('files.newFile')}
-            onClick={() => handleNewFile(null)}
+            onClick={() => handleNewFile('')}
           />
           <ToolbarButton
             icon="create_new_folder"
             label={t('files.newFolder')}
-            onClick={() => handleNewFolder(null)}
+            onClick={() => handleNewFolder('')}
           />
           <ToolbarButton
             icon="upload"
             label={t('files.upload')}
-            onClick={() => handleUpload(null)}
+            onClick={() => handleUpload('')}
+          />
+          <ToolbarButton
+            icon="my_location"
+            label={t('files.tree.revealActiveFile')}
+            onClick={() => {
+              const active = useWorkspaceFilesStore.getState().activeTab
+              if (active) {
+                useWorkspaceFilesStore.getState().revealInTree(active)
+              }
+            }}
+          />
+          <ToolbarButton
+            icon={showHidden ? 'visibility_off' : 'visibility'}
+            label={t('files.tree.toggleHidden')}
+            onClick={() => setShowHidden(!showHidden)}
           />
           <ToolbarButton
             icon="unfold_less"
@@ -1162,6 +1503,7 @@ export function FileTree({ workDir, onSelect }: Props) {
           target={contextMenu.target}
           canReveal={canReveal}
           canOpenTerminal={canOpenTerminal}
+          multiSelectionCount={multiSelected.size}
           onClose={() => setContextMenu(null)}
           onNewFile={handleNewFile}
           onNewFolder={handleNewFolder}
@@ -1169,6 +1511,9 @@ export function FileTree({ workDir, onSelect }: Props) {
           onDelete={handleDelete}
           onRefresh={refreshAll}
           onUpload={handleUpload}
+          onAddToChat={handleAddToChat}
+          onFindInFolder={handleFindInFolder}
+          onShowHistory={handleShowHistory}
           onCopyAbsolutePath={handleCopyAbsolutePath}
           onCopyRelativePath={handleCopyRelativePath}
           onCopyAsMarkdown={handleCopyAsMarkdown}
@@ -1181,17 +1526,69 @@ export function FileTree({ workDir, onSelect }: Props) {
           lanEnabled={lanEnabled}
           lanPeers={lanPeers}
           onSendToPeer={handleSendToPeer}
-          onUploadToGroup={handleUploadToGroup}
           onShareToLan={handleShareToLan}
         />
       )}
 
-      {deleteTarget && (
+      {deleteTargets && deleteTargets.length > 0 && (
         <DeleteConfirmModal
-          node={deleteTarget}
-          onCancel={() => setDeleteTarget(null)}
+          nodes={deleteTargets}
+          onCancel={() => setDeleteTargets(null)}
           onConfirm={confirmDelete}
         />
+      )}
+
+      {historyTarget && root && (
+        <FileHistoryPanel
+          root={root}
+          relPath={historyTarget.relPath}
+          name={historyTarget.name}
+          onClose={() => setHistoryTarget(null)}
+        />
+      )}
+
+      {overwritePrompt && (
+        <Modal
+          open
+          onClose={() => setOverwritePrompt(null)}
+          title={t('files.uploadOverwriteTitle')}
+          width={440}
+          footer={
+            <>
+              <Button
+                variant="secondary"
+                size="md"
+                onClick={() => setOverwritePrompt(null)}
+              >
+                {t('common.cancel')}
+              </Button>
+              <Button
+                variant="danger"
+                size="md"
+                onClick={() => {
+                  const prompt = overwritePrompt
+                  setOverwritePrompt(null)
+                  runUpload(prompt.parentRelPath, prompt.files, true)
+                }}
+              >
+                {t('files.uploadOverwriteConfirm')}
+              </Button>
+            </>
+          }
+        >
+          <div className="flex flex-col gap-2">
+            <p className="text-sm text-[var(--color-text-secondary)]">
+              {t('files.uploadOverwriteBody', { count: overwritePrompt.files.length })}
+            </p>
+            <ul className="max-h-40 overflow-y-auto rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container)] px-3 py-2 text-xs text-[var(--color-text-tertiary)]">
+              {overwritePrompt.files.map((file) => (
+                <li key={file.name} className="truncate">
+                  {file.name}
+                </li>
+              ))}
+            </ul>
+          </div>
+        </Modal>
       )}
     </div>
   )

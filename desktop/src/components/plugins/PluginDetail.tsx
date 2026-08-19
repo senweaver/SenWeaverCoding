@@ -103,8 +103,9 @@ export function PluginDetail() {
     }
   }
 
-  const openSettingsTab = (tab: 'skills' | 'mcp') => {
-    useUIStore.getState().openSettingsOverlay(tab)
+  const openSettingsTab = (subTab: 'skills' | 'mcps') => {
+    useUIStore.getState().setPendingCustomSubTab(subTab)
+    useUIStore.getState().openSettingsOverlay('custom')
   }
 
   const handleOpenSkill = async (skillName: string) => {
@@ -156,7 +157,7 @@ export function PluginDetail() {
       })
       return
     }
-    openSettingsTab('mcp')
+    openSettingsTab('mcps')
     await fetchServers(undefined, currentWorkDir)
 
     const state = useMcpStore.getState()

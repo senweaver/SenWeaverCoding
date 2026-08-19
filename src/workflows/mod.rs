@@ -4,7 +4,7 @@
 
 pub mod executor;
 pub mod types;
-pub use executor::{WorkflowEngine, mock_step_executor};
+pub use executor::WorkflowEngine;
 pub use types::{
     ErrorMode, StartWorkflowRequest, StartWorkflowResponse, StepAgent, StepMode, StepResult,
     Workflow, WorkflowId, WorkflowRun, WorkflowRunId, WorkflowRunStatus, WorkflowStep,

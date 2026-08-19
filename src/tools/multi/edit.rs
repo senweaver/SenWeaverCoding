@@ -324,6 +324,19 @@ impl Tool for MultiEditTool {
             if !originals.contains_key(&path) {
                 let (existing, label) = match tokio::fs::read(&path).await {
                     Ok(bytes) => {
+                        const MAX_EDIT_FILE_BYTES: usize = 10 * 1024 * 1024;
+                        if bytes.len() > MAX_EDIT_FILE_BYTES {
+                            return Ok(ToolResult {
+                                success: false,
+                                output: String::new(),
+                                error: Some(format!(
+                                    "Edit {i}: refusing to edit '{}' ({} bytes exceeds the {} byte limit); split the change or edit a smaller region",
+                                    path.display(),
+                                    bytes.len(),
+                                    MAX_EDIT_FILE_BYTES
+                                )),
+                            });
+                        }
                         if crate::tools::file::encoding::is_probably_binary(&bytes) {
                             return Ok(ToolResult {
                                 success: false,
@@ -463,12 +476,21 @@ impl Tool for MultiEditTool {
             ));
             let file_encoding = encodings.get(&path).cloned().flatten();
             let op = match original {
-                Some(_) if file_encoding.is_some() => EditOp::CreateFile {
-                    path: path.clone(),
-                    contents: final_content,
-                    overwrite: true,
-                    encoding: file_encoding,
-                },
+                Some(orig) if file_encoding.is_some() => {
+                    let expected_pre_sha256 = file_encoding
+                        .as_deref()
+                        .and_then(|label| {
+                            crate::tools::file::encoding::encode_with_label(label, &orig)
+                        })
+                        .map(|b| crate::apply_model::edit_op::sha256_hex(&b));
+                    EditOp::CreateFile {
+                        path: path.clone(),
+                        contents: final_content,
+                        overwrite: true,
+                        encoding: file_encoding,
+                        expected_pre_sha256,
+                    }
+                }
                 Some(orig) => EditOp::Replace {
                     path: path.clone(),
                     byte_range: 0..orig.len(),
@@ -481,6 +503,7 @@ impl Tool for MultiEditTool {
                     contents: final_content,
                     overwrite: true,
                     encoding: None,
+                    expected_pre_sha256: None,
                 },
             };
             batch.push(op);

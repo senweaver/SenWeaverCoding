@@ -70,20 +70,7 @@ pub async fn handle_doctor(ctx: CommandContext) -> CommandResult {
         },
     }
 
-    match crate::util::hidden_sync_command("rg").arg("--version").output() {
-        Ok(out) => {
-            let ver = String::from_utf8_lossy(&out.stdout)
-                .lines()
-                .next()
-                .unwrap_or("")
-                .trim()
-                .to_string();
-            checks.push(format!("  ✓ ripgrep: {ver}"));
-        }
-        Err(_) => {
-            checks.push("  ⚠ rg: not found (recommended for fast search)".to_string());
-        }
-    }
+    checks.push("  ✓ search: built-in engine (ripgrep core)".to_string());
 
     match crate::config::Config::load_or_init().await {
         Ok(cfg) => {

@@ -8,6 +8,7 @@ import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from '../../i18n'
 import {
   AI_FRESH_WINDOW_MS,
+  flushEditorDraft,
   nameOf,
   useWorkspaceFilesStore,
 } from '../../stores/workspaceFilesStore'
@@ -85,23 +86,27 @@ export function EditorTabs() {
   } | null>(null)
   const [confirmBusy, setConfirmBusy] = useState(false)
 
-  const dirtyByPathRef = useRef(dirtyByPath)
   useEffect(() => {
-    dirtyByPathRef.current = dirtyByPath
-  }, [dirtyByPath])
+    setPendingConfirm(null)
+    setConfirmBusy(false)
+    setMenu(null)
+  }, [root])
 
   const currentConfirmTarget = pendingConfirm?.queue[0] ?? null
 
+  const pendingConfirmRef = useRef(pendingConfirm)
+  pendingConfirmRef.current = pendingConfirm
+
   const advanceConfirmQueue = useCallback(() => {
-    setPendingConfirm((prev) => {
-      if (!prev) return null
-      const [, ...rest] = prev.queue
-      if (rest.length === 0) {
-        prev.onAllResolved?.()
-        return null
-      }
-      return { queue: rest, onAllResolved: prev.onAllResolved }
-    })
+    const prev = pendingConfirmRef.current
+    if (!prev) return
+    const [, ...rest] = prev.queue
+    if (rest.length === 0) {
+      setPendingConfirm(null)
+      prev.onAllResolved?.()
+      return
+    }
+    setPendingConfirm({ queue: rest, onAllResolved: prev.onAllResolved })
   }, [])
 
   const handleConfirmCancel = useCallback(() => {
@@ -128,23 +133,31 @@ export function EditorTabs() {
     }
   }, [advanceConfirmQueue, closeTab, currentConfirmTarget, saveFile])
 
+  const isDirtyNow = useCallback((relPath: string) => {
+    const s = useWorkspaceFilesStore.getState()
+    if (!s.root) return false
+    return s.files[`${s.root}::${relPath}`]?.isDirty === true
+  }, [])
+
   const requestClose = useCallback(
     (relPath: string) => {
-      if (dirtyByPathRef.current[relPath]) {
+      flushEditorDraft()
+      if (isDirtyNow(relPath)) {
         setPendingConfirm({ queue: [relPath] })
         return
       }
       closeTab(relPath)
     },
-    [closeTab],
+    [closeTab, isDirtyNow],
   )
 
   const requestCloseMany = useCallback(
     (relPaths: string[], onAllResolved: () => void) => {
+      flushEditorDraft()
       const dirty: string[] = []
       const clean: string[] = []
       for (const rel of relPaths) {
-        if (dirtyByPathRef.current[rel]) dirty.push(rel)
+        if (isDirtyNow(rel)) dirty.push(rel)
         else clean.push(rel)
       }
       for (const rel of clean) closeTab(rel)
@@ -154,7 +167,7 @@ export function EditorTabs() {
       }
       setPendingConfirm({ queue: dirty, onAllResolved })
     },
-    [closeTab],
+    [closeTab, isDirtyNow],
   )
 
   const handleDragStart = useCallback(
@@ -325,6 +338,13 @@ export function EditorTabs() {
           className="fixed z-50 min-w-[160px] overflow-hidden rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] py-1 text-xs shadow-lg"
           style={{ left: `${menu.x}px`, top: `${menu.y}px` }}
         >
+          <MenuItem
+            label={t('files.tab.revealInTree')}
+            onClick={() => {
+              useWorkspaceFilesStore.getState().revealInTree(menu.relPath)
+              setMenu(null)
+            }}
+          />
           <MenuItem
             label={t('files.tab.close')}
             onClick={() => {

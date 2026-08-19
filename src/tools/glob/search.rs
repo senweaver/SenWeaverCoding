@@ -29,7 +29,8 @@ impl Tool for GlobSearchTool {
 
     fn description(&self) -> &str {
         "Search for files matching a glob pattern within the workspace. \
-         Returns a sorted list of matching file paths relative to the workspace root. \
+         Returns matching file paths relative to the workspace root, ordered by \
+         most-recently-modified first (ties broken alphabetically). \
          Examples: '**/*.rs' (all Rust files), 'src/**/mod.rs' (all mod.rs in src)."
     }
 
@@ -124,7 +125,7 @@ impl Tool for GlobSearchTool {
             };
             let deadline = std::time::Instant::now()
                 + std::time::Duration::from_secs(WALK_TIMEOUT_SECS);
-            let mut results = Vec::new();
+            let mut scored: Vec<(String, std::time::SystemTime)> = Vec::new();
             let mut truncated = false;
             let mut timed_out = false;
             for entry in entries {
@@ -146,18 +147,23 @@ impl Tool for GlobSearchTool {
                 if !security_arc.is_resolved_path_allowed(&resolved) {
                     continue;
                 }
-                if resolved.is_dir() {
+                let meta = std::fs::metadata(&resolved).ok();
+                if meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
                     continue;
                 }
+                let mtime = meta
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::UNIX_EPOCH);
                 if let Ok(rel) = resolved.strip_prefix(&workspace_canon) {
-                    results.push(rel.to_string_lossy().to_string());
+                    scored.push((rel.to_string_lossy().to_string(), mtime));
                 }
-                if results.len() >= MAX_RESULTS {
+                if scored.len() >= MAX_RESULTS {
                     truncated = true;
                     break;
                 }
             }
-            results.sort();
+            scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            let results = scored.into_iter().map(|(rel, _)| rel).collect::<Vec<_>>();
             WalkOutcome::Ok {
                 results,
                 truncated,

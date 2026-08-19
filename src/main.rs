@@ -219,6 +219,9 @@ Examples:
         #[arg(long)]
         mode: Option<String>,
 
+        #[arg(long, value_name = "NAME")]
+        profile: Option<String>,
+
         #[arg(long, value_name = "N")]
         max_turns: Option<u32>,
 
@@ -1216,6 +1219,8 @@ async fn async_main() -> Result<()> {
             std::env::current_dir().map(|cwd| cwd.join(project))?
         };
         crate::util::set_runtime_var("SEN_WORKSPACE", project_path.to_string_lossy().as_ref());
+
+        load_env();
     }
 
     if cli.read_only {
@@ -1262,7 +1267,7 @@ async fn async_main() -> Result<()> {
         use std::sync::Arc;
         #[cfg(feature = "observability-prometheus")]
         let observer: Arc<dyn senweavercoding::observability::Observer> =
-            Arc::new(senweavercoding::observability::PrometheusObserver::new());
+            senweavercoding::observability::prometheus::global();
         #[cfg(not(feature = "observability-prometheus"))]
         let observer: Arc<dyn senweavercoding::observability::Observer> =
             Arc::new(senweavercoding::observability::LogObserver::new());
@@ -1420,6 +1425,7 @@ async fn async_main() -> Result<()> {
         temperature: None,
         peripheral: vec![],
         mode: cli.mode.clone(),
+        profile: None,
         max_turns: None,
         output_format: None,
         session_id: None,
@@ -1445,6 +1451,7 @@ async fn async_main() -> Result<()> {
             temperature,
             peripheral,
             mode,
+            profile,
             max_turns,
             output_format,
             session_id,
@@ -1454,7 +1461,14 @@ async fn async_main() -> Result<()> {
             remote,
         } => {
 
-            senweavercoding::bootstrap::init_state(std::env::current_dir().unwrap_or_default());
+            let bootstrap_cwd = match cwd.as_ref() {
+                Some(p) if p.is_absolute() => p.clone(),
+                Some(p) => std::env::current_dir()
+                    .map(|c| c.join(p))
+                    .unwrap_or_else(|_| p.clone()),
+                None => std::env::current_dir().unwrap_or_default(),
+            };
+            senweavercoding::bootstrap::init_state(bootstrap_cwd);
 
             if let Some(ref mode_str) = mode {
                 if mode_str.eq_ignore_ascii_case("auto") {
@@ -1482,6 +1496,49 @@ async fn async_main() -> Result<()> {
                         mode_str,
                         available.join(", ")
                     );
+                }
+            }
+
+            let mut config = config;
+            let mut allowed_tools = allowed_tools;
+            if let Some(profile_name) = profile.as_deref() {
+                let manager = senweavercoding::agent::profile::profiles::ProfileManager::new(
+                    &config.workspace_dir,
+                );
+                match manager.get(profile_name) {
+                    Ok(Some(p)) => {
+                        if let Some(prov) = p.provider.clone() {
+                            config.default_provider = Some(prov);
+                        }
+                        if let Some(m) = p.model.clone() {
+                            config.default_model = Some(m);
+                        }
+                        if let Some(t) = p.temperature {
+                            config.default_temperature = t;
+                        }
+                        if let Some(iters) = p.max_tool_iterations {
+                            config.agent.max_tool_iterations = iters;
+                        }
+                        if allowed_tools.is_empty() && !p.allowed_tools.is_empty() {
+                            allowed_tools = p.allowed_tools.clone();
+                        }
+                        eprintln!(
+                            "Applied agent profile '{}' (provider={}, model={})",
+                            profile_name,
+                            config.default_provider.as_deref().unwrap_or("default"),
+                            config.default_model.as_deref().unwrap_or("default"),
+                        );
+                    }
+                    Ok(None) => {
+                        anyhow::bail!(
+                            "agent profile '{}' not found under {}",
+                            profile_name,
+                            config.workspace_dir.join("agents").display()
+                        );
+                    }
+                    Err(e) => {
+                        anyhow::bail!("failed to load agent profile '{profile_name}': {e}");
+                    }
                 }
             }
 
@@ -1532,6 +1589,7 @@ async fn async_main() -> Result<()> {
                 session_state_file
             };
 
+            let message_was_stdin = matches!(message.as_deref(), Some("-"));
             let message = match message.as_deref() {
                 Some("-") => {
                     if std::io::stdin().is_terminal() {
@@ -1569,9 +1627,45 @@ async fn async_main() -> Result<()> {
                     let log_file = std::fs::File::create(&log_path)?;
                     let log_err = log_file.try_clone()?;
 
+                    let forwarded_args: Vec<std::ffi::OsString> = if message_was_stdin {
+                        let mut rewritten: Vec<std::ffi::OsString> = Vec::new();
+                        let mut args_iter = std::env::args_os().skip(1).peekable();
+                        while let Some(arg) = args_iter.next() {
+                            let arg_str = arg.to_string_lossy();
+                            if arg_str == "-m" || arg_str == "--message" {
+                                let next_is_dash = args_iter
+                                    .peek()
+                                    .map(|next| next.to_string_lossy() == "-")
+                                    .unwrap_or(false);
+                                if next_is_dash {
+                                    args_iter.next();
+                                    if let Some(content) = message.as_deref() {
+                                        rewritten.push(arg);
+                                        rewritten.push(std::ffi::OsString::from(content));
+                                    }
+                                    continue;
+                                }
+                            } else if arg_str == "--message=-"
+                                || arg_str == "-m=-"
+                                || arg_str == "-m-"
+                            {
+                                if let Some(content) = message.as_deref() {
+                                    let mut replacement =
+                                        std::ffi::OsString::from("--message=");
+                                    replacement.push(content);
+                                    rewritten.push(replacement);
+                                }
+                                continue;
+                            }
+                            rewritten.push(arg);
+                        }
+                        rewritten
+                    } else {
+                        std::env::args_os().skip(1).collect()
+                    };
                     let exe = std::env::current_exe()?;
                     let mut cmd = senweavercoding::util::hidden_sync_command(&exe);
-                    cmd.args(std::env::args_os().skip(1))
+                    cmd.args(forwarded_args)
                         .env("SEN_BG_SESSION_ID", &session_id)
                         .stdin(std::process::Stdio::null())
                         .stdout(std::process::Stdio::from(log_file))
@@ -1643,7 +1737,11 @@ async fn async_main() -> Result<()> {
                     peripheral,
                     false,
                     Some(session_file),
-                    None,
+                    if allowed_tools.is_empty() {
+                        None
+                    } else {
+                        Some(allowed_tools)
+                    },
                     None,
                 ))
                 .await;
@@ -2380,7 +2478,7 @@ async fn async_main() -> Result<()> {
 
         Commands::Update {
             check,
-            force: _force,
+            force,
             version,
         } => {
             if check {
@@ -2395,7 +2493,7 @@ async fn async_main() -> Result<()> {
                 }
                 Ok(())
             } else {
-                commands::update::run(version.as_deref()).await
+                commands::update::run(version.as_deref(), force).await
             }
         }
 
@@ -2536,16 +2634,20 @@ async fn async_main() -> Result<()> {
                 .or_else(|| std::env::current_dir().ok())
                 .unwrap_or_else(|| PathBuf::from("."));
 
+            let mut eval_config = config.clone();
+            eval_config.workspace_dir = workdir.clone();
+            let eval_temperature = eval_config.default_temperature;
+
             let start = std::time::Instant::now();
 
             let agent_result = tokio::time::timeout(
                 std::time::Duration::from_secs(timeout),
                 Box::pin(agent::run(
-                    config.clone(),
+                    eval_config,
                     Some(instruction.clone()),
                     provider,
                     model,
-                    config.default_temperature,
+                    eval_temperature,
                     vec![],
                     false,
                     None,
@@ -4221,12 +4323,15 @@ async fn run_inline_complete_command(
     };
 
     if stream {
-
+        use std::io::Write;
         let resp = registry.request(req).await?;
+        let mut stdout = std::io::stdout();
         for s in &resp.suggestions {
-            print!("{}", s.insert_text);
+            let _ = stdout.write_all(s.insert_text.as_bytes());
+            let _ = stdout.flush();
         }
-        println!();
+        let _ = stdout.write_all(b"\n");
+        let _ = stdout.flush();
         return Ok(());
     }
 
@@ -4508,10 +4613,11 @@ async fn run_team_command(config: &Config, action: TeamAction) -> Result<()> {
             let resolved_provider_name =
                 crate::providers::resolve_runtime_provider_name(&provider_name, config);
             let model = crate::providers::resolve_default_model(config)?;
-            let provider = crate::providers::create_provider_with_url_async(
+            let provider = crate::providers::create_resilient_runtime_provider_async(
                 resolved_provider_name,
                 config.api_key.clone(),
                 config.api_url.clone(),
+                crate::providers::ProviderRuntimeOptions::default(),
             )
             .await
             .map_err(|e| {

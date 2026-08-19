@@ -442,11 +442,15 @@ impl Tool for GlobEditTool {
                     anchor: None,
                 });
             } else {
+                let expected_pre_sha256 =
+                    crate::tools::file::encoding::encode_with_label(encoding_label, &content)
+                        .map(|b| crate::apply_model::edit_op::sha256_hex(&b));
                 batch.push(EditOp::CreateFile {
                     path: resolved.clone(),
                     contents: new_content,
                     overwrite: true,
                     encoding: Some(encoding_label.to_string()),
+                    expected_pre_sha256,
                 });
             }
             planned_paths.push(resolved.clone());

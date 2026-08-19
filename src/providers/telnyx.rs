@@ -204,10 +204,7 @@ impl Provider for TelnyxProvider {
         let response = self.apply_extra_headers(http_request).send().await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error = response.text().await?;
-            let sanitized = super::sanitize_api_error(&error);
-            anyhow::bail!("Telnyx API error ({}): {}", status, sanitized);
+            return Err(super::api_error("Telnyx", response).await);
         }
 
         let chat_response: ChatResponse = response.json().await?;
@@ -264,10 +261,7 @@ impl Provider for TelnyxProvider {
         let response = self.apply_extra_headers(http_request).send().await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error = response.text().await?;
-            let sanitized = super::sanitize_api_error(&error);
-            anyhow::bail!("Telnyx API error ({}): {}", status, sanitized);
+            return Err(super::api_error("Telnyx", response).await);
         }
 
         let chat_response: ChatResponse = response.json().await?;

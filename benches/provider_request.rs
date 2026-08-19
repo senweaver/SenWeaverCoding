@@ -6,7 +6,6 @@ use criterion::{BenchmarkId, Criterion, criterion_group, criterion_main};
 use std::hint::black_box;
 
 use senweavercoding::providers::core::idempotency::fingerprint_json;
-use senweavercoding::providers::core::rate_limit::TokenBucket;
 use senweavercoding::providers::core::sse::SseParser;
 
 fn synthetic_messages(n: usize) -> serde_json::Value {
@@ -71,25 +70,5 @@ fn bench_sse_parse(c: &mut Criterion) {
     group.finish();
 }
 
-fn bench_rate_limit(c: &mut Criterion) {
-    c.bench_function("provider_token_bucket_1k_acquires", |b| {
-        b.iter(|| {
-            let mut tb = TokenBucket::new(1000.0, 10_000.0);
-            let mut granted = 0usize;
-            for _ in 0..1000 {
-                if tb.try_acquire(black_box(1.0)) {
-                    granted += 1;
-                }
-            }
-            black_box(granted);
-        });
-    });
-}
-
-criterion_group!(
-    benches,
-    bench_fingerprint,
-    bench_sse_parse,
-    bench_rate_limit
-);
+criterion_group!(benches, bench_fingerprint, bench_sse_parse);
 criterion_main!(benches);

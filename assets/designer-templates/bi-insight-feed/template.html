@@ -24,6 +24,16 @@
   --series-4: #0086C9;
   --font-body: Inter, 'PingFang SC', 'Microsoft YaHei', 'Segoe UI', system-ui, sans-serif;
 }
+html[data-od-mode="dark"] {
+  --bg: #101114;
+  --surface: #17181d;
+  --fg: #e4e4e7;
+  --muted: #9a9ba2;
+  --hairline: #2c2d34;
+  --soft: #1e2027;
+  --up: #4cb586;
+  --down: #e8674a;
+}
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 body {
   background: var(--bg);
@@ -42,8 +52,8 @@ body {
   gap: calc(20px * var(--od-density));
 }
 .page-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; }
-.page-head h1 { font-size: 18px; font-weight: 700; }
-.page-head .meta { font-size: 12px; color: var(--muted); }
+.page-head h1 { font-size: calc(18px * var(--od-scale)); font-weight: 700; }
+.page-head .meta { font-size: calc(12px * var(--od-scale)); color: var(--muted); }
 .card {
   background: var(--surface);
   border-radius: 4px;
@@ -52,7 +62,7 @@ body {
 }
 .answer-card { padding: calc(20px * var(--od-density)) calc(24px * var(--od-density)); }
 .answer-card .question {
-  font-size: 15px;
+  font-size: calc(15px * var(--od-scale));
   font-weight: 700;
   display: flex;
   align-items: center;
@@ -61,7 +71,7 @@ body {
 .answer-card .question::before {
   content: 'AI';
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: calc(10px * var(--od-scale));
   font-weight: 700;
   letter-spacing: 0.08em;
   color: #fff;
@@ -71,7 +81,7 @@ body {
 }
 .answer-card .summary {
   margin-top: 12px;
-  font-size: 14px;
+  font-size: calc(14px * var(--od-scale));
   line-height: 1.7;
   color: var(--fg);
 }
@@ -85,7 +95,7 @@ thead th {
   background: var(--soft);
   text-align: right;
   font-weight: 600;
-  font-size: 11px;
+  font-size: calc(11px * var(--od-scale));
   letter-spacing: 0.04em;
   text-transform: uppercase;
   color: var(--muted);
@@ -99,7 +109,7 @@ tbody td {
   line-height: 24px;
 }
 .preview-caption {
-  font-size: 11px;
+  font-size: calc(11px * var(--od-scale));
   color: var(--muted);
   padding: 8px 12px;
   border-top: 1px solid var(--soft);
@@ -107,20 +117,20 @@ tbody td {
   justify-content: space-between;
 }
 .chips { display: flex; flex-wrap: wrap; gap: 10px; }
-.chips .chips-label { font-size: 12px; color: var(--muted); align-self: center; }
+.chips .chips-label { font-size: calc(12px * var(--od-scale)); color: var(--muted); align-self: center; }
 .chip {
   border: 1px solid color-mix(in srgb, var(--od-accent) 35%, transparent);
   color: var(--od-accent);
   background: var(--surface);
   border-radius: 999px;
   padding: 6px 14px;
-  font-size: 12px;
+  font-size: calc(12px * var(--od-scale));
   cursor: pointer;
   white-space: nowrap;
 }
 .chip:hover { background: color-mix(in srgb, var(--od-accent) 8%, var(--surface)); }
 .section-title {
-  font-size: 13px;
+  font-size: calc(13px * var(--od-scale));
   font-weight: 700;
   letter-spacing: 0.04em;
   color: var(--muted);
@@ -135,11 +145,11 @@ tbody td {
 .pin-card.wide { grid-column: span 6; }
 .pin-card:hover { outline: 1px solid var(--od-accent); }
 .pin-head { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; margin-bottom: 10px; }
-.pin-title { font-size: 14px; font-weight: 700; }
-.pin-meta { font-size: 12px; color: var(--muted); white-space: nowrap; }
+.pin-title { font-size: calc(14px * var(--od-scale)); font-weight: 700; }
+.pin-meta { font-size: calc(12px * var(--od-scale)); color: var(--muted); white-space: nowrap; }
 .pin-card svg { width: 100%; height: auto; display: block; }
 .legend { display: flex; gap: 12px; flex-wrap: wrap; margin-top: 8px; }
-.legend .item { display: inline-flex; align-items: center; gap: 6px; font-size: 11px; color: var(--muted); background: var(--soft); border-radius: 999px; padding: 2px 10px; }
+.legend .item { display: inline-flex; align-items: center; gap: 6px; font-size: calc(11px * var(--od-scale)); color: var(--muted); background: var(--soft); border-radius: 999px; padding: 2px 10px; }
 .legend .swatch { width: 8px; height: 8px; border-radius: 50%; }
 .tip {
   position: absolute;
@@ -147,7 +157,7 @@ tbody td {
   color: #fff;
   border: 1px solid #434343;
   border-radius: 4px;
-  font-size: 11px;
+  font-size: calc(11px * var(--od-scale));
   padding: 6px 10px;
   pointer-events: none;
 }

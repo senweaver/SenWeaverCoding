@@ -134,6 +134,8 @@ impl SqliteMemory {
         Self::init_schema(&conn)?;
         let read_pool = Self::open_read_pool(&db_path, READ_POOL_SIZE);
 
+        Self::check_embedder_fingerprint(&conn, &db_path, embedder.as_ref());
+
         Ok(Self {
             conn: Arc::new(Mutex::new(conn)),
             read_pool,
@@ -146,6 +148,65 @@ impl SqliteMemory {
             search_mode,
             vec_index: Arc::new(RwLock::new(VecIndexCache::empty())),
         })
+    }
+
+    fn embedder_fingerprint_path(db_path: &Path) -> PathBuf {
+        db_path.with_file_name("embedder.fingerprint")
+    }
+
+    fn check_embedder_fingerprint(
+        conn: &Connection,
+        db_path: &Path,
+        embedder: &dyn EmbeddingProvider,
+    ) {
+        if embedder.dimensions() == 0 {
+            return;
+        }
+        let marker = Self::embedder_fingerprint_path(db_path);
+        let current = embedder.fingerprint();
+        match std::fs::read_to_string(&marker) {
+            Ok(stored) => {
+                let stored = stored.trim();
+                if !stored.is_empty() && stored != current {
+                    tracing::warn!(
+                        target: "memory.sqlite",
+                        stored = %stored,
+                        current = %current,
+                        "embedding model fingerprint changed since memories were embedded; \
+                         stored vectors are stale and similarity scores may be wrong. \
+                         Run `sen memory reembed --yes` to migrate them."
+                    );
+                }
+            }
+            Err(_) => {
+                let has_embedded_rows = conn
+                    .query_row(
+                        "SELECT EXISTS(SELECT 1 FROM memories WHERE embedding IS NOT NULL)",
+                        [],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .unwrap_or(0)
+                    == 1;
+                if has_embedded_rows {
+                    tracing::info!(
+                        target: "memory.sqlite",
+                        current = %current,
+                        "existing embedded memories predate fingerprint tracking; cannot verify \
+                         they match the current embedding model. If the embedding model changed \
+                         recently, run `sen memory reembed --yes`."
+                    );
+                }
+                let _ = std::fs::write(&marker, &current);
+            }
+        }
+    }
+
+    fn write_embedder_fingerprint(&self) {
+        if self.embedder.dimensions() == 0 {
+            return;
+        }
+        let marker = Self::embedder_fingerprint_path(&self.db_path);
+        let _ = std::fs::write(&marker, self.embedder.fingerprint());
     }
 
     fn ensure_vec_index_fresh(
@@ -860,6 +921,60 @@ impl SqliteMemory {
         Ok(Some(embedding))
     }
 
+    pub async fn reembed_all_rows(&self) -> anyhow::Result<usize> {
+        if self.embedder.dimensions() == 0 {
+            anyhow::bail!(
+                "no usable embedding backend configured (embedder dimensions = 0); \
+                 configure an embeddings provider before running reembed"
+            );
+        }
+        {
+            let conn = self.conn.lock();
+            let _ = conn.execute("DELETE FROM embedding_cache", []);
+        }
+        let rows: Vec<(String, String)> = {
+            let scan_conn = self.read_conn();
+            let conn = scan_conn.lock();
+            let mut stmt =
+                conn.prepare("SELECT id, content FROM memories WHERE superseded_by IS NULL")?;
+            let mapped = stmt.query_map([], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })?;
+            let mut out = Vec::new();
+            for r in mapped {
+                out.push(r?);
+            }
+            out
+        };
+        let mut updated = 0usize;
+        for (id, content) in rows {
+            let embedding = match self.get_or_compute_embedding(&content).await {
+                Ok(Some(emb)) => emb,
+                Ok(None) => continue,
+                Err(e) => {
+                    tracing::warn!(id = %id, error = %e, "reembed: embedding failed for row; skipping");
+                    continue;
+                }
+            };
+            let norm = f64::from(Self::embedding_norm(&embedding));
+            let blob = vector::vec_to_bytes(&embedding);
+            let now = chrono::Utc::now().to_rfc3339();
+            let conn = self.conn.clone();
+            tokio::task::spawn_blocking(move || -> anyhow::Result<()> {
+                let conn = conn.lock();
+                conn.execute(
+                    "UPDATE memories SET embedding = ?1, embedding_norm = ?2, updated_at = ?3 WHERE id = ?4",
+                    rusqlite::params![blob, norm, now, id],
+                )?;
+                Ok(())
+            })
+            .await??;
+            updated += 1;
+        }
+        self.write_embedder_fingerprint();
+        Ok(updated)
+    }
+
     pub fn fts5_search(
         conn: &Connection,
         query: &str,
@@ -1218,7 +1333,6 @@ impl SqliteMemory {
             }
         };
 
-        let conn = self.conn.clone();
         let scan_conn = self.read_conn();
         let vec_index = self.vec_index.clone();
         let query = query.to_string();
@@ -1237,7 +1351,7 @@ impl SqliteMemory {
                     tracing::warn!("vector index refresh failed: {e}");
                 }
             }
-            let conn = conn.lock();
+            let conn = scan_conn.lock();
             let session_ref = sid.as_deref();
             let ns_ref = ns.as_deref();
             let since_ref = since_owned.as_deref();
@@ -1512,6 +1626,10 @@ impl SqliteMemory {
 impl Memory for SqliteMemory {
     fn name(&self) -> &str {
         "sqlite"
+    }
+
+    async fn reembed_all(&self) -> anyhow::Result<usize> {
+        self.reembed_all_rows().await
     }
 
     async fn store(

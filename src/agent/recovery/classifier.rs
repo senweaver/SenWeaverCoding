@@ -24,18 +24,18 @@ pub fn classify_str(msg: &str) -> ErrorClass {
 }
 
 fn classify_message(m: &str) -> ErrorClass {
+    let status = crate::error::extract_http_status_code(m);
 
-    if m.contains("429")
-        || m.contains("rate limit")
-        || m.contains("rate_limit")
-        || m.contains("too many requests")
-        || m.contains("quota exceeded")
+    if status == Some(429)
+        || m.contains("rate_limit_error")
+        || m.contains("rate_limit_exceeded")
+        || m.contains("too_many_requests")
     {
         return ErrorClass::RateLimited;
     }
 
-    if m.contains("401")
-        || m.contains("403")
+    if status == Some(401)
+        || status == Some(403)
         || m.contains("unauthorized")
         || m.contains("forbidden")
         || m.contains("invalid api key")
@@ -51,9 +51,7 @@ fn classify_message(m: &str) -> ErrorClass {
         || m.contains("connection refused")
         || m.contains("broken pipe")
         || m.contains("temporarily unavailable")
-        || m.contains("503")
-        || m.contains("502")
-        || m.contains("504")
+        || matches!(status, Some(502) | Some(503) | Some(504))
         || m.contains("gateway")
     {
         return ErrorClass::Transient;

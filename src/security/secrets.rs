@@ -314,6 +314,11 @@ const DPAPI_ENTROPY: &[u8] = b"senweavercoding-master-key-v1";
 
 #[cfg(windows)]
 fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
+    dpapi_protect_with_entropy(data, DPAPI_ENTROPY)
+}
+
+#[cfg(windows)]
+pub(crate) fn dpapi_protect_with_entropy(data: &[u8], entropy_bytes: &[u8]) -> Result<Vec<u8>> {
     use windows_sys::Win32::Security::Cryptography::{
         CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData,
     };
@@ -323,8 +328,8 @@ fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
             pbData: data.as_ptr() as *mut u8,
         };
         let entropy = CRYPT_INTEGER_BLOB {
-            cbData: DPAPI_ENTROPY.len() as u32,
-            pbData: DPAPI_ENTROPY.as_ptr() as *mut u8,
+            cbData: entropy_bytes.len() as u32,
+            pbData: entropy_bytes.as_ptr() as *mut u8,
         };
         let mut output = CRYPT_INTEGER_BLOB {
             cbData: 0,
@@ -350,6 +355,11 @@ fn dpapi_protect(data: &[u8]) -> Result<Vec<u8>> {
 
 #[cfg(windows)]
 fn dpapi_unprotect(blob: &[u8]) -> Result<Vec<u8>> {
+    dpapi_unprotect_with_entropy(blob, DPAPI_ENTROPY)
+}
+
+#[cfg(windows)]
+pub(crate) fn dpapi_unprotect_with_entropy(blob: &[u8], entropy_bytes: &[u8]) -> Result<Vec<u8>> {
     use windows_sys::Win32::Security::Cryptography::{
         CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptUnprotectData,
     };
@@ -359,8 +369,8 @@ fn dpapi_unprotect(blob: &[u8]) -> Result<Vec<u8>> {
             pbData: blob.as_ptr() as *mut u8,
         };
         let entropy = CRYPT_INTEGER_BLOB {
-            cbData: DPAPI_ENTROPY.len() as u32,
-            pbData: DPAPI_ENTROPY.as_ptr() as *mut u8,
+            cbData: entropy_bytes.len() as u32,
+            pbData: entropy_bytes.as_ptr() as *mut u8,
         };
         let mut output = CRYPT_INTEGER_BLOB {
             cbData: 0,

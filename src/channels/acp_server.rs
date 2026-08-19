@@ -364,6 +364,7 @@ impl AcpServer {
                         "args": args,
                     }),
                 },
+                TurnEvent::ToolArgsDelta { .. } => continue,
                 TurnEvent::ToolResult {
                     name,
                     output,

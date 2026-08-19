@@ -9,6 +9,7 @@ import {
   type WorkspaceWatchEvent,
 } from '../api/workspaceFiles'
 import type { FileTreeNode } from '../types/workspaceFile'
+import { useFileHistoryStore } from './fileHistoryStore'
 import { useGitStatusStore } from './gitStatusStore'
 import { useLspStore } from './lspStore'
 import { usePythonEnvStore } from './pythonEnvStore'
@@ -91,6 +92,7 @@ export type FileBuffer = {
   draft: string
   isDirty: boolean
   isBinary: boolean
+  lossy?: boolean
   encoding: 'utf8' | 'base64'
   sizeBytes: number
   modifiedAt?: string
@@ -164,10 +166,30 @@ export type TabViewState = {
   } | null
 }
 
-export type ClipboardEntry = {
+export type ClipboardItem = {
   relPath: string
   isDir: boolean
+}
+
+export type ClipboardEntry = {
+  entries: ClipboardItem[]
   mode: 'copy' | 'cut'
+}
+
+function dedupeClipboardItems(items: ClipboardItem[]): ClipboardItem[] {
+  const sorted = [...items]
+    .filter((item) => item.relPath !== '')
+    .sort((a, b) => a.relPath.length - b.relPath.length)
+  const out: ClipboardItem[] = []
+  for (const item of sorted) {
+    const covered = out.some(
+      (kept) => kept.isDir && item.relPath.startsWith(`${kept.relPath}/`),
+    )
+    if (!covered && !out.some((kept) => kept.relPath === item.relPath)) {
+      out.push(item)
+    }
+  }
+  return out
 }
 
 export type CopyJob = {
@@ -186,6 +208,16 @@ export type WorkspaceFilesState = {
   rootLoading: boolean
   rootError?: string
   truncated: boolean
+
+  showHidden: boolean
+
+  setShowHidden: (show: boolean) => void
+
+  pendingReveal: { relPath: string; ticket: number } | null
+
+  revealInTree: (relPath: string) => void
+
+  consumeReveal: () => void
 
   dirs: Record<Key, DirState>
 
@@ -220,9 +252,11 @@ export type WorkspaceFilesState = {
   setTabViewState: (relPath: string, state: TabViewState) => void
 
   setRoot: (root: string | null) => void
+  suspendWatcher: () => void
+  resumeWatcher: () => void
   refreshRoot: () => Promise<void>
   refreshAll: () => Promise<void>
-  loadDirectory: (relPath: string, opts?: { force?: boolean }) => Promise<void>
+  loadDirectory: (relPath: string, opts?: { force?: boolean; silent?: boolean }) => Promise<void>
   retryDirectory: (relPath: string) => Promise<void>
   ensureDirectoryLoaded: (relPath: string) => void
   setExpanded: (relPath: string, expanded: boolean) => void
@@ -266,17 +300,23 @@ export type WorkspaceFilesState = {
   createDir: (parentRelPath: string, name: string) => Promise<void>
   rename: (relPath: string, nextRelPath: string) => Promise<void>
   remove: (relPath: string, isDir: boolean) => Promise<void>
-  uploadFiles: (parentRelPath: string, files: File[]) => Promise<number>
+  uploadFiles: (
+    parentRelPath: string,
+    files: File[],
+    opts?: { overwrite?: boolean },
+  ) => Promise<{ uploaded: number; conflicts: File[] }>
 
   clipboard: ClipboardEntry | null
   copyJob: CopyJob | null
-  copyToClipboard: (relPath: string, isDir: boolean) => void
-  cutToClipboard: (relPath: string, isDir: boolean) => void
+  copyToClipboard: (items: ClipboardItem[]) => void
+  cutToClipboard: (items: ClipboardItem[]) => void
   pasteInto: (targetDir: string) => Promise<void>
   cancelCopy: () => void
 }
 
 let watcherDispose: (() => void) | null = null
+
+let cutInProgress = false
 
 let copyAbortController: AbortController | null = null
 
@@ -330,6 +370,17 @@ const dirLoadEpoch: Record<string, number> = {}
 
 const PERSIST_VERSION = 1
 const PERSIST_DEBOUNCE_MS = 500
+
+const SHOW_HIDDEN_STORAGE_KEY = 'sen-workspace-tree-show-hidden'
+
+function loadShowHidden(): boolean {
+  if (typeof window === 'undefined' || !window.localStorage) return false
+  try {
+    return window.localStorage.getItem(SHOW_HIDDEN_STORAGE_KEY) === 'true'
+  } catch {
+    return false
+  }
+}
 
 const persistTimers: Record<string, ReturnType<typeof setTimeout>> = {}
 
@@ -411,6 +462,125 @@ function schedulePersistExpanded(
   }, PERSIST_DEBOUNCE_MS)
 }
 
+type PersistedTabs = {
+  version: number
+  openTabs: string[]
+  activeTab: string | null
+  tabViewStates: Record<string, TabViewState>
+}
+
+function tabsPersistKeyForRoot(root: string): string {
+  let encoded: string
+  try {
+    encoded = window.btoa(unescape(encodeURIComponent(root)))
+  } catch {
+    encoded = root
+  }
+  const safe = encoded.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')
+  return `sen-workspace-tabs:${safe}`
+}
+
+function loadTabsFromLocalStorage(root: string): PersistedTabs | null {
+  if (typeof window === 'undefined' || !window.localStorage) return null
+  try {
+    const raw = window.localStorage.getItem(tabsPersistKeyForRoot(root))
+    if (!raw) return null
+    const parsed = JSON.parse(raw) as PersistedTabs
+    if (!parsed || parsed.version !== PERSIST_VERSION) return null
+    if (!Array.isArray(parsed.openTabs)) return null
+    const openTabs = parsed.openTabs.filter(
+      (t): t is string => typeof t === 'string' && t.length > 0,
+    )
+    const activeTab =
+      typeof parsed.activeTab === 'string' && openTabs.includes(parsed.activeTab)
+        ? parsed.activeTab
+        : null
+    const tabViewStates =
+      parsed.tabViewStates && typeof parsed.tabViewStates === 'object'
+        ? parsed.tabViewStates
+        : {}
+    return { version: PERSIST_VERSION, openTabs, activeTab, tabViewStates }
+  } catch {
+    return null
+  }
+}
+
+function persistTabsToLocalStorage(
+  root: string,
+  openTabs: string[],
+  activeTab: string | null,
+  tabViewStates: Record<string, TabViewState>,
+) {
+  if (typeof window === 'undefined' || !window.localStorage) return
+  const scopedViewStates: Record<string, TabViewState> = {}
+  for (const tab of openTabs) {
+    const view = tabViewStates[tab]
+    if (view) scopedViewStates[tab] = view
+  }
+  const payload: PersistedTabs = {
+    version: PERSIST_VERSION,
+    openTabs,
+    activeTab,
+    tabViewStates: scopedViewStates,
+  }
+  try {
+    window.localStorage.setItem(
+      tabsPersistKeyForRoot(root),
+      JSON.stringify(payload),
+    )
+  } catch {
+
+  }
+}
+
+let tabsPersistTimer: ReturnType<typeof setTimeout> | null = null
+
+function scheduleTabsPersist(root: string) {
+  if (tabsPersistTimer) clearTimeout(tabsPersistTimer)
+  tabsPersistTimer = setTimeout(() => {
+    tabsPersistTimer = null
+    const s = useWorkspaceFilesStore.getState()
+    if (s.root !== root) return
+    persistTabsToLocalStorage(root, s.openTabs, s.activeTab, s.tabViewStates)
+  }, PERSIST_DEBOUNCE_MS)
+}
+
+function flushTabsPersist(root: string, state: WorkspaceFilesState) {
+  if (tabsPersistTimer) {
+    clearTimeout(tabsPersistTimer)
+    tabsPersistTimer = null
+  }
+  persistTabsToLocalStorage(root, state.openTabs, state.activeTab, state.tabViewStates)
+}
+
+function startWatcherForRoot(
+  get: () => WorkspaceFilesState,
+  root: string,
+): () => void {
+  return workspaceFilesApi.watch(
+    root,
+    (event) => {
+
+      if (get().root === root) {
+        get().handleWatchEvent(event)
+        useGitStatusStore.getState().scheduleRefresh(root)
+        useFileHistoryStore.getState().scheduleRefresh(root)
+      }
+    },
+    () => {
+
+    },
+    () => {
+
+      if (get().root === root) {
+        void get().refreshAll()
+        useGitStatusStore.getState().scheduleRefresh(root)
+        useFileHistoryStore.getState().scheduleRefresh(root)
+      }
+    },
+  )
+}
+
 export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => ({
   root: null,
   rootEntries: [],
@@ -418,6 +588,8 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
   rootLoading: false,
   rootError: undefined,
   truncated: false,
+  showHidden: loadShowHidden(),
+  pendingReveal: null,
   dirs: {},
   files: {},
   openTabs: [],
@@ -461,10 +633,40 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     set({ pendingNavigation: null })
   },
 
+  setShowHidden: (show: boolean) => {
+    if (get().showHidden === show) return
+    set({ showHidden: show })
+    try {
+      window.localStorage.setItem(SHOW_HIDDEN_STORAGE_KEY, show ? 'true' : 'false')
+    } catch {
+    }
+    void get().refreshAll()
+  },
+
+  revealInTree: (relPath: string) => {
+    const root = get().root
+    if (!root || !relPath) return
+    const parents: string[] = []
+    let parent = parentOf(relPath)
+    while (parent) {
+      parents.unshift(parent)
+      parent = parentOf(parent)
+    }
+    for (const dir of parents) {
+      get().setExpanded(dir, true)
+    }
+    set({ pendingReveal: { relPath, ticket: Date.now() + Math.random() } })
+  },
+
+  consumeReveal: () => {
+    set({ pendingReveal: null })
+  },
+
   setRoot: (root) => {
     const current = get().root
     if (current === root) return
     if (current) {
+      flushTabsPersist(current, get())
       const oldPrefix = `${current}::`
       for (const key of Object.keys(dirLoadEpoch)) {
         if (key.startsWith(oldPrefix)) delete dirLoadEpoch[key]
@@ -494,6 +696,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     }
     scheduleModelDispose(Object.values(get().monacoModels))
     const restoredDirs = root ? loadExpandedFromLocalStorage(root) : {}
+    const restoredTabs = root ? loadTabsFromLocalStorage(root) : null
     set({
       root,
       rootEntries: [],
@@ -503,7 +706,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       truncated: false,
       dirs: restoredDirs,
       files: {},
-      openTabs: [],
+      openTabs: restoredTabs?.openTabs ?? [],
       activeTab: null,
       selectedRelPath: null,
       aiPendingWrites: {},
@@ -513,13 +716,15 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       lastSeenContent: {},
       monacoModels: {},
       pendingNavigation: null,
-      tabViewStates: {},
+      pendingReveal: null,
+      tabViewStates: restoredTabs?.tabViewStates ?? {},
       clipboard: null,
       copyJob: null,
     })
     if (root) {
       void get().refreshRoot()
       void useGitStatusStore.getState().fetchStatus(root, { forceRefresh: true })
+      void useFileHistoryStore.getState().fetchFiles(root)
       const py = usePythonEnvStore.getState()
       py.setActiveRoot(root)
       void py.refresh(root).catch((err) => {
@@ -537,27 +742,28 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       for (const rel of restoredRels) {
         void get().loadDirectory(rel)
       }
-      watcherDispose = workspaceFilesApi.watch(
-        root,
-        (event) => {
-
-          if (get().root === root) {
-            get().handleWatchEvent(event)
-            useGitStatusStore.getState().scheduleRefresh(root)
-          }
-        },
-        () => {
-
-        },
-        () => {
-
-          if (get().root === root) {
-            void get().refreshAll()
-            useGitStatusStore.getState().scheduleRefresh(root)
-          }
-        },
-      )
+      const restoredActive = restoredTabs?.activeTab
+      if (restoredActive && (restoredTabs?.openTabs ?? []).includes(restoredActive)) {
+        void get().selectFile(restoredActive).catch(() => {})
+      }
+      watcherDispose = startWatcherForRoot(get, root)
     }
+  },
+
+  suspendWatcher: () => {
+    if (watcherDispose) {
+      watcherDispose()
+      watcherDispose = null
+    }
+  },
+
+  resumeWatcher: () => {
+    const root = get().root
+    if (!root || watcherDispose) return
+    watcherDispose = startWatcherForRoot(get, root)
+    void get().refreshAll()
+    useGitStatusStore.getState().scheduleRefresh(root)
+    useFileHistoryStore.getState().scheduleRefresh(root)
   },
 
   refreshRoot: async () => {
@@ -565,7 +771,11 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     if (!root) return
     set({ rootLoading: true, rootError: undefined })
     try {
-      const tree = await workspaceFilesApi.tree({ root, depth: 1 })
+      const tree = await workspaceFilesApi.tree({
+        root,
+        depth: 1,
+        showHidden: get().showHidden,
+      })
       if (get().root !== root) return
       set({
         rootEntries: tree.entries,
@@ -622,23 +832,28 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     if (!opts?.force && (existing.loaded || existing.loading)) return
     const epoch = (dirLoadEpoch[key] ?? 0) + 1
     dirLoadEpoch[key] = epoch
-    set((s) => ({
-      dirs: {
-        ...s.dirs,
-        [key]: {
-          ...(s.dirs[key] ?? emptyDir),
-          loading: true,
-          expanded: true,
-          error: undefined,
-          ...(opts?.force ? { loaded: false } : {}),
+    const silent = opts?.silent === true
+    set((s) => {
+      const current = s.dirs[key] ?? emptyDir
+      return {
+        dirs: {
+          ...s.dirs,
+          [key]: {
+            ...current,
+            loading: true,
+            expanded: silent ? current.expanded : true,
+            error: undefined,
+            ...(opts?.force ? { loaded: false } : {}),
+          },
         },
-      },
-    }))
+      }
+    })
     try {
       const tree = await workspaceFilesApi.tree({
         root,
         path: relPath,
         depth: 1,
+        showHidden: get().showHidden,
       })
       if (get().root !== root) return
       if (dirLoadEpoch[key] !== epoch) return
@@ -654,7 +869,9 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
             error: undefined,
           },
         }
-        schedulePersistExpanded(root, nextDirs)
+        if (!silent) {
+          schedulePersistExpanded(root, nextDirs)
+        }
         return { dirs: nextDirs }
       })
     } catch (err) {
@@ -770,12 +987,23 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       externalChanged: stripKey(s.externalChanged, relPath),
     }))
     const existing = get().files[key]
-    if (existing && existing.original === existing.draft && !existing.isDirty) {
+    if (
+      existing &&
+      existing.original === existing.draft &&
+      !existing.isDirty &&
+      !existing.missing &&
+      !existing.error
+    ) {
 
       get().snapshotLastSeen(relPath, existing.original)
       return
     }
     if (existing?.loading) return
+    if (existing?.isDirty) {
+
+      get().snapshotLastSeen(relPath, existing.original)
+      return
+    }
     set((s) => ({
       files: {
         ...s.files,
@@ -788,6 +1016,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     }))
     try {
       const file = await workspaceFilesApi.readFile({ root, path: relPath })
+      if (get().root !== root) return
       set((s) => {
         const prev = s.files[key]
         const draft = prev?.isDirty ? prev.draft : file.content
@@ -799,6 +1028,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
               draft,
               isDirty: prev?.isDirty ?? false,
               isBinary: file.isBinary,
+              lossy: file.lossy,
               encoding: file.encoding,
               sizeBytes: file.sizeBytes,
               modifiedAt: file.modifiedAt,
@@ -807,6 +1037,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
               saving: false,
               error: undefined,
               saveError: undefined,
+              missing: false,
             },
           },
 
@@ -814,6 +1045,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         }
       })
     } catch (err) {
+      if (get().root !== root) return
       set((s) => ({
         files: {
           ...s.files,
@@ -966,7 +1198,12 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
           aiModifiedAt: { ...s.aiModifiedAt, [relPath]: now },
         }
       }
-      return { aiPendingWrites: { ...s.aiPendingWrites, [relPath]: now } }
+      return {
+        aiPendingWrites: {
+          ...prunePendingMap(s.aiPendingWrites, now, AI_PENDING_WINDOW_MS * 4),
+          [relPath]: now,
+        },
+      }
     })
   },
 
@@ -978,14 +1215,24 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
 
   registerSelfWrite: (relPath: string) => {
     if (!relPath) return
+    const now = Date.now()
     set((s) => ({
-      selfPendingWrites: { ...s.selfPendingWrites, [relPath]: Date.now() },
+      selfPendingWrites: {
+        ...prunePendingMap(s.selfPendingWrites, now, SELF_PENDING_WINDOW_MS * 4),
+        [relPath]: now,
+      },
     }))
   },
 
   handleWatchEvent: (event: WorkspaceWatchEvent) => {
     const root = get().root
     if (!root) return
+    if (event.kind === 'resync') {
+      void get().refreshAll()
+      useGitStatusStore.getState().scheduleRefresh(root)
+      useFileHistoryStore.getState().scheduleRefresh(root)
+      return
+    }
     const relPath = event.relPath
     if (!relPath) return
     const now = Date.now()
@@ -1035,6 +1282,28 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       }
     })
 
+    if (event.kind === 'removed') {
+      const removedKey = key
+      const removedKeyPrefix = `${removedKey}/`
+      set((s) => {
+        let hasDirEntry = false
+        for (const dk of Object.keys(s.dirs)) {
+          if (dk === removedKey || dk.startsWith(removedKeyPrefix)) {
+            hasDirEntry = true
+            break
+          }
+        }
+        if (!hasDirEntry) return {}
+        const dirs: Record<Key, DirState> = {}
+        for (const [dk, dv] of Object.entries(s.dirs)) {
+          if (dk === removedKey || dk.startsWith(removedKeyPrefix)) continue
+          dirs[dk] = dv
+        }
+        schedulePersistExpanded(root, dirs)
+        return { dirs }
+      })
+    }
+
     if (event.kind === 'created' || event.kind === 'removed' || event.kind === 'renamed') {
       const parent = parentOf(relPath)
       const parentKey = k(root, parent)
@@ -1047,7 +1316,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
 
     if (isOpen && !isSelf) {
       if (event.kind === 'removed') {
-        if (buf && buf.isDirty) {
+        if (buf) {
           set((s) => ({
             externalChanged: { ...s.externalChanged, [relPath]: Date.now() },
             files: {
@@ -1058,9 +1327,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
               },
             },
           }))
-          return
         }
-        void get().closeTab(relPath)
         return
       }
       if (buf && !buf.isDirty) {
@@ -1070,6 +1337,17 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
             set((s) => ({
               aiModifiedAt: { ...s.aiModifiedAt, [relPath]: Date.now() },
             }))
+          }
+        })
+      } else if (buf?.missing && (event.kind === 'created' || event.kind === 'modified')) {
+        set((s) => {
+          const current = s.files[key]
+          if (!current) return {}
+          return {
+            files: {
+              ...s.files,
+              [key]: { ...current, missing: false },
+            },
           }
         })
       } else if (isAi) {
@@ -1134,7 +1412,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     if (!root) return
     const key = k(root, relPath)
     const buf = get().files[key]
-    if (!buf || buf.isBinary) return
+    if (!buf || buf.isBinary || buf.lossy) return
 
     get().registerSelfWrite(relPath)
     set((s) => ({
@@ -1148,9 +1426,10 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         root,
         path: relPath,
         content: buf.draft,
-        ifMatchMtime: buf.modifiedAt,
+        ifMatchMtime: buf.missing ? undefined : buf.modifiedAt,
         encoding: 'utf8',
       })
+      if (get().root !== root) return
 
       get().registerSelfWrite(relPath)
       set((s) => ({
@@ -1163,10 +1442,12 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
             saving: false,
             modifiedAt: res.modifiedAt ?? buf.modifiedAt,
             sizeBytes: res.sizeBytes ?? buf.sizeBytes,
+            missing: false,
           },
         },
 
         aiModifiedAt: stripKey(s.aiModifiedAt, relPath),
+        externalChanged: stripKey(s.externalChanged, relPath),
 
         lastSeenContent: { ...s.lastSeenContent, [relPath]: buf.draft },
       }))
@@ -1176,7 +1457,13 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       const parentDir = get().dirs[parentKey]
       if (parentDir?.loaded) {
         try {
-          const tree = await workspaceFilesApi.tree({ root, path: parent, depth: 1 })
+          const tree = await workspaceFilesApi.tree({
+            root,
+            path: parent,
+            depth: 1,
+            showHidden: get().showHidden,
+          })
+          if (get().root !== root) return
           set((s) => ({
             dirs: {
               ...s.dirs,
@@ -1195,16 +1482,18 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         await get().refreshRoot()
       }
     } catch (err) {
-      set((s) => ({
-        files: {
-          ...s.files,
-          [key]: {
-            ...(s.files[key] ?? buf),
-            saving: false,
-            saveError: err instanceof Error ? err.message : String(err),
+      if (get().root === root) {
+        set((s) => ({
+          files: {
+            ...s.files,
+            [key]: {
+              ...(s.files[key] ?? buf),
+              saving: false,
+              saveError: err instanceof Error ? err.message : String(err),
+            },
           },
-        },
-      }))
+        }))
+      }
       throw err
     }
   },
@@ -1219,11 +1508,55 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       return {
         files: {
           ...s.files,
-          [key]: { ...buf, isDirty: false, draft: buf.original },
+          [key]: { ...buf, loading: true, error: undefined },
         },
       }
     })
-    await get().selectFile(relPath)
+    try {
+      const file = await workspaceFilesApi.readFile({ root, path: relPath })
+      if (get().root !== root) return
+      set((s) => {
+        const buf = s.files[key]
+        if (!buf) return {}
+        return {
+          files: {
+            ...s.files,
+            [key]: {
+              original: file.content,
+              draft: file.content,
+              isDirty: false,
+              isBinary: file.isBinary,
+              lossy: file.lossy,
+              encoding: file.encoding,
+              sizeBytes: file.sizeBytes,
+              modifiedAt: file.modifiedAt,
+              mimeType: file.mimeType,
+              loading: false,
+              saving: false,
+              missing: false,
+            },
+          },
+          lastSeenContent: { ...s.lastSeenContent, [relPath]: file.content },
+          externalChanged: stripKey(s.externalChanged, relPath),
+        }
+      })
+    } catch (err) {
+      if (get().root !== root) return
+      set((s) => {
+        const buf = s.files[key]
+        if (!buf) return {}
+        return {
+          files: {
+            ...s.files,
+            [key]: {
+              ...buf,
+              loading: false,
+              error: err instanceof Error ? err.message : String(err),
+            },
+          },
+        }
+      })
+    }
   },
 
   createFile: async (parentRelPath: string, name: string) => {
@@ -1258,27 +1591,10 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       fromPath: relPath,
       toPath: nextRelPath,
     })
+    if (get().root !== root) return
     get().registerSelfWrite(relPath)
     get().registerSelfWrite(nextRelPath)
-    const oldKey = k(root, relPath)
-    const newKey = k(root, nextRelPath)
-    set((s) => {
-      const files = { ...s.files }
-      const buf = files[oldKey]
-      if (buf) {
-        files[newKey] = buf
-        delete files[oldKey]
-      }
-      const openTabs = s.openTabs.map((t) => (t === relPath ? nextRelPath : t))
-      const activeTab = s.activeTab === relPath ? nextRelPath : s.activeTab
-      return {
-        files,
-        openTabs,
-        activeTab,
-        selectedRelPath:
-          s.selectedRelPath === relPath ? nextRelPath : s.selectedRelPath,
-      }
-    })
+    migrateRename(get, set, root, relPath, nextRelPath)
     const oldParent = parentOf(relPath)
     const newParent = parentOf(nextRelPath)
     await refreshDir(get, set, oldParent)
@@ -1296,84 +1612,131 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       path: relPath,
       recursive: isDir,
     })
+    if (get().root !== root) return
     get().registerSelfWrite(relPath)
     const key = k(root, relPath)
-    const model = get().monacoModels[relPath]
+    const keyPrefix = `${key}/`
+    const relPrefix = `${relPath}/`
+    const matchesRel = (rel: string) => rel === relPath || rel.startsWith(relPrefix)
+    const modelsToDispose: MonacoModelHandle[] = []
     set((s) => {
-      const files = { ...s.files }
-      delete files[key]
-      const dirs = { ...s.dirs }
-      delete dirs[key]
-
-      const openTabs = s.openTabs.filter((t) => t !== relPath)
+      const files: Record<Key, FileBuffer> = {}
+      for (const [fk, fv] of Object.entries(s.files)) {
+        if (fk === key || fk.startsWith(keyPrefix)) continue
+        files[fk] = fv
+      }
+      const dirs: Record<Key, DirState> = {}
+      for (const [dk, dv] of Object.entries(s.dirs)) {
+        if (dk === key || dk.startsWith(keyPrefix)) continue
+        dirs[dk] = dv
+      }
+      const openTabs = s.openTabs.filter((t) => !matchesRel(t))
       let activeTab = s.activeTab
-      if (s.activeTab === relPath) {
+      if (s.activeTab && matchesRel(s.activeTab)) {
         if (openTabs.length === 0) {
           activeTab = null
         } else {
-          const oldIdx = s.openTabs.indexOf(relPath)
-          const fallbackIdx = Math.min(oldIdx, openTabs.length - 1)
+          const oldIdx = s.openTabs.indexOf(s.activeTab)
+          const fallbackIdx = Math.max(
+            0,
+            Math.min(oldIdx, openTabs.length - 1),
+          )
           activeTab = openTabs[fallbackIdx] ?? null
         }
       }
+      const stripMatching = <V,>(map: Record<string, V>): Record<string, V> => {
+        const out: Record<string, V> = {}
+        for (const [mk, mv] of Object.entries(map)) {
+          if (matchesRel(mk)) continue
+          out[mk] = mv
+        }
+        return out
+      }
+      for (const [mk, model] of Object.entries(s.monacoModels)) {
+        if (matchesRel(mk)) modelsToDispose.push(model)
+      }
+      schedulePersistExpanded(root, dirs)
       return {
         files,
         dirs,
         openTabs,
         activeTab,
         selectedRelPath: activeTab,
-        aiModifiedAt: stripKey(s.aiModifiedAt, relPath),
-        externalChanged: stripKey(s.externalChanged, relPath),
-        lastSeenContent: stripKey(s.lastSeenContent, relPath),
-        monacoModels: stripKey(s.monacoModels, relPath),
-        tabViewStates: stripKey(s.tabViewStates, relPath),
+        aiPendingWrites: stripMatching(s.aiPendingWrites),
+        aiModifiedAt: stripMatching(s.aiModifiedAt),
+        externalChanged: stripMatching(s.externalChanged),
+        lastSeenContent: stripMatching(s.lastSeenContent),
+        monacoModels: stripMatching(s.monacoModels),
+        tabViewStates: stripMatching(s.tabViewStates),
       }
     })
-    if (model) scheduleModelDispose([model])
+    scheduleModelDispose(modelsToDispose)
     await refreshDir(get, set, parentOf(relPath))
   },
 
-  uploadFiles: async (parentRelPath: string, files: File[]) => {
+  uploadFiles: async (parentRelPath: string, files: File[], opts) => {
     const root = get().root
-    if (!root || files.length === 0) return 0
+    if (!root || files.length === 0) return { uploaded: 0, conflicts: [] }
+    const overwrite = opts?.overwrite === true
     let uploaded = 0
+    const conflicts: File[] = []
     for (const file of files) {
       const base64 = await readBlobAsBase64(file)
+      if (get().root !== root) break
       const relTarget = joinPath(parentRelPath, file.name)
       get().registerSelfWrite(relTarget)
-      await workspaceFilesApi.upload({
-        root,
-        path: relTarget,
-        contentBase64: base64,
-        overwrite: true,
-      })
+      try {
+        await workspaceFilesApi.upload({
+          root,
+          path: relTarget,
+          contentBase64: base64,
+          overwrite,
+        })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        if (!overwrite && /exist/i.test(message)) {
+          conflicts.push(file)
+          continue
+        }
+        throw err
+      }
       get().registerSelfWrite(relTarget)
       uploaded += 1
     }
-    await refreshDir(get, set, parentRelPath)
-    return uploaded
+    if (get().root === root && uploaded > 0) {
+      await refreshDir(get, set, parentRelPath)
+    }
+    return { uploaded, conflicts }
   },
 
-  copyToClipboard: (relPath: string, isDir: boolean) => {
-    if (!relPath) return
-    set({ clipboard: { relPath, isDir, mode: 'copy' } })
+  copyToClipboard: (items: ClipboardItem[]) => {
+    const entries = dedupeClipboardItems(items)
+    if (entries.length === 0) return
+    set({ clipboard: { entries, mode: 'copy' } })
     try {
       useUIStore.getState().addToast({
         type: 'success',
-        message: t('workspace.copied', { name: nameOf(relPath) }),
+        message:
+          entries.length === 1
+            ? t('workspace.copied', { name: nameOf(entries[0]!.relPath) })
+            : t('workspace.copiedMulti', { count: entries.length }),
         duration: 2200,
       })
     } catch {
     }
   },
 
-  cutToClipboard: (relPath: string, isDir: boolean) => {
-    if (!relPath) return
-    set({ clipboard: { relPath, isDir, mode: 'cut' } })
+  cutToClipboard: (items: ClipboardItem[]) => {
+    const entries = dedupeClipboardItems(items)
+    if (entries.length === 0) return
+    set({ clipboard: { entries, mode: 'cut' } })
     try {
       useUIStore.getState().addToast({
         type: 'success',
-        message: t('workspace.cutToast', { name: nameOf(relPath) }),
+        message:
+          entries.length === 1
+            ? t('workspace.cutToast', { name: nameOf(entries[0]!.relPath) })
+            : t('workspace.cutToastMulti', { count: entries.length }),
         duration: 2200,
       })
     } catch {
@@ -1383,58 +1746,82 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
   pasteInto: async (targetDir: string) => {
     const root = get().root
     const clipboard = get().clipboard
-    if (!root || !clipboard) return
-    if (get().copyJob) return
+    if (!root || !clipboard || clipboard.entries.length === 0) return
+    if (get().copyJob || cutInProgress) return
 
     const normalizedTarget = targetDir ?? ''
-    const fromName = nameOf(clipboard.relPath)
     const targetLabel = normalizedTarget === '' ? '/' : normalizedTarget
 
     if (clipboard.mode === 'cut') {
-      const toPath = normalizedTarget === '' ? fromName : `${normalizedTarget}/${fromName}`
-      const sourceParent =
-        clipboard.relPath.lastIndexOf('/') >= 0
-          ? clipboard.relPath.slice(0, clipboard.relPath.lastIndexOf('/'))
-          : ''
-      if (toPath === clipboard.relPath) {
-        set({ clipboard: null })
-        return
-      }
-      if (
-        clipboard.isDir &&
-        (normalizedTarget === clipboard.relPath ||
-          normalizedTarget.startsWith(`${clipboard.relPath}/`))
-      ) {
-        try {
-          useUIStore.getState().addToast({
-            type: 'error',
-            message: t('workspace.moveIntoSelf'),
-            duration: 4000,
-          })
-        } catch {
-        }
-        return
-      }
+      cutInProgress = true
       try {
-        get().registerSelfWrite(clipboard.relPath)
-        get().registerSelfWrite(toPath)
-        await workspaceFilesApi.move({ root, fromPath: clipboard.relPath, toPath })
-        get().registerSelfWrite(clipboard.relPath)
-        get().registerSelfWrite(toPath)
-        set({ clipboard: null })
-        await refreshDir(get, set, sourceParent)
-        await refreshDir(get, set, normalizedTarget)
-      } catch (err) {
-        try {
-          useUIStore.getState().addToast({
-            type: 'error',
-            message: t('workspace.moveFailed', {
-              message: err instanceof Error ? err.message : String(err),
-            }),
-            duration: 6000,
-          })
-        } catch {
+        const sourceParents = new Set<string>()
+        const errors: string[] = []
+        const succeeded = new Set<string>()
+        for (const item of clipboard.entries) {
+          const fromName = nameOf(item.relPath)
+          const toPath =
+            normalizedTarget === '' ? fromName : `${normalizedTarget}/${fromName}`
+          if (toPath === item.relPath) {
+            succeeded.add(item.relPath)
+            continue
+          }
+          if (
+            item.isDir &&
+            (normalizedTarget === item.relPath ||
+              normalizedTarget.startsWith(`${item.relPath}/`))
+          ) {
+            errors.push(t('workspace.moveIntoSelf'))
+            continue
+          }
+          try {
+            get().registerSelfWrite(item.relPath)
+            get().registerSelfWrite(toPath)
+            await workspaceFilesApi.move({ root, fromPath: item.relPath, toPath })
+            if (get().root !== root) return
+            get().registerSelfWrite(item.relPath)
+            get().registerSelfWrite(toPath)
+            migrateRename(get, set, root, item.relPath, toPath)
+            sourceParents.add(parentOf(item.relPath))
+            succeeded.add(item.relPath)
+          } catch (err) {
+            errors.push(err instanceof Error ? err.message : String(err))
+          }
         }
+        if (get().root !== root) return
+        if (succeeded.size > 0) {
+          set((s) => {
+            const cb = s.clipboard
+            if (!cb || cb.mode !== 'cut') return {}
+            const remaining = cb.entries.filter(
+              (entry) => !succeeded.has(entry.relPath),
+            )
+            return {
+              clipboard:
+                remaining.length > 0
+                  ? { entries: remaining, mode: 'cut' }
+                  : null,
+            }
+          })
+          for (const parent of sourceParents) {
+            if (parent !== normalizedTarget) {
+              await refreshDir(get, set, parent)
+            }
+          }
+          await refreshDir(get, set, normalizedTarget)
+        }
+        if (errors.length > 0) {
+          try {
+            useUIStore.getState().addToast({
+              type: 'error',
+              message: t('workspace.moveFailed', { message: errors[0] ?? '' }),
+              duration: 6000,
+            })
+          } catch {
+          }
+        }
+      } finally {
+        cutInProgress = false
       }
       return
     }
@@ -1449,9 +1836,17 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     const controller = new AbortController()
     copyAbortController = controller
 
+    const entries = clipboard.entries
+    const totalEntries = entries.length
+
+    const jobName = (index: number): string => {
+      const name = nameOf(entries[index]?.relPath ?? '')
+      return totalEntries > 1 ? `${name} (${index + 1}/${totalEntries})` : name
+    }
+
     set({
       copyJob: {
-        fromName,
+        fromName: jobName(0),
         toDir: targetLabel,
         bytesDone: 0,
         bytesTotal: 0,
@@ -1468,53 +1863,82 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     }
 
     try {
-      let errorMessage: string | null = null
-      let done = false
-      await workspaceFilesApi.copyStream(
-        {
-          root,
-          fromPath: clipboard.relPath,
-          toDir: normalizedTarget,
-          signal: controller.signal,
-        },
-        (event: WorkspaceCopyEvent) => {
-          if (copyAbortController !== controller) return
-          if (event.type === 'progress') {
-            set((s) =>
-              s.copyJob
-                ? {
-                    copyJob: {
-                      ...s.copyJob,
-                      bytesDone: event.bytesDone,
-                      bytesTotal: event.bytesTotal,
-                      filesDone: event.filesDone,
-                      filesTotal: event.filesTotal,
-                    },
-                  }
-                : {},
-            )
-          } else if (event.type === 'done') {
-            done = true
-          } else if (event.type === 'error') {
-            errorMessage = event.message
-          }
-        },
-      )
+      let firstError: string | null = null
+      let anyDone = false
+      for (let i = 0; i < entries.length; i += 1) {
+        const item = entries[i]
+        if (!item) continue
+        if (controller.signal.aborted) break
+        set((s) =>
+          s.copyJob
+            ? {
+                copyJob: {
+                  ...s.copyJob,
+                  fromName: jobName(i),
+                  bytesDone: 0,
+                  bytesTotal: 0,
+                  filesDone: 0,
+                  filesTotal: 0,
+                },
+              }
+            : {},
+        )
+        let errorMessage: string | null = null
+        let done = false
+        await workspaceFilesApi.copyStream(
+          {
+            root,
+            fromPath: item.relPath,
+            toDir: normalizedTarget,
+            signal: controller.signal,
+          },
+          (event: WorkspaceCopyEvent) => {
+            if (copyAbortController !== controller) return
+            if (event.type === 'progress') {
+              set((s) =>
+                s.copyJob
+                  ? {
+                      copyJob: {
+                        ...s.copyJob,
+                        bytesDone: event.bytesDone,
+                        bytesTotal: event.bytesTotal,
+                        filesDone: event.filesDone,
+                        filesTotal: event.filesTotal,
+                      },
+                    }
+                  : {},
+              )
+            } else if (event.type === 'done') {
+              done = true
+            } else if (event.type === 'error') {
+              errorMessage = event.message
+            }
+          },
+        )
+        if (copyAbortController !== controller) return
+        if (done && !errorMessage) {
+          anyDone = true
+        } else if (errorMessage && errorMessage !== 'cancelled' && !firstError) {
+          firstError = errorMessage
+        }
+      }
       if (copyAbortController !== controller) return
       copyAbortController = null
-      if (done && !errorMessage) {
+      if (anyDone) {
         await refreshDir(get, set, normalizedTarget)
-        finishClear()
-      } else if (errorMessage && errorMessage !== 'cancelled') {
+      }
+      if (firstError) {
         try {
           useUIStore.getState().addToast({
             type: 'error',
-            message: t('workspace.copyFailed', { message: errorMessage }),
+            message: t('workspace.copyFailed', { message: firstError }),
             duration: 6000,
           })
         } catch {
         }
         set({ copyJob: null })
+      } else if (anyDone) {
+        finishClear()
       } else {
         set({ copyJob: null })
       }
@@ -1573,6 +1997,26 @@ function stripKey<V>(map: Record<string, V>, key: string): Record<string, V> {
   if (!(key in map)) return map
   const next = { ...map }
   delete next[key]
+  return next
+}
+
+function prunePendingMap(
+  map: Record<string, number>,
+  now: number,
+  maxAgeMs: number,
+): Record<string, number> {
+  let hasStale = false
+  for (const ts of Object.values(map)) {
+    if (now - ts > maxAgeMs) {
+      hasStale = true
+      break
+    }
+  }
+  if (!hasStale) return map
+  const next: Record<string, number> = {}
+  for (const [key, ts] of Object.entries(map)) {
+    if (now - ts <= maxAgeMs) next[key] = ts
+  }
   return next
 }
 
@@ -1646,6 +2090,7 @@ async function reloadBuffer(
   const key = k(root, relPath)
   try {
     const file = await workspaceFilesApi.readFile({ root, path: relPath })
+    if (get().root !== root) return
     set((s) => {
       const buf = s.files[key]
       if (!buf) return {}
@@ -1659,12 +2104,15 @@ async function reloadBuffer(
             original: file.content,
             draft: file.content,
             isBinary: file.isBinary,
+            lossy: file.lossy,
             encoding: file.encoding,
             sizeBytes: file.sizeBytes,
             modifiedAt: file.modifiedAt,
             mimeType: file.mimeType,
+            missing: false,
           },
         },
+        externalChanged: stripKey(s.externalChanged, relPath),
       }
     })
   } catch {
@@ -1692,7 +2140,12 @@ async function refreshDir(
   if (existing?.loading) return
   const epoch = dirLoadEpoch[key] ?? 0
   try {
-    const tree = await workspaceFilesApi.tree({ root, path: relPath, depth: 1 })
+    const tree = await workspaceFilesApi.tree({
+      root,
+      path: relPath,
+      depth: 1,
+      showHidden: get().showHidden,
+    })
     if (get().root !== root) return
     if ((dirLoadEpoch[key] ?? 0) !== epoch) return
     set((s) => {
@@ -1747,7 +2200,12 @@ async function reloadLoadedDir(
   if (!existing || existing.loading) return
   const epoch = dirLoadEpoch[key] ?? 0
   try {
-    const tree = await workspaceFilesApi.tree({ root, path: relPath, depth: 1 })
+    const tree = await workspaceFilesApi.tree({
+      root,
+      path: relPath,
+      depth: 1,
+      showHidden: get().showHidden,
+    })
     if (get().root !== root) return
     if ((dirLoadEpoch[key] ?? 0) !== epoch) return
     set((s) => {
@@ -1872,6 +2330,43 @@ function migrateRename(
       externalChanged: remap(s.externalChanged),
       lastSeenContent: remap(s.lastSeenContent),
       monacoModels: remap(s.monacoModels),
+      tabViewStates: remap(s.tabViewStates),
+    }
+  })
+}
+
+let editorDraftFlusher: (() => void) | null = null
+
+export function registerEditorDraftFlusher(fn: (() => void) | null) {
+  editorDraftFlusher = fn
+}
+
+export function flushEditorDraft() {
+  try {
+    editorDraftFlusher?.()
+  } catch {
+  }
+}
+
+useWorkspaceFilesStore.subscribe((state, prev) => {
+  const root = state.root
+  if (!root) return
+  if (root !== prev.root) return
+  if (
+    state.openTabs === prev.openTabs &&
+    state.activeTab === prev.activeTab &&
+    state.tabViewStates === prev.tabViewStates
+  ) {
+    return
+  }
+  scheduleTabsPersist(root)
+})
+
+if (typeof window !== 'undefined') {
+  window.addEventListener('beforeunload', () => {
+    const state = useWorkspaceFilesStore.getState()
+    if (state.root) {
+      flushTabsPersist(state.root, state)
     }
   })
 }

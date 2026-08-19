@@ -27,10 +27,23 @@ pub enum OutlineError {
     UnsupportedLanguage(String),
 }
 
+pub const MAX_OUTLINE_SOURCE_BYTES: u64 = 2 * 1024 * 1024;
+
 pub fn extract_outline(
     path: &Path,
     language: Option<&str>,
 ) -> Result<Vec<OutlineEntry>, OutlineError> {
+    if let Ok(meta) = std::fs::metadata(path) {
+        if meta.len() > MAX_OUTLINE_SOURCE_BYTES {
+            tracing::debug!(
+                target: "code_intel.outline",
+                path = %path.display(),
+                bytes = meta.len(),
+                "skipping outline for oversized file (exceeds cap)"
+            );
+            return Ok(Vec::new());
+        }
+    }
     let source = std::fs::read_to_string(path).map_err(|e| OutlineError::Io {
         path: path.display().to_string(),
         source: e,

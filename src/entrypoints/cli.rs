@@ -118,11 +118,8 @@ impl CliEntrypoint {
     ) -> anyhow::Result<()> {
         if options.dump_system_prompt {
             let cwd = resolve_cwd(&options);
-            let files = crate::memdir::discover_memory_files(&cwd)
-                .await
-                .unwrap_or_default();
-            let prompt = crate::memdir::build_memory_prompt(&files);
-            println!("{prompt}");
+            let personality = crate::agent::profile::personality::load_personality(&cwd);
+            println!("{}", personality.render());
             return Ok(());
         }
 
@@ -144,6 +141,9 @@ impl CliEntrypoint {
             team_sync_enabled: config.teams.sync_enabled,
             ..Default::default()
         });
+        if let Some(svc) = crate::services::try_get_services() {
+            svc.update_config(config.clone());
+        }
         let _ = crate::event_bus::integration::init_global_bus(
             config
                 .config_path

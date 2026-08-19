@@ -844,6 +844,7 @@ async fn process_chat_message(
                         crate::services::governance::credential_vault::redact_args_optional(&args);
                     serde_json::json!({ "type": "tool_call", "name": name, "args": safe_args })
                 }
+                TurnEvent::ToolArgsDelta { .. } => continue,
                 TurnEvent::ToolResult {
                     name,
                     output,

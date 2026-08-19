@@ -3,7 +3,6 @@
 // Licensed under the MIT License.
 
 pub mod control;
-pub mod core;
 pub mod detector;
 pub mod policy;
 pub mod services;
@@ -22,7 +21,7 @@ use crate::providers::traits::StreamEvent;
 use crate::providers::{self, ChatMessage, ChatRequest, Provider, ToolCall};
 use crate::runtime;
 use crate::security::{AutonomyLevel, SecurityPolicy};
-use crate::tools::{self, Tool, ToolRegistry};
+use crate::tools::{self, Tool};
 use crate::util::truncate_with_ellipsis;
 use anyhow::Result;
 use futures_util::{FutureExt, StreamExt};
@@ -138,6 +137,13 @@ pub enum DraftEvent {
         name: String,
         args: serde_json::Value,
         tool_call_id: Option<String>,
+    },
+
+    ToolArgsDelta {
+        call_index: u32,
+        name: String,
+        args_delta: String,
+        args_total_len: u32,
     },
 
     ToolResult {
@@ -419,6 +425,8 @@ async fn build_context(
             .collect();
 
         if !relevant.is_empty() {
+            let max_memory_entry_chars =
+                crate::agent::token::budget::InjectionBudget::current().memory_entry_chars;
             context.push_str("[Memory context]\n");
             for entry in &relevant {
                 if memory::is_assistant_autosave_key(&entry.key) {
@@ -431,8 +439,7 @@ async fn build_context(
                 if entry.content.contains("<tool_result") {
                     continue;
                 }
-                const MAX_MEMORY_ENTRY_CHARS: usize = 700;
-                let content = truncate_with_ellipsis(&entry.content, MAX_MEMORY_ENTRY_CHARS);
+                let content = truncate_with_ellipsis(&entry.content, max_memory_entry_chars);
                 let _ = writeln!(context, "- {}: {}", entry.key, content);
             }
             if context == "[Memory context]\n" {
@@ -487,17 +494,14 @@ async fn code_intel_injection_block(user_msg: &str) -> Option<String> {
         _ => {}
     }
     if !query.is_empty() {
-        let rag_query = extract_code_search_query(query);
-        if !rag_query.is_empty() {
-            let rag_cwd = cwd.clone();
-            if let Some(rag) =
-                tokio::task::spawn_blocking(move || loop_services::rag_source(&rag_cwd))
-                    .await
-                    .ok()
-                    .flatten()
-            {
-                builder = builder.with_rag(rag, rag_query);
-            }
+        let rag_cwd = cwd.clone();
+        if let Some(rag) =
+            tokio::task::spawn_blocking(move || loop_services::rag_source(&rag_cwd))
+                .await
+                .ok()
+                .flatten()
+        {
+            builder = builder.with_rag(rag, query.to_string());
         }
     }
     const INJECTION_BUILD_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(8);
@@ -517,7 +521,7 @@ async fn code_intel_injection_block(user_msg: &str) -> Option<String> {
     }
 }
 
-fn extract_code_search_query(user_msg: &str) -> String {
+pub(crate) fn extract_code_search_query(user_msg: &str) -> String {
     const STOP: &[&str] = &[
         "the", "and", "for", "with", "this", "that", "from", "into", "please", "fix",
     ];
@@ -628,14 +632,13 @@ use crate::agent::tool_authorizer::canonical_tool_alias;
 fn find_tool<'a>(
     tools: &'a [Box<dyn Tool>],
     name: &str,
-    tool_registry: Option<&ToolRegistry>,
 ) -> Option<crate::tools::handle::ToolHandle<'a>> {
-    if let Some(handle) = lookup_tool_exact(tools, name, tool_registry) {
+    if let Some(handle) = lookup_tool_exact(tools, name) {
         return Some(handle);
     }
     if let Some(canonical) = canonical_tool_alias(name) {
         if canonical != name {
-            if let Some(handle) = lookup_tool_exact(tools, canonical, tool_registry) {
+            if let Some(handle) = lookup_tool_exact(tools, canonical) {
                 tracing::debug!(
                     target: "agent.tool",
                     requested = %name,
@@ -652,13 +655,7 @@ fn find_tool<'a>(
 fn lookup_tool_exact<'a>(
     tools: &'a [Box<dyn Tool>],
     name: &str,
-    tool_registry: Option<&ToolRegistry>,
 ) -> Option<crate::tools::handle::ToolHandle<'a>> {
-    if let Some(reg) = tool_registry {
-        if let Some(arc) = reg.get(name) {
-            return Some(crate::tools::handle::ToolHandle::Owned(arc));
-        }
-    }
     tools
         .iter()
         .find(|t| t.name() == name)
@@ -745,12 +742,11 @@ fn append_turn_records_to_history(
 
 async fn auto_finalize_incomplete_plan_steps(
     tools_registry: &[Box<dyn Tool>],
-    tool_registry: Option<&ToolRegistry>,
     on_delta: Option<&tokio::sync::mpsc::Sender<DraftEvent>>,
     history: &mut Vec<ChatMessage>,
     intent_window: &str,
 ) -> usize {
-    let Some(handle) = find_tool(tools_registry, "update_plan", tool_registry) else {
+    let Some(handle) = find_tool(tools_registry, "update_plan") else {
         return 0;
     };
     let tool = handle.as_tool();
@@ -863,18 +859,17 @@ async fn auto_finalize_incomplete_plan_steps(
         }
 
         let assistant_payload = serde_json::json!({
+            "content": "",
             "tool_calls": [{
                 "id": tool_call_id,
-                "type": "function",
-                "function": {
-                    "name": "update_plan",
-                    "arguments": args.to_string(),
-                }
+                "name": "update_plan",
+                "arguments": args.to_string(),
             }]
         });
         history.push(ChatMessage::assistant(assistant_payload.to_string()));
         let tool_msg = serde_json::json!({
             "tool_call_id": tool_call_id,
+            "tool_use_id": tool_call_id,
             "content": output,
         });
         history.push(ChatMessage::tool(tool_msg.to_string()));
@@ -910,7 +905,6 @@ async fn auto_finalize_incomplete_plan_steps(
 
 async fn emit_plan_progress_completion_card(
     tools_registry: &[Box<dyn Tool>],
-    tool_registry: Option<&ToolRegistry>,
     on_delta: Option<&tokio::sync::mpsc::Sender<DraftEvent>>,
     state: &crate::agent::plan_mode::execution_enforcement::PlanExecutionNudgeState,
 ) {
@@ -920,7 +914,7 @@ async fn emit_plan_progress_completion_card(
     let Some(tx) = on_delta else {
         return;
     };
-    let Some(handle) = find_tool(tools_registry, "update_plan", tool_registry) else {
+    let Some(handle) = find_tool(tools_registry, "update_plan") else {
         return;
     };
     let tool = handle.as_tool();
@@ -1279,6 +1273,9 @@ struct StreamedChatOutcome {
 
     thinking_signature_blocks: u32,
 
+    first_thinking_text: String,
+    first_thinking_signature: String,
+
     usage: Option<crate::providers::traits::TokenUsage>,
     forwarded_live_deltas: bool,
 
@@ -1332,6 +1329,11 @@ fn llm_error_is_terminal(err: &anyhow::Error) -> bool {
     if crate::providers::reliable::is_non_retryable(err) {
         return true;
     }
+    if crate::providers::reliable::is_rate_limited(err)
+        || crate::providers::reliable::is_engine_overloaded(err)
+    {
+        return true;
+    }
     if crate::providers::reliable::is_context_window_exceeded(err) {
         return true;
     }
@@ -1357,7 +1359,6 @@ async fn call_provider_chat(
     temperature: f64,
     cancellation_token: Option<&CancellationToken>,
 ) -> Result<crate::providers::ChatResponse> {
-    acquire_llm_rate_limit(cancellation_token).await?;
     let chat_future = provider.chat(
         ChatRequest {
             messages,
@@ -1375,42 +1376,6 @@ async fn call_provider_chat(
     } else {
         chat_future.await
     }
-}
-
-pub(crate) async fn acquire_llm_rate_limit(
-    cancellation_token: Option<&CancellationToken>,
-) -> Result<()> {
-    let Some(services) = crate::services::try_get_services() else {
-        return Ok(());
-    };
-    let mut logged = false;
-    while !services.rate_limiter.try_acquire("llm").await {
-        if !logged {
-            logged = true;
-            if let Some(message) = services.rate_limiter.message("llm").await {
-                tracing::warn!("{}", message.message);
-            }
-        }
-        let retry_ms = services
-            .rate_limiter
-            .status("llm")
-            .await
-            .and_then(|status| status.retry_after_ms)
-            .unwrap_or(100)
-            .clamp(10, 10_000);
-        let sleep = tokio::time::sleep(Duration::from_millis(retry_ms));
-        match cancellation_token {
-            Some(token) => {
-                tokio::select! {
-                    biased;
-                    () = token.cancelled() => return Err(tool_loop_cancelled()),
-                    () = sleep => {}
-                }
-            }
-            None => sleep.await,
-        }
-    }
-    Ok(())
 }
 
 #[derive(Default)]
@@ -1458,7 +1423,6 @@ async fn consume_provider_streaming_response(
     idle_timeout: Option<Duration>,
     progress: &mut StreamProgressProbe,
 ) -> Result<StreamedChatOutcome> {
-    acquire_llm_rate_limit(cancellation_token).await?;
     let cancel_for_provider = cancellation_token.cloned();
     let mut provider_stream =
         crate::providers::reliable::scope_stream_cancel_token_sync(cancel_for_provider, || {
@@ -1530,6 +1494,37 @@ async fn consume_provider_streaming_response(
                     outcome.forwarded_live_deltas = false;
                 }
             }
+            StreamEvent::ToolCallArgsDelta {
+                call_index,
+                name,
+                args_delta,
+                args_total_len,
+            } => {
+                progress.made_progress = true;
+                const STREAMED_ARGS_TOOLS: &[&str] = &[
+                    "file_write",
+                    "file_edit",
+                    "apply_edit",
+                    "multi_edit",
+                    "notebook_edit",
+                ];
+                if STREAMED_ARGS_TOOLS.contains(&name.as_str()) {
+                    if let Some(tx) = delta_sender {
+                        if tx
+                            .send(DraftEvent::ToolArgsDelta {
+                                call_index,
+                                name,
+                                args_delta,
+                                args_total_len,
+                            })
+                            .await
+                            .is_err()
+                        {
+                            delta_sender = None;
+                        }
+                    }
+                }
+            }
             StreamEvent::PreExecutedToolCall { name, args } => {
                 let parsed_args = serde_json::from_str::<serde_json::Value>(&args)
                     .unwrap_or_else(|_| serde_json::Value::String(args.clone()));
@@ -1590,6 +1585,10 @@ async fn consume_provider_streaming_response(
                 outcome.usage = Some(usage);
             }
             StreamEvent::ReasoningSignature(sig) => {
+                if outcome.thinking_signature_blocks == 0 {
+                    outcome.first_thinking_text = outcome.reasoning_content.clone();
+                    outcome.first_thinking_signature = sig.clone();
+                }
                 outcome.thinking_signature = sig;
                 outcome.thinking_signature_blocks =
                     outcome.thinking_signature_blocks.saturating_add(1);
@@ -2017,7 +2016,6 @@ async fn execute_one_tool(
     call_name: &str,
     mut call_arguments: serde_json::Value,
     tools_registry: &[Box<dyn Tool>],
-    tool_registry: Option<&ToolRegistry>,
     activated_tools: Option<&std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
     observer: &dyn Observer,
     cancellation_token: Option<&CancellationToken>,
@@ -2063,7 +2061,7 @@ async fn execute_one_tool(
         });
     }
 
-    let static_handle = find_tool(tools_registry, call_name, tool_registry);
+    let static_handle = find_tool(tools_registry, call_name);
     let activated_arc = if static_handle.is_none() {
         activated_tools.and_then(|at| at.lock().get_resolved(call_name))
     } else {
@@ -2698,7 +2696,6 @@ async fn execute_tools_parallel(
     guardrails_pre_cleared: &[bool],
     runtime_approved: &[bool],
     tools_registry: &[Box<dyn Tool>],
-    tool_registry: Option<&ToolRegistry>,
     activated_tools: Option<&std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
     observer: &dyn Observer,
     cancellation_token: Option<&CancellationToken>,
@@ -2735,7 +2732,6 @@ async fn execute_tools_parallel(
                             &call.name,
                             call.arguments.clone(),
                             tools_registry,
-                            tool_registry,
                             activated_tools,
                             observer,
                             cancellation_token,
@@ -2803,7 +2799,6 @@ async fn execute_tools_sequential(
     guardrails_pre_cleared: &[bool],
     runtime_approved: &[bool],
     tools_registry: &[Box<dyn Tool>],
-    tool_registry: Option<&ToolRegistry>,
     activated_tools: Option<&std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
     observer: &dyn Observer,
     cancellation_token: Option<&CancellationToken>,
@@ -2834,7 +2829,6 @@ async fn execute_tools_sequential(
                     &call.name,
                     call.arguments.clone(),
                     tools_registry,
-                    tool_registry,
                     activated_tools,
                     observer,
                     cancellation_token,
@@ -3153,7 +3147,6 @@ pub(crate) async fn run_unified_loop_impl(
         rbac_identity,
         plan_mode_flag,
         plan_execution_path,
-        tool_registry,
         response_cache_hook,
         memory_session_hook,
         turn_preamble_hook,
@@ -3630,7 +3623,20 @@ pub(crate) async fn run_unified_loop_impl(
                 .unwrap_or(model)
                 .to_string();
             let usable_vp: Option<Box<dyn Provider>> = match configured_vp {
-                Some(ref vp) => match providers::create_provider_async(vp.clone(), None).await {
+                Some(ref vp) => {
+                    let runtime_options = crate::services::try_get_services()
+                        .map(|svc| {
+                            providers::provider_runtime_options_from_config(&svc.config())
+                        })
+                        .unwrap_or_default();
+                    match providers::create_resilient_runtime_provider_async(
+                        vp.clone(),
+                        None,
+                        None,
+                        runtime_options,
+                    )
+                    .await
+                    {
                     Ok(instance) => {
                         let fallback_supports_vision = crate::services::try_get_services()
                             .and_then(|svc| {
@@ -3660,7 +3666,8 @@ pub(crate) async fn run_unified_loop_impl(
                         );
                         None
                     }
-                },
+                    }
+                }
                 None => None,
             };
 
@@ -4135,8 +4142,13 @@ pub(crate) async fn run_unified_loop_impl(
                         }
                     }
 
-                    let reasoning_content = if !streamed.reasoning_content.is_empty() {
-                        Some(streamed.reasoning_content)
+                    let multi_signed_blocks = streamed.thinking_signature_blocks > 1
+                        && !streamed.first_thinking_signature.is_empty()
+                        && !streamed.first_thinking_text.is_empty();
+                    let reasoning_content = if multi_signed_blocks {
+                        Some(streamed.first_thinking_text.clone())
+                    } else if !streamed.reasoning_content.is_empty() {
+                        Some(streamed.reasoning_content.clone())
                     } else if !streamed.tool_calls.is_empty() {
                         Some(
                             "(chain-of-thought unavailable  -  model emitted tool calls without a CoT stream)"
@@ -4145,12 +4157,14 @@ pub(crate) async fn run_unified_loop_impl(
                     } else {
                         None
                     };
-                    let thinking_signature = if streamed.thinking_signature.is_empty()
-                        || streamed.thinking_signature_blocks > 1
-                    {
+                    let thinking_signature = if streamed.thinking_signature.is_empty() {
+                        None
+                    } else if multi_signed_blocks {
+                        Some(streamed.first_thinking_signature.clone())
+                    } else if streamed.thinking_signature_blocks > 1 {
                         None
                     } else {
-                        Some(streamed.thinking_signature)
+                        Some(streamed.thinking_signature.clone())
                     };
                     Ok(crate::providers::ChatResponse {
                         text: Some(streamed.response_text),
@@ -4185,7 +4199,11 @@ pub(crate) async fn run_unified_loop_impl(
                     if stream_err.to_string().contains("exceeded max response size") {
                         return Err(stream_err);
                     }
-                    if stream_err.to_string().contains("stream idle timeout")
+                    if crate::providers::reliable::is_rate_limited(&stream_err)
+                        || crate::providers::reliable::is_engine_overloaded(&stream_err)
+                    {
+                        Err(stream_err)
+                    } else if stream_err.to_string().contains("stream idle timeout")
                         && llm_resilience_attempt < LLM_RESILIENCE_MAX_RETRIES
                     {
                         tracing::warn!(
@@ -4245,7 +4263,6 @@ pub(crate) async fn run_unified_loop_impl(
             }
         } else {
 
-            acquire_llm_rate_limit(cancellation_token.as_ref()).await?;
             let chat_future = active_provider.chat(
                 ChatRequest {
                     messages: &prepared_messages.messages,
@@ -4387,7 +4404,13 @@ pub(crate) async fn run_unified_loop_impl(
                     {
                         break 'llm_attempt Err(e);
                     }
-                    let backoff_ms = llm_resilience_backoff_ms(llm_resilience_attempt);
+                    let rate_limited = crate::providers::reliable::is_rate_limited(&e);
+                    let retry_after_ms = crate::providers::reliable::parse_retry_after_ms(&e)
+                        .map(|ms| ms.min(crate::providers::reliable::RETRY_AFTER_CAP_MS));
+                    let backoff_ms = match retry_after_ms {
+                        Some(ms) if rate_limited => ms,
+                        _ => llm_resilience_backoff_ms(llm_resilience_attempt),
+                    };
                     let err_summary = crate::providers::sanitize_api_error(&e.to_string());
                     tracing::warn!(
                         target: "agent.loop.resilience",
@@ -4397,22 +4420,35 @@ pub(crate) async fn run_unified_loop_impl(
                         attempt = llm_resilience_attempt,
                         max_attempts = LLM_RESILIENCE_MAX_RETRIES,
                         backoff_ms,
+                        rate_limited,
                         error = %err_summary,
                         "LLM call failed with a recoverable error; keeping turn alive and retrying instead of aborting"
                     );
                     if let Some(ref tx) = on_delta {
                         let _ = tx.send(DraftEvent::Clear).await;
+                        let message = if rate_limited {
+                            format!(
+                                "{active_provider_name} is rate limited by the upstream API (HTTP 429); waiting {:.0}s before retrying automatically (attempt {llm_resilience_attempt})…",
+                                backoff_ms as f64 / 1000.0
+                            )
+                        } else {
+                            format!(
+                                "{active_provider_name} connection error; recovering and retrying automatically (attempt {llm_resilience_attempt})…"
+                            )
+                        };
                         let _ = tx
                             .send(DraftEvent::ProviderRetry {
                                 attempt: llm_resilience_attempt,
                                 max_attempts: LLM_RESILIENCE_MAX_RETRIES,
                                 wait_ms: backoff_ms,
-                                class: "transient".to_string(),
+                                class: if rate_limited {
+                                    "account_rate_limited".to_string()
+                                } else {
+                                    "transient".to_string()
+                                },
                                 provider: active_provider_name.to_string(),
                                 model: active_model.to_string(),
-                                message: format!(
-                                    "{active_provider_name} connection error; recovering and retrying automatically (attempt {llm_resilience_attempt})…"
-                                ),
+                                message,
                             })
                             .await;
                     }
@@ -5080,7 +5116,6 @@ pub(crate) async fn run_unified_loop_impl(
                         let intent_window = build_intent_text_window(&display_text, history);
                         let finalized = auto_finalize_incomplete_plan_steps(
                             tools_registry,
-                            tool_registry,
                             on_delta.as_ref(),
                             history,
                             &intent_window,
@@ -5092,7 +5127,6 @@ pub(crate) async fn run_unified_loop_impl(
                     }
                     emit_plan_progress_completion_card(
                         tools_registry,
-                        tool_registry,
                         on_delta.as_ref(),
                         &plan_exec_nudge_state,
                     )
@@ -5182,7 +5216,6 @@ pub(crate) async fn run_unified_loop_impl(
                 let intent_window = build_intent_text_window(&display_text, history);
                 let finalized = auto_finalize_incomplete_plan_steps(
                     tools_registry,
-                    tool_registry,
                     on_delta.as_ref(),
                     history,
                     &intent_window,
@@ -5194,7 +5227,6 @@ pub(crate) async fn run_unified_loop_impl(
             }
             emit_plan_progress_completion_card(
                 tools_registry,
-                tool_registry,
                 on_delta.as_ref(),
                 &plan_exec_nudge_state,
             )
@@ -5315,7 +5347,7 @@ pub(crate) async fn run_unified_loop_impl(
                     "Tool call arguments failed JSON parsing; rejecting before execution \
                      with a structured re-emit request instead of running with empty args"
                 );
-                let schema = find_tool(tools_registry, &call.name, tool_registry)
+                let schema = find_tool(tools_registry, &call.name)
                     .map(|handle| handle.as_tool().parameters_schema());
                 let feedback = crate::agent::tool_handler::arg_validate::parse_error_feedback(
                     &call.name,
@@ -6119,7 +6151,6 @@ pub(crate) async fn run_unified_loop_impl(
                             &executable_pre_cleared,
                             &executable_runtime_approved,
                             tools_registry,
-                            tool_registry,
                             activated_tools,
                             observer,
                             cancellation_token.as_ref(),
@@ -6144,7 +6175,6 @@ pub(crate) async fn run_unified_loop_impl(
                             &executable_pre_cleared,
                             &executable_runtime_approved,
                             tools_registry,
-                            tool_registry,
                             activated_tools,
                             observer,
                             cancellation_token.as_ref(),
@@ -6786,7 +6816,6 @@ pub(crate) async fn run_unified_loop_impl(
         let intent_window = build_intent_text_window("", history);
         let _ = auto_finalize_incomplete_plan_steps(
             tools_registry,
-            tool_registry,
             on_delta.as_ref(),
             history,
             &intent_window,
@@ -6795,7 +6824,6 @@ pub(crate) async fn run_unified_loop_impl(
     }
     emit_plan_progress_completion_card(
         tools_registry,
-        tool_registry,
         on_delta.as_ref(),
         &plan_exec_nudge_state,
     )
@@ -7008,6 +7036,7 @@ async fn run_impl(
     );
 
     if let Some(svc) = crate::services::try_get_services() {
+        svc.update_config(config.clone());
         svc.set_max_context_tokens(config.agent.max_context_tokens);
     }
 
@@ -8202,6 +8231,7 @@ async fn run_impl(
                 )
                 .with_temperature(effective_temperature)
                 .with_silent(true)
+                .with_approval(approval_manager.as_ref())
                 .with_channel_name(channel_name)
                 .with_max_iterations(config.agent.max_tool_iterations)
                 .with_on_delta(Some(delta_tx.clone()))
@@ -8250,10 +8280,10 @@ async fn run_impl(
                             continue;
                         }
                         eprintln!(
-                            "\x1b[1;31m✖ This turn's request failed: {e}\x1b[0m\n\x1b[2m  The input was not written to session history; resend it as-is or adjust and retry (network/rate-limit issues usually succeed after a short wait).\x1b[0m"
+                            "\x1b[1;31m✖ This turn's request failed: {e}\x1b[0m\n\x1b[2m  Any partial work that already ran is preserved in session history; say \"continue\" to resume, or send a new request (network/rate-limit issues usually succeed after a short wait).\x1b[0m"
                         );
                         if history.len() > history_len_before_turn {
-                            history.truncate(history_len_before_turn);
+                            crate::agent::dangling_tool_repair::note_failed_turn_chat(&mut history);
                         }
                         break String::new();
                     }
@@ -8282,9 +8312,11 @@ async fn run_impl(
                 if !content_was_streamed.load(std::sync::atomic::Ordering::Relaxed) {
                     println!("{response}");
                 }
-                let already_in_history = history
-                    .last()
-                    .is_some_and(|m| m.role == "assistant" && m.content == response);
+                let already_in_history = history.last().is_some_and(|m| {
+                    m.role == "assistant"
+                        && !crate::agent::dangling_tool_repair::is_turn_close_note(&m.content)
+                        && !m.content.trim().is_empty()
+                });
                 if !already_in_history {
                     history.push(ChatMessage::assistant(&response));
                 }

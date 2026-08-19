@@ -17,7 +17,6 @@ use tokio::sync::mpsc;
 
 use super::crypto::{public_from_b64, SessionCipher};
 use super::discovery::PeerRegistry;
-use super::group::op::GroupInbound;
 use super::identity::LanIdentity;
 use super::share::types::ShareInbound;
 use super::protocol::{
@@ -40,16 +39,6 @@ pub struct TransferUpdate {
 }
 
 #[derive(Debug, Clone)]
-pub struct GroupDocReceived {
-    pub group_id: String,
-    pub doc_id: String,
-    pub peer_id: String,
-    pub path: PathBuf,
-    pub is_dir: bool,
-    pub size: i64,
-}
-
-#[derive(Debug, Clone)]
 pub struct ShareReceived {
     pub share_id: String,
     pub peer_id: String,
@@ -64,8 +53,6 @@ pub trait LanEvents: Send + Sync {
     fn on_transfer_update(&self, update: TransferUpdate);
     fn on_connection_change(&self);
     fn on_peer_connected(&self, _peer_id: &str) {}
-    fn on_group_control(&self, _peer_id: &str, _msg: GroupInbound) {}
-    fn on_group_doc_received(&self, _info: GroupDocReceived) {}
     fn on_share_control(&self, _peer_id: &str, _msg: ShareInbound) {}
     fn on_share_received(&self, _info: ShareReceived) {}
 }
@@ -98,8 +85,6 @@ enum InboundOp {
         name: String,
         is_dir: bool,
         display_total: u64,
-        group_id: String,
-        doc_id: String,
         share_id: String,
     },
     Chunk {
@@ -390,8 +375,6 @@ impl LanTransport {
                 name,
                 is_dir,
                 total_size,
-                group_id,
-                doc_id,
                 share_id,
             }) => {
                 if let Some(tx) = self.inbound_sender(peer_id, &transfer_id) {
@@ -400,8 +383,6 @@ impl LanTransport {
                             name,
                             is_dir,
                             display_total: total_size,
-                            group_id,
-                            doc_id,
                             share_id,
                         })
                         .await;
@@ -419,26 +400,6 @@ impl LanTransport {
                 self.inbound.remove(&transfer_id);
             }
             DecodedFrame::Control(ControlMessage::Ack { .. }) => {}
-            DecodedFrame::Control(ControlMessage::GroupGossip { group_id, ops }) => {
-                self.events
-                    .on_group_control(peer_id, GroupInbound::Gossip { group_id, ops });
-            }
-            DecodedFrame::Control(ControlMessage::GroupSyncRequest { groups }) => {
-                self.events
-                    .on_group_control(peer_id, GroupInbound::SyncRequest { groups });
-            }
-            DecodedFrame::Control(ControlMessage::GroupSyncResponse { groups }) => {
-                self.events
-                    .on_group_control(peer_id, GroupInbound::SyncResponse { groups });
-            }
-            DecodedFrame::Control(ControlMessage::GroupInvite { group_id, ops }) => {
-                self.events
-                    .on_group_control(peer_id, GroupInbound::Invite { group_id, ops });
-            }
-            DecodedFrame::Control(ControlMessage::GroupDocRequest { group_id, doc_id }) => {
-                self.events
-                    .on_group_control(peer_id, GroupInbound::DocRequest { group_id, doc_id });
-            }
             DecodedFrame::Control(ControlMessage::ShareListRequest) => {
                 self.events
                     .on_share_control(peer_id, ShareInbound::ListRequest);
@@ -496,8 +457,6 @@ impl LanTransport {
             let mut is_dir = false;
             let mut display_total: u64 = 0;
             let mut complete_total: Option<u64> = None;
-            let mut group_id = String::new();
-            let mut doc_id = String::new();
             let mut share_id = String::new();
             let mut last_emit = Instant::now();
 
@@ -507,15 +466,11 @@ impl LanTransport {
                         name: offered_name,
                         is_dir: offered_is_dir,
                         display_total: offered_total,
-                        group_id: offered_group,
-                        doc_id: offered_doc,
                         share_id: offered_share,
                     } => {
                         name = Some(offered_name);
                         is_dir = offered_is_dir;
                         display_total = offered_total;
-                        group_id = offered_group;
-                        doc_id = offered_doc;
                         share_id = offered_share;
                         let nm = name.clone().unwrap_or_default();
                         this.emit_inbound(&peer_dir, &transfer_id, &task_peer, &nm, display_total, written, "active");
@@ -555,8 +510,6 @@ impl LanTransport {
                         name.clone().unwrap_or_default(),
                         is_dir,
                         written,
-                        &group_id,
-                        &doc_id,
                         &share_id,
                     )
                     .await;
@@ -618,8 +571,6 @@ impl LanTransport {
         name: String,
         is_dir: bool,
         written: u64,
-        group_id: &str,
-        doc_id: &str,
         share_id: &str,
     ) {
         let mut status = "completed".to_string();
@@ -680,16 +631,7 @@ impl LanTransport {
         });
 
         if status == "completed" {
-            if !group_id.is_empty() && !doc_id.is_empty() {
-                self.events.on_group_doc_received(GroupDocReceived {
-                    group_id: group_id.to_string(),
-                    doc_id: doc_id.to_string(),
-                    peer_id: peer_id.to_string(),
-                    path: final_path.clone(),
-                    is_dir,
-                    size: i64::try_from(written).unwrap_or(0),
-                });
-            } else if !share_id.is_empty() {
+            if !share_id.is_empty() {
                 self.events.on_share_received(ShareReceived {
                     share_id: share_id.to_string(),
                     peer_id: peer_id.to_string(),
@@ -751,20 +693,7 @@ impl LanTransport {
         transfer_id: &str,
         source: &Path,
     ) -> Result<()> {
-        self.send_path_inner(peer_id, transfer_id, source, "", "", "")
-            .await
-    }
-
-    pub async fn send_group_doc(
-        self: &Arc<Self>,
-        peer_id: &str,
-        transfer_id: &str,
-        group_id: &str,
-        doc_id: &str,
-        source: &Path,
-    ) -> Result<()> {
-        self.send_path_inner(peer_id, transfer_id, source, group_id, doc_id, "")
-            .await
+        self.send_path_inner(peer_id, transfer_id, source, "").await
     }
 
     pub async fn send_share(
@@ -774,7 +703,7 @@ impl LanTransport {
         share_id: &str,
         source: &Path,
     ) -> Result<()> {
-        self.send_path_inner(peer_id, transfer_id, source, "", "", share_id)
+        self.send_path_inner(peer_id, transfer_id, source, share_id)
             .await
     }
 
@@ -797,8 +726,6 @@ impl LanTransport {
         peer_id: &str,
         transfer_id: &str,
         source: &Path,
-        group_id: &str,
-        doc_id: &str,
         share_id: &str,
     ) -> Result<()> {
         let link = self.ensure_link(peer_id).await?;
@@ -814,10 +741,8 @@ impl LanTransport {
                 .file_name()
                 .map(|n| n.to_string_lossy().to_string())
                 .unwrap_or_else(|| "folder".to_string());
-            self.stream_dir(
-                &link, peer_id, &transfer_uuid, source, &name, group_id, doc_id, share_id,
-            )
-            .await
+            self.stream_dir(&link, peer_id, &transfer_uuid, source, &name, share_id)
+                .await
         } else {
             let name = source
                 .file_name()
@@ -830,8 +755,6 @@ impl LanTransport {
                 source,
                 &name,
                 metadata.len(),
-                group_id,
-                doc_id,
                 share_id,
             )
             .await
@@ -852,8 +775,6 @@ impl LanTransport {
         path: &Path,
         name: &str,
         total: u64,
-        group_id: &str,
-        doc_id: &str,
         share_id: &str,
     ) -> Result<()> {
         let transfer_id = transfer_uuid.to_string();
@@ -862,8 +783,6 @@ impl LanTransport {
             name: name.to_string(),
             is_dir: false,
             total_size: total,
-            group_id: group_id.to_string(),
-            doc_id: doc_id.to_string(),
             share_id: share_id.to_string(),
         })?)
         .await?;
@@ -906,8 +825,6 @@ impl LanTransport {
         transfer_uuid: &uuid::Uuid,
         source: &Path,
         name: &str,
-        group_id: &str,
-        doc_id: &str,
         share_id: &str,
     ) -> Result<()> {
         let transfer_id = transfer_uuid.to_string();
@@ -921,8 +838,6 @@ impl LanTransport {
             name: name.to_string(),
             is_dir: true,
             total_size: display_total,
-            group_id: group_id.to_string(),
-            doc_id: doc_id.to_string(),
             share_id: share_id.to_string(),
         })?)
         .await?;

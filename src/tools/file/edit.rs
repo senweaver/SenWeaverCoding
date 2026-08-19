@@ -512,12 +512,18 @@ impl FileEditTool {
     ) -> Result<(), String> {
         self.snapshot_before_write(path).await;
         let op = match encoding {
-            Some(label) => EditOp::CreateFile {
-                path: path.to_path_buf(),
-                contents: new_content.to_string(),
-                overwrite: true,
-                encoding: Some(label),
-            },
+            Some(label) => {
+                let expected_pre_sha256 =
+                    crate::tools::file::encoding::encode_with_label(&label, original)
+                        .map(|b| crate::apply_model::edit_op::sha256_hex(&b));
+                EditOp::CreateFile {
+                    path: path.to_path_buf(),
+                    contents: new_content.to_string(),
+                    overwrite: true,
+                    encoding: Some(label),
+                    expected_pre_sha256,
+                }
+            }
             None => EditOp::Replace {
                 path: path.to_path_buf(),
                 byte_range: 0..original.len(),

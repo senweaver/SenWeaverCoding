@@ -23,6 +23,28 @@ const COMBINED_TOKEN_RE = new RegExp(
   'g',
 )
 
+const LINE_RANGE_RE = /:(\d+)(?:-(\d+))?$/
+
+export function selectionRefLabel(
+  name: string,
+  startLine: number,
+  endLine: number,
+): string {
+  return startLine === endLine
+    ? `${name} (${startLine})`
+    : `${name} (${startLine}-${endLine})`
+}
+
+export function selectionRefPath(
+  relPath: string,
+  startLine: number,
+  endLine: number,
+): string {
+  return startLine === endLine
+    ? `${relPath}:${startLine}`
+    : `${relPath}:${startLine}-${endLine}`
+}
+
 export function makeCredToken(name: string, field?: string): string {
   if (field) return `\${cred.${name}.${field}}`
   return `\${cred.${name}}`
@@ -49,6 +71,7 @@ export function sessionIdFromRef(relPath: string): string {
 
 export function refKind(relPath: string): RefKind {
   if (isSessionRef(relPath)) return 'session'
+  if (LINE_RANGE_RE.test(relPath)) return 'file'
   const base = lastSegment(relPath)
   return /\.[^.\\/]+$/.test(base) ? 'file' : 'folder'
 }
@@ -103,6 +126,7 @@ export function refsToPlainText(value: string): string {
 
 export function refIconName(relPath: string): string {
   if (isSessionRef(relPath)) return 'forum'
+  if (LINE_RANGE_RE.test(relPath)) return 'description'
   const base = lastSegment(relPath)
   return /\.[^.\\/]+$/.test(base) ? 'description' : 'folder'
 }

@@ -148,6 +148,7 @@ struct VaultFile {
 pub struct CredentialVault {
     data_path: PathBuf,
     salt: Vec<u8>,
+    master_key: Vec<u8>,
     state: RwLock<VaultPayload>,
     placeholder_re: Regex,
     redact_re: Regex,
@@ -161,13 +162,115 @@ fn current_ts() -> i64 {
         .unwrap_or(0)
 }
 
-const CURRENT_VAULT_VERSION: u32 = 2;
+const CURRENT_VAULT_VERSION: u32 = 3;
+
+const VAULT_KEY_FILE: &str = "credentials.key";
+#[cfg(windows)]
+const VAULT_KEY_DPAPI_ENTROPY: &[u8] = b"senweavercoding.credential_vault.key.v3";
+const VAULT_KEY_SCHEME_DPAPI: &[u8] = b"DPAPI1";
+const VAULT_KEY_SCHEME_PLAIN: &[u8] = b"PLAIN1";
 
 fn machine_hint() -> String {
     hostname::get()
         .ok()
         .and_then(|h| h.into_string().ok())
         .unwrap_or_else(|| "senweavercoding-default-host".to_string())
+}
+
+fn vault_passphrase() -> Option<String> {
+    std::env::var("SENAGENTOS_VAULT_PASSPHRASE")
+        .ok()
+        .or_else(|| std::env::var("SEN_VAULT_PASSPHRASE").ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+}
+
+fn wrap_master_key(raw: &[u8]) -> Vec<u8> {
+    #[cfg(windows)]
+    {
+        match crate::security::secrets::dpapi_protect_with_entropy(raw, VAULT_KEY_DPAPI_ENTROPY) {
+            Ok(blob) => {
+                let mut out = Vec::with_capacity(VAULT_KEY_SCHEME_DPAPI.len() + blob.len());
+                out.extend_from_slice(VAULT_KEY_SCHEME_DPAPI);
+                out.extend_from_slice(&blob);
+                return out;
+            }
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "DPAPI wrap of vault master key failed; storing with file-permission protection only"
+                );
+            }
+        }
+    }
+    let mut out = Vec::with_capacity(VAULT_KEY_SCHEME_PLAIN.len() + raw.len());
+    out.extend_from_slice(VAULT_KEY_SCHEME_PLAIN);
+    out.extend_from_slice(raw);
+    out
+}
+
+fn unwrap_master_key(stored: &[u8]) -> Result<Vec<u8>> {
+    if let Some(rest) = stored.strip_prefix(VAULT_KEY_SCHEME_DPAPI) {
+        #[cfg(windows)]
+        {
+            return crate::security::secrets::dpapi_unprotect_with_entropy(
+                rest,
+                VAULT_KEY_DPAPI_ENTROPY,
+            )
+            .context("unwrapping DPAPI-protected vault master key (wrong Windows user profile?)");
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = rest;
+            anyhow::bail!(
+                "credential vault master key is DPAPI-wrapped (created on Windows) and cannot be unwrapped on this OS"
+            );
+        }
+    }
+    if let Some(rest) = stored.strip_prefix(VAULT_KEY_SCHEME_PLAIN) {
+        return Ok(rest.to_vec());
+    }
+    anyhow::bail!("credential vault master key file malformed (unknown wrapping scheme)")
+}
+
+fn read_master_key(data_dir: &Path) -> Result<Option<Vec<u8>>> {
+    let path = data_dir.join(VAULT_KEY_FILE);
+    if !path.exists() {
+        return Ok(None);
+    }
+    let stored = std::fs::read(&path).context("reading vault master key file")?;
+    let raw = unwrap_master_key(&stored)?;
+    if raw.len() != 32 {
+        anyhow::bail!("credential vault master key malformed (expected 32 bytes)");
+    }
+    Ok(Some(raw))
+}
+
+fn create_master_key(data_dir: &Path) -> Result<Vec<u8>> {
+    let mut raw = vec![0u8; 32];
+    OsRng.fill_bytes(&mut raw);
+    let wrapped = wrap_master_key(&raw);
+    let path = data_dir.join(VAULT_KEY_FILE);
+    std::fs::write(&path, &wrapped).context("writing vault master key file")?;
+    restrict_file_permissions(&path);
+    Ok(raw)
+}
+
+fn derive_key_v3(master: &[u8], salt: &[u8]) -> Result<[u8; 32]> {
+    use argon2::{Algorithm, Argon2, Params, Version};
+    let mut secret = Vec::with_capacity(96);
+    secret.extend_from_slice(b"senweavercoding.credential_vault.v3");
+    secret.extend_from_slice(master);
+    if let Some(pass) = vault_passphrase() {
+        secret.extend_from_slice(pass.as_bytes());
+    }
+    let params = Params::default();
+    let argon = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut key = [0u8; 32];
+    argon
+        .hash_password_into(&secret, salt, &mut key)
+        .map_err(|e| anyhow::anyhow!("argon2 v3 key derivation failed: {e}"))?;
+    Ok(key)
 }
 
 fn derive_key_legacy(salt: &[u8]) -> [u8; 32] {
@@ -184,12 +287,7 @@ fn derive_key_legacy(salt: &[u8]) -> [u8; 32] {
 fn vault_kdf_secret() -> Vec<u8> {
     let mut secret = Vec::with_capacity(96);
     secret.extend_from_slice(b"senweavercoding.credential_vault.v2");
-    if let Some(pass) = std::env::var("SENAGENTOS_VAULT_PASSPHRASE")
-        .ok()
-        .or_else(|| std::env::var("SEN_VAULT_PASSPHRASE").ok())
-        .map(|s| s.trim().to_string())
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(pass) = vault_passphrase() {
         secret.extend_from_slice(pass.as_bytes());
     }
     secret.extend_from_slice(machine_hint().as_bytes());
@@ -208,7 +306,7 @@ fn derive_key_argon2(salt: &[u8]) -> Result<[u8; 32]> {
     Ok(key)
 }
 
-fn derive_key_for_version(version: u32, salt: &[u8]) -> Result<[u8; 32]> {
+fn derive_key_for_legacy_version(version: u32, salt: &[u8]) -> Result<[u8; 32]> {
     if version >= 2 {
         derive_key_argon2(salt)
     } else {
@@ -305,6 +403,8 @@ impl CredentialVault {
             salt
         };
 
+        let stored_master_key = read_master_key(data_dir)?;
+
         let mut needs_upgrade = false;
         let payload = if data_path.exists() {
             let raw = std::fs::read(&data_path).context("reading vault file")?;
@@ -312,7 +412,18 @@ impl CredentialVault {
                 VaultPayload::default()
             } else {
                 let file: VaultFile = serde_json::from_slice(&raw).context("parsing vault file")?;
-                let key_bytes = derive_key_for_version(file.version, &salt)?;
+                let key_bytes = if file.version >= 3 {
+                    let master = stored_master_key.as_deref().ok_or_else(|| {
+                        anyhow::anyhow!(
+                            "credential vault is v3 but its master key file ({VAULT_KEY_FILE}) is missing; \
+                             restore the key file from backup or delete the vault files to start fresh \
+                             (stored credentials cannot be recovered without the key)"
+                        )
+                    })?;
+                    derive_key_v3(master, &salt)?
+                } else {
+                    derive_key_for_legacy_version(file.version, &salt)?
+                };
                 let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
                 let nonce_bytes = b64().decode(file.nonce.as_bytes()).context("decoding nonce")?;
                 let cipher_bytes = b64()
@@ -333,6 +444,11 @@ impl CredentialVault {
             VaultPayload::default()
         };
 
+        let master_key = match stored_master_key {
+            Some(k) => k,
+            None => create_master_key(data_dir)?,
+        };
+
         let placeholder_re =
             Regex::new(r"\$\{cred\.([A-Za-z0-9_-]+)(?:\.([A-Za-z0-9_-]+))?\}")
                 .context("compiling credential placeholder regex")?;
@@ -341,6 +457,7 @@ impl CredentialVault {
         let vault = Arc::new(Self {
             data_path,
             salt,
+            master_key,
             state: RwLock::new(payload),
             placeholder_re,
             redact_re,
@@ -351,10 +468,12 @@ impl CredentialVault {
             if let Err(err) = vault.write_locked(&snapshot) {
                 tracing::warn!(
                     error = %err,
-                    "credential vault KDF upgrade to argon2id failed; keeping legacy file"
+                    "credential vault upgrade to v3 (random master key) failed; keeping legacy file"
                 );
             } else {
-                tracing::info!("credential vault re-encrypted with argon2id KDF");
+                tracing::info!(
+                    "credential vault re-encrypted with v3 scheme (random master key, DPAPI-wrapped on Windows)"
+                );
             }
         }
 
@@ -363,7 +482,7 @@ impl CredentialVault {
 
     fn write_locked(&self, payload: &VaultPayload) -> Result<()> {
         let plaintext = serde_json::to_vec(payload).context("serializing vault payload")?;
-        let key_bytes = derive_key_for_version(CURRENT_VAULT_VERSION, &self.salt)?;
+        let key_bytes = derive_key_v3(&self.master_key, &self.salt)?;
         let cipher = ChaCha20Poly1305::new(Key::from_slice(&key_bytes));
         let mut nonce_bytes = [0u8; 12];
         OsRng.fill_bytes(&mut nonce_bytes);

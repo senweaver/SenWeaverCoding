@@ -11,17 +11,12 @@ use parking_lot::Mutex;
 use serde_json::json;
 
 use super::discovery::{Discovery, DiscoveryParams, PeerRegistry};
-use super::group::op::GroupInbound;
-use super::group::store::GroupStore;
-use super::group::GroupService;
 use super::identity::LanIdentity;
 use super::share::store::ShareStore;
 use super::share::types::ShareInbound;
 use super::share::ShareService;
 use super::store::{LanStore, NewMessage};
-use super::transport::{
-    GroupDocReceived, LanEvents, LanTransport, ShareReceived, TransferUpdate,
-};
+use super::transport::{LanEvents, LanTransport, ShareReceived, TransferUpdate};
 
 const FILE_MARKER: &str = "__lan_file__:";
 
@@ -30,7 +25,6 @@ pub struct LanService {
     store: Arc<LanStore>,
     registry: Arc<PeerRegistry>,
     transport: Arc<LanTransport>,
-    group: Arc<GroupService>,
     share: Arc<ShareService>,
     discovery: Mutex<Option<Discovery>>,
     running: AtomicBool,
@@ -43,7 +37,6 @@ pub struct LanService {
 struct LanEventSink {
     store: Arc<LanStore>,
     registry: Arc<PeerRegistry>,
-    group: Arc<GroupService>,
     share: Arc<ShareService>,
 }
 
@@ -63,15 +56,6 @@ impl LanService {
             None => lan_root.join("downloads"),
         };
 
-        let group_store = Arc::new(GroupStore::open(sen_dir, identity.user_id())?);
-        let group_docs_root = sen_dir.join("lan").join("groups");
-        let group = GroupService::new(
-            Arc::clone(&identity),
-            group_store,
-            Arc::clone(&registry),
-            group_docs_root,
-        );
-
         let share_store = Arc::new(ShareStore::open(sen_dir)?);
         let share = ShareService::new(
             Arc::clone(&identity),
@@ -82,7 +66,6 @@ impl LanService {
         let sink: Arc<dyn LanEvents> = Arc::new(LanEventSink {
             store: Arc::clone(&store),
             registry: Arc::clone(&registry),
-            group: Arc::clone(&group),
             share: Arc::clone(&share),
         });
 
@@ -97,7 +80,6 @@ impl LanService {
             lan_cfg.max_frame_bytes.max(lan_cfg.chunk_size + 4096),
             lan_cfg.num_streams,
         ));
-        group.attach_transport(&transport);
         share.attach_transport(&transport);
 
         Ok(Arc::new(Self {
@@ -105,7 +87,6 @@ impl LanService {
             store,
             registry,
             transport,
-            group,
             share,
             discovery: Mutex::new(None),
             running: AtomicBool::new(false),
@@ -114,10 +95,6 @@ impl LanService {
             lan_root,
             downloads_dir,
         }))
-    }
-
-    pub fn group(&self) -> Arc<GroupService> {
-        Arc::clone(&self.group)
     }
 
     pub fn share(&self) -> Arc<ShareService> {
@@ -156,16 +133,13 @@ impl LanService {
         let runtime = tokio::runtime::Handle::current();
         let on_change: Arc<dyn Fn() + Send + Sync> = {
             let reg = Arc::clone(&self.registry);
-            let group = Arc::clone(&self.group);
             let share = Arc::clone(&self.share);
             let runtime = runtime.clone();
             Arc::new(move || {
                 let snapshot = reg.snapshot();
                 emit_lan("lan_peers", json!({ "peers": snapshot }));
-                let group = Arc::clone(&group);
                 let share = Arc::clone(&share);
                 runtime.spawn(async move {
-                    group.on_peers_changed();
                     share.on_peers_changed();
                 });
             })
@@ -207,7 +181,8 @@ impl LanService {
             let this = Arc::clone(self);
             tokio::spawn(async move {
                 if let Err(err) = this.spawn_discovery(port).await {
-                    tracing::warn!(error = %err, "failed to restart LAN discovery after profile change");
+                    let detail = format!("{err:#}");
+                    tracing::warn!(error = %detail, "failed to restart LAN discovery after profile change");
                 }
             });
         }
@@ -510,27 +485,10 @@ impl LanEvents for LanEventSink {
     fn on_connection_change(&self) {}
 
     fn on_peer_connected(&self, peer_id: &str) {
-        let group = Arc::clone(&self.group);
         let share = Arc::clone(&self.share);
         let peer = peer_id.to_string();
         tokio::spawn(async move {
-            group.handle_peer_connected(&peer).await;
             share.handle_peer_connected(&peer).await;
-        });
-    }
-
-    fn on_group_control(&self, peer_id: &str, msg: GroupInbound) {
-        let group = Arc::clone(&self.group);
-        let peer = peer_id.to_string();
-        tokio::spawn(async move {
-            group.handle_inbound(&peer, msg).await;
-        });
-    }
-
-    fn on_group_doc_received(&self, info: GroupDocReceived) {
-        let group = Arc::clone(&self.group);
-        tokio::spawn(async move {
-            group.handle_doc_received(info).await;
         });
     }
 

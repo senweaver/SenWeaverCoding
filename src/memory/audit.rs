@@ -123,6 +123,10 @@ impl<M: Memory> Memory for AuditedMemory<M> {
         self.inner.name()
     }
 
+    async fn reembed_all(&self) -> anyhow::Result<usize> {
+        self.inner.reembed_all().await
+    }
+
     async fn store(
         &self,
         key: &str,

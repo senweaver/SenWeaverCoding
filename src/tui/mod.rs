@@ -4210,6 +4210,9 @@ pub async fn run_tui_with_opts(config: Config, legacy: bool) -> anyhow::Result<(
         data_dir: svc_data_dir,
         ..Default::default()
     });
+    if let Some(svc) = crate::services::try_get_services() {
+        svc.update_config(config.clone());
+    }
 
     let bridge = agent_bridge::spawn_agent_task(config.clone());
     run_tui_inner(config, bridge, legacy).await
@@ -4230,6 +4233,9 @@ pub async fn run_tui_standalone_with_opts(legacy: bool) -> anyhow::Result<()> {
 
     let svc_cfg = crate::services::container::ServiceContainerConfig::default();
     let _ = crate::services::init_services(svc_cfg);
+    if let Some(svc) = crate::services::try_get_services() {
+        svc.update_config(config.clone());
+    }
 
     let bridge = agent_bridge::spawn_agent_task(config.clone());
     run_tui_inner(config, bridge, legacy).await

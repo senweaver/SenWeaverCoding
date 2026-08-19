@@ -5,7 +5,6 @@
 pub mod builder;
 pub mod git;
 pub mod lsp_ctx;
-pub mod memory_files;
 pub mod open_files;
 pub mod outline_ctx;
 pub mod rag_ctx;

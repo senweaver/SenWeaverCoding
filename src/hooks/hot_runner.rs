@@ -177,10 +177,27 @@ pub fn build_runner(config: &Config, workspace_dir: &Path) -> Option<Arc<HookRun
         }
     }
 
+    let default_fail_mode = config
+        .hooks
+        .fail_mode
+        .as_deref()
+        .and_then(|raw| match raw.trim().to_ascii_lowercase().as_str() {
+            "allow" => Some(super::script_runner::HookFailMode::Allow),
+            "deny" => Some(super::script_runner::HookFailMode::Deny),
+            "" => None,
+            other => {
+                tracing::warn!(
+                    value = %other,
+                    "invalid hooks.fail_mode (expected \"allow\" or \"deny\"); ignoring"
+                );
+                None
+            }
+        });
     let script_runner = super::script_runner::ScriptHookRunner::load_default(
         workspace_dir.to_path_buf(),
         config.hooks.allow_workspace_hooks,
-    );
+    )
+    .with_default_fail_mode(default_fail_mode);
     if script_runner.source_count() > 0 {
         tracing::info!(
             sources = script_runner.source_count(),

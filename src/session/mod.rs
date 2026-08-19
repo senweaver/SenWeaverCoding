@@ -454,6 +454,7 @@ pub fn turn_event_to_session_event(
         | TurnEvent::Cancelling { .. }
         | TurnEvent::PiiSanitized { .. }
         | TurnEvent::PlanProgressCommitted { .. }
+        | TurnEvent::ToolArgsDelta { .. }
         | TurnEvent::StreamReset => {
 
             return None;

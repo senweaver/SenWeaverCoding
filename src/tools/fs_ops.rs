@@ -212,7 +212,10 @@ impl Tool for CopyPathTool {
     }
 }
 
-fn collect_files_bounded(root: &std::path::Path, limit: usize) -> Vec<std::path::PathBuf> {
+pub(crate) fn collect_files_bounded(
+    root: &std::path::Path,
+    limit: usize,
+) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     if root.is_file() {
         out.push(root.to_path_buf());

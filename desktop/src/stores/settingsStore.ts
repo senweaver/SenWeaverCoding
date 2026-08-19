@@ -16,7 +16,18 @@ import {
   VISIBLE_CODING_MODES,
 } from '../types/codingMode'
 import type { Locale } from '../i18n'
+import { t } from '../i18n'
 import { useUIStore } from './uiStore'
+
+function notifySettingSaveFailed(err: unknown) {
+  useUIStore.getState().addToast({
+    type: 'error',
+    message: t('settings.saveFailed', {
+      error: err instanceof Error ? err.message : String(err),
+    }),
+    duration: 6000,
+  })
+}
 type PendingCodingModeTransition = {
   target: CodingModeId
   resolver: (confirmed: boolean) => void
@@ -434,8 +445,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
 
       const derived = (res.permissionMode as PermissionMode) || get().permissionMode
       set({ permissionMode: derived })
-    } catch {
+    } catch (err) {
       set({ codingMode: prev })
+      notifySettingSaveFailed(err)
     }
   },
 
@@ -470,6 +482,7 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
       set({ codingMode: prevMode })
       if (!needsConfirm) {
         console.warn('[settings] requestSetCodingMode failed', err)
+        notifySettingSaveFailed(err)
         return
       }
     }
@@ -493,8 +506,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set({ permissionMode: mode })
     try {
       await settingsApi.setPermissionMode(mode)
-    } catch {
+    } catch (err) {
       set({ permissionMode: prev })
+      notifySettingSaveFailed(err)
     }
   },
 
@@ -518,8 +532,9 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     set({ effortLevel: level })
     try {
       await modelsApi.setEffort(level)
-    } catch {
+    } catch (err) {
       set({ effortLevel: prev })
+      notifySettingSaveFailed(err)
     }
   },
 
@@ -548,9 +563,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     useUIStore.getState().setTheme(theme)
     try {
       await settingsApi.updateUser({ theme })
-    } catch {
+    } catch (err) {
       set({ theme: prev })
       useUIStore.getState().setTheme(prev)
+      notifySettingSaveFailed(err)
     }
   },
 
@@ -560,9 +576,10 @@ export const useSettingsStore = create<SettingsStore>((set, get) => ({
     storeCloseBehavior(behavior)
     try {
       await settingsApi.updateUser({ closeBehavior: behavior })
-    } catch {
+    } catch (err) {
       set({ closeBehavior: prev })
       storeCloseBehavior(prev)
+      notifySettingSaveFailed(err)
     }
   },
 

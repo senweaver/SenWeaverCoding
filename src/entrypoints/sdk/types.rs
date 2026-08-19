@@ -272,6 +272,9 @@ impl From<crate::agent::TurnEvent> for SdkTurnEvent {
                 output,
                 success,
             },
+            T::ToolArgsDelta { name, .. } => Self::Chunk {
+                delta: format!("[tool_args_streaming] {name}"),
+            },
             T::PlanProgressCommitted { title, .. } => Self::Chunk {
                 delta: format!("[plan_progress] {title}"),
             },

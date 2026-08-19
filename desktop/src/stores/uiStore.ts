@@ -3,7 +3,6 @@
 // Licensed under the MIT License.
 
 import { create } from 'zustand'
-import { useLanGroupStore } from './lanGroupStore'
 import { useLanShareStore } from './lanShareStore'
 import type { ThemeMode } from '../types/settings'
 
@@ -125,18 +124,23 @@ export type Toast = {
 export type SettingsTab =
   | 'providers'
   | 'agents'
-  | 'codingMode'
   | 'general'
   | 'adapters'
-  | 'mcp'
-  | 'skills'
-  | 'hooks'
+  | 'custom'
+  | 'security'
   | 'usage'
   | 'evolution'
   | 'plugins'
   | 'lsp'
   | 'keyboard'
-  | 'credentials'
+
+export type CustomSettingsSubTab =
+  | 'tools'
+  | 'guardrails'
+  | 'web'
+  | 'mcps'
+  | 'rules'
+  | 'skills'
 
 type ActiveView = 'code'
 
@@ -163,9 +167,11 @@ type UIStore = {
 
   settingsOverlayOpen: boolean
   pendingSettingsTab: SettingsTab | null
+  pendingCustomSubTab: CustomSettingsSubTab | null
   templateLibraryOpen: boolean
   activeModal: string | null
   workspaceFinderMode: WorkspaceFinderMode | null
+  workspaceFinderScopeDir: string | null
   closePromptOpen: boolean
   safeExiting: boolean
   editorCursor: EditorCursor | null
@@ -187,12 +193,16 @@ type UIStore = {
   closeSettingsOverlay: () => void
   toggleSettingsOverlay: (tab?: SettingsTab) => void
   setPendingSettingsTab: (tab: SettingsTab | null) => void
+  setPendingCustomSubTab: (subTab: CustomSettingsSubTab | null) => void
   openTemplateLibrary: () => void
   closeTemplateLibrary: () => void
   toggleTemplateLibrary: () => void
   openModal: (id: string) => void
   closeModal: () => void
-  openWorkspaceFinder: (mode: WorkspaceFinderMode) => void
+  openWorkspaceFinder: (
+    mode: WorkspaceFinderMode,
+    opts?: { scopeDir?: string },
+  ) => void
   closeWorkspaceFinder: () => void
   dismissChatOverlays: () => void
   setClosePromptOpen: (open: boolean) => void
@@ -226,9 +236,11 @@ export const useUIStore = create<UIStore>((set, get) => ({
   appMode: 'code',
   settingsOverlayOpen: false,
   pendingSettingsTab: null,
+  pendingCustomSubTab: null,
   templateLibraryOpen: false,
   activeModal: null,
   workspaceFinderMode: null,
+  workspaceFinderScopeDir: null,
   closePromptOpen: false,
   safeExiting: false,
   editorCursor: null,
@@ -282,11 +294,16 @@ export const useUIStore = create<UIStore>((set, get) => ({
       settingsOverlayOpen: true,
       pendingSettingsTab: tab ?? state.pendingSettingsTab,
     })),
-  closeSettingsOverlay: () => set({ settingsOverlayOpen: false, pendingSettingsTab: null }),
+  closeSettingsOverlay: () =>
+    set({ settingsOverlayOpen: false, pendingSettingsTab: null, pendingCustomSubTab: null }),
   toggleSettingsOverlay: (tab) =>
     set((state) => {
       if (state.settingsOverlayOpen) {
-        return { settingsOverlayOpen: false, pendingSettingsTab: null }
+        return {
+          settingsOverlayOpen: false,
+          pendingSettingsTab: null,
+          pendingCustomSubTab: null,
+        }
       }
       return {
         settingsOverlayOpen: true,
@@ -294,24 +311,28 @@ export const useUIStore = create<UIStore>((set, get) => ({
       }
     }),
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
+  setPendingCustomSubTab: (subTab) => set({ pendingCustomSubTab: subTab }),
   openTemplateLibrary: () => set({ templateLibraryOpen: true }),
   closeTemplateLibrary: () => set({ templateLibraryOpen: false }),
   toggleTemplateLibrary: () => set((s) => ({ templateLibraryOpen: !s.templateLibraryOpen })),
   openModal: (id) => set({ activeModal: id }),
   closeModal: () => set({ activeModal: null }),
 
-  openWorkspaceFinder: (mode) => {
+  openWorkspaceFinder: (mode, opts) => {
     try {
       localStorage.setItem(RIGHT_SIDEBAR_OPEN_KEY, 'true')
     } catch {
     }
-    set({ workspaceFinderMode: mode, rightSidebarOpen: true })
+    set({
+      workspaceFinderMode: mode,
+      workspaceFinderScopeDir: opts?.scopeDir?.trim() ? opts.scopeDir : null,
+      rightSidebarOpen: true,
+    })
   },
-  closeWorkspaceFinder: () => set({ workspaceFinderMode: null }),
+  closeWorkspaceFinder: () =>
+    set({ workspaceFinderMode: null, workspaceFinderScopeDir: null }),
 
   dismissChatOverlays: () => {
-    const lanGroup = useLanGroupStore.getState()
-    if (lanGroup.panelOpen) lanGroup.closePanel()
     const lanShare = useLanShareStore.getState()
     if (lanShare.panelOpen) lanShare.closePanel()
     set((s) => {
@@ -327,6 +348,7 @@ export const useUIStore = create<UIStore>((set, get) => ({
       if (s.settingsOverlayOpen) {
         next.settingsOverlayOpen = false
         next.pendingSettingsTab = null
+        next.pendingCustomSubTab = null
       }
       if (s.templateLibraryOpen) {
         next.templateLibraryOpen = false

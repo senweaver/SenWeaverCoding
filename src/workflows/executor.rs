@@ -574,14 +574,3 @@ fn evaluate_condition(condition: &str, input: &str) -> bool {
         }
     }
 }
-
-pub fn mock_step_executor()
--> impl Fn(StepAgent, String) -> std::future::Ready<Result<(String, u64, u64), String>> {
-    |_agent, prompt| {
-        std::future::ready(Ok((
-            format!("Processed: {}", prompt),
-            prompt.len() as u64 / 4,
-            100,
-        )))
-    }
-}

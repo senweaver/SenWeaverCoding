@@ -254,14 +254,25 @@ impl Tool for InlineCompleteTool {
     }
 
     fn fingerprint(&self, args: &Value) -> Option<String> {
+        use sha2::{Digest, Sha256};
         let prefix = args.get("prefix")?.as_str()?;
         let suffix = args.get("suffix").and_then(Value::as_str).unwrap_or("");
         let language = args.get("language").and_then(Value::as_str).unwrap_or("");
-        Some(format!(
-            "inline_complete::{language}::{}::{}",
-            prefix.len(),
-            suffix.len()
-        ))
+        let path = args
+            .get("path")
+            .or_else(|| args.get("file"))
+            .or_else(|| args.get("uri"))
+            .and_then(Value::as_str)
+            .unwrap_or("");
+        let mut hasher = Sha256::new();
+        hasher.update(language.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(path.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(prefix.as_bytes());
+        hasher.update([0u8]);
+        hasher.update(suffix.as_bytes());
+        Some(format!("inline_complete::{}", hex::encode(hasher.finalize())))
     }
 
     fn cache_ttl_secs(&self) -> u64 {

@@ -541,6 +541,7 @@ impl WorkerWireTracker {
             TurnEvent::PiiSanitized { .. } => vec![json!({
                 "type": "pii_sanitized",
             })],
+            TurnEvent::ToolArgsDelta { .. } => Vec::new(),
         }
     }
 }

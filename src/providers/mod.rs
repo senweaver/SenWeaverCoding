@@ -1155,24 +1155,201 @@ pub async fn stream_cancelled(token: &Option<tokio_util::sync::CancellationToken
     }
 }
 
+fn parse_retry_after_header_value(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(secs) = trimmed.parse::<f64>() {
+        if secs.is_finite() && secs >= 0.0 {
+            return u64::try_from(std::time::Duration::from_secs_f64(secs).as_millis()).ok();
+        }
+        return None;
+    }
+    let parsed = chrono::DateTime::parse_from_rfc2822(trimmed).ok()?;
+    let delta_ms = parsed
+        .signed_duration_since(chrono::Utc::now())
+        .num_milliseconds();
+    Some(delta_ms.max(0) as u64)
+}
+
+fn parse_reset_duration_ms(value: &str) -> Option<u64> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    if let Ok(secs) = trimmed.parse::<f64>() {
+        if secs.is_finite() && secs >= 0.0 {
+            return u64::try_from(std::time::Duration::from_secs_f64(secs).as_millis()).ok();
+        }
+        return None;
+    }
+    let mut total_ms: f64 = 0.0;
+    let mut num = String::new();
+    let mut chars = trimmed.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c.is_ascii_digit() || c == '.' {
+            num.push(c);
+            continue;
+        }
+        if num.is_empty() {
+            return None;
+        }
+        let unit_ms = match c {
+            'h' => 3_600_000.0,
+            'm' if chars.peek() == Some(&'s') => {
+                chars.next();
+                1.0
+            }
+            'm' => 60_000.0,
+            's' => 1_000.0,
+            _ => return None,
+        };
+        let value: f64 = num.parse().ok()?;
+        num.clear();
+        total_ms += value * unit_ms;
+    }
+    if !num.is_empty() || !total_ms.is_finite() || total_ms < 0.0 {
+        return None;
+    }
+    Some(total_ms.round() as u64)
+}
+
+pub fn retry_after_ms_from_headers(
+    headers: &reqwest::header::HeaderMap,
+    status: reqwest::StatusCode,
+) -> Option<u64> {
+    let header_str = |name: &str| {
+        headers
+            .get(name)
+            .and_then(|v| v.to_str().ok())
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+    };
+
+    if matches!(status.as_u16(), 429 | 503 | 529) {
+        if let Some(ms) = header_str("retry-after").and_then(parse_retry_after_header_value) {
+            return Some(ms);
+        }
+
+        if let Some(value) = header_str("retry-after-ms") {
+            if let Ok(ms) = value.parse::<f64>() {
+                if ms.is_finite() && ms >= 0.0 {
+                    return Some(ms.round() as u64);
+                }
+            }
+        }
+    }
+
+    if status.as_u16() != 429 {
+        return None;
+    }
+
+    let remaining_zero = |name: &str| {
+        header_str(name)
+            .and_then(|v| v.parse::<f64>().ok())
+            .is_some_and(|v| v <= 0.0)
+    };
+    let reset_requests = header_str("x-ratelimit-reset-requests").and_then(parse_reset_duration_ms);
+    let reset_tokens = header_str("x-ratelimit-reset-tokens").and_then(parse_reset_duration_ms);
+    let requests_exhausted = remaining_zero("x-ratelimit-remaining-requests");
+    let tokens_exhausted = remaining_zero("x-ratelimit-remaining-tokens");
+
+    match (requests_exhausted, tokens_exhausted, reset_requests, reset_tokens) {
+        (true, false, Some(requests_ms), _) => Some(requests_ms),
+        (false, true, _, Some(tokens_ms)) => Some(tokens_ms),
+        (true, true, requests_ms, tokens_ms) => match (requests_ms, tokens_ms) {
+            (Some(a), Some(b)) => Some(a.max(b)),
+            (Some(a), None) => Some(a),
+            (None, Some(b)) => Some(b),
+            (None, None) => None,
+        },
+        _ => None,
+    }
+}
+
+fn prepend_retry_after_prefix(retry_after_ms: Option<u64>, body: String) -> String {
+    match retry_after_ms {
+        Some(ms) => format!("Retry-After: {}\n{body}", ms as f64 / 1000.0),
+        None => body,
+    }
+}
+
 pub async fn stream_error_body_with_retry_after(
     response: reqwest::Response,
 ) -> (reqwest::StatusCode, String) {
     let status = response.status();
-    let retry_after = response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .map(|s| s.trim().to_string());
+    let retry_after_ms = retry_after_ms_from_headers(response.headers(), status);
     let body = response
         .text()
         .await
         .unwrap_or_else(|_| format!("HTTP error: {status}"));
-    let body = match retry_after {
-        Some(value) if !value.is_empty() => format!("Retry-After: {value}\n{body}"),
-        _ => body,
-    };
-    (status, body)
+    (status, prepend_retry_after_prefix(retry_after_ms, body))
+}
+
+pub fn extract_provider_error_code(body: &str) -> Option<String> {
+    let json_start = body.find(['{', '['])?;
+    let value: serde_json::Value = serde_json::from_str(body[json_start..].trim()).ok()?;
+    let obj = value.as_object()?;
+    let error_obj = obj.get("error").and_then(|e| e.as_object());
+    let candidates = [
+        error_obj.and_then(|e| e.get("type")),
+        error_obj.and_then(|e| e.get("code")),
+        error_obj.and_then(|e| e.get("status")),
+        obj.get("type"),
+        obj.get("code"),
+    ];
+    for candidate in candidates.into_iter().flatten() {
+        if let Some(s) = candidate.as_str() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_ascii_lowercase());
+            }
+        }
+        if let Some(n) = candidate.as_u64() {
+            return Some(n.to_string());
+        }
+    }
+    None
+}
+
+pub fn parse_retry_after_value_ms(value: &str) -> Option<u64> {
+    parse_retry_after_header_value(value)
+}
+
+pub(crate) fn retry_after_ms_from_prefixed_body(body: &str) -> Option<u64> {
+    let rest = body.strip_prefix("Retry-After: ")?;
+    let line_end = rest.find('\n').unwrap_or(rest.len());
+    parse_retry_after_value_ms(&rest[..line_end])
+}
+
+pub fn stream_upstream_error(
+    provider: &str,
+    status: reqwest::StatusCode,
+    raw_body: &str,
+    sanitized: &str,
+) -> crate::providers::traits::StreamError {
+    crate::providers::traits::StreamError::Upstream {
+        provider: provider.to_string(),
+        status: Some(status.as_u16()),
+        code: extract_provider_error_code(raw_body),
+        retry_after_ms: retry_after_ms_from_prefixed_body(raw_body),
+        message: format!("{status}: {sanitized}"),
+    }
+}
+
+pub fn stream_declared_error(
+    provider: &str,
+    code: Option<String>,
+    message: String,
+) -> crate::providers::traits::StreamError {
+    crate::providers::traits::StreamError::Upstream {
+        provider: provider.to_string(),
+        status: None,
+        code: code.map(|c| c.trim().to_ascii_lowercase()),
+        retry_after_ms: None,
+        message,
+    }
 }
 
 pub async fn api_error_structured(
@@ -1180,21 +1357,12 @@ pub async fn api_error_structured(
     response: reqwest::Response,
 ) -> ProviderError {
     let status = response.status();
-    let retry_after = response
-        .headers()
-        .get(reqwest::header::RETRY_AFTER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(ToString::to_string);
+    let retry_after_ms = retry_after_ms_from_headers(response.headers(), status);
     let body = response
         .text()
         .await
         .unwrap_or_else(|_| "<failed to read provider error body>".to_string());
-    let body = match retry_after {
-        Some(value) => format!("Retry-After: {value}\n{body}"),
-        None => body,
-    };
+    let body = prepend_retry_after_prefix(retry_after_ms, body);
     let sanitized = sanitize_api_error(&body);
     ProviderError::Http {
         provider: provider.to_string(),
@@ -1206,6 +1374,20 @@ pub async fn api_error_structured(
 
 pub async fn api_error(provider: &str, response: reqwest::Response) -> anyhow::Error {
     anyhow::Error::new(api_error_structured(provider, response).await)
+}
+
+pub fn provider_http_error(
+    provider: &str,
+    status: reqwest::StatusCode,
+    body: &str,
+) -> anyhow::Error {
+    let sanitized = sanitize_api_error(body);
+    anyhow::Error::new(ProviderError::Http {
+        provider: provider.to_string(),
+        status: status.as_u16(),
+        body: body.to_string(),
+        sanitized_message: sanitized,
+    })
 }
 
 fn resolve_provider_credential(name: &str, credential_override: Option<&str>) -> Option<String> {
@@ -1222,23 +1404,6 @@ fn resolve_provider_credential(name: &str, credential_override: Option<&str>) ->
                 if let Some(credential) = resolve_minimax_oauth_refresh_token(name) {
                     return Some(credential);
                 }
-            } else if name == "anthropic" || name == "openai" || name == "groq" {
-
-                let env_candidates: &[&str] = match name {
-                    "anthropic" => &["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_API_KEY"],
-                    "openai" => &["OPENAI_API_KEY"],
-                    "groq" => &["GROQ_API_KEY"],
-                    _ => &[],
-                };
-                for env_var in env_candidates {
-                    if let Ok(val) = std::env::var(env_var) {
-                        let trimmed = val.trim().to_string();
-                        if !trimmed.is_empty() {
-                            return Some(trimmed);
-                        }
-                    }
-                }
-                return Some(trimmed_override.to_owned());
             } else {
                 return Some(trimmed_override.to_owned());
             }
@@ -1486,6 +1651,29 @@ pub fn create_provider_for_model(
         );
     }
     create_provider_with_url_and_options(name, api_key, api_url, options)
+}
+
+pub fn create_resilient_provider_for_model(
+    name: &str,
+    model: &str,
+    api_key: Option<&str>,
+    api_url: Option<&str>,
+    reliability: &crate::config::ReliabilityConfig,
+    options: &ProviderRuntimeOptions,
+) -> anyhow::Result<Box<dyn Provider>> {
+    let resolved_name =
+        if matches!(name, "openai") && openai::responses::model_uses_responses_api(model) {
+            "openai-responses"
+        } else {
+            name
+        };
+    create_resilient_provider_with_options(
+        resolved_name,
+        api_key,
+        api_url,
+        reliability,
+        options,
+    )
 }
 
 #[allow(clippy::too_many_lines)]
@@ -2598,15 +2786,6 @@ pub fn create_resilient_provider_with_options(
     )
     .with_transient_max_retries(reliability.transient_max_retries);
 
-    let reliable = if reliability.client_llm_rate_limit_enabled {
-        reliable.with_rate_limit(
-            crate::providers::reliable::DEFAULT_CLIENT_LLM_RATE_LIMIT_CAPACITY,
-            crate::providers::reliable::DEFAULT_CLIENT_LLM_RATE_LIMIT_REFILL_PER_SEC,
-        )
-    } else {
-        reliable.with_client_rate_limit_enabled(false)
-    };
-
     Ok(Box::new(reliable))
 }
 
@@ -2819,6 +2998,24 @@ pub async fn create_resilient_provider_with_options_async(
     })
     .await
     .map_err(|e| anyhow::anyhow!("provider initialization task failed: {e}"))?
+}
+
+fn reliability_from_runtime() -> crate::config::ReliabilityConfig {
+    crate::services::try_get_services()
+        .map(|services| services.config().reliability.clone())
+        .unwrap_or_default()
+}
+
+pub async fn create_resilient_runtime_provider_async(
+    name: String,
+    api_key: Option<String>,
+    api_url: Option<String>,
+    options: ProviderRuntimeOptions,
+) -> anyhow::Result<Box<dyn Provider>> {
+    let reliability = reliability_from_runtime();
+    let api_url = api_url.or_else(|| options.provider_api_url.clone());
+    create_resilient_provider_with_options_async(name, api_key, api_url, reliability, options)
+        .await
 }
 
 pub struct ProviderInfo {

@@ -4,6 +4,7 @@ powershell = "在 Windows 上执行 PowerShell 命令，受工作区沙箱约束
 file_read = "读取工作区文件内容，可用行范围（offset/limit）与压缩级别（smart/signatures）精确加载，避免整文件读取大文件。"
 file_write = "在工作区创建或覆盖文件并写入指定内容。"
 file_edit = "对现有工作区文件执行精确的查找替换编辑。"
+apply_edit = "通过快速 apply 模型把懒片段编辑(用 `// ... existing code ...` 标记未改动部分)合并进现有文件;适合多处或结构性编辑。"
 multi_edit = "对单个或多个文件批量应用一组协调一致的原子编辑。"
 notebook_edit = "编辑 Jupyter Notebook 单元格，同时保留 notebook 结构与元数据。"
 glob_search = "按 glob 模式查找工作区文件，并按修改时间排序返回。"

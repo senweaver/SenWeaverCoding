@@ -17,7 +17,6 @@ import { createPortal } from 'react-dom'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
 import { useUpdateStore } from '../../stores/updateStore'
-import { useLanGroupStore } from '../../stores/lanGroupStore'
 import { useLanShareStore } from '../../stores/lanShareStore'
 import { enterMinimalMode } from '../../lib/minimalMode'
 import { useComputerUseStore } from '../../stores/computerUseStore'
@@ -59,9 +58,6 @@ function applyZoomPct(pct: number): void {
 
 export function TitleBar() {
   const t = useTranslation()
-  const lanGroupPanelOpen = useLanGroupStore((s) => s.panelOpen)
-  const lanGroupUnread = useLanGroupStore((s) => s.unread)
-  const toggleLanGroupPanel = useLanGroupStore((s) => s.togglePanel)
   const lanSharePanelOpen = useLanShareStore((s) => s.panelOpen)
   const toggleLanSharePanel = useLanShareStore((s) => s.togglePanel)
   const templateLibraryOpen = useUIStore((s) => s.templateLibraryOpen)
@@ -165,25 +161,11 @@ export function TitleBar() {
         <img src="/app-icon.png" alt="" className="h-4 w-4 shrink-0" draggable={false} data-tauri-drag-region />
 
         <PanelTrigger
-          label={t('lanGroup.title')}
-          active={lanGroupPanelOpen}
-          unread={lanGroupUnread}
-          onClick={() => {
-            closeAll()
-            if (!useLanGroupStore.getState().panelOpen) {
-              useLanShareStore.getState().closePanel()
-              useUIStore.getState().closeTemplateLibrary()
-            }
-            toggleLanGroupPanel()
-          }}
-        />
-        <PanelTrigger
           label={t('lanShare.title')}
           active={lanSharePanelOpen}
           onClick={() => {
             closeAll()
             if (!useLanShareStore.getState().panelOpen) {
-              useLanGroupStore.getState().closePanel()
               useUIStore.getState().closeTemplateLibrary()
             }
             toggleLanSharePanel()
@@ -195,7 +177,6 @@ export function TitleBar() {
           onClick={() => {
             closeAll()
             if (!useUIStore.getState().templateLibraryOpen) {
-              useLanGroupStore.getState().closePanel()
               useLanShareStore.getState().closePanel()
             }
             useUIStore.getState().toggleTemplateLibrary()
@@ -229,12 +210,10 @@ export function TitleBar() {
 function PanelTrigger({
   label,
   active,
-  unread,
   onClick,
 }: {
   label: string
   active: boolean
-  unread?: number
   onClick: () => void
 }) {
   return (
@@ -252,11 +231,6 @@ function PanelTrigger({
       }`}
     >
       {label}
-      {unread != null && unread > 0 && (
-        <span className="absolute -right-1.5 -top-1 inline-flex h-3.5 min-w-3.5 items-center justify-center rounded-full bg-[var(--color-error)] px-1 text-[9px] font-semibold text-white">
-          {unread > 99 ? '99+' : unread}
-        </span>
-      )}
     </button>
   )
 }

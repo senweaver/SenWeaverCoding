@@ -201,19 +201,6 @@ impl TrustTracker {
         }
     }
 
-    pub fn get_effective_autonomy(&mut self, domain: &str, base_level: &str) -> String {
-        if self.check_regression(domain).is_none() {
-            return base_level.to_string();
-        }
-
-        match base_level {
-            "full" => "supervised".to_string(),
-            "supervised" => "read_only".to_string(),
-
-            _ => base_level.to_string(),
-        }
-    }
-
     pub fn corrections_for_domain(&self, domain: &str) -> Vec<&CorrectionEvent> {
         self.correction_log
             .iter()

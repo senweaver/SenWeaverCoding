@@ -101,6 +101,9 @@ pub async fn run(config: Config, host: String, port: u16) -> Result<()> {
             team_sync_enabled: config.teams.sync_enabled,
             ..Default::default()
         });
+        if let Some(svc) = crate::services::try_get_services() {
+            svc.update_config(config.clone());
+        }
     }
 
     {

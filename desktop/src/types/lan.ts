@@ -11,6 +11,7 @@ export type LanIdentity = {
   publicKey: string
   running: boolean
   port: number
+  configuredEnabled?: boolean
 }
 
 export type LanPeer = {

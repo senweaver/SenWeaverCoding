@@ -38,10 +38,11 @@ export const useUsageStore = create<UsageStore>((set, get) => ({
   error: null,
 
   fetch: async () => {
-    set({ isLoading: true, error: null })
+    if (get().isLoading) return
+    set({ isLoading: true })
     try {
       const summary = await usageApi.get('all')
-      set({ summary, isLoading: false })
+      set({ summary, isLoading: false, error: null })
     } catch (err) {
       set({
         isLoading: false,

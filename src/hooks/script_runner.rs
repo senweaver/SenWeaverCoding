@@ -69,6 +69,13 @@ impl HookEvent {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum HookFailMode {
+    Allow,
+    Deny,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct HookCommand {
 
@@ -79,6 +86,9 @@ pub struct HookCommand {
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub matchers: Option<HookMatchers>,
+
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fail_mode: Option<HookFailMode>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
@@ -222,6 +232,7 @@ pub struct ScriptHookRunner {
     sources: Vec<HooksSource>,
     workspace_dir: PathBuf,
     default_timeout: Duration,
+    default_fail_mode: Option<HookFailMode>,
 
     enabled: bool,
 }
@@ -232,6 +243,7 @@ impl Default for ScriptHookRunner {
             sources: Vec::new(),
             workspace_dir: std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")),
             default_timeout: Duration::from_secs(15),
+            default_fail_mode: None,
             enabled: true,
         }
     }
@@ -273,6 +285,12 @@ impl ScriptHookRunner {
 
     pub fn with_default_timeout(mut self, timeout: Duration) -> Self {
         self.default_timeout = timeout;
+        self
+    }
+
+    #[must_use]
+    pub fn with_default_fail_mode(mut self, mode: Option<HookFailMode>) -> Self {
+        self.default_fail_mode = mode;
         self
     }
 
@@ -344,6 +362,16 @@ impl ScriptHookRunner {
                 agent_message: Some(reason),
             };
         }
+        let effective_fail_mode = cmd.fail_mode.or(self.default_fail_mode);
+        let fail_open_decision = |reason_user: String, reason_agent: String| -> HookDecision {
+            match effective_fail_mode {
+                Some(HookFailMode::Deny) => HookDecision::Deny {
+                    user_message: Some(reason_user),
+                    agent_message: Some(reason_agent),
+                },
+                _ => HookDecision::Allow,
+            }
+        };
         let timeout = cmd
             .timeout_ms
             .map(Duration::from_millis)
@@ -367,9 +395,13 @@ impl ScriptHookRunner {
                 tracing::warn!(
                     command = cmd.command,
                     error = %e,
-                    "hooks.json script failed to spawn; treating as allow"
+                    fail_mode = ?effective_fail_mode,
+                    "hooks.json script failed to spawn"
                 );
-                return HookDecision::Allow;
+                return fail_open_decision(
+                    format!("hook `{}` failed to spawn: {e}", cmd.command),
+                    "hook spawn failed".to_string(),
+                );
             }
         };
 
@@ -398,24 +430,38 @@ impl ScriptHookRunner {
         let output = match tokio::time::timeout(timeout, output_future).await {
             Ok(Ok(o)) => o,
             Ok(Err(e)) => {
-                tracing::warn!(command = cmd.command, error = %e, "hook script wait failed");
-                return HookDecision::Allow;
+                tracing::warn!(command = cmd.command, error = %e, fail_mode = ?effective_fail_mode, "hook script wait failed");
+                return fail_open_decision(
+                    format!("hook `{}` wait failed: {e}", cmd.command),
+                    "hook wait failed".to_string(),
+                );
             }
             Err(_) => {
                 if stdin_write_timed_out.load(std::sync::atomic::Ordering::Relaxed) {
                     tracing::warn!(
                         command = cmd.command,
                         timeout_ms = timeout.as_millis() as u64,
-                        "hook script did not consume its stdin payload and then timed out; \
-                         treating as allow (only an explicit script response can deny)"
+                        fail_mode = ?effective_fail_mode,
+                        "hook script did not consume its stdin payload and then timed out"
                     );
-                    return HookDecision::Allow;
+                    return fail_open_decision(
+                        format!(
+                            "hook `{}` did not read stdin and timed out after {}ms",
+                            cmd.command,
+                            timeout.as_millis() as u64
+                        ),
+                        "hook stdin timeout".to_string(),
+                    );
                 }
                 tracing::warn!(
                     command = cmd.command,
                     timeout_ms = timeout.as_millis() as u64,
-                    "hook script timed out; treating as deny"
+                    fail_mode = ?effective_fail_mode,
+                    "hook script timed out"
                 );
+                if effective_fail_mode == Some(HookFailMode::Allow) {
+                    return HookDecision::Allow;
+                }
                 return HookDecision::Deny {
                     user_message: Some(format!(
                         "hook script `{}` timed out after {}ms",

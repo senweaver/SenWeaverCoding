@@ -99,6 +99,8 @@ pub enum EditOp {
         overwrite: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encoding: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        expected_pre_sha256: Option<String>,
     },
 
     DeleteFile {
@@ -214,10 +216,30 @@ impl EditOp {
                 Ok(())
             }
             EditOp::CreateFile {
-                path, overwrite, ..
+                path,
+                overwrite,
+                expected_pre_sha256,
+                ..
             } => {
                 if !overwrite && path.exists() {
                     return Err(PreconditionError::FileExists { path: path.clone() });
+                }
+                if *overwrite {
+                    if let Some(expected) = expected_pre_sha256 {
+                        if path.exists() {
+                            let bytes = read_bytes(path)?;
+                            let actual = sha256_hex(&bytes);
+                            if !actual.eq_ignore_ascii_case(expected) {
+                                return Err(PreconditionError::StaleOverwrite {
+                                    path: path.clone(),
+                                });
+                            }
+                        } else {
+                            return Err(PreconditionError::StaleOverwrite {
+                                path: path.clone(),
+                            });
+                        }
+                    }
                 }
                 Ok(())
             }
@@ -390,6 +412,8 @@ pub enum PreconditionError {
         path: PathBuf,
         byte_range: Range<usize>,
     },
+    #[error("file {path} changed on disk since it was read (full-file overwrite rejected to avoid clobbering a concurrent edit); re-read the current contents and retry")]
+    StaleOverwrite { path: PathBuf },
     #[error("io error reading {path}: {source}")]
     Io {
         path: PathBuf,
@@ -407,7 +431,8 @@ impl From<PreconditionError> for ToolErrorCause {
             | PreconditionError::FileExists { .. }
             | PreconditionError::RangeOutOfBounds { .. }
             | PreconditionError::OutOfBounds { .. }
-            | PreconditionError::ContentMismatch { .. } => {
+            | PreconditionError::ContentMismatch { .. }
+            | PreconditionError::StaleOverwrite { .. } => {
                 ToolErrorCause::PreconditionFailed(value.to_string())
             }
         }
@@ -419,6 +444,14 @@ fn read_bytes(path: &Path) -> Result<Vec<u8>, PreconditionError> {
         path: path.to_path_buf(),
         source,
     })
+}
+
+#[must_use]
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hasher = Sha256::new();
+    hasher.update(bytes);
+    hex::encode(hasher.finalize())
 }
 
 fn ensure_range_in_bounds(

@@ -1279,7 +1279,9 @@ impl CodingMode {
 
     pub fn approval_policy(&self) -> ModeApprovalPolicy {
         match self {
-            Self::Agent | Self::Harness | Self::Designer => ModeApprovalPolicy::AutoApprove,
+            Self::Agent | Self::Vibe | Self::Harness | Self::Designer => {
+                ModeApprovalPolicy::AutoApprove
+            }
             Self::Ask => ModeApprovalPolicy::ReadOnly,
             _ => ModeApprovalPolicy::Default,
         }
@@ -1487,7 +1489,6 @@ impl CodingMode {
             "lsp",
             "calculator",
             "weather",
-            "web_search",
             "web_search_tool",
             "web_fetch",
             "multi_search",
@@ -1527,7 +1528,6 @@ impl CodingMode {
             "screenshot",
             "ask_question",
             "ask_user",
-            "AskQuestion",
         ] {
             tools.insert(extra);
         }
@@ -1601,7 +1601,7 @@ impl CodingMode {
         tools.insert("send_user_message");
 
         tools.insert("memory_store");
-        tools.insert("memory_search");
+        tools.insert("memory_recall");
 
         tools.insert("sessions_list");
         tools.insert("sessions_history");

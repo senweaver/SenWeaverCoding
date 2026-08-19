@@ -7,7 +7,11 @@ import DOMPurify from 'dompurify'
 import { CodeViewer } from '../chat/CodeViewer'
 import { isMermaidBlock } from '../../lib/mermaidDetect'
 import type { CodeBlock, ParsedMarkdown } from '../../lib/markdownParse'
-import { getCachedMarkdown, parseMarkdownAsync } from '../../lib/markdownWorkerClient'
+import {
+  getCachedMarkdown,
+  getMarkdownForImmediateRender,
+  parseMarkdownAsync,
+} from '../../lib/markdownWorkerClient'
 
 const MermaidRenderer = lazy(() =>
   import('../chat/MermaidRenderer').then((m) => ({ default: m.MermaidRenderer })),
@@ -163,8 +167,8 @@ function getProseClasses(
 
 export function MarkdownRenderer({ content, variant = 'default', className, scale = 'default', streaming = false }: Props) {
   const [parsed, setParsed] = useState<{ source: string; result: ParsedMarkdown } | null>(() => {
-    const cached = getCachedMarkdown(content)
-    return cached ? { source: content, result: cached } : null
+    const eager = getMarkdownForImmediateRender(content)
+    return eager ? { source: content, result: eager } : null
   })
 
   useEffect(() => {

@@ -196,6 +196,7 @@ impl PatchApplyTool {
                         contents: contents.clone(),
                         overwrite: false,
                         encoding: None,
+                        expected_pre_sha256: None,
                     });
                 }
                 PatchFileAction::Delete => {
@@ -220,6 +221,7 @@ impl PatchApplyTool {
                                 contents: refined.contents,
                                 overwrite: true,
                                 encoding: refined.encoding,
+                                expected_pre_sha256: refined.pre_sha256,
                             });
                         }
                         None => {
@@ -756,6 +758,7 @@ impl Tool for PatchApplyTool {
                                 contents: contents.clone(),
                                 overwrite: false,
                                 encoding: None,
+                                expected_pre_sha256: None,
                             });
                         }
                         PatchFileAction::Delete => {

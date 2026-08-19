@@ -4,7 +4,6 @@
 
 pub mod crypto;
 pub mod discovery;
-pub mod group;
 pub mod identity;
 pub mod protocol;
 pub mod service;
@@ -13,7 +12,6 @@ pub mod store;
 pub mod transport;
 
 pub use discovery::{PeerRegistry, PeerView};
-pub use group::GroupService;
 pub use share::ShareService;
 pub use identity::{IdentitySnapshot, LanIdentity};
 pub use service::LanService;

@@ -270,6 +270,14 @@ impl Memory for PipelinedMemory {
         self.inner.name()
     }
 
+    async fn reembed_all(&self) -> anyhow::Result<usize> {
+        let result = self.inner.reembed_all().await;
+        if result.is_ok() {
+            self.pipeline.invalidate_cache();
+        }
+        result
+    }
+
     async fn store(
         &self,
         key: &str,

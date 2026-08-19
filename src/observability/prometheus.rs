@@ -686,3 +686,36 @@ impl Observer for PrometheusObserver {
         self
     }
 }
+
+static GLOBAL_PROMETHEUS: std::sync::OnceLock<std::sync::Arc<PrometheusObserver>> =
+    std::sync::OnceLock::new();
+
+pub fn global() -> std::sync::Arc<PrometheusObserver> {
+    GLOBAL_PROMETHEUS
+        .get_or_init(|| std::sync::Arc::new(PrometheusObserver::new()))
+        .clone()
+}
+
+pub struct SharedPrometheusObserver(pub std::sync::Arc<PrometheusObserver>);
+
+impl Observer for SharedPrometheusObserver {
+    fn record_event(&self, event: &ObserverEvent) {
+        self.0.record_event(event);
+    }
+
+    fn record_metric(&self, metric: &ObserverMetric) {
+        self.0.record_metric(metric);
+    }
+
+    fn flush(&self) {
+        self.0.flush();
+    }
+
+    fn name(&self) -> &str {
+        "prometheus"
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self.0.as_any()
+    }
+}

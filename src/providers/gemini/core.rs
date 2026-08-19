@@ -392,6 +392,29 @@ impl CandidateContent {
 #[derive(Debug, Deserialize)]
 struct ApiError {
     message: String,
+    #[serde(default)]
+    code: Option<u64>,
+    #[serde(default)]
+    status: Option<String>,
+}
+
+fn gemini_api_error(err: &ApiError) -> anyhow::Error {
+    let status = err
+        .code
+        .and_then(|c| u16::try_from(c).ok())
+        .filter(|c| (100..=599).contains(c))
+        .and_then(|c| reqwest::StatusCode::from_u16(c).ok());
+    let body = match err.status.as_deref().map(str::trim) {
+        Some(s) if !s.is_empty() => format!("{s}: {}", err.message),
+        _ => err.message.clone(),
+    };
+    match status {
+        Some(status) => crate::providers::provider_http_error("Gemini", status, &body),
+        None => anyhow::anyhow!(
+            "Gemini API error: {}",
+            crate::providers::sanitize_api_error(&body)
+        ),
+    }
 }
 
 impl GenerateContentResponse {
@@ -1213,8 +1236,8 @@ impl GeminiProvider {
             .await?;
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
+            let (status, error_text) =
+                crate::providers::stream_error_body_with_retry_after(response).await;
 
             if auth.is_oauth() && Self::should_rotate_oauth_on_error(status, &error_text) {
 
@@ -1272,10 +1295,11 @@ impl GeminiProvider {
                         .send()
                         .await?;
                 } else {
-                    anyhow::bail!(
-                        "Gemini API error ({status}): {}",
-                        crate::providers::sanitize_api_error(&error_text)
-                    );
+                    return Err(crate::providers::provider_http_error(
+                        "Gemini",
+                        status,
+                        &error_text,
+                    ));
                 }
             } else if auth.is_oauth()
                 && Self::should_retry_oauth_without_generation_config(status, &error_text)
@@ -1296,16 +1320,17 @@ impl GeminiProvider {
                     .send()
                     .await?;
             } else {
-                anyhow::bail!(
-                    "Gemini API error ({status}): {}",
-                    crate::providers::sanitize_api_error(&error_text)
-                );
+                return Err(crate::providers::provider_http_error(
+                    "Gemini",
+                    status,
+                    &error_text,
+                ));
             }
         }
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
+            let (status, error_text) =
+                crate::providers::stream_error_body_with_retry_after(response).await;
             if auth.is_oauth()
                 && Self::should_retry_oauth_without_generation_config(status, &error_text)
             {
@@ -1325,35 +1350,31 @@ impl GeminiProvider {
                     .send()
                     .await?;
             } else {
-                anyhow::bail!(
-                    "Gemini API error ({status}): {}",
-                    crate::providers::sanitize_api_error(&error_text)
-                );
+                return Err(crate::providers::provider_http_error(
+                    "Gemini",
+                    status,
+                    &error_text,
+                ));
             }
         }
 
         if !response.status().is_success() {
-            let status = response.status();
-            let error_text = response.text().await.unwrap_or_default();
-            anyhow::bail!(
-                "Gemini API error ({status}): {}",
-                crate::providers::sanitize_api_error(&error_text)
-            );
+            let (status, error_text) =
+                crate::providers::stream_error_body_with_retry_after(response).await;
+            return Err(crate::providers::provider_http_error(
+                "Gemini",
+                status,
+                &error_text,
+            ));
         }
 
         let result: GenerateContentResponse = response.json().await?;
         if let Some(err) = &result.error {
-            anyhow::bail!(
-                "Gemini API error: {}",
-                crate::providers::sanitize_api_error(&err.message)
-            );
+            return Err(gemini_api_error(err));
         }
         let result = result.into_effective_response();
         if let Some(err) = result.error {
-            anyhow::bail!(
-                "Gemini API error: {}",
-                crate::providers::sanitize_api_error(&err.message)
-            );
+            return Err(gemini_api_error(&err));
         }
 
         Ok(result)
@@ -1402,19 +1423,23 @@ impl GeminiProvider {
 
         let mut tool_id_to_name: std::collections::HashMap<String, String> =
             std::collections::HashMap::new();
+        let mut prev_was_tool = false;
 
         for msg in messages {
             match msg.role.as_str() {
                 "system" => {
+                    prev_was_tool = false;
                     system_parts.push(&msg.content);
                 }
                 "user" => {
+                    prev_was_tool = false;
                     contents.push(Content {
                         role: Some("user".to_string()),
                         parts: build_parts(&msg.content),
                     });
                 }
                 "assistant" => {
+                    prev_was_tool = false;
                     let mut parts = Vec::new();
                     let mut consumed_tool_calls = false;
 
@@ -1467,15 +1492,28 @@ impl GeminiProvider {
 
                     let (fn_name, response_body) =
                         parse_tool_message(&msg.content, &tool_id_to_name);
-                    contents.push(Content {
-                        role: Some("user".to_string()),
-                        parts: vec![Part::FunctionResponse {
-                            function_response: FunctionResponsePart {
-                                name: fn_name,
-                                response: response_body,
-                            },
-                        }],
-                    });
+                    let response_part = Part::FunctionResponse {
+                        function_response: FunctionResponsePart {
+                            name: fn_name,
+                            response: response_body,
+                        },
+                    };
+                    if prev_was_tool {
+                        if let Some(last) = contents.last_mut() {
+                            last.parts.push(response_part);
+                        } else {
+                            contents.push(Content {
+                                role: Some("user".to_string()),
+                                parts: vec![response_part],
+                            });
+                        }
+                    } else {
+                        contents.push(Content {
+                            role: Some("user".to_string()),
+                            parts: vec![response_part],
+                        });
+                    }
+                    prev_was_tool = true;
                 }
                 _ => {}
             }
@@ -1988,13 +2026,16 @@ impl Provider for GeminiProvider {
                 }
             };
             if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
+                let (status, text) =
+                    crate::providers::stream_error_body_with_retry_after(response).await;
+                let sanitized = crate::providers::sanitize_api_error(&text);
                 let _ = tx
-                    .send(Err(StreamError::Provider(format!(
-                        "Gemini API error ({status}): {}",
-                        crate::providers::sanitize_api_error(&text)
-                    ))))
+                    .send(Err(crate::providers::stream_upstream_error(
+                        "Gemini",
+                        status,
+                        &text,
+                        &sanitized,
+                    )))
                     .await;
                 return;
             }
@@ -2047,11 +2088,26 @@ impl Provider for GeminiProvider {
                     };
                     let parsed = parsed.into_effective_response();
                     if let Some(err) = parsed.error {
+                        let status = err
+                            .code
+                            .and_then(|c| u16::try_from(c).ok())
+                            .filter(|c| (100..=599).contains(c));
+                        let code = err
+                            .status
+                            .as_deref()
+                            .map(|s| s.trim().to_ascii_lowercase())
+                            .filter(|s| !s.is_empty());
                         let _ = tx
-                            .send(Err(StreamError::Provider(format!(
-                                "Gemini API error: {}",
-                                crate::providers::sanitize_api_error(&err.message)
-                            ))))
+                            .send(Err(StreamError::Upstream {
+                                provider: "Gemini".to_string(),
+                                status,
+                                code,
+                                retry_after_ms: None,
+                                message: format!(
+                                    "Gemini API error: {}",
+                                    crate::providers::sanitize_api_error(&err.message)
+                                ),
+                            }))
                             .await;
                         return;
                     }

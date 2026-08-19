@@ -1109,6 +1109,18 @@ impl SessionBackend for SqliteSessionBackend {
         Ok(n)
     }
 
+    fn session_for_edit_batch(&self, edit_batch_id: &str) -> Option<String> {
+        let conn = self.read_conn();
+        conn.query_row(
+            "SELECT session_key FROM session_edit_batches
+              WHERE edit_batch_id = ?1
+              ORDER BY id ASC LIMIT 1",
+            params![edit_batch_id],
+            |row| row.get(0),
+        )
+        .ok()
+    }
+
     fn save_rewind_stash(
         &self,
         rewind_id: &str,

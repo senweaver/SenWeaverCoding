@@ -11,26 +11,14 @@ import {
   type ProxyScope,
   type ServiceTokensStatus,
 } from '../../api/systemSettings'
-
-type SectionMessage = { kind: 'ok' | 'error'; text: string } | null
+import {
+  SettingsSection,
+  SettingsSectionStatus,
+  type SettingsSectionStatusValue,
+} from './SettingsSection'
 
 function toErrorText(err: unknown, fallback: string) {
   return err instanceof Error && err.message ? err.message : fallback
-}
-
-function MessageBox({ message }: { message: SectionMessage }) {
-  if (!message) return null
-  return (
-    <div
-      className={`mt-2 text-xs px-3 py-2 rounded-[var(--radius-md)] border ${
-        message.kind === 'ok'
-          ? 'border-[var(--color-success)]/30 bg-[var(--color-success)]/12 text-[var(--color-success)]'
-          : 'border-[color:rgba(239,68,68,0.25)] bg-[color:rgba(239,68,68,0.08)] text-[var(--color-error)]'
-      }`}
-    >
-      {message.text}
-    </div>
-  )
 }
 
 function ToggleRow({
@@ -93,7 +81,7 @@ export function NetworkProxySection() {
   const [scope, setScope] = useState<ProxyScope>('environment')
   const [systemDetect, setSystemDetect] = useState(false)
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<SectionMessage>(null)
+  const [message, setMessage] = useState<SettingsSectionStatusValue>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -154,94 +142,88 @@ export function NetworkProxySection() {
   ]
 
   return (
-    <div className="mt-6 border-t border-[var(--color-border)] pt-4">
-      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
-        {t('settings.network.title')}
-      </h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">
-        {t('settings.network.description')}
-      </p>
-
-      <div className="space-y-3">
-        <ToggleRow
-          label={t('settings.network.enabled')}
-          hint={t('settings.network.enabledHint')}
-          checked={enabled}
-          onChange={setEnabled}
-          disabled={!loaded}
-        />
-
-        <div>
-          <FieldLabel text={t('settings.network.httpProxy')} />
-          <Input
-            value={httpProxy}
-            onChange={(e) => setHttpProxy(e.target.value)}
-            placeholder="http://127.0.0.1:7890"
-          />
-        </div>
-
-        <div>
-          <FieldLabel text={t('settings.network.httpsProxy')} />
-          <Input
-            value={httpsProxy}
-            onChange={(e) => setHttpsProxy(e.target.value)}
-            placeholder="http://127.0.0.1:7890"
-          />
-        </div>
-
-        <div>
-          <FieldLabel text={t('settings.network.allProxy')} />
-          <Input
-            value={allProxy}
-            onChange={(e) => setAllProxy(e.target.value)}
-            placeholder="http://127.0.0.1:7890"
-          />
-        </div>
-
-        <div>
-          <FieldLabel text={t('settings.network.noProxy')} />
-          <Input
-            value={noProxy}
-            onChange={(e) => setNoProxy(e.target.value)}
-            placeholder="localhost, 127.0.0.1, .internal"
-          />
-          <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
-            {t('settings.network.noProxyHint')}
-          </p>
-        </div>
-
-        <div>
-          <FieldLabel text={t('settings.network.scope')} />
-          <select
-            value={scope}
-            onChange={(e) => setScope(e.target.value as ProxyScope)}
-            className="w-full h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
-          >
-            {SCOPES.map(({ value, label }) => (
-              <option key={value} value={value}>
-                {label}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <ToggleRow
-          label={t('settings.network.systemDetect')}
-          hint={t('settings.network.systemDetectHint')}
-          checked={systemDetect}
-          onChange={setSystemDetect}
-          disabled={!loaded}
-        />
-
-        <div className="flex justify-end">
+    <SettingsSection
+      title={t('settings.network.title')}
+      description={t('settings.network.description')}
+      footer={
+        <>
+          <SettingsSectionStatus status={message} />
           <Button onClick={() => void save()} disabled={!loaded || saving} size="sm">
             {saving ? t('common.saving') : t('common.save')}
           </Button>
-        </div>
+        </>
+      }
+    >
+      <ToggleRow
+        label={t('settings.network.enabled')}
+        hint={t('settings.network.enabledHint')}
+        checked={enabled}
+        onChange={setEnabled}
+        disabled={!loaded}
+      />
+
+      <div>
+        <FieldLabel text={t('settings.network.httpProxy')} />
+        <Input
+          value={httpProxy}
+          onChange={(e) => setHttpProxy(e.target.value)}
+          placeholder="http://127.0.0.1:7890"
+        />
       </div>
 
-      <MessageBox message={message} />
-    </div>
+      <div>
+        <FieldLabel text={t('settings.network.httpsProxy')} />
+        <Input
+          value={httpsProxy}
+          onChange={(e) => setHttpsProxy(e.target.value)}
+          placeholder="http://127.0.0.1:7890"
+        />
+      </div>
+
+      <div>
+        <FieldLabel text={t('settings.network.allProxy')} />
+        <Input
+          value={allProxy}
+          onChange={(e) => setAllProxy(e.target.value)}
+          placeholder="http://127.0.0.1:7890"
+        />
+      </div>
+
+      <div>
+        <FieldLabel text={t('settings.network.noProxy')} />
+        <Input
+          value={noProxy}
+          onChange={(e) => setNoProxy(e.target.value)}
+          placeholder="localhost, 127.0.0.1, .internal"
+        />
+        <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
+          {t('settings.network.noProxyHint')}
+        </p>
+      </div>
+
+      <div>
+        <FieldLabel text={t('settings.network.scope')} />
+        <select
+          value={scope}
+          onChange={(e) => setScope(e.target.value as ProxyScope)}
+          className="w-full h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
+        >
+          {SCOPES.map(({ value, label }) => (
+            <option key={value} value={value}>
+              {label}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <ToggleRow
+        label={t('settings.network.systemDetect')}
+        hint={t('settings.network.systemDetectHint')}
+        checked={systemDetect}
+        onChange={setSystemDetect}
+        disabled={!loaded}
+      />
+    </SettingsSection>
   )
 }
 
@@ -252,7 +234,7 @@ export function AutomationSection() {
   const [catchUp, setCatchUp] = useState(false)
   const [maxRunHistory, setMaxRunHistory] = useState(0)
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<SectionMessage>(null)
+  const [message, setMessage] = useState<SettingsSectionStatusValue>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -296,52 +278,46 @@ export function AutomationSection() {
   }
 
   return (
-    <div className="mt-6 border-t border-[var(--color-border)] pt-4">
-      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
-        {t('settings.automation.title')}
-      </h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">
-        {t('settings.automation.description')}
-      </p>
-
-      <div className="space-y-3">
-        <ToggleRow
-          label={t('settings.automation.enabled')}
-          hint={t('settings.automation.enabledHint')}
-          checked={enabled}
-          onChange={setEnabled}
-          disabled={!loaded}
-        />
-        <ToggleRow
-          label={t('settings.automation.catchUp')}
-          hint={t('settings.automation.catchUpHint')}
-          checked={catchUp}
-          onChange={setCatchUp}
-          disabled={!loaded}
-        />
-
-        <div>
-          <FieldLabel text={t('settings.automation.maxRunHistory')} />
-          <Input
-            type="number"
-            min={0}
-            value={Number.isFinite(maxRunHistory) ? maxRunHistory : 0}
-            onChange={(e) => setMaxRunHistory(Number.parseInt(e.target.value || '0', 10))}
-          />
-          <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
-            {t('settings.automation.maxRunHistoryHint')}
-          </p>
-        </div>
-
-        <div className="flex justify-end">
+    <SettingsSection
+      title={t('settings.automation.title')}
+      description={t('settings.automation.description')}
+      footer={
+        <>
+          <SettingsSectionStatus status={message} />
           <Button onClick={() => void save()} disabled={!loaded || saving} size="sm">
             {saving ? t('common.saving') : t('common.save')}
           </Button>
-        </div>
-      </div>
+        </>
+      }
+    >
+      <ToggleRow
+        label={t('settings.automation.enabled')}
+        hint={t('settings.automation.enabledHint')}
+        checked={enabled}
+        onChange={setEnabled}
+        disabled={!loaded}
+      />
+      <ToggleRow
+        label={t('settings.automation.catchUp')}
+        hint={t('settings.automation.catchUpHint')}
+        checked={catchUp}
+        onChange={setCatchUp}
+        disabled={!loaded}
+      />
 
-      <MessageBox message={message} />
-    </div>
+      <div>
+        <FieldLabel text={t('settings.automation.maxRunHistory')} />
+        <Input
+          type="number"
+          min={0}
+          value={Number.isFinite(maxRunHistory) ? maxRunHistory : 0}
+          onChange={(e) => setMaxRunHistory(Number.parseInt(e.target.value || '0', 10))}
+        />
+        <p className="text-xs text-[var(--color-text-tertiary)] mt-1">
+          {t('settings.automation.maxRunHistoryHint')}
+        </p>
+      </div>
+    </SettingsSection>
   )
 }
 
@@ -363,13 +339,7 @@ export function SecuritySandboxSection() {
   const [maxCpuTimeSeconds, setMaxCpuTimeSeconds] = useState('')
   const [maxSubprocesses, setMaxSubprocesses] = useState('')
   const [saving, setSaving] = useState(false)
-  const [message, setMessage] = useState<SectionMessage>(null)
-
-  const [tokens, setTokens] = useState<ServiceTokensStatus | null>(null)
-  const [rpcInput, setRpcInput] = useState('')
-  const [mcpInput, setMcpInput] = useState('')
-  const [tokenBusy, setTokenBusy] = useState(false)
-  const [tokenMessage, setTokenMessage] = useState<SectionMessage>(null)
+  const [message, setMessage] = useState<SettingsSectionStatusValue>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -392,16 +362,6 @@ export function SecuritySandboxSection() {
       } catch (err) {
         if (!cancelled) {
           setMessage({ kind: 'error', text: toErrorText(err, t('settings.system.loadFailed')) })
-        }
-      }
-    })()
-    void (async () => {
-      try {
-        const res = await systemSettingsApi.getServiceTokens()
-        if (!cancelled) setTokens(res)
-      } catch (err) {
-        if (!cancelled) {
-          setTokenMessage({ kind: 'error', text: toErrorText(err, t('settings.system.loadFailed')) })
         }
       }
     })()
@@ -433,6 +393,121 @@ export function SecuritySandboxSection() {
       setSaving(false)
     }
   }
+
+  const backendOptions = availableBackends.includes(backend) || backend.length === 0
+    ? availableBackends
+    : [backend, ...availableBackends]
+
+  return (
+    <SettingsSection
+      title={t('settings.security.title')}
+      description={t('settings.security.description')}
+      footer={
+        <>
+          <SettingsSectionStatus status={message} />
+          <Button onClick={() => void save()} disabled={!loaded || saving} size="sm">
+            {saving ? t('common.saving') : t('common.save')}
+          </Button>
+        </>
+      }
+    >
+      <ToggleRow
+        label={t('settings.security.sandboxEnabled')}
+        hint={t('settings.security.sandboxEnabledHint')}
+        checked={sandboxEnabled}
+        onChange={setSandboxEnabled}
+        disabled={!loaded}
+      />
+
+      <div>
+        <FieldLabel text={t('settings.security.backend')} />
+        <select
+          value={backend}
+          onChange={(e) => setBackend(e.target.value)}
+          disabled={!loaded}
+          className="w-full h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] disabled:opacity-50"
+        >
+          {backendOptions.map((b) => (
+            <option key={b} value={b}>
+              {b}
+            </option>
+          ))}
+        </select>
+      </div>
+
+      <ToggleRow
+        label={t('settings.security.confineFilesystem')}
+        hint={t('settings.security.confineFilesystemHint')}
+        checked={confineFilesystem}
+        onChange={setConfineFilesystem}
+        disabled={!loaded}
+      />
+
+      <div>
+        <div className="text-xs font-medium text-[var(--color-text-primary)] mb-1">
+          {t('settings.security.resourcesTitle')}
+        </div>
+        <p className="text-xs text-[var(--color-text-tertiary)] mb-2">
+          {t('settings.security.resourcesHint')}
+        </p>
+        <div className="grid grid-cols-3 gap-3">
+          <div>
+            <FieldLabel text={t('settings.security.maxMemoryMb')} />
+            <Input
+              type="number"
+              min={0}
+              value={maxMemoryMb}
+              onChange={(e) => setMaxMemoryMb(e.target.value)}
+            />
+          </div>
+          <div>
+            <FieldLabel text={t('settings.security.maxCpuTimeSeconds')} />
+            <Input
+              type="number"
+              min={0}
+              value={maxCpuTimeSeconds}
+              onChange={(e) => setMaxCpuTimeSeconds(e.target.value)}
+            />
+          </div>
+          <div>
+            <FieldLabel text={t('settings.security.maxSubprocesses')} />
+            <Input
+              type="number"
+              min={0}
+              value={maxSubprocesses}
+              onChange={(e) => setMaxSubprocesses(e.target.value)}
+            />
+          </div>
+        </div>
+      </div>
+    </SettingsSection>
+  )
+}
+
+export function ServiceTokensSection() {
+  const t = useTranslation()
+  const [tokens, setTokens] = useState<ServiceTokensStatus | null>(null)
+  const [rpcInput, setRpcInput] = useState('')
+  const [mcpInput, setMcpInput] = useState('')
+  const [tokenBusy, setTokenBusy] = useState(false)
+  const [tokenMessage, setTokenMessage] = useState<SettingsSectionStatusValue>(null)
+
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
+      try {
+        const res = await systemSettingsApi.getServiceTokens()
+        if (!cancelled) setTokens(res)
+      } catch (err) {
+        if (!cancelled) {
+          setTokenMessage({ kind: 'error', text: toErrorText(err, t('settings.system.loadFailed')) })
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [t])
 
   async function saveTokens() {
     const payload: { rpcToken?: string | null; mcpSseToken?: string | null } = {}
@@ -472,139 +547,42 @@ export function SecuritySandboxSection() {
     }
   }
 
-  const backendOptions = availableBackends.includes(backend) || backend.length === 0
-    ? availableBackends
-    : [backend, ...availableBackends]
-
   return (
-    <div className="mt-6 border-t border-[var(--color-border)] pt-4">
-      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
-        {t('settings.security.title')}
-      </h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">
-        {t('settings.security.description')}
-      </p>
-
-      <div className="space-y-3">
-        <ToggleRow
-          label={t('settings.security.sandboxEnabled')}
-          hint={t('settings.security.sandboxEnabledHint')}
-          checked={sandboxEnabled}
-          onChange={setSandboxEnabled}
-          disabled={!loaded}
-        />
-
-        <div>
-          <FieldLabel text={t('settings.security.backend')} />
-          <select
-            value={backend}
-            onChange={(e) => setBackend(e.target.value)}
-            disabled={!loaded}
-            className="w-full h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] disabled:opacity-50"
+    <SettingsSection
+      title={t('settings.security.tokensTitle')}
+      description={t('settings.security.tokensDescription')}
+      footer={
+        <>
+          <SettingsSectionStatus status={tokenMessage} />
+          <Button
+            onClick={() => void saveTokens()}
+            disabled={tokenBusy || !tokens || (!rpcInput.trim() && !mcpInput.trim())}
+            size="sm"
           >
-            {backendOptions.map((b) => (
-              <option key={b} value={b}>
-                {b}
-              </option>
-            ))}
-          </select>
-        </div>
-
-        <ToggleRow
-          label={t('settings.security.confineFilesystem')}
-          hint={t('settings.security.confineFilesystemHint')}
-          checked={confineFilesystem}
-          onChange={setConfineFilesystem}
-          disabled={!loaded}
-        />
-
-        <div>
-          <div className="text-xs font-medium text-[var(--color-text-primary)] mb-1">
-            {t('settings.security.resourcesTitle')}
-          </div>
-          <p className="text-xs text-[var(--color-text-tertiary)] mb-2">
-            {t('settings.security.resourcesHint')}
-          </p>
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <FieldLabel text={t('settings.security.maxMemoryMb')} />
-              <Input
-                type="number"
-                min={0}
-                value={maxMemoryMb}
-                onChange={(e) => setMaxMemoryMb(e.target.value)}
-              />
-            </div>
-            <div>
-              <FieldLabel text={t('settings.security.maxCpuTimeSeconds')} />
-              <Input
-                type="number"
-                min={0}
-                value={maxCpuTimeSeconds}
-                onChange={(e) => setMaxCpuTimeSeconds(e.target.value)}
-              />
-            </div>
-            <div>
-              <FieldLabel text={t('settings.security.maxSubprocesses')} />
-              <Input
-                type="number"
-                min={0}
-                value={maxSubprocesses}
-                onChange={(e) => setMaxSubprocesses(e.target.value)}
-              />
-            </div>
-          </div>
-        </div>
-
-        <div className="flex justify-end">
-          <Button onClick={() => void save()} disabled={!loaded || saving} size="sm">
-            {saving ? t('common.saving') : t('common.save')}
+            {tokenBusy ? t('common.saving') : t('common.save')}
           </Button>
-        </div>
-
-        <MessageBox message={message} />
-
-        <div className="border-t border-[var(--color-border)] pt-3">
-          <div className="text-xs font-medium text-[var(--color-text-primary)] mb-1">
-            {t('settings.security.tokensTitle')}
-          </div>
-          <p className="text-xs text-[var(--color-text-tertiary)] mb-2">
-            {t('settings.security.tokensDescription')}
-          </p>
-
-          <div className="space-y-2">
-            <TokenRow
-              label={t('settings.security.rpcToken')}
-              isSet={tokens?.rpcTokenSet ?? false}
-              value={rpcInput}
-              onChange={setRpcInput}
-              onClear={() => void clearToken('rpc')}
-              busy={tokenBusy || !tokens}
-            />
-            <TokenRow
-              label={t('settings.security.mcpSseToken')}
-              isSet={tokens?.mcpSseTokenSet ?? false}
-              value={mcpInput}
-              onChange={setMcpInput}
-              onClear={() => void clearToken('mcp')}
-              busy={tokenBusy || !tokens}
-            />
-          </div>
-
-          <div className="flex justify-end mt-2">
-            <Button
-              onClick={() => void saveTokens()}
-              disabled={tokenBusy || !tokens || (!rpcInput.trim() && !mcpInput.trim())}
-              size="sm"
-            >
-              {tokenBusy ? t('common.saving') : t('common.save')}
-            </Button>
-          </div>
-
-          <MessageBox message={tokenMessage} />
-        </div>
+        </>
+      }
+    >
+      <div className="space-y-2">
+        <TokenRow
+          label={t('settings.security.rpcToken')}
+          isSet={tokens?.rpcTokenSet ?? false}
+          value={rpcInput}
+          onChange={setRpcInput}
+          onClear={() => void clearToken('rpc')}
+          busy={tokenBusy || !tokens}
+        />
+        <TokenRow
+          label={t('settings.security.mcpSseToken')}
+          isSet={tokens?.mcpSseTokenSet ?? false}
+          value={mcpInput}
+          onChange={setMcpInput}
+          onClear={() => void clearToken('mcp')}
+          busy={tokenBusy || !tokens}
+        />
       </div>
-    </div>
+    </SettingsSection>
   )
 }
 

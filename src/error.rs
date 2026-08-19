@@ -60,6 +60,93 @@ pub trait ErrorClassification {
     }
 }
 
+pub fn extract_http_status_code(msg: &str) -> Option<u16> {
+    let bytes = msg.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i].is_ascii_digit() {
+            let start = i;
+            while i < bytes.len() && bytes[i].is_ascii_digit() {
+                i += 1;
+            }
+            if i - start == 3 {
+                if let Ok(code) = msg[start..i].parse::<u16>() {
+                    if (100..=599).contains(&code)
+                        && (has_status_context_before(msg, start)
+                            || has_reason_phrase_after(msg, i))
+                    {
+                        return Some(code);
+                    }
+                }
+            }
+        } else {
+            i += 1;
+        }
+    }
+    None
+}
+
+fn preceding_word(msg: &str, mut end: usize) -> (Option<String>, usize) {
+    let bytes = msg.as_bytes();
+    while end > 0 && !bytes[end - 1].is_ascii_alphanumeric() {
+        end -= 1;
+    }
+    let word_end = end;
+    while end > 0 && bytes[end - 1].is_ascii_alphabetic() {
+        end -= 1;
+    }
+    if end == word_end {
+        return (None, end);
+    }
+    (Some(msg[end..word_end].to_ascii_lowercase()), end)
+}
+
+fn has_status_context_before(msg: &str, digit_start: usize) -> bool {
+    let (word, word_start) = preceding_word(msg, digit_start);
+    let Some(word) = word else { return false };
+    match word.as_str() {
+        "http" | "status" | "code" | "statuscode" => true,
+        "error" => {
+            let (prev, _) = preceding_word(msg, word_start);
+            prev.as_deref() != Some("os")
+        }
+        _ => false,
+    }
+}
+
+fn has_reason_phrase_after(msg: &str, digit_end: usize) -> bool {
+    let rest = msg[digit_end..]
+        .trim_start_matches([' ', '-', ':', '(', ')', '.', ','])
+        .to_ascii_lowercase();
+    const REASON_PHRASES: &[&str] = &[
+        "bad request",
+        "unauthorized",
+        "payment required",
+        "forbidden",
+        "not found",
+        "method not allowed",
+        "not acceptable",
+        "proxy authentication required",
+        "request timeout",
+        "conflict",
+        "gone",
+        "length required",
+        "precondition failed",
+        "payload too large",
+        "request entity too large",
+        "uri too long",
+        "unsupported media type",
+        "unprocessable entity",
+        "too many requests",
+        "unavailable for legal reasons",
+        "internal server error",
+        "bad gateway",
+        "service unavailable",
+        "gateway timeout",
+    ];
+    REASON_PHRASES.iter().any(|phrase| rest.starts_with(phrase))
+}
+
 pub fn classify_anyhow(err: &anyhow::Error) -> ErrorCategory {
     for cause in err.chain() {
         if cause.downcast_ref::<tokio::time::error::Elapsed>().is_some() {
@@ -70,6 +157,11 @@ pub fn classify_anyhow(err: &anyhow::Error) -> ErrorCategory {
         }
         if let Some(provider_err) = cause.downcast_ref::<crate::providers::ProviderError>() {
             return provider_error_category(provider_err);
+        }
+        if let Some(stream_err) =
+            cause.downcast_ref::<crate::providers::traits::StreamError>()
+        {
+            return stream_err.category();
         }
         if let Some(reqwest_err) = cause.downcast_ref::<reqwest::Error>() {
             return reqwest_error_category(reqwest_err);
@@ -82,16 +174,17 @@ pub fn classify_anyhow(err: &anyhow::Error) -> ErrorCategory {
         }
     }
     let s = err.to_string().to_lowercase();
+    let status = extract_http_status_code(&s);
     if s.contains("timed out") || s.contains("timeout") || s.contains("deadline") {
         return ErrorCategory::Timeout;
     }
-    if s.contains("rate limit") || s.contains("rate_limit") || s.contains("429") || s.contains("too many requests") {
+    if status == Some(429) || s.contains("too_many_requests") {
         return ErrorCategory::RateLimit;
     }
-    if s.contains("unauthorized") || s.contains("forbidden") || s.contains("401") || s.contains("403") || s.contains("permission") {
+    if s.contains("unauthorized") || s.contains("forbidden") || status == Some(401) || status == Some(403) || s.contains("permission") {
         return ErrorCategory::Permission;
     }
-    if s.contains("not found") || s.contains("404") {
+    if s.contains("not found") || status == Some(404) {
         return ErrorCategory::NotFound;
     }
     if s.contains("connection") || s.contains("dns") || s.contains("network") || s.contains("reset by peer") || s.contains("broken pipe") {

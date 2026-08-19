@@ -107,8 +107,16 @@ impl Tool for WritePlanTool {
         }
         let workspace_root = config.workspace_dir.clone();
 
-        let provider: Arc<dyn Provider> =
-            match crate::providers::create_provider_async(provider_name, None).await {
+        let provider: Arc<dyn Provider> = {
+            let options = crate::providers::provider_runtime_options_from_config(&config);
+            match crate::providers::create_resilient_runtime_provider_async(
+                provider_name,
+                None,
+                None,
+                options,
+            )
+            .await
+            {
                 Ok(p) => Arc::from(p),
                 Err(e) => {
                     return Ok(ToolResult {
@@ -117,7 +125,8 @@ impl Tool for WritePlanTool {
                         error: Some(format!("write_plan: failed to create provider: {e}")),
                     });
                 }
-            };
+            }
+        };
 
         let ctx = PlanContext {
             goal: goal.to_string(),

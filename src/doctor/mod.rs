@@ -263,21 +263,21 @@ fn classify_model_probe_error(err_message: &str) -> ModelProbeOutcome {
         return ModelProbeOutcome::Skipped;
     }
 
-    if [
-        "401",
-        "403",
-        "429",
-        "unauthorized",
-        "forbidden",
-        "api key",
-        "token",
-        "insufficient balance",
-        "insufficient quota",
-        "plan does not include",
-        "rate limit",
-    ]
-    .iter()
-    .any(|hint| lower.contains(hint))
+    let status = crate::error::extract_http_status_code(&lower);
+    if matches!(status, Some(401) | Some(403) | Some(429))
+        || [
+            "unauthorized",
+            "forbidden",
+            "api key",
+            "insufficient balance",
+            "insufficient quota",
+            "plan does not include",
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            "too many requests",
+        ]
+        .iter()
+        .any(|hint| lower.contains(hint))
     {
         return ModelProbeOutcome::AuthOrAccess;
     }

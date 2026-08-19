@@ -94,6 +94,7 @@ export type AgentRuntimeConfig = {
   parallelToolMaxConcurrency: number
   subagentLimit: SubagentLimitConfig
   subagentCallTimeoutSecs: number
+  subagentModel: string | null
   fastApplyModel: string | null
   fastApplyTemperature: number
   fastApplyTimeoutSecs: number
@@ -157,6 +158,7 @@ export type AgentRuntimePatch = {
   parallelToolMaxConcurrency?: number
   subagentLimit?: SubagentLimitConfig
   subagentCallTimeoutSecs?: number
+  subagentModel?: string | null
   fastApplyModel?: string | null
   fastApplyTemperature?: number
   fastApplyTimeoutSecs?: number

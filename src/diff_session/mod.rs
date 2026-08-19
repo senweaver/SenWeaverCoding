@@ -27,6 +27,7 @@ enum StagedChange {
         path: PathBuf,
         contents: String,
         encoding: Option<String>,
+        pre_sha256: Option<String>,
     },
 }
 
@@ -171,6 +172,7 @@ impl DiffSession {
         path: impl AsRef<Path>,
         contents: impl Into<String>,
         encoding: Option<String>,
+        pre_sha256: Option<String>,
     ) -> Result<(), DiffSessionError> {
         if self.applied {
             return Err(DiffSessionError::AlreadyApplied);
@@ -180,6 +182,7 @@ impl DiffSession {
             path: abs,
             contents: contents.into(),
             encoding,
+            pre_sha256,
         });
         Ok(())
     }
@@ -262,12 +265,14 @@ impl DiffSession {
                     path,
                     contents,
                     encoding,
+                    pre_sha256,
                 } => {
                     batch.push(EditOp::CreateFile {
                         path: path.clone(),
                         contents: contents.clone(),
                         overwrite: true,
                         encoding: encoding.clone(),
+                        expected_pre_sha256: pre_sha256.clone(),
                     });
                 }
             }

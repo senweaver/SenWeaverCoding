@@ -7,6 +7,7 @@ import {
   sessionsApi,
   type EditReviewFile,
   type EditReviewFileDiff,
+  type EditReviewHunks,
 } from '../api/sessions'
 
 type ReviewPanelState = {
@@ -20,6 +21,10 @@ type ReviewPanelState = {
   diffLoading: Record<string, true>
   expandedPaths: Record<string, true>
   revertingPaths: Record<string, true>
+  hunks: Record<string, EditReviewHunks | null>
+  hunkLoading: Record<string, true>
+  hunkDecisions: Record<string, Record<number, 'reject'>>
+  hunkApplying: Record<string, true>
   refreshTimer: number | null
   generation: number
 
@@ -34,6 +39,9 @@ type ReviewPanelState = {
   keepAll: () => void
   undoFile: (path: string) => Promise<void>
   undoAll: () => Promise<void>
+  loadHunks: (path: string) => Promise<void>
+  toggleHunkRejected: (path: string, index: number) => void
+  applyHunkDecisions: (path: string) => Promise<void>
   purgeSession: (sessionId: string) => void
 }
 
@@ -48,6 +56,10 @@ export const useReviewPanelStore = create<ReviewPanelState>((set, get) => ({
   diffLoading: {},
   expandedPaths: {},
   revertingPaths: {},
+  hunks: {},
+  hunkLoading: {},
+  hunkDecisions: {},
+  hunkApplying: {},
   refreshTimer: null,
   generation: 0,
 
@@ -65,6 +77,10 @@ export const useReviewPanelStore = create<ReviewPanelState>((set, get) => ({
       diffLoading: {},
       expandedPaths: prev.sessionId === sessionId ? prev.expandedPaths : {},
       revertingPaths: {},
+      hunks: prev.sessionId === sessionId ? prev.hunks : {},
+      hunkLoading: {},
+      hunkDecisions: prev.sessionId === sessionId ? prev.hunkDecisions : {},
+      hunkApplying: {},
       error: null,
       refreshTimer: null,
       generation: prev.generation + 1,
@@ -117,7 +133,7 @@ export const useReviewPanelStore = create<ReviewPanelState>((set, get) => ({
       set({ refreshTimer: null })
       const cur = get()
       if (!cur.open || cur.sessionId !== sessionId) return
-      set({ diffs: {}, generation: cur.generation + 1 })
+      set({ diffs: {}, hunks: {}, hunkDecisions: {}, generation: cur.generation + 1 })
       void get().refresh()
     }, 800)
     set({ refreshTimer: timer })
@@ -236,6 +252,87 @@ export const useReviewPanelStore = create<ReviewPanelState>((set, get) => ({
     }
   },
 
+  loadHunks: async (path) => {
+    const sessionId = get().sessionId
+    if (!sessionId) return
+    if (get().hunkLoading[path] || get().hunks[path] !== undefined) return
+    const generation = get().generation
+    set((s) => ({ hunkLoading: { ...s.hunkLoading, [path]: true } }))
+    try {
+      const res = await sessionsApi.getEditReviewHunks(sessionId, path)
+      if (get().sessionId !== sessionId || get().generation !== generation) return
+      set((s) => {
+        const hunkLoading = { ...s.hunkLoading }
+        delete hunkLoading[path]
+        return { hunks: { ...s.hunks, [path]: res }, hunkLoading }
+      })
+    } catch {
+      if (get().sessionId !== sessionId || get().generation !== generation) return
+      set((s) => {
+        const hunkLoading = { ...s.hunkLoading }
+        delete hunkLoading[path]
+        return { hunks: { ...s.hunks, [path]: null }, hunkLoading }
+      })
+    }
+  },
+
+  toggleHunkRejected: (path, index) => {
+    set((s) => {
+      const forPath = { ...(s.hunkDecisions[path] ?? {}) }
+      if (forPath[index]) {
+        delete forPath[index]
+      } else {
+        forPath[index] = 'reject'
+      }
+      return { hunkDecisions: { ...s.hunkDecisions, [path]: forPath } }
+    })
+  },
+
+  applyHunkDecisions: async (path) => {
+    const sessionId = get().sessionId
+    if (!sessionId || get().hunkApplying[path]) return
+    const hunkData = get().hunks[path]
+    if (!hunkData) return
+    const rejectedIndices = Object.keys(get().hunkDecisions[path] ?? {})
+      .map((k) => Number(k))
+      .filter((n) => Number.isInteger(n) && n >= 0)
+    if (rejectedIndices.length === 0) return
+    set((s) => ({ hunkApplying: { ...s.hunkApplying, [path]: true } }))
+    try {
+      await sessionsApi.applyEditReviewHunks(
+        sessionId,
+        path,
+        rejectedIndices,
+        hunkData.afterSha256,
+      )
+      set((s) => {
+        const hunks = { ...s.hunks }
+        delete hunks[path]
+        const decisions = { ...s.hunkDecisions }
+        delete decisions[path]
+        const diffs = { ...s.diffs }
+        delete diffs[path]
+        return { hunks, hunkDecisions: decisions, diffs }
+      })
+      await get().refresh()
+    } catch (err) {
+      set({ error: err instanceof Error ? err.message : String(err) })
+      set((s) => {
+        const hunks = { ...s.hunks }
+        delete hunks[path]
+        const decisions = { ...s.hunkDecisions }
+        delete decisions[path]
+        return { hunks, hunkDecisions: decisions }
+      })
+    } finally {
+      set((s) => {
+        const applying = { ...s.hunkApplying }
+        delete applying[path]
+        return { hunkApplying: applying }
+      })
+    }
+  },
+
   purgeSession: (sessionId) => {
     if (get().sessionId !== sessionId) return
     const timer = get().refreshTimer
@@ -251,6 +348,10 @@ export const useReviewPanelStore = create<ReviewPanelState>((set, get) => ({
       diffLoading: {},
       expandedPaths: {},
       revertingPaths: {},
+      hunks: {},
+      hunkLoading: {},
+      hunkDecisions: {},
+      hunkApplying: {},
       refreshTimer: null,
       generation: get().generation + 1,
     })

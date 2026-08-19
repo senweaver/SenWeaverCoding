@@ -102,6 +102,22 @@ pub fn note_failed_turn(history: &mut Vec<ConversationMessage>) {
     ));
 }
 
+pub fn note_failed_turn_chat(history: &mut Vec<crate::providers::traits::ChatMessage>) {
+    let already_noted = history
+        .last()
+        .is_some_and(|c| c.role == "assistant" && is_turn_close_note(&c.content));
+    if already_noted {
+        return;
+    }
+    tracing::info!(
+        target: "agent.dangling_tool_repair",
+        "marking the failed CLI turn (partial tool history preserved) before the next user request"
+    );
+    history.push(crate::providers::traits::ChatMessage::assistant(
+        FAILED_TURN_NOTE,
+    ));
+}
+
 pub fn tail_signals_interrupted_turn(history: &[ConversationMessage]) -> bool {
     match history.last() {
         Some(ConversationMessage::Chat(c)) if c.role == "user" => true,

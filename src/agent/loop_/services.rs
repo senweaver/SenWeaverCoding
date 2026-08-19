@@ -301,7 +301,12 @@ impl RagSource for CodeRagSource {
         };
         let lexical = {
             let index = self.index.clone();
-            let q = query.to_string();
+            let lexical_query = crate::agent::loop_::extract_code_search_query(query);
+            let q = if lexical_query.trim().is_empty() {
+                query.to_string()
+            } else {
+                lexical_query
+            };
             let focus = crate::context::builder::FocusPathRegistry::current();
             let search_limit = limit.saturating_mul(2);
             match tokio::task::spawn_blocking(move || {
@@ -664,8 +669,10 @@ fn spawn_vector_index_seed(root: PathBuf, fingerprint: u64, index: SharedVectorC
         let seed_lock = vector_index_lock(&root);
         let _seed_guard = seed_lock.lock().await;
         let snapshot_dir = vector_snapshot_dir(&root);
+        let mut snapshot_restored = false;
         match index.load_snapshot(&snapshot_dir).await {
             Ok(restored) if restored > 0 => {
+                snapshot_restored = true;
                 tracing::info!(
                     target: "rag.code_index",
                     restored,
@@ -682,6 +689,13 @@ fn spawn_vector_index_seed(root: PathBuf, fingerprint: u64, index: SharedVectorC
                 );
             }
         }
+        let manifest_root = root.clone();
+        let mut merkle = tokio::task::spawn_blocking(move || {
+            crate::rag::merkle_manifest::MerkleManifest::load(&manifest_root)
+        })
+        .await
+        .unwrap_or_default();
+        let mut merkle_skipped_files = 0usize;
         let walk_root = root.clone();
         let files = tokio::task::spawn_blocking(move || {
             let mut files = collect_vector_seed_files(&walk_root);
@@ -722,22 +736,35 @@ fn spawn_vector_index_seed(root: PathBuf, fingerprint: u64, index: SharedVectorC
                 cap_truncated = true;
                 break;
             }
+            if snapshot_restored && merkle.is_unchanged_fast(&root, &file) {
+                retained_paths.insert(file.clone());
+                total_chunks += index.chunk_ids_for_path(&file).await.len();
+                merkle_skipped_files += 1;
+                continue;
+            }
             files_indexed += 1;
             let read_path = file.clone();
             let chunk_root = root.clone();
-            let chunks = match tokio::task::spawn_blocking(move || {
+            let (content_sha, chunks) = match tokio::task::spawn_blocking(move || {
                 let content = std::fs::read_to_string(&read_path)?;
-                Ok::<_, std::io::Error>(chunk_source_for_vector_index(
-                    &chunk_root,
-                    &read_path,
-                    &content,
+                let sha = crate::apply_model::edit_op::sha256_hex(content.as_bytes());
+                Ok::<_, std::io::Error>((
+                    sha,
+                    chunk_source_for_vector_index(&chunk_root, &read_path, &content),
                 ))
             })
             .await
             {
-                Ok(Ok(chunks)) => chunks,
+                Ok(Ok(pair)) => pair,
                 _ => continue,
             };
+            if snapshot_restored && merkle.sha_matches(&root, &file, &content_sha) {
+                merkle.record_with_sha(&root, &file, content_sha);
+                retained_paths.insert(file.clone());
+                total_chunks += index.chunk_ids_for_path(&file).await.len();
+                merkle_skipped_files += 1;
+                continue;
+            }
             let mut chunks = chunks;
             let remaining = chunk_cap.saturating_sub(total_chunks);
             if chunks.len() > remaining {
@@ -745,6 +772,7 @@ fn spawn_vector_index_seed(root: PathBuf, fingerprint: u64, index: SharedVectorC
                 cap_truncated = true;
             }
             retained_paths.insert(file.clone());
+            merkle.record_with_sha(&root, &file, content_sha);
             let current_ids: std::collections::HashSet<String> =
                 chunks.iter().map(|c| c.id.clone()).collect();
             let stale: Vec<String> = index
@@ -814,6 +842,15 @@ fn spawn_vector_index_seed(root: PathBuf, fingerprint: u64, index: SharedVectorC
                 "vector snapshot persist failed; cold start will re-embed"
             );
         }
+        {
+            let keep: std::collections::HashSet<String> = retained_paths
+                .iter()
+                .filter_map(|p| crate::rag::merkle_manifest::rel_key(&root, p))
+                .collect();
+            merkle.retain_keys(&keep);
+            let manifest_root = root.clone();
+            let _ = tokio::task::spawn_blocking(move || merkle.save(&manifest_root)).await;
+        }
         if cap_truncated {
             tracing::warn!(
                 target: "rag.code_index",
@@ -832,10 +869,71 @@ fn spawn_vector_index_seed(root: PathBuf, fingerprint: u64, index: SharedVectorC
             reused = reused_chunks,
             embedded = embedded_chunks,
             files_indexed,
+            merkle_skipped_files,
             total_seed_files,
             root = %root.display(),
             "vector code index seeding complete"
         );
+        #[cfg(not(feature = "fs-watch"))]
+        spawn_periodic_merkle_diff(root.clone());
+    });
+}
+
+#[cfg(not(feature = "fs-watch"))]
+static MERKLE_PERIODIC_STARTED: OnceLock<
+    parking_lot::Mutex<std::collections::HashSet<PathBuf>>,
+> = OnceLock::new();
+
+#[cfg(not(feature = "fs-watch"))]
+fn spawn_periodic_merkle_diff(root: PathBuf) {
+    {
+        let set = MERKLE_PERIODIC_STARTED
+            .get_or_init(|| parking_lot::Mutex::new(std::collections::HashSet::new()));
+        let mut guard = set.lock();
+        if !guard.insert(root.clone()) {
+            return;
+        }
+    }
+    crate::runtime::spawn_supervised("rag.merkle_periodic_diff", async move {
+        const MERKLE_DIFF_PERIOD: std::time::Duration = std::time::Duration::from_secs(300);
+        loop {
+            tokio::time::sleep(MERKLE_DIFF_PERIOD).await;
+            let scan_root = root.clone();
+            let changed = tokio::task::spawn_blocking(move || {
+                let manifest = crate::rag::merkle_manifest::MerkleManifest::load(&scan_root);
+                if manifest.entries.is_empty() {
+                    return Vec::new();
+                }
+                let files = collect_vector_seed_files(&scan_root);
+                let mut changed: Vec<PathBuf> = Vec::new();
+                let mut seen: std::collections::HashSet<String> =
+                    std::collections::HashSet::new();
+                for abs in files {
+                    if let Some(key) = crate::rag::merkle_manifest::rel_key(&scan_root, &abs) {
+                        seen.insert(key);
+                    }
+                    if !manifest.is_unchanged_fast(&scan_root, &abs) {
+                        changed.push(abs);
+                    }
+                }
+                for key in manifest.entries.keys() {
+                    if !seen.contains(key) {
+                        changed.push(scan_root.join(key));
+                    }
+                }
+                changed
+            })
+            .await
+            .unwrap_or_default();
+            if !changed.is_empty() {
+                tracing::debug!(
+                    target: "rag.code_index",
+                    count = changed.len(),
+                    "periodic merkle diff detected external file changes without fs-watch"
+                );
+                note_code_files_changed(&changed);
+            }
+        }
     });
 }
 
@@ -1202,6 +1300,13 @@ pub fn note_code_files_changed(paths: &[PathBuf]) {
             .await
             .ok()
             .flatten();
+            let manifest_root = root.clone();
+            let mut merkle = tokio::task::spawn_blocking(move || {
+                crate::rag::merkle_manifest::MerkleManifest::load(&manifest_root)
+            })
+            .await
+            .unwrap_or_default();
+            let mut merkle_dirty = false;
             let mut touched = false;
             for p in &paths {
                 if !p.starts_with(&root) {
@@ -1212,29 +1317,33 @@ pub fn note_code_files_changed(paths: &[PathBuf]) {
                 });
                 if !p.exists() || !is_seedable_source_file(p) || ignored {
                     index.remove_path(p).await;
+                    merkle.remove(&root, p);
+                    merkle_dirty = true;
                     touched = true;
                     continue;
                 }
                 if let Ok(meta) = p.metadata() {
                     if meta.len() > VECTOR_SEED_MAX_FILE_BYTES {
                         index.remove_path(p).await;
+                        merkle.remove(&root, p);
+                        merkle_dirty = true;
                         touched = true;
                         continue;
                     }
                 }
                 let read_path = p.clone();
                 let chunk_root = root.clone();
-                let chunks = match tokio::task::spawn_blocking(move || {
+                let (content_sha, chunks) = match tokio::task::spawn_blocking(move || {
                     let content = std::fs::read_to_string(&read_path)?;
-                    Ok::<_, std::io::Error>(chunk_source_for_vector_index(
-                        &chunk_root,
-                        &read_path,
-                        &content,
+                    let sha = crate::apply_model::edit_op::sha256_hex(content.as_bytes());
+                    Ok::<_, std::io::Error>((
+                        sha,
+                        chunk_source_for_vector_index(&chunk_root, &read_path, &content),
                     ))
                 })
                 .await
                 {
-                    Ok(Ok(chunks)) => chunks,
+                    Ok(Ok(pair)) => pair,
                     _ => continue,
                 };
                 let current_ids: std::collections::HashSet<String> =
@@ -1266,7 +1375,14 @@ pub fn note_code_files_changed(paths: &[PathBuf]) {
                     );
                     continue;
                 }
+                merkle.record_with_sha(&root, p, content_sha);
+                merkle_dirty = true;
                 touched = true;
+            }
+            if merkle_dirty {
+                let manifest_root = root.clone();
+                let _ =
+                    tokio::task::spawn_blocking(move || merkle.save(&manifest_root)).await;
             }
             enforce_vector_chunk_cap(&root, &index).await;
             if touched && vector_snapshot_save_due(&root) {

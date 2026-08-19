@@ -2,14 +2,14 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useTranslation } from '../../i18n'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import type { TemplateItem } from '../../api/templateLibrary'
 
 const IFRAME_SANDBOX = 'allow-scripts allow-popups allow-forms allow-modals'
 
-function injectTokens(body: string, tokens: string): string {
+export function injectTokens(body: string, tokens: string): string {
   const styleTag = tokens.trim() ? `<style>${tokens}</style>` : ''
   if (/<head[^>]*>/i.test(body)) {
     return body.replace(/<head([^>]*)>/i, `<head$1>${styleTag}`)
@@ -28,6 +28,16 @@ export function TemplateLibraryPreview({
   buffers: Record<string, string>
 }) {
   const t = useTranslation()
+  const [imgFailed, setImgFailed] = useState(false)
+  const [videoFailed, setVideoFailed] = useState(false)
+
+  useEffect(() => {
+    setImgFailed(false)
+  }, [item.previewImageUrl])
+
+  useEffect(() => {
+    setVideoFailed(false)
+  }, [item.previewVideoUrl])
 
   const srcDoc = useMemo(() => {
     if (item.kind === 'design-system') {
@@ -70,20 +80,24 @@ export function TemplateLibraryPreview({
         prompt = buffers[file.path] ?? ''
       }
     }
-    const media = item.previewImageUrl || item.previewVideoUrl
+    const showImage = Boolean(item.previewImageUrl) && !imgFailed
+    const showVideo = !showImage && Boolean(item.previewVideoUrl) && !videoFailed
+    const media = showImage || showVideo
     return (
       <div className="h-full overflow-auto bg-[var(--color-surface)] p-4">
-        {item.previewImageUrl && (
+        {showImage && (
           <img
-            src={item.previewImageUrl}
+            src={item.previewImageUrl ?? undefined}
             alt=""
+            onError={() => setImgFailed(true)}
             className="mb-3 max-h-[40%] w-full rounded-lg object-contain"
           />
         )}
-        {!item.previewImageUrl && item.previewVideoUrl && (
+        {showVideo && (
           <video
-            src={item.previewVideoUrl}
+            src={item.previewVideoUrl ?? undefined}
             controls
+            onError={() => setVideoFailed(true)}
             className="mb-3 max-h-[40%] w-full rounded-lg"
           />
         )}

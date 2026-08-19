@@ -10,10 +10,26 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::SystemTime;
 
-const MAX_SNAPSHOTS_PER_FILE: usize = 20;
+const MAX_SNAPSHOTS_PER_FILE: usize = 100;
 const MAX_TIMELINE_EVENTS: usize = 4096;
 const HISTORY_DIR_NAME: &str = ".sen/edit_history";
 const INDEX_FILE: &str = "index.json";
+
+const SESSION_KEY_SEP: char = '\u{1f}';
+
+fn scoped_session_key(session: &str, rel: &str) -> String {
+    format!("{session}{SESSION_KEY_SEP}{rel}")
+}
+
+fn rel_from_scoped(key: &str) -> Option<&str> {
+    key.split_once(SESSION_KEY_SEP).map(|(_, rel)| rel)
+}
+
+fn scoped_matches_bucket(key: &str, bucket: &str) -> bool {
+    key.split_once(SESSION_KEY_SEP)
+        .map(|(session, _)| session == bucket)
+        .unwrap_or(false)
+}
 
 static SHARED_HISTORIES: once_cell::sync::Lazy<
     parking_lot::Mutex<HashMap<PathBuf, Arc<EditHistory>>>,
@@ -50,6 +66,9 @@ pub struct FileSnapshot {
 
     #[serde(default)]
     pub absent: bool,
+
+    #[serde(default)]
+    pub session_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -211,6 +230,10 @@ impl EditHistory {
             .unwrap_or_default()
             .as_secs();
 
+        let ctx_session = crate::session::current_session_context()
+            .map(|c| c.session_id)
+            .filter(|s| !s.is_empty());
+
         let (snapshot, is_creation) = if path.exists() {
             let content = std::fs::read(path)?;
             let hash = Self::sha256(&content);
@@ -226,6 +249,7 @@ impl EditHistory {
                     description: description.to_string(),
                     byte_size: content.len(),
                     absent: false,
+                    session_id: ctx_session.clone(),
                 },
                 false,
             )
@@ -238,6 +262,7 @@ impl EditHistory {
                     description: description.to_string(),
                     byte_size: 0,
                     absent: true,
+                    session_id: ctx_session.clone(),
                 },
                 true,
             )
@@ -287,24 +312,32 @@ impl EditHistory {
                     ev.snapshot_index -= evicted;
                     true
                 });
-                match state.session_first_index.get_mut(&key) {
-                    Some(first) if *first >= evicted => *first -= evicted,
-                    Some(_) => {
-                        state.session_first_index.remove(&key);
+                let suffix = format!("{SESSION_KEY_SEP}{key}");
+                state.session_first_index.retain(|k, first| {
+                    if !k.ends_with(&suffix) {
+                        return true;
+                    }
+                    if *first >= evicted {
+                        *first -= evicted;
+                        true
+                    } else {
                         tracing::debug!(
                             target: "rewind",
                             path = %key,
                             "session-start pre-image evicted by snapshot cap; \
                              revert_all_session will skip this path"
                         );
+                        false
                     }
-                    None => {}
-                }
+                });
             }
 
+            let bucket = ctx_session
+                .clone()
+                .unwrap_or_else(|| state.session_id.clone());
             state
                 .session_first_index
-                .entry(key.clone())
+                .entry(scoped_session_key(&bucket, &key))
                 .or_insert(idx);
 
             let mut ev = event;
@@ -354,15 +387,35 @@ impl EditHistory {
         self.apply_pre_image(path, &hash, absent)
     }
 
-    pub fn revert_to_session_start(&self, path: &Path) -> anyhow::Result<()> {
+    fn session_bucket(&self, explicit: Option<&str>) -> String {
+        if let Some(s) = explicit {
+            if !s.is_empty() {
+                return s.to_string();
+            }
+        }
+        if let Some(ctx) = crate::session::current_session_context() {
+            if !ctx.session_id.is_empty() {
+                return ctx.session_id;
+            }
+        }
+        self.state.read().session_id.clone()
+    }
+
+    pub fn revert_to_session_start(
+        &self,
+        path: &Path,
+        session_id: Option<&str>,
+    ) -> anyhow::Result<()> {
         self.ensure_loaded();
         let key = self.relative_key(path);
+        let bucket = self.session_bucket(session_id);
+        let scoped = scoped_session_key(&bucket, &key);
 
         let (hash, absent) = {
             let state = self.state.read();
             let idx = *state
                 .session_first_index
-                .get(&key)
+                .get(&scoped)
                 .ok_or_else(|| anyhow::anyhow!("No session edit history for: {key}"))?;
             let snap = state
                 .index
@@ -436,16 +489,22 @@ impl EditHistory {
 
     pub fn revert_all_session(&self) -> anyhow::Result<Vec<String>> {
         self.ensure_loaded();
+        let bucket = self.session_bucket(None);
         let mut reverted = Vec::new();
 
         let targets: Vec<String> = {
             let state = self.state.read();
-            state.session_first_index.keys().cloned().collect()
+            state
+                .session_first_index
+                .keys()
+                .filter(|k| scoped_matches_bucket(k, &bucket))
+                .filter_map(|k| rel_from_scoped(k).map(String::from))
+                .collect()
         };
 
         for key in targets {
             let abs_path = self.workspace_dir.join(&key);
-            match self.revert_to_session_start(&abs_path) {
+            match self.revert_to_session_start(&abs_path, Some(&bucket)) {
                 Ok(()) => reverted.push(key),
                 Err(e) => {
                     tracing::warn!(
@@ -468,11 +527,102 @@ impl EditHistory {
         state.index.files.get(&key).cloned().unwrap_or_default()
     }
 
-    pub fn session_edited_files(&self) -> Vec<SessionEditedFile> {
+    pub fn files_summary(&self) -> Vec<(String, usize, u64)> {
         self.ensure_loaded();
         let state = self.state.read();
+        let mut out: Vec<(String, usize, u64)> = state
+            .index
+            .files
+            .iter()
+            .filter(|(_, chain)| !chain.is_empty())
+            .map(|(rel, chain)| {
+                let last_ts = chain.iter().map(|s| s.timestamp).max().unwrap_or(0);
+                (rel.clone(), chain.len(), last_ts)
+            })
+            .collect();
+        out.sort_by(|a, b| a.0.cmp(&b.0));
+        out
+    }
+
+    pub fn restore_snapshot_with_stash(
+        &self,
+        path: &Path,
+        snapshot_index: usize,
+        expected_sha256: Option<&str>,
+        stash_tool: &str,
+        stash_description: &str,
+    ) -> anyhow::Result<()> {
+        self.ensure_loaded();
+        let key = self.relative_key(path);
+        let (hash, absent) = {
+            let state = self.state.read();
+            let chain = state
+                .index
+                .files
+                .get(&key)
+                .ok_or_else(|| anyhow::anyhow!("No edit history for: {key}"))?;
+            let snap = chain
+                .get(snapshot_index)
+                .ok_or_else(|| anyhow::anyhow!("Snapshot index {snapshot_index} out of range"))?;
+            (snap.sha256.clone(), snap.absent)
+        };
+
+        if let Some(expected) = expected_sha256 {
+            if expected != hash {
+                anyhow::bail!(
+                    "Snapshot at index {snapshot_index} no longer matches the requested \
+                     version; reload the history list and retry"
+                );
+            }
+        }
+
+        if let Err(e) = self.snapshot_before_write(path, stash_tool, stash_description) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %e,
+                "restore_snapshot: failed to stash current state before revert"
+            );
+        }
+
+        self.apply_pre_image(path, &hash, absent)
+    }
+
+    pub fn file_history_with_batches(
+        &self,
+        path: &Path,
+    ) -> Vec<(FileSnapshot, Option<String>)> {
+        self.ensure_loaded();
+        let key = self.relative_key(path);
+        let state = self.state.read();
+        let Some(chain) = state.index.files.get(&key) else {
+            return Vec::new();
+        };
+        chain
+            .iter()
+            .enumerate()
+            .map(|(idx, snap)| {
+                let batch = state
+                    .timeline
+                    .iter()
+                    .find(|ev| ev.path == key && ev.snapshot_index == idx)
+                    .and_then(|ev| ev.edit_batch_id.clone());
+                (snap.clone(), batch)
+            })
+            .collect()
+    }
+
+    pub fn session_edited_files(&self, session_id: Option<&str>) -> Vec<SessionEditedFile> {
+        self.ensure_loaded();
+        let bucket = self.session_bucket(session_id);
+        let state = self.state.read();
         let mut out: Vec<SessionEditedFile> = Vec::new();
-        for (key, first_idx) in state.session_first_index.iter() {
+        for (scoped, first_idx) in state.session_first_index.iter() {
+            if !scoped_matches_bucket(scoped, &bucket) {
+                continue;
+            }
+            let Some(key) = rel_from_scoped(scoped) else {
+                continue;
+            };
             let Some(chain) = state.index.files.get(key) else {
                 continue;
             };
@@ -483,7 +633,7 @@ impl EditHistory {
             for ev in state
                 .timeline
                 .iter()
-                .filter(|ev| &ev.path == key && ev.snapshot_index >= *first_idx)
+                .filter(|ev| ev.path == key && ev.snapshot_index >= *first_idx)
             {
                 if let Some(id) = ev.edit_batch_id.as_deref() {
                     if !batch_ids.iter().any(|b| b == id) {
@@ -492,7 +642,7 @@ impl EditHistory {
                 }
             }
             out.push(SessionEditedFile {
-                rel_path: key.clone(),
+                rel_path: key.to_string(),
                 first_snapshot_index: *first_idx,
                 pre_image: snap.clone(),
                 batch_ids,
@@ -502,11 +652,17 @@ impl EditHistory {
         out
     }
 
-    pub fn session_first_index_for(&self, path: &Path) -> Option<(usize, FileSnapshot)> {
+    pub fn session_first_index_for(
+        &self,
+        path: &Path,
+        session_id: Option<&str>,
+    ) -> Option<(usize, FileSnapshot)> {
         self.ensure_loaded();
         let key = self.relative_key(path);
+        let bucket = self.session_bucket(session_id);
+        let scoped = scoped_session_key(&bucket, &key);
         let state = self.state.read();
-        let idx = *state.session_first_index.get(&key)?;
+        let idx = *state.session_first_index.get(&scoped)?;
         let snap = state.index.files.get(&key)?.get(idx)?.clone();
         Some((idx, snap))
     }
@@ -745,26 +901,14 @@ impl EditHistory {
         diff_lines.push(format!("--- a/{key}"));
         diff_lines.push(format!("+++ b/{key}"));
 
-        let old_lines: Vec<&str> = old.lines().collect();
-        let new_lines: Vec<&str> = current.lines().collect();
-
-        let max = old_lines.len().max(new_lines.len());
-        for i in 0..max {
-            match (old_lines.get(i), new_lines.get(i)) {
-                (Some(o), Some(n)) if o == n => {
-                    diff_lines.push(format!(" {o}"));
-                }
-                (Some(o), Some(n)) => {
-                    diff_lines.push(format!("-{o}"));
-                    diff_lines.push(format!("+{n}"));
-                }
-                (Some(o), None) => {
-                    diff_lines.push(format!("-{o}"));
-                }
-                (None, Some(n)) => {
-                    diff_lines.push(format!("+{n}"));
-                }
-                (None, None) => {}
+        let diff = similar::TextDiff::from_lines(&old, &current);
+        for change in diff.iter_all_changes() {
+            let value = change.value();
+            let line = value.strip_suffix('\n').unwrap_or(value);
+            match change.tag() {
+                similar::ChangeTag::Equal => diff_lines.push(format!(" {line}")),
+                similar::ChangeTag::Delete => diff_lines.push(format!("-{line}")),
+                similar::ChangeTag::Insert => diff_lines.push(format!("+{line}")),
             }
         }
 

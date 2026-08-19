@@ -140,11 +140,24 @@ fn provision_actor(
     session_id: &str,
 ) -> Option<Arc<SessionActor>> {
     match SessionEventLog::open_at(workspace_root, session_id) {
-        Ok(log) => Some(SessionActor::open_or_create(
-            session_id.to_string(),
-            Arc::new(log),
-            SessionSyncHub::global(),
-        )),
+        Ok(log) => {
+            let actor = SessionActor::open_or_create(
+                session_id.to_string(),
+                Arc::new(log),
+                SessionSyncHub::global(),
+            );
+            let cross_process_enabled = crate::services::try_get_services()
+                .map(|svc| svc.config().gateway.cross_process_session_sync)
+                .unwrap_or(false);
+            if cross_process_enabled {
+                crate::session::rpc::enable_cross_process_sync(
+                    workspace_root,
+                    session_id,
+                    &actor,
+                );
+            }
+            Some(actor)
+        }
         Err(err) => {
             tracing::warn!(error = %err, "CLI: failed to open session event log; persistence disabled");
             None

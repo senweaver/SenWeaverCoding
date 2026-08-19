@@ -92,6 +92,29 @@ export function WorkspaceQueuePanel({ sessionId }: Props) {
     [list, sessionId],
   )
 
+  const runningSet = useSessionRunStateStore((s) => s.running)
+  const otherRunningId = useMemo(() => {
+    if (!sessionId || workspaceKey.startsWith('__solo::')) return null
+    const id = useWorkspaceQueueStore
+      .getState()
+      .getRunningSessionInWorkspace(workspaceKey)
+    return id && id !== sessionId ? id : null
+  }, [sessionId, workspaceKey, runningSet])
+
+  const otherQueueCount = useMemo(
+    () =>
+      sessionId
+        ? useWorkspaceQueueStore.getState().getOtherSessionsQueueCount(sessionId)
+        : 0,
+    [sessionId, queues],
+  )
+
+  const otherRunningTitle = useMemo(() => {
+    if (!otherRunningId) return ''
+    const meta = sessions.find((s) => s.id === otherRunningId)
+    return resolveSessionTitle(meta?.title, t('sidebar.untitled'))
+  }, [otherRunningId, sessions, t])
+
   const otherSessionTitle = useMemo(() => {
     const firstOther = otherItems[0]
     if (!firstOther) return ''
@@ -100,11 +123,27 @@ export function WorkspaceQueuePanel({ sessionId }: Props) {
   }, [otherItems, sessions, t])
 
   if (!sessionId) return null
-  if (ownItems.length === 0 && otherItems.length === 0) return null
+  const ownCount = ownItems.length
+  const otherCount = otherQueueCount
+
+  if (ownCount === 0 && otherCount === 0) {
+    if (!otherRunningId) return null
+    return (
+      <div
+        className="mb-1.5 flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)]"
+        data-testid="workspace-busy-hint"
+      >
+        <span className="inline-flex items-center text-[var(--color-brand)]">
+          <Spinner size={9} />
+        </span>
+        <span className="truncate">
+          {t('composer.queue.otherRunning', { title: otherRunningTitle })}
+        </span>
+      </div>
+    )
+  }
 
   const expanded = expandedSessions.has(sessionId)
-  const ownCount = ownItems.length
-  const otherCount = otherItems.length
 
   const headerLabel = ownCount > 0
     ? t('composer.queue.title', { count: ownCount })

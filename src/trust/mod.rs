@@ -8,8 +8,22 @@ pub use types::*;
 
 use parking_lot::Mutex;
 use std::sync::OnceLock;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 static TRUST_TRACKER: OnceLock<Mutex<TrustTracker>> = OnceLock::new();
+
+static LAST_DECAY_EPOCH_SECS: AtomicU64 = AtomicU64::new(0);
+const DECAY_THROTTLE_SECS: u64 = 3600;
+
+fn maybe_apply_decay(tracker: &mut TrustTracker) {
+    let now = chrono::Utc::now();
+    let now_secs = now.timestamp().max(0) as u64;
+    let last = LAST_DECAY_EPOCH_SECS.load(Ordering::Relaxed);
+    if now_secs.saturating_sub(last) >= DECAY_THROTTLE_SECS {
+        LAST_DECAY_EPOCH_SECS.store(now_secs, Ordering::Relaxed);
+        tracker.apply_decay(now);
+    }
+}
 
 pub fn global_tracker() -> &'static Mutex<TrustTracker> {
     TRUST_TRACKER.get_or_init(|| {
@@ -29,6 +43,7 @@ pub fn global_tracker() -> &'static Mutex<TrustTracker> {
 
 pub fn record_tool_decision(tool_name: &str, approved: bool, description: &str) {
     let mut tracker = global_tracker().lock();
+    maybe_apply_decay(&mut tracker);
     if approved {
         tracker.record_success(tool_name);
     } else {
@@ -37,5 +52,7 @@ pub fn record_tool_decision(tool_name: &str, approved: bool, description: &str) 
 }
 
 pub fn domain_regressed(domain: &str) -> bool {
-    global_tracker().lock().check_regression(domain).is_some()
+    let mut tracker = global_tracker().lock();
+    maybe_apply_decay(&mut tracker);
+    tracker.check_regression(domain).is_some()
 }

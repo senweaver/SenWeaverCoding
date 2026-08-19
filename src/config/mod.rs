@@ -2,6 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 pub mod domain;
+pub mod file_watch;
 pub mod hot_reload;
 pub mod live;
 

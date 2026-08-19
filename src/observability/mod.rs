@@ -69,7 +69,7 @@ fn create_single_observer(token: &str, config: &ObservabilityConfig) -> Box<dyn 
         "prometheus" => {
             #[cfg(feature = "observability-prometheus")]
             {
-                Box::new(PrometheusObserver::new())
+                Box::new(prometheus::SharedPrometheusObserver(prometheus::global()))
             }
             #[cfg(not(feature = "observability-prometheus"))]
             {

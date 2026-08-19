@@ -190,7 +190,8 @@ function McpPanel({ cwd, onClose }: { cwd?: string; onClose: () => void }) {
                     key={`${server.scope}:${server.projectPath ?? 'global'}:${server.name}`}
                     onClick={() => {
                       selectServer(server)
-                      openSettingsOverlay('mcp')
+                      useUIStore.getState().setPendingCustomSubTab('mcps')
+                      openSettingsOverlay('custom')
                       onClose()
                     }}
                     className="block w-full border-t border-[var(--color-border)] px-4 py-4 text-left first:border-t-0 hover:bg-[var(--color-surface-hover)]"
@@ -264,7 +265,8 @@ function SkillsPanel({ cwd, onClose }: { cwd?: string; onClose: () => void }) {
               key={`${skill.source}:${skill.name}`}
               onClick={async () => {
                 await fetchSkillDetail(skill.source, skill.name, cwd, 'skills')
-                openSettingsOverlay('skills')
+                useUIStore.getState().setPendingCustomSubTab('skills')
+                openSettingsOverlay('custom')
                 onClose()
               }}
               className="block w-full border-t border-[var(--color-border)] px-4 py-4 text-left first:border-t-0 hover:bg-[var(--color-surface-hover)]"

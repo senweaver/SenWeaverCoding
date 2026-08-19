@@ -69,7 +69,7 @@ pub fn is_non_retryable(err: &anyhow::Error) -> bool {
     }
 
     let msg = err.to_string();
-    if let Some(code) = extract_http_status_code(&msg) {
+    if let Some(code) = crate::error::extract_http_status_code(&msg) {
         if (400..500).contains(&code) {
             return code != 429 && code != 408;
         }
@@ -105,93 +105,6 @@ pub fn is_non_retryable(err: &anyhow::Error) -> bool {
             || msg_lower.contains("invalid"))
 }
 
-pub(crate) fn extract_http_status_code(msg: &str) -> Option<u16> {
-    let bytes = msg.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i].is_ascii_digit() {
-            let start = i;
-            while i < bytes.len() && bytes[i].is_ascii_digit() {
-                i += 1;
-            }
-            if i - start == 3 {
-                if let Ok(code) = msg[start..i].parse::<u16>() {
-                    if (100..=599).contains(&code)
-                        && (has_status_context_before(msg, start)
-                            || has_reason_phrase_after(msg, i))
-                    {
-                        return Some(code);
-                    }
-                }
-            }
-        } else {
-            i += 1;
-        }
-    }
-    None
-}
-
-fn preceding_word(msg: &str, mut end: usize) -> (Option<String>, usize) {
-    let bytes = msg.as_bytes();
-    while end > 0 && !bytes[end - 1].is_ascii_alphanumeric() {
-        end -= 1;
-    }
-    let word_end = end;
-    while end > 0 && bytes[end - 1].is_ascii_alphabetic() {
-        end -= 1;
-    }
-    if end == word_end {
-        return (None, end);
-    }
-    (Some(msg[end..word_end].to_ascii_lowercase()), end)
-}
-
-fn has_status_context_before(msg: &str, digit_start: usize) -> bool {
-    let (word, word_start) = preceding_word(msg, digit_start);
-    let Some(word) = word else { return false };
-    match word.as_str() {
-        "http" | "status" | "code" | "statuscode" => true,
-        "error" => {
-            let (prev, _) = preceding_word(msg, word_start);
-            prev.as_deref() != Some("os")
-        }
-        _ => false,
-    }
-}
-
-fn has_reason_phrase_after(msg: &str, digit_end: usize) -> bool {
-    let rest = msg[digit_end..]
-        .trim_start_matches([' ', '-', ':', '(', ')', '.', ','])
-        .to_ascii_lowercase();
-    const REASON_PHRASES: &[&str] = &[
-        "bad request",
-        "unauthorized",
-        "payment required",
-        "forbidden",
-        "not found",
-        "method not allowed",
-        "not acceptable",
-        "proxy authentication required",
-        "request timeout",
-        "conflict",
-        "gone",
-        "length required",
-        "precondition failed",
-        "payload too large",
-        "request entity too large",
-        "uri too long",
-        "unsupported media type",
-        "unprocessable entity",
-        "too many requests",
-        "unavailable for legal reasons",
-        "internal server error",
-        "bad gateway",
-        "service unavailable",
-        "gateway timeout",
-    ];
-    REASON_PHRASES.iter().any(|phrase| rest.starts_with(phrase))
-}
-
 pub fn is_tool_schema_error(err: &anyhow::Error) -> bool {
     let lower = err.to_string().to_lowercase();
     let hints = [
@@ -221,15 +134,59 @@ pub(crate) fn is_context_window_exceeded(err: &anyhow::Error) -> bool {
     hints.iter().any(|hint| lower.contains(hint))
 }
 
-fn is_rate_limited(err: &anyhow::Error) -> bool {
-    if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>() {
-        if let Some(status) = reqwest_err.status() {
-            return status.as_u16() == 429;
+fn contains_official_rate_limit_code(lower: &str) -> bool {
+    [
+        "rate_limit_error",
+        "rate_limit_exceeded",
+        "too_many_requests",
+    ]
+    .iter()
+    .any(|code| lower.contains(code))
+}
+
+fn provider_http_has_official_rate_limit_code(body: &str) -> bool {
+    if let Some(code) = super::extract_provider_error_code(body) {
+        if crate::providers::traits::is_official_rate_limit_code(&code) {
+            return true;
+        }
+    }
+    contains_official_rate_limit_code(&body.to_lowercase())
+}
+
+pub(crate) fn is_rate_limited(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(provider_err) = cause.downcast_ref::<crate::providers::ProviderError>() {
+            if let Some(status) = provider_err.http_status() {
+                if status == 429 {
+                    return true;
+                }
+                if let Some(body) = provider_err.http_body() {
+                    if provider_http_has_official_rate_limit_code(body) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+        }
+        if let Some(stream_err) = cause.downcast_ref::<StreamError>() {
+            if stream_err.is_official_rate_limit() {
+                return true;
+            }
+            if let Some(status) = stream_err.http_status() {
+                return status == 429;
+            }
+        }
+        if let Some(reqwest_err) = cause.downcast_ref::<reqwest::Error>() {
+            if let Some(status) = reqwest_err.status() {
+                return status.as_u16() == 429;
+            }
         }
     }
     let msg = err.to_string();
-    msg.contains("429")
-        && (msg.contains("Too Many") || msg.contains("rate") || msg.contains("limit"))
+    if crate::error::extract_http_status_code(&msg) == Some(429) {
+        return true;
+    }
+    contains_official_rate_limit_code(&msg.to_lowercase())
 }
 
 pub(crate) fn is_transport_level_error(err: &anyhow::Error) -> bool {
@@ -263,28 +220,77 @@ pub(crate) fn is_transport_level_error(err: &anyhow::Error) -> bool {
     .any(|hint| lower.contains(hint))
 }
 
-fn is_engine_overloaded(err: &anyhow::Error) -> bool {
-    let lower = err.to_string().to_lowercase();
-    engine_overload_hints()
-        .iter()
-        .any(|hint| lower.contains(hint))
+fn contains_official_overload_code(lower: &str) -> bool {
+    [
+        "overloaded_error",
+        "engine_overloaded",
+        "server_overloaded",
+        "service_overloaded",
+    ]
+    .iter()
+    .any(|code| lower.contains(code))
 }
 
-fn engine_overload_hints() -> &'static [&'static str] {
-    &[
-        "engine_overloaded",
+fn contains_overload_hint(lower: &str) -> bool {
+    [
         "engine overload",
         "engine is currently overloaded",
         "engine is overloaded",
-        "overloaded_error",
-        "server_overloaded",
         "service overloaded",
-        "service_overloaded",
         "currently overloaded",
         "temporarily overloaded",
         "system overloaded",
         "upstream overload",
     ]
+    .iter()
+    .any(|hint| lower.contains(hint))
+}
+
+fn overload_capable_status(status: u16) -> bool {
+    matches!(status, 429 | 500 | 502 | 503 | 529)
+}
+
+pub(crate) fn is_engine_overloaded(err: &anyhow::Error) -> bool {
+    for cause in err.chain() {
+        if let Some(provider_err) = cause.downcast_ref::<crate::providers::ProviderError>() {
+            if let Some(status) = provider_err.http_status() {
+                if status == 529 {
+                    return true;
+                }
+                let body = provider_err.http_body().unwrap_or("").to_lowercase();
+                return overload_capable_status(status)
+                    && (contains_official_overload_code(&body) || contains_overload_hint(&body));
+            }
+        }
+        if let Some(stream_err) = cause.downcast_ref::<StreamError>() {
+            if stream_err.is_official_overload() {
+                return true;
+            }
+            if let Some(status) = stream_err.http_status() {
+                if status == 529 {
+                    return true;
+                }
+                let message = stream_err.to_string().to_lowercase();
+                return overload_capable_status(status)
+                    && (contains_official_overload_code(&message)
+                        || contains_overload_hint(&message));
+            }
+        }
+        if let Some(reqwest_err) = cause.downcast_ref::<reqwest::Error>() {
+            if let Some(status) = reqwest_err.status() {
+                return status.as_u16() == 529;
+            }
+        }
+    }
+    let lower = err.to_string().to_lowercase();
+    if contains_official_overload_code(&lower) {
+        return true;
+    }
+    match crate::error::extract_http_status_code(&lower) {
+        Some(529) => true,
+        Some(status) => overload_capable_status(status) && contains_overload_hint(&lower),
+        None => false,
+    }
 }
 
 fn is_account_rate_limited(err: &anyhow::Error) -> bool {
@@ -374,9 +380,21 @@ fn is_non_retryable_rate_limit(err: &anyhow::Error) -> bool {
     false
 }
 
-fn parse_retry_after_ms(err: &anyhow::Error) -> Option<u64> {
-    let msg = err.to_string();
+pub(crate) const RETRY_AFTER_CAP_MS: u64 = 300_000;
+
+fn retry_after_ms_from_text(msg: &str) -> Option<u64> {
+    if let Some(ms) = super::retry_after_ms_from_prefixed_body(msg) {
+        return Some(ms);
+    }
+
     let lower = msg.to_lowercase();
+    let status = crate::error::extract_http_status_code(&lower);
+    let retry_after_eligible = matches!(status, Some(429) | Some(503) | Some(529))
+        || contains_official_rate_limit_code(&lower)
+        || contains_official_overload_code(&lower);
+    if !retry_after_eligible {
+        return None;
+    }
 
     for prefix in &[
         "retry-after:",
@@ -385,17 +403,32 @@ fn parse_retry_after_ms(err: &anyhow::Error) -> Option<u64> {
         "retry_after ",
     ] {
         if let Some(pos) = lower.find(prefix) {
-            let after = &msg[pos + prefix.len()..];
-            let num_str: String = after
-                .trim()
-                .chars()
-                .take_while(|c| c.is_ascii_digit() || *c == '.')
-                .collect();
-            if let Ok(secs) = num_str.parse::<f64>() {
-                if secs.is_finite() && secs >= 0.0 {
-                    let millis = Duration::from_secs_f64(secs).as_millis();
-                    if let Ok(value) = u64::try_from(millis) {
-                        return Some(value);
+            let after = msg[pos + prefix.len()..].trim_start();
+            let line_end = after.find('\n').unwrap_or(after.len());
+            if let Some(ms) = super::parse_retry_after_value_ms(after[..line_end].trim()) {
+                return Some(ms);
+            }
+        }
+    }
+
+    if let Some(pos) = lower.find("retrydelay") {
+        let after = &lower[pos + "retrydelay".len()..];
+        if let Some(start) = after.find(|c: char| c.is_ascii_digit()) {
+            if start <= 6 {
+                let rest = &after[start..];
+                let num_str: String = rest
+                    .chars()
+                    .take_while(|c| c.is_ascii_digit() || *c == '.')
+                    .collect();
+                let tail = &rest[num_str.len()..];
+                if let Ok(value) = num_str.parse::<f64>() {
+                    if value.is_finite() && value >= 0.0 {
+                        let ms = if tail.starts_with("ms") {
+                            value
+                        } else {
+                            value * 1000.0
+                        };
+                        return Some(ms.round() as u64);
                     }
                 }
             }
@@ -404,9 +437,29 @@ fn parse_retry_after_ms(err: &anyhow::Error) -> Option<u64> {
     None
 }
 
+pub(crate) fn parse_retry_after_ms(err: &anyhow::Error) -> Option<u64> {
+    for cause in err.chain() {
+        if let Some(stream_err) = cause.downcast_ref::<StreamError>() {
+            if let Some(ms) = stream_err.retry_after_ms() {
+                return Some(ms);
+            }
+        }
+        if let Some(provider_err) = cause.downcast_ref::<crate::providers::ProviderError>() {
+            if let Some(body) = provider_err.http_body() {
+                if let Some(ms) = retry_after_ms_from_text(body) {
+                    return Some(ms);
+                }
+            }
+        }
+    }
+    retry_after_ms_from_text(&err.to_string())
+}
+
 fn pseudo_jitter_seed(attempt: u32) -> f64 {
-    let x = attempt.wrapping_mul(2_654_435_761);
-    (x as f64 / u32::MAX as f64).clamp(0.0, 1.0)
+    let deterministic =
+        (attempt.wrapping_mul(2_654_435_761) as f64 / u32::MAX as f64).clamp(0.0, 1.0);
+    let random = rand::random::<f64>();
+    ((deterministic + random) * 0.5).clamp(0.0, 1.0)
 }
 
 fn class_backoff_ms(attempt: u32, class: FailureClass) -> Option<u64> {
@@ -415,7 +468,7 @@ fn class_backoff_ms(attempt: u32, class: FailureClass) -> Option<u64> {
             1_000, 2_000, 4_000, 8_000, 15_000, 30_000, 30_000, 30_000, 30_000, 30_000,
         ],
         FailureClass::AccountRateLimited => {
-            &[5_000, 15_000, 30_000, 60_000, 60_000, 60_000, 60_000, 60_000, 60_000, 60_000]
+            &[2_000, 4_000, 8_000, 15_000, 30_000, 60_000, 60_000, 60_000, 60_000, 60_000]
         }
         _ => return None,
     };
@@ -552,10 +605,6 @@ pub const TRANSIENT_RETRY_FLOOR: u32 = 12;
 
 pub const TRANSPORT_RETRY_CAP: u32 = 12;
 
-pub const DEFAULT_CLIENT_LLM_RATE_LIMIT_CAPACITY: f64 = 60.0;
-
-pub const DEFAULT_CLIENT_LLM_RATE_LIMIT_REFILL_PER_SEC: f64 = 1.0;
-
 const STREAM_BACKOFF_CEILING_MS: u64 = 10_000;
 
 const STREAM_CONTEXT_TRUNCATION_MAX: u32 = 4;
@@ -568,10 +617,6 @@ pub struct ReliableProvider {
     model_fallbacks: HashMap<String, Vec<String>>,
 
     counter: std::sync::Arc<crate::providers::core::retry::ReliabilityCounter>,
-
-    rate_limiters: std::sync::Arc<crate::providers::core::rate_limit::RateLimiterMap<String>>,
-
-    client_rate_limit_enabled: bool,
 
     engine_overload_max_retries: u32,
 
@@ -616,32 +661,10 @@ impl ReliableProvider {
             base_backoff_ms: base_backoff_ms.max(50),
             model_fallbacks: HashMap::new(),
             counter: std::sync::Arc::new(crate::providers::core::retry::ReliabilityCounter::new()),
-            rate_limiters: std::sync::Arc::new(
-                crate::providers::core::rate_limit::RateLimiterMap::new(1_000_000.0, 1_000_000.0),
-            ),
-            client_rate_limit_enabled: false,
             engine_overload_max_retries: 10,
             account_rate_limit_max_retries: 5,
             transient_max_retries: max_retries.max(TRANSIENT_RETRY_FLOOR),
         }
-    }
-
-    pub fn with_rate_limit(mut self, capacity: f64, refill_per_sec: f64) -> Self {
-        self.rate_limiters =
-            std::sync::Arc::new(crate::providers::core::rate_limit::RateLimiterMap::new(
-                capacity.max(0.0),
-                refill_per_sec.max(0.0),
-            ));
-        self.client_rate_limit_enabled = capacity.is_finite()
-            && refill_per_sec.is_finite()
-            && capacity > 0.0
-            && refill_per_sec > 0.0;
-        self
-    }
-
-    pub fn with_client_rate_limit_enabled(mut self, enabled: bool) -> Self {
-        self.client_rate_limit_enabled = enabled;
-        self
     }
 
     pub fn with_retry_caps(
@@ -657,12 +680,6 @@ impl ReliableProvider {
     pub fn with_transient_max_retries(mut self, transient_max_retries: u32) -> Self {
         self.transient_max_retries = transient_max_retries.max(TRANSIENT_RETRY_FLOOR);
         self
-    }
-
-    pub fn rate_limiters(
-        &self,
-    ) -> std::sync::Arc<crate::providers::core::rate_limit::RateLimiterMap<String>> {
-        std::sync::Arc::clone(&self.rate_limiters)
     }
 
     pub fn counter(&self) -> std::sync::Arc<crate::providers::core::retry::ReliabilityCounter> {
@@ -717,34 +734,24 @@ impl ReliableProvider {
         err: &anyhow::Error,
         class: FailureClass,
     ) -> u64 {
-        if let Some(retry_after) = parse_retry_after_ms(err) {
-            return retry_after.min(60_000);
+        let honor_retry_after = match class {
+            FailureClass::AccountRateLimited | FailureClass::EngineOverloaded => true,
+            FailureClass::Transient => matches!(
+                crate::error::extract_http_status_code(&err.to_string()),
+                Some(503)
+            ),
+            FailureClass::NonRetryable => false,
+        };
+        if honor_retry_after {
+            if let Some(retry_after) = parse_retry_after_ms(err) {
+                return retry_after.min(RETRY_AFTER_CAP_MS);
+            }
         }
         if let Some(ms) = class_backoff_ms(attempt, class) {
             return ms;
         }
         crate::providers::core::retry::exp_backoff(attempt, self.base_backoff_ms, 30_000, 0.25)
             .as_millis() as u64
-    }
-
-    async fn gate_rate_limit(&self, provider: &str) {
-        Self::gate_rate_limit_shared(
-            self.client_rate_limit_enabled,
-            &self.rate_limiters,
-            provider,
-        )
-        .await;
-    }
-
-    async fn gate_rate_limit_shared(
-        enabled: bool,
-        limiters: &crate::providers::core::rate_limit::RateLimiterMap<String>,
-        provider: &str,
-    ) {
-        if !enabled {
-            return;
-        }
-        limiters.wait(&provider.to_string(), 1.0).await;
     }
 
     fn effective_class_cap(&self, class: FailureClass) -> u32 {
@@ -883,12 +890,13 @@ impl ReliableProvider {
             return FailureAction::ExhaustedClass;
         }
 
+        let class_attempt_index = class_attempts.saturating_sub(1);
         let wait = self
-            .compute_backoff_for_class(attempt, err, class)
+            .compute_backoff_for_class(class_attempt_index, err, class)
             .min(if matches!(class, FailureClass::Transient) {
                 STREAM_BACKOFF_CEILING_MS
             } else {
-                60_000
+                RETRY_AFTER_CAP_MS
             });
         let retry_class = Self::classify_retry(err);
         tracing::warn!(
@@ -956,8 +964,6 @@ impl ReliableProvider {
 
         let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamChunk>>(100);
 
-        let rate_limit_enabled = self.client_rate_limit_enabled;
-        let rate_limiters = std::sync::Arc::clone(&self.rate_limiters);
         let cancel_token = current_stream_cancel_token();
 
         let _bg = crate::runtime::spawn_supervised(
@@ -966,12 +972,6 @@ impl ReliableProvider {
                 let mut last_err: Option<StreamError> = None;
 
                 for (provider_label, provider_arc, current_model) in combos {
-                    Self::gate_rate_limit_shared(
-                        rate_limit_enabled,
-                        &rate_limiters,
-                        &provider_label,
-                    )
-                    .await;
                     let mut stream = make_stream(provider_arc, current_model.clone());
                     let mut made_progress = false;
                     let mut failed_before_progress = false;
@@ -1104,7 +1104,6 @@ impl Provider for ReliableProvider {
             for (provider_name, provider) in &self.providers {
                 state = RetryState::default();
                 for attempt in 0..=outer_cap {
-                    self.gate_rate_limit(provider_name).await;
                     match Self::with_idempotency(
                         provider_name,
                         current_model,
@@ -1214,7 +1213,6 @@ impl Provider for ReliableProvider {
             for (provider_name, provider) in &self.providers {
                 state = RetryState::default();
                 for attempt in 0..=outer_cap {
-                    self.gate_rate_limit(provider_name).await;
                     let messages_value = serde_json::to_value(&effective_messages)
                         .unwrap_or(serde_json::Value::Null);
                     match Self::with_idempotency(
@@ -1352,7 +1350,6 @@ impl Provider for ReliableProvider {
             for (provider_name, provider) in &self.providers {
                 state = RetryState::default();
                 for attempt in 0..=outer_cap {
-                    self.gate_rate_limit(provider_name).await;
                     let messages_value = serde_json::to_value(&effective_messages)
                         .unwrap_or(serde_json::Value::Null);
                     match Self::with_idempotency(
@@ -1479,7 +1476,6 @@ impl Provider for ReliableProvider {
             for (provider_name, provider) in &self.providers {
                 state = RetryState::default();
                 for attempt in 0..=outer_cap {
-                    self.gate_rate_limit(provider_name).await;
                     let req = ChatRequest {
                         messages: &effective_messages,
                         tools: request.tools,
@@ -1667,9 +1663,6 @@ impl Provider for ReliableProvider {
 
             let (tx, rx) = tokio::sync::mpsc::channel::<StreamResult<StreamEvent>>(100);
 
-            let rate_limit_enabled = self.client_rate_limit_enabled;
-            let rate_limiters = std::sync::Arc::clone(&self.rate_limiters);
-
             let _bg = crate::runtime::spawn_supervised(
                 "providers.reliable.stream_chat_retry",
                 Self::scope_stream_retry(scoped_session, scoped_mode, async move {
@@ -1690,7 +1683,6 @@ impl Provider for ReliableProvider {
                         let mut rate_limit_attempts: u32 = 0;
                         let mut transient_attempts: u32 = 0;
                         let mut transport_attempts: u32 = 0;
-                        let mut total_attempts: u32 = 0;
 
                         let (summary, switch_class): (String, RetryClass) = 'retry: loop {
                             if let Some(token) = cancel_token.as_ref() {
@@ -1703,13 +1695,6 @@ impl Provider for ReliableProvider {
                                     return;
                                 }
                             }
-
-                            Self::gate_rate_limit_shared(
-                                rate_limit_enabled,
-                                &rate_limiters,
-                                &provider_label,
-                            )
-                            .await;
 
                             let req = ChatRequest {
                                 messages: messages_owned.as_slice(),
@@ -1822,7 +1807,7 @@ impl Provider for ReliableProvider {
                                 );
                             }
 
-                            let anyhow_err = anyhow::anyhow!("{}", err_string);
+                            let anyhow_err = anyhow::Error::new(err);
 
                             if is_context_window_exceeded(&anyhow_err) {
                                 if context_truncation_passes < STREAM_CONTEXT_TRUNCATION_MAX {
@@ -1925,15 +1910,16 @@ impl Provider for ReliableProvider {
                                 break 'retry (summary, retry_class);
                             }
 
+                            let class_attempt_index = class_attempts.saturating_sub(1);
                             let wait_ms_raw = if let Some(ms) = parse_retry_after_ms(&anyhow_err) {
-                                ms.min(60_000)
+                                ms.min(RETRY_AFTER_CAP_MS)
                             } else if let Some(ms) =
-                                class_backoff_ms(total_attempts, class)
+                                class_backoff_ms(class_attempt_index, class)
                             {
                                 ms
                             } else {
                                 crate::providers::core::retry::exp_backoff(
-                                    total_attempts,
+                                    class_attempt_index,
                                     base_backoff,
                                     30_000,
                                     0.25,
@@ -1992,8 +1978,6 @@ impl Provider for ReliableProvider {
                             } else {
                                 tokio::time::sleep(sleep_dur).await;
                             }
-
-                            total_attempts = total_attempts.saturating_add(1);
                         };
 
                         last_failure = Some(summary.clone());

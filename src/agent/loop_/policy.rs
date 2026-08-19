@@ -20,7 +20,7 @@ use crate::i18n::ToolDescriptions;
 use crate::observability::traits::Observer;
 use crate::providers::traits::Provider;
 use crate::security::rbac::{CallerIdentity, RbacEngine};
-use crate::tools::{ActivatedToolSet, PlanModeFlag, Tool, ToolRegistry};
+use crate::tools::{ActivatedToolSet, PlanModeFlag, Tool};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LoopOrigin {
@@ -67,8 +67,6 @@ pub struct PolicyBundle<'a> {
     pub plan_mode_flag: Option<&'a PlanModeFlag>,
 
     pub plan_execution_path: Option<&'a str>,
-
-    pub tool_registry: Option<&'a ToolRegistry>,
 
     pub response_cache_hook: Option<Arc<dyn ResponseCacheHook>>,
     pub memory_session_hook: Option<Arc<dyn MemorySessionHook>>,
@@ -127,7 +125,6 @@ impl<'a> PolicyBundle<'a> {
             rbac_identity: None,
             plan_mode_flag: None,
             plan_execution_path: None,
-            tool_registry: None,
             response_cache_hook: None,
             memory_session_hook: None,
             turn_preamble_hook: None,
@@ -344,6 +341,7 @@ impl<'a> PolicyBundle<'a> {
                                 | TurnEvent::SubagentChunk { .. }
                                 | TurnEvent::WorkerProgress { .. }
                                 | TurnEvent::CommandPreview { .. }
+                                | TurnEvent::ToolArgsDelta { .. }
                         )
                     }
 
@@ -508,11 +506,6 @@ impl<'a> PolicyBundle<'a> {
 
     pub fn with_plan_execution_path(mut self, path: Option<&'a str>) -> Self {
         self.plan_execution_path = path;
-        self
-    }
-
-    pub fn with_tool_registry(mut self, registry: Option<&'a ToolRegistry>) -> Self {
-        self.tool_registry = registry;
         self
     }
 

@@ -391,6 +391,10 @@ impl PromptSection for ContextReferenceSection {
         }
         out.push('\n');
 
+        out.push_str(
+            "- A file reference may carry a line-range suffix `path:start-end` (or a single line `path:line`), e.g. `@[main.rs (10-25)](src/main.rs:10-25)`: the user selected exactly those lines in the editor. Strip the suffix to get the real file path, and read precisely that range first with `file_read` (`offset` = start line, `limit` = number of lines) before widening if needed.\n",
+        );
+
         let outline = has_tool("code_outline");
         let graph = has_tool("code_graph_query");
         let lsp = has_tool("lsp");

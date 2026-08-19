@@ -15,6 +15,7 @@ import { useSettingsStore } from '../stores/settingsStore'
 import { useEvolutionStore } from '../stores/evolutionStore'
 import { useUIStore } from '../stores/uiStore'
 import { useDockSuspend } from '../hooks/useDockSuspend'
+import { CodingModeSettings } from '../components/settings/CodingModeSettings'
 import type { GlobalDirective, ThinkingLevel } from '../types/agentSettings'
 import type { AutonomySettings, LoopControlsSettings, PermissionMode } from '../types/settings'
 import type { AvailableModelEntry } from '../types/evolution'
@@ -60,6 +61,8 @@ export function AgentsSettings() {
           {t('settings.agents.description')}
         </p>
       </div>
+
+      <CodingModeSettings />
 
       <AutoRunSection />
 

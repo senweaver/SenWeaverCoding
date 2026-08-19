@@ -12,6 +12,10 @@ impl MultiObserver {
     pub fn new(observers: Vec<Box<dyn Observer>>) -> Self {
         Self { observers }
     }
+
+    pub fn observers(&self) -> &[Box<dyn Observer>] {
+        &self.observers
+    }
 }
 
 impl Observer for MultiObserver {

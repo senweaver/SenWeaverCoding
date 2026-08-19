@@ -42,9 +42,6 @@ pub struct ReliabilityConfig {
 
     #[serde(default = "default_transient_max_retries")]
     pub transient_max_retries: u32,
-
-    #[serde(default = "default_client_llm_rate_limit_enabled")]
-    pub client_llm_rate_limit_enabled: bool,
 }
 
 fn default_provider_retries() -> u32 {
@@ -65,10 +62,6 @@ fn default_account_rate_limit_max_retries() -> u32 {
 
 fn default_transient_max_retries() -> u32 {
     crate::providers::reliable::TRANSIENT_RETRY_FLOOR
-}
-
-fn default_client_llm_rate_limit_enabled() -> bool {
-    false
 }
 
 fn default_channel_backoff_secs() -> u64 {
@@ -102,7 +95,6 @@ impl Default for ReliabilityConfig {
             engine_overload_max_retries: default_engine_overload_max_retries(),
             account_rate_limit_max_retries: default_account_rate_limit_max_retries(),
             transient_max_retries: default_transient_max_retries(),
-            client_llm_rate_limit_enabled: default_client_llm_rate_limit_enabled(),
         }
     }
 }

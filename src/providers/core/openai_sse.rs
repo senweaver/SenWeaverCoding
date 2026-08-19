@@ -50,6 +50,26 @@ pub fn stream_error_text(chunk: &StreamChunkResponse) -> Option<String> {
     })
 }
 
+pub fn stream_error_code(chunk: &StreamChunkResponse) -> Option<String> {
+    let err = chunk.error.as_ref()?;
+    if err.is_null() || err.is_string() {
+        return None;
+    }
+    let candidates = [err.get("type"), err.get("code"), err.get("status")];
+    for candidate in candidates.into_iter().flatten() {
+        if let Some(s) = candidate.as_str() {
+            let trimmed = s.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_ascii_lowercase());
+            }
+        }
+        if let Some(n) = candidate.as_u64() {
+            return Some(n.to_string());
+        }
+    }
+    None
+}
+
 #[derive(Debug, Deserialize, Clone, Default)]
 pub struct StreamUsageInfo {
     #[serde(default)]
@@ -256,6 +276,16 @@ impl StreamToolCallAccumulator {
         0
     }
 
+    #[must_use]
+    pub fn current_name(&self) -> Option<&str> {
+        self.name.as_deref()
+    }
+
+    #[must_use]
+    pub fn args_len(&self) -> usize {
+        self.arguments.len()
+    }
+
     fn is_empty_slot(&self) -> bool {
         self.id.is_none() && self.name.is_none() && self.arguments.is_empty()
     }
@@ -439,7 +469,13 @@ pub fn sse_bytes_to_chunks(
                         continue;
                     };
                     if let Some(err_text) = stream_error_text(&parsed) {
-                        let _ = tx.send(Err(StreamError::Provider(err_text))).await;
+                        let _ = tx
+                            .send(Err(crate::providers::stream_declared_error(
+                                "upstream",
+                                stream_error_code(&parsed),
+                                err_text,
+                            )))
+                            .await;
                         return;
                     }
                     if parsed.choices.iter().any(|c| c.finish_reason.is_some()) {
@@ -565,7 +601,13 @@ pub fn sse_bytes_to_events(
                                     error = %err_text,
                                     "upstream emitted in-stream error event; failing the turn instead of masking it as a complete response"
                                 );
-                                let _ = tx.send(Err(StreamError::Provider(err_text))).await;
+                                let _ = tx
+                                    .send(Err(crate::providers::stream_declared_error(
+                                        "upstream",
+                                        stream_error_code(&chunk),
+                                        err_text,
+                                    )))
+                                    .await;
                                 return;
                             }
 
@@ -656,8 +698,37 @@ pub fn sse_bytes_to_events(
                                         if let Some(acc) = tool_calls.get_mut(index) {
                                             let remaining = MAX_STREAM_TOOL_ARGS_TOTAL_BYTES
                                                 .saturating_sub(total_tool_args_bytes);
-                                            total_tool_args_bytes = total_tool_args_bytes
-                                                .saturating_add(acc.apply_delta(delta, remaining));
+                                            let consumed = acc.apply_delta(delta, remaining);
+                                            total_tool_args_bytes =
+                                                total_tool_args_bytes.saturating_add(consumed);
+                                            if consumed > 0 {
+                                                let args_total_len =
+                                                    acc.args_len().min(u32::MAX as usize) as u32;
+                                                if let Some(name) = acc.current_name() {
+                                                    let args_delta = delta
+                                                        .function
+                                                        .as_ref()
+                                                        .and_then(|f| f.arguments.as_deref())
+                                                        .or(delta.arguments.as_deref())
+                                                        .unwrap_or_default()
+                                                        .to_string();
+                                                    if !args_delta.is_empty()
+                                                        && tx
+                                                            .send(Ok(
+                                                                StreamEvent::ToolCallArgsDelta {
+                                                                    call_index: index as u32,
+                                                                    name: name.to_string(),
+                                                                    args_delta,
+                                                                    args_total_len,
+                                                                },
+                                                            ))
+                                                            .await
+                                                            .is_err()
+                                                    {
+                                                        return;
+                                                    }
+                                                }
+                                            }
                                         }
                                     }
                                 }

@@ -28,7 +28,8 @@ type Props = {
   todos: Todo[]
   markdown?: string
   modelLabel?: string
-  status: 'writing' | 'completed'
+  status: 'writing' | 'completed' | 'failed'
+  error?: string
   superseded?: boolean
   sessionId?: string | null
 }
@@ -43,6 +44,7 @@ export function PlanCard({
   markdown,
   modelLabel,
   status,
+  error,
   superseded,
   sessionId,
 }: Props) {
@@ -73,6 +75,7 @@ export function PlanCard({
   const resumePlanExecution = useChatStore((s) => s.resumePlanExecution)
 
   const completed = status === 'completed'
+  const failed = status === 'failed'
   const visibleTodos = todos.slice(0, 3)
   const moreCount = Math.max(0, todos.length - visibleTodos.length)
   const showMoreLabel = moreCount > 0 ? t('plan.todosShowMore', { count: moreCount }) : ''
@@ -151,12 +154,20 @@ export function PlanCard({
             </button>
           )}
           <span className="ml-auto flex items-center gap-1.5">
-            {!completed && (
+            {failed ? (
+              <span
+                className="text-[11px] text-[var(--color-error)] flex items-center gap-1"
+                title={error || t('plan.failedHint')}
+              >
+                <span className="material-symbols-outlined text-[12px]">error</span>
+                {t('plan.failed')}
+              </span>
+            ) : !completed ? (
               <span className="text-[11px] text-[var(--color-text-tertiary)] flex items-center gap-1">
                 <span className="material-symbols-outlined text-[12px] animate-spin">progress_activity</span>
                 {t('plan.writingPlan')}
               </span>
-            )}
+            ) : null}
           </span>
         </div>
 
@@ -246,6 +257,15 @@ export function PlanCard({
                   check_circle
                 </span>
                 {t('plan.completed')}
+              </span>
+            ) : failed ? (
+              <span
+                className="flex items-center gap-1 rounded-[var(--radius-md)] px-3 py-1 text-[11px] font-semibold bg-[var(--color-error)]/15 text-[var(--color-error)] cursor-default select-none"
+                title={error || t('plan.failedHint')}
+                aria-label={t('plan.failed')}
+              >
+                <span className="material-symbols-outlined text-[14px]">error</span>
+                {t('plan.failed')}
               </span>
             ) : (
               <button

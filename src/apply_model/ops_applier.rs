@@ -835,11 +835,15 @@ impl OpsApplier {
                 anchor: None,
             }
         } else {
+            let expected_pre_sha256 =
+                crate::tools::file::encoding::encode_with_label(encoding_label, &source)
+                    .map(|b| super::edit_op::sha256_hex(&b));
             super::edit_op::EditOp::CreateFile {
                 path: path.clone(),
                 contents: new_text,
                 overwrite: true,
                 encoding: Some(encoding_label.to_string()),
+                expected_pre_sha256,
             }
         };
         let batch = super::edit_op::EditBatch::new(origin)
@@ -1126,6 +1130,7 @@ impl OpsApplier {
                 contents,
                 overwrite,
                 encoding,
+                ..
             } => {
                 if let Some(parent) = path.parent() {
                     std::fs::create_dir_all(parent).map_err(|source| ApplyBatchError::Io {

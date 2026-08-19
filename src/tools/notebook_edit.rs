@@ -64,7 +64,11 @@ pub(crate) fn notebook_to_string_pretty_one_space(value: &Value) -> anyhow::Resu
     let formatter = serde_json::ser::PrettyFormatter::with_indent(b" ");
     let mut ser = serde_json::Serializer::with_formatter(&mut buf, formatter);
     value.serialize(&mut ser)?;
-    Ok(String::from_utf8(buf)?)
+    let mut out = String::from_utf8(buf)?;
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
 }
 
 pub(crate) fn apply_cell_type(cell: &mut Value, cell_type: &str) {

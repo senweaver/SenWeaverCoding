@@ -16,7 +16,6 @@ use super::oauth::OAuthService;
 use super::plugin_service::PluginService;
 use super::governance::policy_limits::{PolicyLimitsService, PolicyRule};
 use super::prompt_suggestion::PromptSuggestionService;
-use super::governance::rate_limit::RateLimiter;
 use super::memory::session::SessionMemoryService;
 use super::settings_sync::{ConflictStrategy, SettingsSyncService};
 use super::memory::team_sync::TeamMemorySyncService;
@@ -78,8 +77,6 @@ pub struct ServiceContainer {
     pub compact: CompactService,
     pub lsp: LspService,
     pub mcp: McpManager,
-
-    pub rate_limiter: RateLimiter,
 
     pub session_memory: SessionMemoryService,
 
@@ -248,7 +245,6 @@ impl ServiceContainer {
             mcp: McpManager::new(),
             notifier: Notifier::new(),
             oauth: OAuthService::new(),
-            rate_limiter: RateLimiter::new(),
             session_memory: SessionMemoryService::new(),
             token_estimator: TokenEstimator::new(4.0),
 

@@ -1,3 +1,4 @@
+<!-- SenWeaverCoding built-in template -->
 <!doctype html>
 <html lang="en" data-theme="paper">
 <head>
@@ -6,22 +7,50 @@
   <title>Swiss Creative Mode Template</title>
   <style>
     :root {
+      --od-accent: #ff7f2a;
+      --od-scale: 1;
+      --od-density: 1;
+      --od-motion: 1;
       --paper: #f3efe4;
       --ink: #0b0b0b;
       --accent-a: #f28cc2;
       --accent-b: #f1cb3c;
       --accent-c: #188f5a;
-      --accent-d: #ff7f2a;
+      --accent-d: var(--od-accent);
+      --on-pastel: #0b0b0b;
+      --plain: #ffffff;
       --card-shadow: 8px 8px 0 var(--ink);
+      --dur-scene: calc(.4s * var(--od-motion));
+      --fs-12: calc(12px * var(--od-scale));
+      --fs-14: calc(14px * var(--od-scale));
+      --fs-16: calc(16px * var(--od-scale));
+      --fs-18: calc(18px * var(--od-scale));
+      --fs-30: calc(30px * var(--od-scale));
+      --fs-56: calc(56px * var(--od-scale));
+      --pad-app: calc(18px * var(--od-density));
+      --pad-scene: calc(28px * var(--od-density));
+      --gap-md: calc(14px * var(--od-density));
+      --gap-sm: calc(12px * var(--od-density));
+      --gap-xs: calc(10px * var(--od-density));
     }
-    html[data-theme="dark"] {
+    html[data-theme="dark"],
+    html[data-od-mode="dark"] {
       --paper: #111216;
       --ink: #f3efe4;
       --accent-a: #ff9ad0;
       --accent-b: #ffd84f;
       --accent-c: #2fbf7a;
-      --accent-d: #ff9852;
+      --plain: #1d1f26;
       --card-shadow: 8px 8px 0 #000;
+    }
+    html[data-od-mode="light"] {
+      --paper: #f3efe4;
+      --ink: #0b0b0b;
+      --accent-a: #f28cc2;
+      --accent-b: #f1cb3c;
+      --accent-c: #188f5a;
+      --plain: #ffffff;
+      --card-shadow: 8px 8px 0 var(--ink);
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; width: 100%; min-height: 100%; }
@@ -29,35 +58,36 @@
       font-family: "Inter", "Helvetica Neue", Arial, sans-serif;
       background: var(--paper);
       color: var(--ink);
+      font-size: var(--fs-16);
     }
     .app {
       width: min(1320px, 94vw);
-      margin: 24px auto 34px;
+      margin: calc(24px * var(--od-density)) auto calc(34px * var(--od-density));
       border: 3px solid var(--ink);
       background: var(--paper);
       box-shadow: var(--card-shadow);
-      padding: 18px 18px 24px;
+      padding: var(--pad-app) var(--pad-app) calc(24px * var(--od-density));
     }
     .topbar {
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 14px;
+      gap: var(--gap-md);
       flex-wrap: wrap;
       border-bottom: 2px dashed var(--ink);
-      padding-bottom: 14px;
-      margin-bottom: 16px;
+      padding-bottom: var(--gap-md);
+      margin-bottom: calc(16px * var(--od-density));
     }
-    .kicker { font-size: 12px; font-weight: 800; letter-spacing: .18em; text-transform: uppercase; }
-    .controls { display: flex; gap: 8px; flex-wrap: wrap; }
+    .kicker { font-size: var(--fs-12); font-weight: 800; letter-spacing: .18em; text-transform: uppercase; }
+    .controls { display: flex; gap: calc(8px * var(--od-density)); flex-wrap: wrap; }
     button {
       border: 2px solid var(--ink);
-      background: #fff;
+      background: var(--plain);
       color: var(--ink);
       padding: 7px 12px;
       border-radius: 999px;
       font-weight: 700;
-      font-size: 12px;
+      font-size: var(--fs-12);
       letter-spacing: .08em;
       text-transform: uppercase;
       cursor: pointer;
@@ -76,8 +106,8 @@
       opacity: 0;
       transform: translateX(40px);
       pointer-events: none;
-      transition: opacity .4s ease, transform .4s ease;
-      padding: 28px;
+      transition: opacity var(--dur-scene) ease, transform var(--dur-scene) ease;
+      padding: var(--pad-scene);
     }
     .scene.active {
       opacity: 1;
@@ -88,13 +118,13 @@
     .stack-grid {
       display: grid;
       grid-template-columns: 1fr 1fr;
-      gap: 28px;
+      gap: var(--pad-scene);
       height: 100%;
       align-items: center;
     }
     .display {
-      margin: 0 0 16px;
-      font-size: clamp(40px, 7vw, 98px);
+      margin: 0 0 calc(16px * var(--od-density));
+      font-size: clamp(calc(40px * var(--od-scale)), 7vw, calc(98px * var(--od-scale)));
       line-height: .95;
       text-transform: uppercase;
       letter-spacing: -.03em;
@@ -103,7 +133,7 @@
     .display span { color: var(--accent-d); }
     .lead {
       max-width: 580px;
-      font-size: 18px;
+      font-size: var(--fs-18);
       line-height: 1.45;
       font-weight: 600;
     }
@@ -126,26 +156,26 @@
     .layer.l1 { background: var(--accent-a); transform: translate(-26px, -24px); }
     .layer.l2 { background: var(--accent-d); transform: translate(18px, 16px); }
     .layer.l3 { background: var(--paper); transform: rotate(-6deg); }
-    .steps-title { margin: 0 0 16px; font-size: clamp(38px, 6vw, 88px); font-weight: 900; text-transform: uppercase; line-height: .94; }
-    .step-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; }
+    .steps-title { margin: 0 0 calc(16px * var(--od-density)); font-size: clamp(calc(38px * var(--od-scale)), 6vw, calc(88px * var(--od-scale))); font-weight: 900; text-transform: uppercase; line-height: .94; }
+    .step-row { display: grid; grid-template-columns: repeat(4, 1fr); gap: var(--gap-sm); }
     .card {
       border: 3px solid var(--ink);
-      padding: 14px;
+      padding: var(--gap-md);
       min-height: 320px;
       display: flex;
       flex-direction: column;
-      gap: 12px;
+      gap: var(--gap-sm);
       box-shadow: 5px 5px 0 var(--ink);
     }
-    .card:nth-child(1) { background: #fff; }
-    .card:nth-child(2) { background: var(--accent-a); }
-    .card:nth-child(3) { background: var(--accent-b); }
+    .card:nth-child(1) { background: var(--plain); }
+    .card:nth-child(2) { background: var(--accent-a); color: var(--on-pastel); }
+    .card:nth-child(3) { background: var(--accent-b); color: var(--on-pastel); }
     .card:nth-child(4) { background: var(--accent-c); color: var(--paper); }
-    .num { font-size: 56px; font-weight: 900; line-height: 1; }
-    .title { font-size: 30px; text-transform: uppercase; letter-spacing: .06em; font-weight: 900; }
-    .body { font-size: 16px; line-height: 1.4; font-weight: 600; }
-    .legend { display: grid; gap: 10px; }
-    .row { display: flex; align-items: center; gap: 10px; font-weight: 700; }
+    .num { font-size: var(--fs-56); font-weight: 900; line-height: 1; }
+    .title { font-size: var(--fs-30); text-transform: uppercase; letter-spacing: .06em; font-weight: 900; }
+    .body { font-size: var(--fs-16); line-height: 1.4; font-weight: 600; }
+    .legend { display: grid; gap: var(--gap-xs); }
+    .row { display: flex; align-items: center; gap: var(--gap-xs); font-weight: 700; }
     .swatch { width: 22px; height: 22px; border: 2px solid var(--ink); flex: 0 0 auto; }
     .stack-board {
       border: 3px solid var(--ink);
@@ -155,51 +185,54 @@
       display: grid;
       place-items: center;
     }
-    .stack { width: min(420px, 88%); display: grid; gap: 10px; }
+    .stack { width: min(420px, 88%); display: grid; gap: var(--gap-xs); }
     .stack-item {
       border: 3px solid var(--ink);
       box-shadow: 8px 8px 0 var(--ink);
-      padding: 14px;
+      padding: var(--gap-md);
       font-weight: 900;
       letter-spacing: .12em;
       text-transform: uppercase;
-      background: #fff;
+      background: var(--plain);
     }
-    .stack-item:nth-child(1) { background: var(--accent-a); width: 76%; }
-    .stack-item:nth-child(2) { background: var(--accent-b); width: 84%; margin-left: 8%; }
-    .stack-item:nth-child(3) { background: var(--accent-d); width: 90%; margin-left: 12%; }
+    .stack-item:nth-child(1) { background: var(--accent-a); color: var(--on-pastel); width: 76%; }
+    .stack-item:nth-child(2) { background: var(--accent-b); color: var(--on-pastel); width: 84%; margin-left: 8%; }
+    .stack-item:nth-child(3) { background: var(--accent-d); color: var(--on-pastel); width: 90%; margin-left: 12%; }
     .stack-item:nth-child(4) { background: var(--paper); width: 96%; margin-left: 16%; }
     .hotspot {
-      margin-top: 16px;
+      margin-top: calc(16px * var(--od-density));
       border: 2px solid var(--ink);
-      background: #fff;
-      padding: 10px 12px;
+      background: var(--plain);
+      padding: var(--gap-xs) var(--gap-sm);
       display: flex;
       justify-content: space-between;
       align-items: center;
-      gap: 10px;
+      gap: var(--gap-xs);
     }
-    .hotspot p { margin: 0; font-size: 14px; font-weight: 700; }
+    .hotspot p { margin: 0; font-size: var(--fs-14); font-weight: 700; }
     .hotspot .dot { width: 13px; height: 13px; border-radius: 999px; background: var(--accent-d); border: 2px solid var(--ink); }
     .footer {
-      margin-top: 16px;
+      margin-top: calc(16px * var(--od-density));
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 14px;
+      gap: var(--gap-md);
       flex-wrap: wrap;
     }
-    .dots { display: flex; gap: 8px; }
+    .dots { display: flex; gap: calc(8px * var(--od-density)); }
     .dot-btn {
       width: 24px;
       height: 24px;
       border-radius: 999px;
       padding: 0;
       line-height: 1;
-      background: #fff;
+      background: var(--plain);
     }
     .dot-btn.active { background: var(--ink); color: var(--paper); }
-    .meta { font-size: 12px; font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+    .meta { font-size: var(--fs-12); font-weight: 800; letter-spacing: .14em; text-transform: uppercase; }
+    @media (prefers-reduced-motion: reduce) {
+      .scene { transition: none; }
+    }
     @media (max-width: 980px) {
       .hero-grid, .stack-grid { grid-template-columns: 1fr; }
       .step-row { grid-template-columns: 1fr 1fr; }
@@ -211,10 +244,10 @@
   </style>
 </head>
 <body>
-  <div class="app">
-    <div class="topbar">
+  <div class="app" data-od-id="app" data-od-label="Creative mode board">
+    <div class="topbar" data-od-id="topbar" data-od-label="Top bar">
       <div class="kicker">Swiss Creative Mode / Template</div>
-      <div class="controls">
+      <div class="controls" data-od-id="controls" data-od-label="Scene controls">
         <button id="prevBtn" type="button">Prev</button>
         <button id="nextBtn" type="button">Next</button>
         <button id="themeBtn" type="button">Theme</button>
@@ -223,15 +256,15 @@
       </div>
     </div>
 
-    <div class="viewport">
-      <section class="scene active" data-scene="0">
+    <div class="viewport" data-od-id="viewport" data-od-label="Scene viewport">
+      <section class="scene active" data-scene="0" data-od-id="scene-hero" data-od-label="Scene 1: hero">
         <div class="hero-grid">
-          <div>
+          <div data-od-id="hero-copy" data-od-label="Hero copy">
             <p class="kicker">Vol. 01 / Edition 2026</p>
             <h1 class="display">Creative <span>Mode</span></h1>
             <p class="lead">A premium editorial template for launch narratives, strategy decks, and visual system storytelling. Replace copy and labels while preserving rhythm and interaction.</p>
           </div>
-          <div class="art-board">
+          <div class="art-board" data-od-id="hero-art" data-od-label="Layered art board">
             <div class="layer l1"></div>
             <div class="layer l2"></div>
             <div class="layer l3"></div>
@@ -239,34 +272,34 @@
         </div>
       </section>
 
-      <section class="scene" data-scene="1">
+      <section class="scene" data-scene="1" data-od-id="scene-process" data-od-label="Scene 2: process">
         <p class="kicker">How it works</p>
         <h2 class="steps-title">A Four-Step Process.</h2>
-        <div class="step-row">
-          <article class="card"><div class="num">01</div><div class="title">Discover</div><div class="body">Capture constraints and map opportunities.</div></article>
-          <article class="card"><div class="num">02</div><div class="title">Define</div><div class="body">Frame the problem and lock system rules.</div></article>
-          <article class="card"><div class="num">03</div><div class="title">Develop</div><div class="body">Prototype interactions and visual hierarchy.</div></article>
-          <article class="card"><div class="num">04</div><div class="title">Deliver</div><div class="body">Ship polished artifacts ready for decision flow.</div></article>
+        <div class="step-row" data-od-id="process-steps" data-od-label="Process steps">
+          <article class="card" data-od-id="step-discover" data-od-label="Step 01: discover"><div class="num">01</div><div class="title">Discover</div><div class="body">Capture constraints and map opportunities.</div></article>
+          <article class="card" data-od-id="step-define" data-od-label="Step 02: define"><div class="num">02</div><div class="title">Define</div><div class="body">Frame the problem and lock system rules.</div></article>
+          <article class="card" data-od-id="step-develop" data-od-label="Step 03: develop"><div class="num">03</div><div class="title">Develop</div><div class="body">Prototype interactions and visual hierarchy.</div></article>
+          <article class="card" data-od-id="step-deliver" data-od-label="Step 04: deliver"><div class="num">04</div><div class="title">Deliver</div><div class="body">Ship polished artifacts ready for decision flow.</div></article>
         </div>
       </section>
 
-      <section class="scene" data-scene="2">
+      <section class="scene" data-scene="2" data-od-id="scene-stack" data-od-label="Scene 3: system stack">
         <div class="stack-grid">
-          <div>
+          <div data-od-id="stack-copy" data-od-label="Stack copy">
             <p class="kicker">System diagram</p>
             <h2 class="display">A Stack Of Moving Parts.</h2>
-            <div class="legend">
+            <div class="legend" data-od-id="stack-legend" data-od-label="Layer legend">
               <div class="row"><span class="swatch" style="background: var(--accent-a)"></span>Layer Alpha - Interface</div>
               <div class="row"><span class="swatch" style="background: var(--accent-b)"></span>Layer Beta - Orchestration</div>
               <div class="row"><span class="swatch" style="background: var(--accent-d)"></span>Layer Gamma - Services</div>
               <div class="row"><span class="swatch" style="background: var(--paper)"></span>Layer Delta - Substrate</div>
             </div>
-            <div class="hotspot" id="hotspotPanel">
+            <div class="hotspot" id="hotspotPanel" data-od-id="stack-hotspot" data-od-label="Hotspot note">
               <p id="hotspotText">Hotspot: orchestration rail is currently pinned for annotation.</p>
               <span class="dot"></span>
             </div>
           </div>
-          <div class="stack-board">
+          <div class="stack-board" data-od-id="stack-board" data-od-label="Stack board">
             <div class="stack">
               <div class="stack-item">Layer / 01</div>
               <div class="stack-item">Layer / 02</div>
@@ -278,7 +311,7 @@
       </section>
     </div>
 
-    <div class="footer">
+    <div class="footer" data-od-id="footer" data-od-label="Footer">
       <div class="dots" id="dots"></div>
       <div class="meta" id="meta">Scene 01 · 03</div>
     </div>

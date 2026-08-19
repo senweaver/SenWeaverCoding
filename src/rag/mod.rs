@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 pub mod embedding;
+pub mod merkle_manifest;
 
 pub mod vector_code_index;
 

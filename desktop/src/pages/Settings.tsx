@@ -3,12 +3,10 @@
 // Licensed under the MIT License.
 
 import { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
-import { useSettingsStore, PII_KIND_LABELS, type PiiKindLabel } from '../stores/settingsStore'
-import { useChatStore } from '../stores/chatStore'
-import { useTabStore } from '../stores/tabStore'
+import { useSettingsStore } from '../stores/settingsStore'
 import { useAutonomyStore } from '../stores/autonomyStore'
 import { useProviderStore } from '../stores/providerStore'
-import { useTranslation, useCodingModeText, type TranslationKey } from '../i18n'
+import { useTranslation, type TranslationKey } from '../i18n'
 import { Modal } from '../components/shared/Modal'
 import { ConfirmDialog } from '../components/shared/ConfirmDialog'
 import { Input } from '../components/shared/Input'
@@ -26,8 +24,6 @@ import type {
 } from '../types/provider'
 import { normalizeApiFormat, apiFormatLabel } from '../types/provider'
 import type { ProviderPreset } from '../types/providerPreset'
-import type { CodingModeId } from '../types/codingMode'
-import { sortByCodingModeOrder } from '../types/codingMode'
 import { ApiError } from '../api/client'
 import { settingsApi } from '../api/settings'
 import {
@@ -44,7 +40,10 @@ import {
   NetworkProxySection,
   AutomationSection,
   SecuritySandboxSection,
+  ServiceTokensSection,
 } from '../components/settings/SystemSettingsSections'
+import { SettingsSection } from '../components/settings/SettingsSection'
+import { TaskModelsPanel } from '../components/settings/TaskModelsPanel'
 import { usePluginStore } from '../stores/pluginStore'
 import { useUIStore, type SettingsTab } from '../stores/uiStore'
 import { useLanStore } from '../stores/lanStore'
@@ -52,22 +51,17 @@ import { useLanStore } from '../stores/lanStore'
 const AdapterSettings = lazy(() =>
   import('./AdapterSettings').then((m) => ({ default: m.AdapterSettings })),
 )
-const ToolsAndMcpsSettings = lazy(() =>
-  import('./ToolsAndMcpsSettings').then((m) => ({ default: m.ToolsAndMcpsSettings })),
+const CustomSettings = lazy(() =>
+  import('./CustomSettings').then((m) => ({ default: m.CustomSettings })),
 )
-const HooksSettings = lazy(() =>
-  import('./HooksSettings').then((m) => ({ default: m.HooksSettings })),
+const SecuritySettings = lazy(() =>
+  import('./SecuritySettings').then((m) => ({ default: m.SecuritySettings })),
 )
 const UsageSettings = lazy(() =>
   import('./UsageSettings').then((m) => ({ default: m.UsageSettings })),
 )
 const EvolutionSettings = lazy(() =>
   import('./EvolutionSettings').then((m) => ({ default: m.EvolutionSettings })),
-)
-const RulesSkillsSubagentsSettings = lazy(() =>
-  import('./RulesSkillsSubagentsSettings').then((m) => ({
-    default: m.RulesSkillsSubagentsSettings,
-  })),
 )
 const AgentsSettings = lazy(() =>
   import('./AgentsSettings').then((m) => ({ default: m.AgentsSettings })),
@@ -79,9 +73,6 @@ const KeyboardShortcutsSettings = lazy(() =>
   import('./KeyboardShortcutsSettings').then((m) => ({
     default: m.KeyboardShortcutsSettings,
   })),
-)
-const CredentialsSettings = lazy(() =>
-  import('./CredentialsSettings').then((m) => ({ default: m.CredentialsSettings })),
 )
 const PluginList = lazy(() =>
   import('../components/plugins/PluginList').then((m) => ({ default: m.PluginList })),
@@ -123,14 +114,11 @@ export function Settings() {
             <TabButton icon="auto_awesome" label={t('settings.tab.evolution')} active={activeTab === 'evolution'} onClick={() => setActiveTab('evolution')} />
             <TabButton icon="dns" label={t('settings.tab.providers')} active={activeTab === 'providers'} onClick={() => setActiveTab('providers')} />
             <TabButton icon="smart_toy" label={t('settings.tab.agents')} active={activeTab === 'agents'} onClick={() => setActiveTab('agents')} />
-            <TabButton icon="psychology" label={t('settings.tab.codingMode')} active={activeTab === 'codingMode'} onClick={() => setActiveTab('codingMode')} />
-            <TabButton icon="policy" label={t('settings.tab.skills')} active={activeTab === 'skills'} onClick={() => setActiveTab('skills')} />
-            <TabButton icon="build" label={t('settings.tab.mcp')} active={activeTab === 'mcp'} onClick={() => setActiveTab('mcp')} />
+            <TabButton icon="dashboard_customize" label={t('settings.tab.custom')} active={activeTab === 'custom'} onClick={() => setActiveTab('custom')} />
             <TabButton icon="extension" label={t('settings.tab.plugins')} active={activeTab === 'plugins'} onClick={() => setActiveTab('plugins')} />
             <TabButton icon="code" label={t('settings.tab.lsp')} active={activeTab === 'lsp'} onClick={() => setActiveTab('lsp')} />
             <TabButton icon="keyboard" label={t('settings.tab.keyboard')} active={activeTab === 'keyboard'} onClick={() => setActiveTab('keyboard')} />
-            <TabButton icon="key" label={t('settings.tab.credentials')} active={activeTab === 'credentials'} onClick={() => setActiveTab('credentials')} />
-            <TabButton icon="webhook" label={t('settings.tab.hooks')} active={activeTab === 'hooks'} onClick={() => setActiveTab('hooks')} />
+            <TabButton icon="security" label={t('settings.tab.security')} active={activeTab === 'security'} onClick={() => setActiveTab('security')} />
           </div>
           <div className="flex-shrink-0 border-t border-[var(--color-border)] pt-2 mt-2">
             <TabButton
@@ -147,18 +135,15 @@ export function Settings() {
           <Suspense fallback={<SettingsTabFallback />}>
             {activeTab === 'providers' && <ProviderSettings />}
             {activeTab === 'agents' && <AgentsSettings />}
-            {activeTab === 'codingMode' && <CodingModeSettings />}
             {activeTab === 'general' && <GeneralSettings />}
             {activeTab === 'adapters' && <AdapterSettings />}
-            {activeTab === 'mcp' && <ToolsAndMcpsSettings />}
+            {activeTab === 'custom' && <CustomSettings />}
             {activeTab === 'plugins' && <PluginsSettings />}
             {activeTab === 'lsp' && <LspSettings />}
             {activeTab === 'keyboard' && <KeyboardShortcutsSettings />}
-            {activeTab === 'skills' && <RulesSkillsSubagentsSettings />}
-            {activeTab === 'hooks' && <HooksSettings />}
+            {activeTab === 'security' && <SecuritySettings />}
             {activeTab === 'usage' && <UsageSettings />}
             {activeTab === 'evolution' && <EvolutionSettings />}
-            {activeTab === 'credentials' && <CredentialsSettings />}
           </Suspense>
         </div>
       </div>
@@ -224,13 +209,10 @@ function SettingsSyncSection() {
   }
 
   return (
-    <div className="mt-6 border-t border-[var(--color-border)] pt-4">
-      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
-        {t('settings.general.syncTitle')}
-      </h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">
-        {t('settings.general.syncDescription')}
-      </p>
+    <SettingsSection
+      title={t('settings.general.syncTitle')}
+      description={t('settings.general.syncDescription')}
+    >
       <div className="flex flex-wrap items-center gap-2">
         <Button variant="secondary" size="sm" onClick={handleExport} loading={isExporting}>
           <span className="material-symbols-outlined text-[14px]">download</span>
@@ -259,7 +241,7 @@ function SettingsSyncSection() {
       </div>
       {message && (
         <div
-          className={`mt-2 text-xs px-3 py-2 rounded-[var(--radius-md)] border ${
+          className={`text-xs px-3 py-2 rounded-[var(--radius-md)] border ${
             message.kind === 'ok'
               ? 'border-[var(--color-success)]/30 bg-[var(--color-success)]/12 text-[var(--color-success)]'
               : 'border-[color:rgba(239,68,68,0.25)] bg-[color:rgba(239,68,68,0.08)] text-[var(--color-error)]'
@@ -268,7 +250,7 @@ function SettingsSyncSection() {
           {message.text}
         </div>
       )}
-    </div>
+    </SettingsSection>
   )
 }
 
@@ -378,6 +360,10 @@ function ProviderSettings() {
           <span className="material-symbols-outlined text-[14px]">add</span>
           {t('settings.providers.addProvider')}
         </Button>
+      </div>
+
+      <div className="mb-4">
+        <TaskModelsPanel providers={providers} presetMap={presetMap} />
       </div>
 
       {providers.length > 0 && (
@@ -1202,10 +1188,9 @@ function ProviderFormModal({ open, onClose, mode, provider, presets }: ProviderF
           />
           {duplicateProvider ? (
             <div className="mt-1 text-xs text-[var(--color-error)]">
-              {t('settings.providers.nameConflictHint').replace(
-                '{{name}}',
-                duplicateProvider.name,
-              )}
+              {t('settings.providers.nameConflictHint', {
+                name: duplicateProvider.name,
+              })}
             </div>
           ) : null}
         </div>
@@ -1623,308 +1608,6 @@ function AdvancedSettingsSection({
   )
 }
 
-function CodingModeSettings() {
-  const codingMode = useSettingsStore((s) => s.codingMode)
-  const codingModes = useSettingsStore((s) => s.codingModes)
-  const codingModeOrder = useSettingsStore((s) => s.codingModeOrder)
-  const setCodingModeOrder = useSettingsStore((s) => s.setCodingModeOrder)
-  const requestSetCodingMode = useSettingsStore((s) => s.requestSetCodingMode)
-  const permissionMode = useSettingsStore((s) => s.permissionMode)
-  const t = useTranslation()
-  const tCodingMode = useCodingModeText()
-
-  const MODE_GLYPH: Record<string, string> = {
-    vibe: 'bolt',
-    agent: 'robot_2',
-    spec: 'description',
-    plan: 'architecture',
-    ask: 'help',
-    tdd: 'science',
-    debug: 'bug_report',
-    architect: 'design_services',
-    pair: 'group',
-    context: 'data_object',
-    mvai: 'hub',
-    harness: 'precision_manufacturing',
-  }
-
-  const modes = useMemo(
-    () => sortByCodingModeOrder(codingModes, codingModeOrder),
-    [codingModes, codingModeOrder],
-  )
-
-  const [dragId, setDragId] = useState<CodingModeId | null>(null)
-  const [dragOverId, setDragOverId] = useState<CodingModeId | null>(null)
-  const dragStateRef = useRef<{
-    id: CodingModeId
-    startX: number
-    startY: number
-    pointerId: number
-    active: boolean
-  } | null>(null)
-  const suppressClickRef = useRef(false)
-
-  const modeIds = modes.map((m) => m.id)
-
-  const findModeAtPoint = (x: number, y: number): CodingModeId | null => {
-    const el = document.elementFromPoint(x, y) as HTMLElement | null
-    const row = el?.closest('[data-coding-mode-row]') as HTMLElement | null
-    const id = row?.getAttribute('data-coding-mode-row')
-    return id && modeIds.includes(id as CodingModeId) ? (id as CodingModeId) : null
-  }
-
-  const reorder = (sourceId: CodingModeId, targetId: CodingModeId) => {
-    if (sourceId === targetId) return
-    const fromIdx = modeIds.indexOf(sourceId)
-    const toIdx = modeIds.indexOf(targetId)
-    if (fromIdx === -1 || toIdx === -1) return
-    const next = [...modeIds]
-    next.splice(fromIdx, 1)
-    next.splice(toIdx, 0, sourceId)
-    setCodingModeOrder(next)
-  }
-
-  const handlePointerDown = (e: React.PointerEvent, id: CodingModeId) => {
-    if (e.button !== 0) return
-    suppressClickRef.current = false
-    dragStateRef.current = {
-      id,
-      startX: e.clientX,
-      startY: e.clientY,
-      pointerId: e.pointerId,
-      active: false,
-    }
-  }
-
-  const handlePointerMove = (e: React.PointerEvent) => {
-    const st = dragStateRef.current
-    if (!st) return
-    if (!st.active) {
-      const dx = e.clientX - st.startX
-      const dy = e.clientY - st.startY
-      if (Math.hypot(dx, dy) < 5) return
-      st.active = true
-      setDragId(st.id)
-      try {
-        ;(e.currentTarget as HTMLElement).setPointerCapture(st.pointerId)
-      } catch {
-      }
-    }
-    const targetId = findModeAtPoint(e.clientX, e.clientY)
-    setDragOverId(targetId && targetId !== st.id ? targetId : null)
-  }
-
-  const handlePointerUp = (e: React.PointerEvent) => {
-    const st = dragStateRef.current
-    dragStateRef.current = null
-    if (!st) return
-    try {
-      ;(e.currentTarget as HTMLElement).releasePointerCapture(st.pointerId)
-    } catch {
-    }
-    if (st.active) {
-      suppressClickRef.current = true
-      const targetId = findModeAtPoint(e.clientX, e.clientY)
-      setDragId(null)
-      setDragOverId(null)
-      if (targetId) reorder(st.id, targetId)
-    }
-  }
-
-  return (
-    <div>
-      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
-        {t('settings.codingMode.title')}
-      </h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-2">
-        {t('settings.codingMode.description')}
-      </p>
-
-      <div className="mb-3 px-3 py-2 rounded-lg bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)] flex items-center gap-2">
-        <span className="material-symbols-outlined text-[14px]">drag_indicator</span>
-        {t('settings.codingMode.reorderHint')}
-      </div>
-
-      <div className="mb-3 px-3 py-2 rounded-lg bg-[var(--color-surface-container-low)] border border-[var(--color-border)] text-xs text-[var(--color-text-tertiary)] flex items-center gap-2">
-        <span className="material-symbols-outlined text-[14px]">shield</span>
-        {t('settings.codingMode.derivedPermission', { mode: permissionMode })}
-      </div>
-
-      <div className="flex flex-col gap-2">
-        {modes.map((m) => {
-          const isSelected = codingMode === m.id
-          const isDragging = dragId === m.id
-          const isDragOver = dragOverId === m.id && dragId !== null && dragId !== m.id
-          return (
-            <div
-              key={m.id}
-              role="button"
-              tabIndex={0}
-              data-coding-mode-row={m.id}
-              onClick={() => {
-                if (suppressClickRef.current) {
-                  suppressClickRef.current = false
-                  return
-                }
-                void requestSetCodingMode(m.id)
-              }}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' || e.key === ' ') {
-                  e.preventDefault()
-                  void requestSetCodingMode(m.id)
-                }
-              }}
-              onPointerDown={(e) => handlePointerDown(e, m.id)}
-              onPointerMove={handlePointerMove}
-              onPointerUp={handlePointerUp}
-              style={{ touchAction: 'none' }}
-              className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border cursor-pointer select-none transition-all text-left ${
-                isSelected
-                  ? 'border-[var(--color-brand)] bg-[var(--color-surface-container)] shadow-[var(--shadow-focus-ring)]'
-                  : 'border-[var(--color-border)] hover:border-[var(--color-border-focus)] hover:bg-[var(--color-surface-hover)]'
-              }${isDragging ? ' opacity-50' : ''}${
-                isDragOver ? ' border-[var(--color-brand)] border-dashed' : ''
-              }`}
-            >
-              <span
-                className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] cursor-grab active:cursor-grabbing shrink-0"
-                title={t('settings.codingMode.dragHandle')}
-              >
-                drag_indicator
-              </span>
-              <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)] shrink-0">
-                {MODE_GLYPH[m.id] ?? 'tune'}
-              </span>
-              <div className="flex-1 min-w-0">
-                <div className="text-xs font-semibold text-[var(--color-text-primary)] flex items-center gap-2">
-                  {tCodingMode(m.id, 'label', m.label)}
-                  <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-[var(--color-surface-container-low)] text-[var(--color-text-tertiary)]">
-                    {m.permissionMode}
-                  </span>
-                </div>
-                <div className="text-xs text-[var(--color-text-tertiary)]">
-                  {tCodingMode(m.id, 'description', m.description ?? '')}
-                </div>
-              </div>
-              {isSelected && (
-                <span
-                  className="material-symbols-outlined text-[18px] text-[var(--color-brand)] shrink-0"
-                  style={{ fontVariationSettings: "'FILL' 1" }}
-                >
-                  check_circle
-                </span>
-              )}
-            </div>
-          )
-        })}
-        {modes.length === 0 && (
-          <div className="text-xs text-[var(--color-text-tertiary)] py-4 text-center">
-            {t('settings.codingMode.loading')}
-          </div>
-        )}
-      </div>
-
-      <DebugPrivacySettings />
-    </div>
-  )
-}
-
-function DebugPrivacySettings() {
-  const t = useTranslation()
-  const piiSanitizer = useSettingsStore((s) => s.piiSanitizer)
-  const setPiiEnabled = useSettingsStore((s) => s.setPiiEnabled)
-  const setPiiKindEnabled = useSettingsStore((s) => s.setPiiKindEnabled)
-  const resetPiiSanitizer = useSettingsStore((s) => s.resetPiiSanitizer)
-  const activeTabId = useTabStore((s) => s.activeTabId)
-  const sessionStats = useChatStore((s) =>
-    activeTabId ? s.sessions[activeTabId]?.debugPiiStats : undefined,
-  )
-  const resetDebugPiiStats = useChatStore((s) => s.resetDebugPiiStats)
-
-  const disabledSet = useMemo(
-    () => new Set<PiiKindLabel>(piiSanitizer.disabledKinds),
-    [piiSanitizer.disabledKinds],
-  )
-
-  return (
-    <div className="mt-6 border-t border-[var(--color-border)] pt-4">
-      <h3 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
-        {t('settings.debugPrivacy.title')}
-      </h3>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-4">
-        {t('settings.debugPrivacy.description')}
-      </p>
-
-      <label className="flex items-center justify-between gap-3 mb-3 px-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
-        <div className="flex flex-col">
-          <span className="text-xs font-medium text-[var(--color-text-primary)]">
-            {t('settings.debugPrivacy.enable')}
-          </span>
-          <span className="text-xs text-[var(--color-text-tertiary)]">
-            {t('settings.debugPrivacy.enableHint')}
-          </span>
-        </div>
-        <input
-          type="checkbox"
-          checked={piiSanitizer.enabled}
-          onChange={(e) => setPiiEnabled(e.target.checked)}
-          className="h-4 w-4"
-        />
-      </label>
-
-      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 mb-3">
-        {PII_KIND_LABELS.map((kind) => {
-          const enabled = !disabledSet.has(kind)
-          return (
-            <label
-              key={kind}
-              className={`flex items-center justify-between gap-2 px-2.5 py-1.5 rounded border text-xs ${
-                piiSanitizer.enabled
-                  ? 'border-[var(--color-border)] bg-[var(--color-surface)]'
-                  : 'border-[var(--color-border)] bg-[var(--color-surface-container-low)] opacity-60'
-              }`}
-            >
-              <span className="text-[var(--color-text-secondary)]">
-                {t(`debug.privacy.categories.${kind}` as TranslationKey)}
-              </span>
-              <input
-                type="checkbox"
-                disabled={!piiSanitizer.enabled}
-                checked={enabled}
-                onChange={(e) => setPiiKindEnabled(kind, e.target.checked)}
-                className="h-3.5 w-3.5"
-              />
-            </label>
-          )
-        })}
-      </div>
-
-      <div className="flex items-center justify-between gap-2 mb-3 px-3 py-2 rounded border border-[var(--color-border)] bg-[var(--color-surface-container-low)] text-xs">
-        <span className="text-[var(--color-text-secondary)]">
-          {t('settings.debugPrivacy.sessionStats')}
-        </span>
-        <span className="font-mono text-[var(--color-text-primary)]">
-          {sessionStats?.total ?? 0}
-        </span>
-      </div>
-
-      <div className="flex items-center gap-2">
-        <Button
-          variant="ghost"
-          size="sm"
-          onClick={() => activeTabId && resetDebugPiiStats(activeTabId)}
-          disabled={!activeTabId || (sessionStats?.total ?? 0) === 0}
-        >
-          {t('settings.debugPrivacy.clearStats')}
-        </Button>
-        <Button variant="ghost" size="sm" onClick={resetPiiSanitizer}>
-          {t('settings.debugPrivacy.resetDefaults')}
-        </Button>
-      </div>
-    </div>
-  )
-}
-
 function GeneralSettings() {
   const effortLevel = useSettingsStore((s) => s.effortLevel)
   const setEffort = useSettingsStore((s) => s.setEffort)
@@ -1974,116 +1657,126 @@ function GeneralSettings() {
   ]
 
   return (
-    <div>
-      {}
-      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.appearanceTitle')}</h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.appearanceDescription')}</p>
-      <div className="flex flex-wrap gap-2 mb-4">
-        {THEMES.map(({ value, label }) => (
-          <button
-            key={value}
-            onClick={() => void setTheme(value)}
-            className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
-              theme === value
-                ? 'bg-[image:var(--gradient-btn-primary)] text-[var(--color-btn-primary-fg)] border-transparent shadow-[var(--shadow-button-primary)]'
-                : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {}
-      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.closeBehaviorTitle')}</h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.closeBehaviorDescription')}</p>
-      <div className="flex flex-wrap gap-2 mb-4">
-        {CLOSE_BEHAVIORS.map(({ value, label }) => (
-          <button
-            key={value}
-            onClick={() => void setCloseBehavior(value)}
-            className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
-              closeBehavior === value
-                ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
-                : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {}
-      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.languageTitle')}</h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.languageDescription')}</p>
-      <div className="flex flex-wrap gap-2 mb-4">
-        {LANGUAGES.map(({ value, label }) => (
-          <button
-            key={value}
-            onClick={() => setLocale(value)}
-            className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
-              locale === value
-                ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
-                : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {}
-      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.effortTitle')}</h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.effortDescription')}</p>
-      <div className="flex flex-wrap gap-2 mb-4">
-        {(['low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
-          <button
-            key={level}
-            onClick={() => setEffort(level)}
-            className={`h-7 px-4 min-w-[72px] text-xs font-semibold rounded-lg border transition-all ${
-              effortLevel === level
-                ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
-                : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
-            }`}
-          >
-            {EFFORT_LABELS[level]}
-          </button>
-        ))}
-      </div>
-
-      {}
-      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">{t('settings.general.securityPolicyTitle')}</h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">{t('settings.general.securityPolicyDescription')}</p>
-      <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] px-3 py-2.5">
-        <div className="min-w-0 flex-1">
-          <div className="text-xs font-medium text-[var(--color-text-primary)]">
-            {t('settings.general.securityPolicyToggle')}
-          </div>
-          <div className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
-            {enableCommandPolicy
-              ? t('settings.general.securityPolicyEnabledHint')
-              : t('settings.general.securityPolicyDisabledHint')}
-          </div>
+    <div className="space-y-4">
+      <SettingsSection
+        title={t('settings.general.appearanceTitle')}
+        description={t('settings.general.appearanceDescription')}
+      >
+        <div className="flex flex-wrap gap-2">
+          {THEMES.map(({ value, label }) => (
+            <button
+              key={value}
+              onClick={() => void setTheme(value)}
+              className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
+                theme === value
+                  ? 'bg-[image:var(--gradient-btn-primary)] text-[var(--color-btn-primary-fg)] border-transparent shadow-[var(--shadow-button-primary)]'
+                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
         </div>
-        <button
-          type="button"
-          role="switch"
-          aria-checked={enableCommandPolicy}
-          disabled={autonomyIsSaving || autonomyIsLoading}
-          onClick={() => {
-            void autonomyUpdate({ enableCommandPolicy: !enableCommandPolicy })
-          }}
-          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
-            enableCommandPolicy ? 'bg-[var(--color-brand)]' : 'bg-[var(--color-surface-hover)]'
-          }`}
-        >
-          <span
-            className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
-              enableCommandPolicy ? 'translate-x-5' : 'translate-x-0.5'
+      </SettingsSection>
+
+      <SettingsSection
+        title={t('settings.general.closeBehaviorTitle')}
+        description={t('settings.general.closeBehaviorDescription')}
+      >
+        <div className="flex flex-wrap gap-2">
+          {CLOSE_BEHAVIORS.map(({ value, label }) => (
+            <button
+              key={value}
+              onClick={() => void setCloseBehavior(value)}
+              className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
+                closeBehavior === value
+                  ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
+                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title={t('settings.general.languageTitle')}
+        description={t('settings.general.languageDescription')}
+      >
+        <div className="flex flex-wrap gap-2">
+          {LANGUAGES.map(({ value, label }) => (
+            <button
+              key={value}
+              onClick={() => setLocale(value)}
+              className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
+                locale === value
+                  ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
+                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title={t('settings.general.effortTitle')}
+        description={t('settings.general.effortDescription')}
+      >
+        <div className="flex flex-wrap gap-2">
+          {(['low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
+            <button
+              key={level}
+              onClick={() => setEffort(level)}
+              className={`h-7 px-4 min-w-[72px] text-xs font-semibold rounded-lg border transition-all ${
+                effortLevel === level
+                  ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
+                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+              }`}
+            >
+              {EFFORT_LABELS[level]}
+            </button>
+          ))}
+        </div>
+      </SettingsSection>
+
+      <SettingsSection
+        title={t('settings.general.securityPolicyTitle')}
+        description={t('settings.general.securityPolicyDescription')}
+      >
+        <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] px-3 py-2.5">
+          <div className="min-w-0 flex-1">
+            <div className="text-xs font-medium text-[var(--color-text-primary)]">
+              {t('settings.general.securityPolicyToggle')}
+            </div>
+            <div className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
+              {enableCommandPolicy
+                ? t('settings.general.securityPolicyEnabledHint')
+                : t('settings.general.securityPolicyDisabledHint')}
+            </div>
+          </div>
+          <button
+            type="button"
+            role="switch"
+            aria-checked={enableCommandPolicy}
+            disabled={autonomyIsSaving || autonomyIsLoading}
+            onClick={() => {
+              void autonomyUpdate({ enableCommandPolicy: !enableCommandPolicy })
+            }}
+            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+              enableCommandPolicy ? 'bg-[var(--color-brand)]' : 'bg-[var(--color-surface-hover)]'
             }`}
-          />
-        </button>
-      </div>
+          >
+            <span
+              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+                enableCommandPolicy ? 'translate-x-5' : 'translate-x-0.5'
+              }`}
+            />
+          </button>
+        </div>
+      </SettingsSection>
 
       <LanUserGroupSection />
 
@@ -2094,6 +1787,8 @@ function GeneralSettings() {
       <AutomationSection />
 
       <SecuritySandboxSection />
+
+      <ServiceTokensSection />
 
     </div>
   )
@@ -2134,6 +1829,14 @@ function LanUserGroupSection() {
         nickname: nickname.trim() || undefined,
         email: email.trim() ? email.trim() : null,
       })
+    } catch (err) {
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('settings.userGroup.profileSaveFailed', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+        duration: 6000,
+      })
     } finally {
       setSaving(false)
     }
@@ -2143,93 +1846,102 @@ function LanUserGroupSection() {
     setBusy(true)
     try {
       await setDiscovery(!running)
+    } catch (err) {
+      useUIStore.getState().addToast({
+        type: 'error',
+        message: t('settings.userGroup.discoveryToggleFailed', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+        duration: 8000,
+      })
     } finally {
       setBusy(false)
     }
   }
 
   return (
-    <div className="mt-6">
-      <h2 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
-        {t('settings.userGroup.title')}
-      </h2>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-3">
-        {t('settings.userGroup.description')}
-      </p>
+    <SettingsSection
+      title={t('settings.userGroup.title')}
+      description={t('settings.userGroup.description')}
+      footer={
+        <Button onClick={() => void save()} disabled={!dirty || saving} size="sm">
+          {saving ? t('common.saving') : t('common.save')}
+        </Button>
+      }
+    >
+      <div>
+        <label className="text-xs font-medium text-[var(--color-text-secondary)] mb-1 block">
+          {t('settings.userGroup.nickname')}
+        </label>
+        <Input value={nickname} onChange={(e) => setNickname(e.target.value)} />
+      </div>
 
-      <div className="space-y-3">
-        <div>
-          <label className="text-xs font-medium text-[var(--color-text-secondary)] mb-1 block">
-            {t('settings.userGroup.nickname')}
-          </label>
-          <Input value={nickname} onChange={(e) => setNickname(e.target.value)} />
-        </div>
+      <div>
+        <label className="text-xs font-medium text-[var(--color-text-secondary)] mb-1 block">
+          {t('settings.userGroup.email')}
+        </label>
+        <Input
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder="name@example.com"
+        />
+      </div>
 
-        <div>
-          <label className="text-xs font-medium text-[var(--color-text-secondary)] mb-1 block">
-            {t('settings.userGroup.email')}
-          </label>
-          <Input
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            placeholder="name@example.com"
-          />
-        </div>
-
-        <div className="flex justify-end">
-          <Button onClick={() => void save()} disabled={!dirty || saving}>
-            {saving ? t('common.saving') : t('common.save')}
-          </Button>
-        </div>
-
-        <div className="grid grid-cols-2 gap-3">
-          <div className="rounded-lg border border-[var(--color-border)] px-3 py-2">
-            <div className="text-xs text-[var(--color-text-tertiary)]">
-              {t('settings.userGroup.userId')}
-            </div>
-            <div className="text-xs font-mono text-[var(--color-text-primary)] mt-0.5 break-all">
-              {identity?.userId ?? '—'}
-            </div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="rounded-lg border border-[var(--color-border)] px-3 py-2">
+          <div className="text-xs text-[var(--color-text-tertiary)]">
+            {t('settings.userGroup.userId')}
           </div>
-          <div className="rounded-lg border border-[var(--color-border)] px-3 py-2">
-            <div className="text-xs text-[var(--color-text-tertiary)]">
-              {t('settings.userGroup.localIp')}
-            </div>
-            <div className="text-xs font-mono text-[var(--color-text-primary)] mt-0.5 break-all">
-              {identity?.localIp ?? '—'}
-            </div>
+          <div className="text-xs font-mono text-[var(--color-text-primary)] mt-0.5 break-all">
+            {identity?.userId ?? '—'}
           </div>
         </div>
-
-        <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] px-3 py-2.5">
-          <div className="min-w-0 flex-1">
-            <div className="text-xs font-medium text-[var(--color-text-primary)]">
-              {t('settings.userGroup.discoveryToggle')}
-            </div>
-            <div className="text-xs text-[var(--color-text-tertiary)] mt-0.5">
-              {running
-                ? t('settings.userGroup.discoveryEnabledHint')
-                : t('settings.userGroup.discoveryDisabledHint')}
-            </div>
+        <div className="rounded-lg border border-[var(--color-border)] px-3 py-2">
+          <div className="text-xs text-[var(--color-text-tertiary)]">
+            {t('settings.userGroup.localIp')}
           </div>
-          <button
-            type="button"
-            role="switch"
-            aria-checked={running}
-            disabled={busy}
-            onClick={() => void toggleDiscovery()}
-            className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
-              running ? 'bg-[var(--color-brand)]' : 'bg-[var(--color-surface-hover)]'
-            }`}
-          >
-            <span
-              className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
-                running ? 'translate-x-5' : 'translate-x-0.5'
-              }`}
-            />
-          </button>
+          <div className="text-xs font-mono text-[var(--color-text-primary)] mt-0.5 break-all">
+            {identity?.localIp ?? '—'}
+          </div>
         </div>
       </div>
-    </div>
+
+      <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] px-3 py-2.5">
+        <div className="min-w-0 flex-1">
+          <div className="text-xs font-medium text-[var(--color-text-primary)]">
+            {t('settings.userGroup.discoveryToggle')}
+          </div>
+          <div
+            className={`text-xs mt-0.5 ${
+              !running && identity?.configuredEnabled
+                ? 'text-[var(--color-warning)]'
+                : 'text-[var(--color-text-tertiary)]'
+            }`}
+          >
+            {running
+              ? t('settings.userGroup.discoveryEnabledHint')
+              : identity?.configuredEnabled
+                ? t('settings.userGroup.discoveryFailedHint')
+                : t('settings.userGroup.discoveryDisabledHint')}
+          </div>
+        </div>
+        <button
+          type="button"
+          role="switch"
+          aria-checked={running}
+          disabled={busy}
+          onClick={() => void toggleDiscovery()}
+          className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors disabled:opacity-50 ${
+            running ? 'bg-[var(--color-brand)]' : 'bg-[var(--color-surface-hover)]'
+          }`}
+        >
+          <span
+            className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+              running ? 'translate-x-5' : 'translate-x-0.5'
+            }`}
+          />
+        </button>
+      </div>
+    </SettingsSection>
   )
 }

@@ -194,6 +194,9 @@ impl SdkSession {
                     if !forward {
                         continue;
                     }
+                    if matches!(event, crate::agent::TurnEvent::ToolArgsDelta { .. }) {
+                        continue;
+                    }
                     let sdk_event: SdkTurnEvent = event.into();
                     if sdk_tx.send(sdk_event).await.is_err() {
 
@@ -409,6 +412,8 @@ impl SdkEntrypoint {
         let session = session_lock
             .take()
             .ok_or_else(|| anyhow::anyhow!("session already used (single-use mode)"))?;
+        drop(session_lock);
+        self.sessions.lock().await.remove(&session_id);
 
         session.send_message(message).await
     }
@@ -426,6 +431,8 @@ impl SdkEntrypoint {
         let session = session_lock
             .take()
             .ok_or_else(|| anyhow::anyhow!("session already used (single-use mode)"))?;
+        drop(session_lock);
+        self.sessions.lock().await.remove(&session_id);
         session.send_message_streamed(message, event_tx).await
     }
 

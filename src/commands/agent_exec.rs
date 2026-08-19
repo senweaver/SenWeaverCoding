@@ -107,10 +107,11 @@ async fn exec_subagent(name: &str, prompt: &str) -> CommandResult {
 
     let resolved_provider_name =
         crate::providers::resolve_runtime_provider_name(&provider_name, &cfg);
-    let provider = match crate::providers::create_provider_with_url_async(
+    let provider = match crate::providers::create_resilient_runtime_provider_async(
         resolved_provider_name,
         api_key,
         None,
+        crate::providers::ProviderRuntimeOptions::default(),
     )
     .await
     {

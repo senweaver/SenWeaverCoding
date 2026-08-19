@@ -106,6 +106,7 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
         ("file_read", SAFE, "Read file contents from the workspace"),
         ("file_write", MODERATE, "Write or create a file in the workspace"),
         ("file_edit", MODERATE, "Edit an existing file by patch"),
+        ("apply_edit", MODERATE, "Merge a lazy edit snippet into a file via a fast apply model"),
         ("multi_edit", MODERATE, "Apply multiple file edits atomically"),
         ("notebook_edit", MODERATE, "Edit Jupyter notebook cells"),
         ("glob_search", SAFE, "Find files by glob pattern"),

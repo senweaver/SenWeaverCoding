@@ -131,10 +131,22 @@ pub async fn run_worker(
     .await;
 
     let mut config_for_agent: Config = (*ctx.config).clone();
-    if let Some(ref model) = spec.model {
-        if !model.trim().is_empty() {
-            config_for_agent.default_model = Some(model.clone());
-        }
+    let resolved_model = spec
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| {
+            ctx.config
+                .agent_runtime
+                .subagent_model
+                .as_deref()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+        })
+        .map(str::to_string);
+    if let Some(model) = resolved_model {
+        config_for_agent.default_model = Some(model);
     }
 
     let denied = Some(vec!["spawn_workers".to_string()]);

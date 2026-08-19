@@ -521,11 +521,13 @@ impl OllamaProvider {
                 status,
                 sanitized
             );
-            anyhow::bail!(
-                "Ollama API error ({}): {}. Is Ollama running? (brew install ollama && ollama serve)",
+            return Err(super::provider_http_error(
+                "Ollama",
                 status,
-                sanitized
-            );
+                &format!(
+                    "{raw}. Is Ollama running? (brew install ollama && ollama serve)"
+                ),
+            ));
         }
 
         let chat_response: ApiChatResponse = match serde_json::from_slice(&body) {
@@ -1005,13 +1007,16 @@ impl Provider for OllamaProvider {
                 }
             };
             if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
+                let (status, text) =
+                    crate::providers::stream_error_body_with_retry_after(response).await;
+                let sanitized = crate::providers::sanitize_api_error(&text);
                 let _ = tx
-                    .send(Err(StreamError::Provider(format!(
-                        "Ollama API error ({status}): {}",
-                        crate::providers::sanitize_api_error(&text)
-                    ))))
+                    .send(Err(crate::providers::stream_upstream_error(
+                        "Ollama",
+                        status,
+                        &text,
+                        &sanitized,
+                    )))
                     .await;
                 return;
             }

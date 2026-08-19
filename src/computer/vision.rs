@@ -57,11 +57,12 @@ impl VisionClient {
             config,
         );
 
-        let provider = crate::providers::create_provider_for_model(
+        let provider = crate::providers::create_resilient_provider_for_model(
             &runtime_name,
             model,
             profile.and_then(|p| p.api_key.as_deref()),
             profile.and_then(|p| p.base_url.as_deref()),
+            &config.reliability,
             &options,
         )?;
 

@@ -1,3 +1,4 @@
+<!-- SenWeaverCoding built-in template -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -6,14 +7,52 @@
   <title>Swiss User Research Template</title>
   <style>
     :root {
+      --od-accent: #171717;
+      --od-scale: 1;
+      --od-density: 1;
+      --od-motion: 1;
       --paper: #f7f6ea;
       --ink: #161616;
       --muted: #5d5a51;
       --line: rgba(22, 22, 22, 0.2);
-      --seg1: #171717;
+      --frame: rgba(22, 22, 22, 0.08);
+      --seg1: var(--od-accent);
       --seg2: #595959;
       --seg3: #8b8b84;
       --seg4: #c8c8bf;
+      --evidence-a: rgba(0, 0, 0, 0.02);
+      --evidence-b: rgba(0, 0, 0, 0.06);
+      --shadow-deck: 0 18px 60px rgba(0, 0, 0, 0.08);
+      --shadow-evidence: 0 24px 48px rgba(0, 0, 0, 0.12);
+      --dur-slide: calc(.45s * var(--od-motion));
+      --dur-rule: calc(.6s * var(--od-motion));
+      --dur-hover: calc(.2s * var(--od-motion));
+      --dur-lift: calc(.3s * var(--od-motion));
+      --fs-11: calc(11px * var(--od-scale));
+      --fs-12: calc(12px * var(--od-scale));
+      --fs-20: calc(20px * var(--od-scale));
+      --fs-21: calc(21px * var(--od-scale));
+      --fs-24: calc(24px * var(--od-scale));
+      --fs-29: calc(29px * var(--od-scale));
+      --fs-58: calc(58px * var(--od-scale));
+      --fs-88: calc(88px * var(--od-scale));
+      --pad-slide-y: calc(52px * var(--od-density));
+      --pad-slide-x: calc(64px * var(--od-density));
+    }
+    html[data-od-mode="dark"] {
+      --od-accent: #f0efe4;
+      --paper: #161511;
+      --ink: #f0efe4;
+      --muted: #a3a091;
+      --line: rgba(240, 239, 228, 0.24);
+      --frame: rgba(240, 239, 228, 0.1);
+      --seg2: #b0afa2;
+      --seg3: #7c7b70;
+      --seg4: #43423a;
+      --evidence-a: rgba(255, 255, 255, 0.03);
+      --evidence-b: rgba(255, 255, 255, 0.07);
+      --shadow-deck: 0 18px 60px rgba(0, 0, 0, 0.55);
+      --shadow-evidence: 0 24px 48px rgba(0, 0, 0, 0.5);
     }
     * { box-sizing: border-box; }
     body {
@@ -23,14 +62,15 @@
       color: var(--ink);
       -webkit-font-smoothing: antialiased;
       min-height: 100vh;
+      font-size: calc(16px * var(--od-scale));
     }
     .deck {
       max-width: 1360px;
       min-height: 860px;
-      margin: 26px auto;
-      border: 1px solid rgba(22, 22, 22, 0.08);
+      margin: calc(26px * var(--od-density)) auto;
+      border: 1px solid var(--frame);
       background: var(--paper);
-      box-shadow: 0 18px 60px rgba(0, 0, 0, 0.08);
+      box-shadow: var(--shadow-deck);
       display: flex;
       flex-direction: column;
       position: relative;
@@ -40,14 +80,14 @@
       display: flex;
       justify-content: space-between;
       align-items: center;
-      padding: 14px 20px;
+      padding: calc(14px * var(--od-density)) calc(20px * var(--od-density));
       border-bottom: 1px solid var(--line);
-      font-size: 12px;
+      font-size: var(--fs-12);
       letter-spacing: 0.18em;
       text-transform: uppercase;
       color: var(--muted);
     }
-    .toolbar .btns { display: flex; gap: 8px; }
+    .toolbar .btns { display: flex; gap: calc(8px * var(--od-density)); }
     .toolbar button {
       border: 1px solid var(--line);
       background: transparent;
@@ -55,7 +95,7 @@
       border-radius: 999px;
       height: 30px;
       padding: 0 12px;
-      font-size: 11px;
+      font-size: var(--fs-11);
       letter-spacing: 0.08em;
       cursor: pointer;
     }
@@ -63,10 +103,10 @@
     .slide {
       position: absolute;
       inset: 0;
-      padding: 52px 64px;
+      padding: var(--pad-slide-y) var(--pad-slide-x);
       opacity: 0;
       transform: translateX(28px);
-      transition: opacity .45s ease, transform .45s ease;
+      transition: opacity var(--dur-slide) ease, transform var(--dur-slide) ease;
       pointer-events: none;
     }
     .slide.active {
@@ -79,56 +119,56 @@
       background: var(--line);
       transform-origin: 0 50%;
       transform: scaleX(0);
-      transition: transform .6s ease;
+      transition: transform var(--dur-rule) ease;
     }
     .slide.active .rule-top, .slide.active .rule-bottom { transform: scaleX(1); }
-    .meta { font-size: 11px; letter-spacing: .24em; text-transform: uppercase; color: var(--muted); }
+    .meta { font-size: var(--fs-11); letter-spacing: .24em; text-transform: uppercase; color: var(--muted); }
     h1, h2 { font-weight: 300; letter-spacing: -0.02em; margin: 0; }
-    h1 { font-size: 88px; line-height: 1.02; margin-top: 24px; }
-    h2 { font-size: 58px; line-height: 1.05; margin-top: 18px; }
+    h1 { font-size: var(--fs-88); line-height: 1.02; margin-top: calc(24px * var(--od-density)); }
+    h2 { font-size: var(--fs-58); line-height: 1.05; margin-top: calc(18px * var(--od-density)); }
     p { color: var(--muted); line-height: 1.55; }
-    .s1-main { margin-top: 84px; max-width: 980px; }
-    .s1-main p { font-size: 24px; max-width: 760px; margin-top: 26px; }
+    .s1-main { margin-top: calc(84px * var(--od-density)); max-width: 980px; }
+    .s1-main p { font-size: var(--fs-24); max-width: 760px; margin-top: calc(26px * var(--od-density)); }
     .foot {
       position: absolute;
-      left: 64px;
-      right: 64px;
-      bottom: 44px;
+      left: var(--pad-slide-x);
+      right: var(--pad-slide-x);
+      bottom: calc(44px * var(--od-density));
       display: flex;
       justify-content: space-between;
-      font-size: 11px;
+      font-size: var(--fs-11);
       letter-spacing: .2em;
       text-transform: uppercase;
       color: var(--muted);
     }
     .s2-grid {
-      margin-top: 52px;
+      margin-top: var(--pad-slide-y);
       display: grid;
       grid-template-columns: 420px 1fr;
-      gap: 80px;
+      gap: calc(80px * var(--od-density));
       align-items: center;
     }
     .donut-wrap { width: 420px; height: 420px; margin: 0 auto; }
-    .legend { display: grid; gap: 18px; }
+    .legend { display: grid; gap: calc(18px * var(--od-density)); }
     .legend-row {
       display: grid;
       grid-template-columns: 16px 1fr auto;
-      gap: 14px;
+      gap: calc(14px * var(--od-density));
       align-items: center;
-      font-size: 21px;
-      transition: transform .2s ease;
+      font-size: var(--fs-21);
+      transition: transform var(--dur-hover) ease;
     }
     .legend-row:hover { transform: translateX(6px); }
     .swatch { width: 16px; height: 16px; border-radius: 2px; }
-    .pct { font-variant-numeric: tabular-nums; color: var(--muted); font-size: 20px; }
+    .pct { font-variant-numeric: tabular-nums; color: var(--muted); font-size: var(--fs-20); }
     .s3-grid {
-      margin-top: 44px;
+      margin-top: calc(44px * var(--od-density));
       display: grid;
       grid-template-columns: 1fr 520px;
-      gap: 52px;
+      gap: var(--pad-slide-y);
     }
-    .s3-grid p { font-size: 29px; max-width: 760px; margin-top: 16px; }
-    .bullets { margin-top: 30px; display: grid; gap: 14px; font-size: 20px; }
+    .s3-grid p { font-size: var(--fs-29); max-width: 760px; margin-top: calc(16px * var(--od-density)); }
+    .bullets { margin-top: calc(30px * var(--od-density)); display: grid; gap: calc(14px * var(--od-density)); font-size: var(--fs-20); }
     .bullets div { padding-left: 24px; position: relative; }
     .bullets div::before { content: "—"; position: absolute; left: 0; color: var(--muted); }
     .evidence {
@@ -138,14 +178,14 @@
       place-items: center;
       color: var(--muted);
       position: relative;
-      background: linear-gradient(140deg, rgba(0, 0, 0, 0.02), rgba(0, 0, 0, 0.06));
-      transition: box-shadow .3s ease, transform .3s ease;
+      background: linear-gradient(140deg, var(--evidence-a), var(--evidence-b));
+      transition: box-shadow var(--dur-lift) ease, transform var(--dur-lift) ease;
     }
     .evidence:hover {
-      box-shadow: 0 24px 48px rgba(0, 0, 0, 0.12);
+      box-shadow: var(--shadow-evidence);
       transform: translateY(-2px);
     }
-    .cap { font-size: 12px; letter-spacing: .1em; margin-top: 14px; color: var(--muted); }
+    .cap { font-size: var(--fs-12); letter-spacing: .1em; margin-top: calc(14px * var(--od-density)); color: var(--muted); }
     .dots {
       position: absolute;
       left: 50%;
@@ -159,37 +199,42 @@
       width: 9px; height: 9px; border-radius: 50%;
       border: 1px solid var(--ink);
       background: transparent; cursor: pointer;
+      padding: 0;
     }
     .dots button.active { background: var(--ink); transform: scale(1.3); }
+    @media (prefers-reduced-motion: reduce) {
+      .slide, .rule-top, .rule-bottom, .legend-row, .evidence { transition: none; }
+      .rule-top, .rule-bottom { transform: scaleX(1); }
+    }
   </style>
 </head>
 <body>
-  <main class="deck">
-    <header class="toolbar">
+  <main class="deck" data-od-id="deck" data-od-label="Research deck">
+    <header class="toolbar" data-od-id="deck-toolbar" data-od-label="Toolbar">
       <span>Swiss research template</span>
       <div class="btns">
         <button type="button" id="prevBtn">Prev</button>
         <button type="button" id="nextBtn">Next</button>
       </div>
     </header>
-    <section class="slides">
-      <article class="slide active" data-slide="0">
+    <section class="slides" data-od-id="deck-slides" data-od-label="Slides stage">
+      <article class="slide active" data-slide="0" data-od-id="slide-cover" data-od-label="Slide 1: cover">
         <div class="rule-top"></div>
-        <div class="s1-main">
+        <div class="s1-main" data-od-id="cover-lockup" data-od-label="Cover lockup">
           <div class="meta">User research synthesis · [month, year]</div>
           <h1>User Research Synthesis</h1>
           <p>What we learned from [N] interviews and what it means for the product.</p>
         </div>
         <div class="rule-bottom" style="margin-top: 84px;"></div>
-        <div class="foot"><span>Research team · [month, year]</span><span>Round [N] · Internal</span></div>
+        <div class="foot" data-od-id="cover-footer" data-od-label="Cover footer"><span>Research team · [month, year]</span><span>Round [N] · Internal</span></div>
       </article>
 
-      <article class="slide" data-slide="1">
+      <article class="slide" data-slide="1" data-od-id="slide-participants" data-od-label="Slide 2: participants">
         <div class="rule-top"></div>
         <div class="meta" style="margin-top: 10px;">Participant breakdown</div>
         <h2>Who we spoke with</h2>
         <div class="s2-grid">
-          <div class="donut-wrap">
+          <div class="donut-wrap" data-od-id="participants-donut" data-od-label="Participant donut">
             <svg viewBox="0 0 400 400" width="420" height="420" aria-label="Participant donut">
               <g transform="translate(200 200) rotate(-90)" fill="none" stroke-width="38">
                 <circle r="118" cx="0" cy="0" stroke="var(--seg1)" stroke-dasharray="283.39 741.78"></circle>
@@ -199,7 +244,7 @@
               </g>
             </svg>
           </div>
-          <div class="legend">
+          <div class="legend" data-od-id="participants-legend" data-od-label="Segment legend">
             <div class="legend-row"><span class="swatch" style="background:var(--seg1)"></span><span>Power users</span><span class="pct">38%</span></div>
             <div class="legend-row"><span class="swatch" style="background:var(--seg2)"></span><span>Casual users</span><span class="pct">25%</span></div>
             <div class="legend-row"><span class="swatch" style="background:var(--seg3)"></span><span>Churn-risk users</span><span class="pct">22%</span></div>
@@ -207,32 +252,32 @@
           </div>
         </div>
         <div class="rule-bottom" style="margin-top: 18px;"></div>
-        <div class="foot"><span>Source: Recruitment screener</span><span>Total participants: [N]</span></div>
+        <div class="foot" data-od-id="participants-footer" data-od-label="Participants footer"><span>Source: Recruitment screener</span><span>Total participants: [N]</span></div>
       </article>
 
-      <article class="slide" data-slide="2">
+      <article class="slide" data-slide="2" data-od-id="slide-pattern" data-od-label="Slide 3: key pattern">
         <div class="rule-top"></div>
         <div class="s3-grid">
-          <div>
+          <div data-od-id="pattern-copy" data-od-label="Pattern copy">
             <div class="meta">The pattern</div>
             <h2>The first 48 hours determine everything</h2>
             <p>Users who complete three core actions in their first two days have a 4x higher 90-day retention rate.</p>
-            <div class="bullets">
+            <div class="bullets" data-od-id="pattern-bullets" data-od-label="Evidence bullets">
               <div>Onboarding drop-off peaks at step 3</div>
               <div>"What do I do next?" is the most common exit trigger</div>
               <div>Users who invite a teammate retain at 2x the rate</div>
             </div>
           </div>
-          <div>
-            <div class="evidence">Image placeholder</div>
+          <div data-od-id="pattern-evidence" data-od-label="Evidence slot">
+            <div class="evidence">Evidence slot — session still</div>
             <div class="cap">Session recording review · [month of study]</div>
           </div>
         </div>
         <div class="rule-bottom" style="margin-top: 24px;"></div>
-        <div class="foot"><span>User research synthesis</span><span>Research team</span></div>
+        <div class="foot" data-od-id="pattern-footer" data-od-label="Pattern footer"><span>User research synthesis</span><span>Research team</span></div>
       </article>
     </section>
-    <nav class="dots" aria-label="Slide navigation">
+    <nav class="dots" aria-label="Slide navigation" data-od-id="deck-dots" data-od-label="Slide dots">
       <button type="button" class="active" data-dot="0" aria-label="Slide 1"></button>
       <button type="button" data-dot="1" aria-label="Slide 2"></button>
       <button type="button" data-dot="2" aria-label="Slide 3"></button>

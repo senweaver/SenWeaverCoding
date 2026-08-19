@@ -1,3 +1,4 @@
+<!-- SenWeaverCoding built-in template -->
 <!doctype html>
 <html lang="en">
   <head>
@@ -6,13 +7,44 @@
     <title>Executive brief scaffold</title>
     <style>
       :root {
+        --od-accent: #465a82;
+        --od-scale: 1;
+        --od-density: 1;
+        --od-motion: 1;
         --bg: #f4f0e8;
         --paper: #fffdf8;
+        --paper-border: rgba(16, 23, 43, 0.08);
+        --paper-shadow: 0 24px 80px rgba(16, 23, 43, 0.12);
         --ink: #10172b;
         --muted: #667085;
         --line: #ded6c8;
-        --accent: #465a82;
+        --accent: var(--od-accent);
         --warm: #e0522d;
+        --metric-bg: #fffaf2;
+        --fs-12: calc(12px * var(--od-scale));
+        --fs-14: calc(14px * var(--od-scale));
+        --fs-18: calc(18px * var(--od-scale));
+        --fs-21: calc(21px * var(--od-scale));
+        --fs-38: calc(38px * var(--od-scale));
+        --fs-64: calc(64px * var(--od-scale));
+        --pad-page: calc(40px * var(--od-density));
+        --pad-x: calc(64px * var(--od-density));
+        --gap-lg: calc(48px * var(--od-density));
+        --gap-md: calc(44px * var(--od-density));
+        --gap-sm: calc(20px * var(--od-density));
+        --gap-xs: calc(12px * var(--od-density));
+      }
+
+      html[data-od-mode="dark"] {
+        --bg: #14120e;
+        --paper: #1d1a15;
+        --paper-border: rgba(236, 231, 221, 0.08);
+        --paper-shadow: 0 24px 80px rgba(0, 0, 0, 0.5);
+        --ink: #ece7dd;
+        --muted: #9a958a;
+        --line: #373126;
+        --warm: #ff7a4d;
+        --metric-bg: #242017;
       }
 
       * {
@@ -29,31 +61,32 @@
         background: var(--bg);
         color: var(--ink);
         font-family: "DM Sans", ui-sans-serif, system-ui, sans-serif;
-        padding: 40px;
+        font-size: calc(16px * var(--od-scale));
+        padding: var(--pad-page);
       }
 
       .brief {
         max-width: 1120px;
         margin: 0 auto;
         background: var(--paper);
-        border: 1px solid rgba(16, 23, 43, 0.08);
+        border: 1px solid var(--paper-border);
         border-radius: 18px;
         overflow: hidden;
-        box-shadow: 0 24px 80px rgba(16, 23, 43, 0.12);
+        box-shadow: var(--paper-shadow);
       }
 
       header {
         display: grid;
         grid-template-columns: 1.1fr 0.9fr;
-        gap: 48px;
-        padding: 56px 64px 44px;
+        gap: var(--gap-lg);
+        padding: calc(56px * var(--od-density)) var(--pad-x) var(--gap-md);
         border-bottom: 1px solid var(--line);
       }
 
       .eyebrow {
-        margin: 0 0 18px;
+        margin: 0 0 calc(18px * var(--od-density));
         color: var(--warm);
-        font-size: 12px;
+        font-size: var(--fs-12);
         font-weight: 800;
         letter-spacing: 0.16em;
         text-transform: uppercase;
@@ -63,28 +96,28 @@
         margin: 0;
         max-width: 660px;
         font-family: Georgia, "Times New Roman", serif;
-        font-size: 64px;
+        font-size: var(--fs-64);
         line-height: 0.98;
         letter-spacing: -0.04em;
       }
 
       .summary {
         color: var(--muted);
-        font-size: 18px;
+        font-size: var(--fs-18);
         line-height: 1.55;
       }
 
       .meta {
         display: grid;
-        gap: 12px;
+        gap: var(--gap-xs);
         align-content: end;
       }
 
       .meta-row {
         display: flex;
         justify-content: space-between;
-        gap: 24px;
-        padding: 12px 0;
+        gap: calc(24px * var(--od-density));
+        padding: var(--gap-xs) 0;
         border-bottom: 1px solid var(--line);
         color: var(--muted);
       }
@@ -96,57 +129,57 @@
       .grid {
         display: grid;
         grid-template-columns: 0.9fr 1.1fr;
-        gap: 44px;
-        padding: 44px 64px 56px;
+        gap: var(--gap-md);
+        padding: var(--gap-md) var(--pad-x) calc(56px * var(--od-density));
       }
 
       .metrics {
         display: grid;
-        gap: 16px;
+        gap: calc(16px * var(--od-density));
       }
 
       .metric {
-        padding: 22px;
+        padding: calc(22px * var(--od-density));
         border-radius: 16px;
         border: 1px solid var(--line);
-        background: #fffaf2;
+        background: var(--metric-bg);
       }
 
       .metric strong {
         display: block;
         color: var(--warm);
-        font-size: 38px;
+        font-size: var(--fs-38);
         letter-spacing: -0.05em;
       }
 
       .metric span {
         color: var(--muted);
-        font-size: 14px;
+        font-size: var(--fs-14);
       }
 
       .findings {
         display: grid;
-        gap: 20px;
+        gap: var(--gap-sm);
       }
 
       .finding {
         display: grid;
         grid-template-columns: 42px 1fr;
-        gap: 18px;
-        padding-top: 18px;
+        gap: calc(18px * var(--od-density));
+        padding-top: calc(18px * var(--od-density));
         border-top: 1px solid var(--line);
       }
 
       .finding b {
         color: var(--accent);
         font-family: "SF Mono", ui-monospace, monospace;
-        font-size: 12px;
+        font-size: var(--fs-12);
         letter-spacing: 0.14em;
       }
 
       .finding h2 {
         margin: 0 0 8px;
-        font-size: 21px;
+        font-size: var(--fs-21);
       }
 
       .finding p {
@@ -158,79 +191,79 @@
       footer {
         display: flex;
         justify-content: space-between;
-        gap: 24px;
-        padding: 18px 64px;
+        gap: calc(24px * var(--od-density));
+        padding: calc(18px * var(--od-density)) var(--pad-x);
         border-top: 1px solid var(--line);
         color: var(--accent);
         font-family: "SF Mono", ui-monospace, monospace;
-        font-size: 12px;
+        font-size: var(--fs-12);
         text-transform: uppercase;
         letter-spacing: 0.12em;
       }
 
       @media (max-width: 820px) {
         body {
-          padding: 18px;
+          padding: calc(18px * var(--od-density));
         }
 
         header,
         .grid {
           grid-template-columns: 1fr;
-          padding: 32px 28px;
+          padding: calc(32px * var(--od-density)) calc(28px * var(--od-density));
         }
 
         h1 {
-          font-size: 42px;
+          font-size: calc(42px * var(--od-scale));
         }
 
         footer {
-          padding: 18px 28px;
+          padding: calc(18px * var(--od-density)) calc(28px * var(--od-density));
           flex-direction: column;
         }
       }
     </style>
   </head>
   <body>
-    <main class="brief">
-      <header>
-        <div>
-          <p class="eyebrow">Executive brief</p>
-          <h1>The operating window has narrowed.</h1>
-          <p class="summary">
+    <main class="brief" data-od-id="brief" data-od-label="Executive brief">
+      <header data-od-id="brief-header" data-od-label="Header">
+        <div data-od-id="brief-headline" data-od-label="Headline block">
+          <p class="eyebrow" data-od-id="brief-eyebrow" data-od-label="Eyebrow">Executive brief</p>
+          <h1 data-od-id="brief-title" data-od-label="Title">The operating window has narrowed.</h1>
+          <p class="summary" data-od-id="brief-summary" data-od-label="Summary">
             Three independent signals point to the same decision: accelerate the product loop now,
             while distribution, demand, and delivery capacity are aligned.
           </p>
         </div>
-        <aside class="meta" aria-label="Brief metadata">
+        <aside class="meta" aria-label="Brief metadata" data-od-id="brief-meta" data-od-label="Metadata">
           <div class="meta-row"><span>Prepared for</span><strong>Leadership team</strong></div>
           <div class="meta-row"><span>Period</span><strong>Q2 2026</strong></div>
           <div class="meta-row"><span>Decision</span><strong>Approve focused sprint</strong></div>
         </aside>
       </header>
 
-      <section class="grid">
-        <aside class="metrics" aria-label="Key metrics">
-          <div class="metric"><strong>18%</strong><span>Increase in qualified demand</span></div>
-          <div class="metric"><strong>6 wk</strong><span>Window before renewal planning locks</span></div>
-          <div class="metric"><strong>3</strong><span>Risks requiring executive attention</span></div>
+      <section class="grid" data-od-id="brief-body" data-od-label="Body grid">
+        <aside class="metrics" aria-label="Key metrics" data-od-id="key-metrics" data-od-label="Key metrics">
+          <div class="metric" data-od-id="metric-demand" data-od-label="Metric: demand"><strong>18%</strong><span>Increase in qualified demand</span></div>
+          <div class="metric" data-od-id="metric-window" data-od-label="Metric: window"><strong>6 wk</strong><span>Window before renewal planning locks</span></div>
+          <div class="metric" data-od-id="metric-risks" data-od-label="Metric: risks"><strong>3</strong><span>Risks requiring executive attention</span></div>
         </aside>
 
-        <div class="findings">
-          <article class="finding">
+        <div class="findings" data-od-id="findings" data-od-label="Findings">
+          <article class="finding" data-od-id="finding-1" data-od-label="Finding 01">
             <b>01</b>
             <div>
               <h2>Demand is specific enough to productize.</h2>
               <p>Recent conversations cluster around the same workflow, buyer, and budget owner.</p>
             </div>
           </article>
-          <article class="finding">
+          <article class="finding" data-od-id="finding-2" data-od-label="Finding 02">
             <b>02</b>
             <div>
               <h2>Distribution is newly reachable.</h2>
               <p>Partner and lifecycle channels now create repeatable entry points for the offer.</p>
             </div>
           </article>
-          <article class="finding">
+          <article class="finding" data-od-id="finding-3" data-od-label="Finding 03">
             <b>03</b>
             <div>
               <h2>The main risk is coordination, not feasibility.</h2>
@@ -240,7 +273,7 @@
         </div>
       </section>
 
-      <footer>
+      <footer data-od-id="brief-footer" data-od-label="Footer">
         <span>Executive brief</span>
         <span>One-page decision brief</span>
       </footer>

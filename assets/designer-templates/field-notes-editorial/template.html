@@ -1,3 +1,4 @@
+<!-- SenWeaverCoding built-in template -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -6,42 +7,85 @@
   <title>Field Notes Editorial Report</title>
   <style>
     :root {
+      --od-accent: #c9d57a;
+      --od-scale: 1;
+      --od-density: 1;
+      --od-motion: 1;
       --paper: #f4f0e8;
+      --paper-hi: #f8f5ee;
       --ink: #181715;
       --ink-soft: rgba(24, 23, 21, 0.72);
-      --lime: #c9d57a;
+      --lime: var(--od-accent);
       --pink: #e4b8cc;
       --peach: #e9cbaf;
       --line-pink: #e6a2bc;
       --line-yellow: #ddd06a;
       --line-ink: #1d1d1d;
+      --card-veil: rgba(255, 255, 255, 0.33);
+      --chart-bg: #ffffff;
+      --grid-line: rgba(24, 23, 21, 0.1);
+      --pager-bg: #111111;
+      --pager-bg-hover: #222222;
+      --pager-fg: #f5f1ea;
+      --shadow-deck: 0 18px 60px rgba(24, 23, 21, 0.12);
+      --shadow-card: 0 14px 34px rgba(24, 23, 21, 0.1);
+      --shadow-chart: 0 14px 44px rgba(24, 23, 21, 0.1);
       --radius: 28px;
+      --dur-hover: calc(.25s * var(--od-motion));
+      --fs-11: calc(11px * var(--od-scale));
+      --fs-12: calc(12px * var(--od-scale));
+      --fs-14: calc(14px * var(--od-scale));
+      --fs-28: calc(28px * var(--od-scale));
+      --fs-32: calc(32px * var(--od-scale));
+      --fs-64: calc(64px * var(--od-scale));
+      --fs-78: calc(78px * var(--od-scale));
+      --fs-122: calc(122px * var(--od-scale));
+      --pad-panel: calc(28px * var(--od-density));
+      --gap-md: calc(18px * var(--od-density));
+      --gap-lg: calc(24px * var(--od-density));
+    }
+    html[data-od-mode="dark"] {
+      --paper: #1a1813;
+      --paper-hi: #201d17;
+      --ink: #ece7db;
+      --ink-soft: rgba(236, 231, 219, 0.72);
+      --line-ink: #ece7db;
+      --card-veil: rgba(255, 255, 255, 0.06);
+      --chart-bg: #24211a;
+      --grid-line: rgba(236, 231, 219, 0.12);
+      --pager-bg: #ece7db;
+      --pager-bg-hover: #d9d3c4;
+      --pager-fg: #181715;
+      --shadow-deck: 0 18px 60px rgba(0, 0, 0, 0.5);
+      --shadow-card: 0 14px 34px rgba(0, 0, 0, 0.4);
+      --shadow-chart: 0 14px 44px rgba(0, 0, 0, 0.4);
     }
     * { box-sizing: border-box; }
     html, body { margin: 0; height: 100%; }
     body {
       font-family: "Avenir Next", "Segoe UI", Inter, sans-serif;
-      background: radial-gradient(circle at 50% 40%, #f8f5ee 0%, var(--paper) 65%);
+      background: radial-gradient(circle at 50% 40%, var(--paper-hi) 0%, var(--paper) 65%);
       color: var(--ink);
+      font-size: calc(16px * var(--od-scale));
     }
     .deck {
       width: min(1280px, 96vw);
-      margin: 22px auto;
+      margin: calc(22px * var(--od-density)) auto;
       border-radius: 22px;
-      padding: 30px 30px 84px;
+      padding: calc(30px * var(--od-density)) calc(30px * var(--od-density)) calc(84px * var(--od-density));
       position: relative;
       overflow: hidden;
-      box-shadow: 0 18px 60px rgba(24, 23, 21, 0.12);
+      box-shadow: var(--shadow-deck);
       background: var(--paper);
     }
     .topline {
       display: flex;
       justify-content: space-between;
       color: var(--ink-soft);
-      font-size: 12px;
+      font-size: var(--fs-12);
       letter-spacing: .14em;
       text-transform: uppercase;
-      margin-bottom: 18px;
+      margin-bottom: var(--gap-md);
     }
     .panel { display: none; min-height: 560px; }
     .panel.active { display: block; }
@@ -50,13 +94,14 @@
       display: grid;
       grid-template-columns: 1.8fr 1fr;
       grid-template-rows: 1fr 1fr;
-      gap: 18px;
+      gap: var(--gap-md);
       min-height: 520px;
     }
-    .hero, .card { border-radius: var(--radius); padding: 28px; }
+    .hero, .card { border-radius: var(--radius); padding: var(--pad-panel); }
     .hero {
       grid-row: 1 / -1;
       background: var(--lime);
+      color: #181715;
       display: flex;
       flex-direction: column;
       justify-content: space-between;
@@ -64,36 +109,37 @@
     .hero em {
       display: block;
       font-family: Georgia, "Times New Roman", serif;
-      font-size: 32px;
+      font-size: var(--fs-32);
       line-height: 1.2;
       font-style: italic;
       max-width: 560px;
     }
     .hero .pct {
       font-family: Georgia, "Times New Roman", serif;
-      font-size: 122px;
+      font-size: var(--fs-122);
       line-height: .9;
     }
-    .card { background: #fff5; display: flex; flex-direction: column; justify-content: flex-end; }
-    .card.pink { background: var(--pink); }
-    .card.peach { background: var(--peach); }
-    .card .label { font-size: 12px; letter-spacing: .16em; text-transform: uppercase; opacity: .8; }
-    .card .num { font-family: Georgia, "Times New Roman", serif; font-size: 78px; line-height: 1; }
+    .card { background: var(--card-veil); display: flex; flex-direction: column; justify-content: flex-end; }
+    .card.pink { background: var(--pink); color: #181715; }
+    .card.peach { background: var(--peach); color: #181715; }
+    .card .label { font-size: var(--fs-12); letter-spacing: .16em; text-transform: uppercase; opacity: .8; }
+    .card .num { font-family: Georgia, "Times New Roman", serif; font-size: var(--fs-78); line-height: 1; }
 
     .insight-grid {
       min-height: 520px;
       display: grid;
       grid-template-columns: repeat(3, 1fr);
-      gap: 20px;
+      gap: calc(20px * var(--od-density));
     }
     .insight {
       border-radius: var(--radius);
-      padding: 30px;
-      transition: transform .25s ease, box-shadow .25s ease;
+      padding: calc(30px * var(--od-density));
+      color: #181715;
+      transition: transform var(--dur-hover) ease, box-shadow var(--dur-hover) ease;
     }
-    .insight:hover { transform: translateY(-4px); box-shadow: 0 14px 34px rgba(24,23,21,.1); }
-    .insight h3 { margin: 10px 0 12px; font-size: 28px; font-family: Georgia, serif; }
-    .insight p { margin: 0; line-height: 1.6; color: var(--ink-soft); }
+    .insight:hover { transform: translateY(-4px); box-shadow: var(--shadow-card); }
+    .insight h3 { margin: 10px 0 12px; font-size: var(--fs-28); font-family: Georgia, serif; }
+    .insight p { margin: 0; line-height: 1.6; color: rgba(24, 23, 21, 0.72); }
     .insight:nth-child(1) { background: var(--pink); }
     .insight:nth-child(2) { background: var(--lime); }
     .insight:nth-child(3) { background: var(--peach); }
@@ -102,27 +148,27 @@
       min-height: 520px;
       display: grid;
       grid-template-columns: .9fr 1.1fr;
-      gap: 24px;
+      gap: var(--gap-lg);
       align-items: center;
     }
     .retention h2 {
-      margin: 0 0 16px;
-      font-size: 64px;
+      margin: 0 0 calc(16px * var(--od-density));
+      font-size: var(--fs-64);
       line-height: 1.06;
       font-family: Georgia, serif;
     }
     .retention p { color: var(--ink-soft); line-height: 1.7; }
-    .legend { margin-top: 22px; display: grid; gap: 10px; }
-    .legend .row { display: flex; align-items: center; gap: 10px; font-size: 14px; }
+    .legend { margin-top: calc(22px * var(--od-density)); display: grid; gap: calc(10px * var(--od-density)); }
+    .legend .row { display: flex; align-items: center; gap: 10px; font-size: var(--fs-14); }
     .legend i { width: 24px; height: 4px; border-radius: 2px; display: inline-block; }
     .chart-wrap {
-      background: #fff;
+      background: var(--chart-bg);
       border-radius: var(--radius);
-      padding: 20px;
-      box-shadow: 0 14px 44px rgba(24,23,21,.1);
+      padding: calc(20px * var(--od-density));
+      box-shadow: var(--shadow-chart);
     }
     .chart-wrap svg { width: 100%; height: auto; display: block; }
-    .axis { font-size: 11px; fill: var(--ink-soft); }
+    .axis { font-size: var(--fs-11); fill: var(--ink-soft); }
     .line { fill: none; stroke-width: 3; stroke-linecap: round; stroke-linejoin: round; }
 
     .bottom {
@@ -134,64 +180,70 @@
       justify-content: space-between;
       align-items: center;
       color: var(--ink-soft);
-      font-size: 12px;
+      font-size: var(--fs-12);
       letter-spacing: .08em;
     }
     .pager {
       display: inline-flex;
       align-items: center;
       gap: 12px;
-      background: #111;
-      color: #f5f1ea;
+      background: var(--pager-bg);
+      color: var(--pager-fg);
       border-radius: 999px;
-      padding: 8px 14px;
+      padding: calc(8px * var(--od-density)) calc(14px * var(--od-density));
       border: 0;
       cursor: pointer;
+      font-size: var(--fs-12);
     }
-    .pager:hover { background: #222; }
+    .pager:hover { background: var(--pager-bg-hover); }
+
+    @media (prefers-reduced-motion: reduce) {
+      .insight { transition: none; }
+      .insight:hover { transform: none; }
+    }
 
     @media (max-width: 1100px) {
       .metrics-grid, .insight-grid, .retention { grid-template-columns: 1fr; }
       .hero { min-height: 300px; }
-      .hero .pct { font-size: 84px; }
-      .retention h2 { font-size: 44px; }
+      .hero .pct { font-size: calc(84px * var(--od-scale)); }
+      .retention h2 { font-size: calc(44px * var(--od-scale)); }
     }
   </style>
 </head>
 <body>
-  <section class="deck">
-    <div class="topline"><span>Field Notes</span><span id="page-mark">vi</span></div>
+  <section class="deck" data-od-id="report" data-od-label="Field notes report">
+    <div class="topline" data-od-id="report-topline" data-od-label="Top line"><span>Field Notes</span><span id="page-mark">vi</span></div>
 
-    <div class="panel active" id="panel-metrics">
+    <div class="panel active" id="panel-metrics" data-od-id="panel-metrics" data-od-label="Panel: metrics">
       <div class="metrics-grid">
-        <article class="hero">
+        <article class="hero" data-od-id="metric-hero" data-od-label="Hero metric">
           <em>of new accounts open the third email, up from 41% last quarter.</em>
           <div class="pct" data-count="68">0%</div>
         </article>
-        <article class="card pink">
+        <article class="card pink" data-od-id="metric-interviews" data-od-label="Metric: interviews">
           <div class="label">Long-form interviews</div>
           <div class="num" data-count="28">0</div>
         </article>
-        <article class="card peach">
+        <article class="card peach" data-od-id="metric-teams" data-od-label="Metric: teams">
           <div class="label">Teams shadowed</div>
           <div class="num" data-count="9">0</div>
         </article>
       </div>
     </div>
 
-    <div class="panel" id="panel-insights">
+    <div class="panel" id="panel-insights" data-od-id="panel-insights" data-od-label="Panel: insights">
       <div class="insight-grid">
-        <article class="insight">
+        <article class="insight" data-od-id="insight-1" data-od-label="Insight 1">
           <strong>Insight #1</strong>
           <h3>Trust is the onboarding</h3>
           <p>Customers do not churn on day one because the product is hard. They churn when the early messages feel generic.</p>
         </article>
-        <article class="insight">
+        <article class="insight" data-od-id="insight-2" data-od-label="Insight 2">
           <strong>Insight #2</strong>
           <h3>Power users dread upgrades</h3>
           <p>The most engaged users value predictability. Keep upgrade narratives explicit and avoid surprise resets.</p>
         </article>
-        <article class="insight">
+        <article class="insight" data-od-id="insight-3" data-od-label="Insight 3">
           <strong>Insight #3</strong>
           <h3>Support is product</h3>
           <p>Half of feature requests are discoverability issues. Documentation and UI clarity lower roadmap noise.</p>
@@ -199,20 +251,20 @@
       </div>
     </div>
 
-    <div class="panel" id="panel-retention">
+    <div class="panel" id="panel-retention" data-od-id="panel-retention" data-od-label="Panel: retention">
       <div class="retention">
-        <div>
+        <div data-od-id="retention-copy" data-od-label="Retention copy">
           <h2>The curve bends around day three.</h2>
           <p>Cohorts with a written welcome plus a human follow-up retain roughly 2x better than template-only cohorts by day 90.</p>
-          <div class="legend">
+          <div class="legend" data-od-id="retention-legend" data-od-label="Chart legend">
             <div class="row"><i style="background:var(--line-pink)"></i><span>Templated welcome</span></div>
             <div class="row"><i style="background:var(--line-yellow)"></i><span>Written welcome</span></div>
             <div class="row"><i style="background:var(--line-ink)"></i><span>Written + human reply</span></div>
           </div>
         </div>
-        <div class="chart-wrap">
+        <div class="chart-wrap" data-od-id="retention-chart" data-od-label="Retention chart">
           <svg viewBox="0 0 560 280" aria-label="Retention line chart">
-            <g stroke="rgba(24,23,21,.1)">
+            <g stroke="var(--grid-line)">
               <line x1="56" y1="40" x2="530" y2="40"></line>
               <line x1="56" y1="90" x2="530" y2="90"></line>
               <line x1="56" y1="140" x2="530" y2="140"></line>
@@ -232,7 +284,7 @@
       </div>
     </div>
 
-    <div class="bottom">
+    <div class="bottom" data-od-id="report-footer" data-od-label="Footer pager">
       <span>April 29, 2026</span>
       <button id="pager" class="pager">◀ <span id="pager-text">6 / 12</span> ▶</button>
       <span>Field Notes · Vol. III</span>
@@ -244,6 +296,14 @@
     const marks = { metrics: "vi", insights: "iv", retention: "x" };
     const pagerText = { metrics: "6 / 12", insights: "4 / 12", retention: "10 / 12" };
     let idx = 0;
+
+    function motionFactor() {
+      const raw = getComputedStyle(document.documentElement).getPropertyValue("--od-motion");
+      const parsed = parseFloat(raw);
+      if (!Number.isFinite(parsed) || parsed < 0) return 1;
+      return parsed;
+    }
+    const reducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
     function showPanel(next) {
       idx = next % panels.length;
@@ -260,11 +320,16 @@
 
     document.querySelectorAll("[data-count]").forEach((el) => {
       const target = Number(el.getAttribute("data-count") || "0");
-      let start = null;
       const unit = el.textContent.includes("%") ? "%" : "";
+      const duration = 900 * motionFactor();
+      if (reducedMotion || duration <= 0) {
+        el.textContent = String(target) + unit;
+        return;
+      }
+      let start = null;
       function tick(ts) {
         if (!start) start = ts;
-        const p = Math.min((ts - start) / 900, 1);
+        const p = Math.min((ts - start) / duration, 1);
         const v = Math.round(target * p);
         el.textContent = String(v) + unit;
         if (p < 1) requestAnimationFrame(tick);
@@ -274,11 +339,13 @@
 
     ["line1", "line2", "line3"].forEach((id, i) => {
       const path = document.getElementById(id);
+      const drawMs = 1000 * motionFactor();
+      if (reducedMotion || drawMs <= 0) return;
       const len = path.getTotalLength();
       path.style.strokeDasharray = String(len);
       path.style.strokeDashoffset = String(len);
       setTimeout(() => {
-        path.style.transition = "stroke-dashoffset 1s ease";
+        path.style.transition = "stroke-dashoffset " + drawMs + "ms ease";
         path.style.strokeDashoffset = "0";
       }, 300 + i * 120);
     });

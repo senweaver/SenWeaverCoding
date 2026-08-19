@@ -5,7 +5,6 @@
 pub mod idempotency;
 pub mod openai_sse;
 pub mod prediction;
-pub mod rate_limit;
 pub mod retry;
 pub mod sse;
 pub mod vcr;

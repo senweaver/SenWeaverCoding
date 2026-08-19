@@ -10,7 +10,6 @@ use once_cell::sync::Lazy;
 
 use super::git::GitContext;
 use super::lsp_ctx::LspSnapshot;
-use super::memory_files::MemoryFileContext;
 use super::open_files::{NoOpenFilesSource, OpenFile, OpenFilesSource};
 use super::outline_ctx::OutlineNode;
 use super::rag_ctx::SearchHit;
@@ -38,7 +37,6 @@ pub trait RagSource: Send + Sync {
 #[derive(Debug, Clone)]
 pub struct QueryContext {
     pub git: Option<GitContext>,
-    pub memory: MemoryFileContext,
     pub cwd: PathBuf,
     pub date: String,
     pub additional_instructions: Vec<String>,
@@ -188,10 +186,11 @@ impl QueryContext {
         }
         if !self.rag_hits.is_empty() {
             out.push_str("rag_hits:\n");
-            const RAG_SECTION_MAX_BYTES: usize = 6144;
+            let rag_section_max_bytes =
+                crate::agent::token::budget::InjectionBudget::current().rag_section_bytes;
             let section_start = out.len();
             for h in &self.rag_hits {
-                if out.len().saturating_sub(section_start) >= RAG_SECTION_MAX_BYTES {
+                if out.len().saturating_sub(section_start) >= rag_section_max_bytes {
                     out.push_str("- … (more hits elided)\n");
                     break;
                 }
@@ -310,8 +309,6 @@ impl ContextBuilder {
 
         let git_fut = GitContext::gather(&self.cwd);
 
-        let memory_fut = async { MemoryFileContext::default() };
-
         let focus_for_outline = self.focus_files.clone();
         let outline_query = self.rag_query.clone();
         let outline_fut = async move {
@@ -341,7 +338,9 @@ impl ContextBuilder {
         let repo_map_fut = async move {
             match (repo_map_graph, repo_map_needed) {
                 (Some(g), true) => tokio::task::spawn_blocking(move || {
-                    g.repo_map(12, 6, 4 * 1024)
+                    let repo_map_bytes =
+                        crate::agent::token::budget::InjectionBudget::current().repo_map_bytes;
+                    g.repo_map(12, 6, repo_map_bytes)
                 })
                 .await
                 .unwrap_or_default(),
@@ -402,9 +401,8 @@ impl ContextBuilder {
             }
         };
 
-        let (git_res, memory, outline, symbols, open_files, lsp_info, rag_hits, repo_map) = tokio::join!(
+        let (git_res, outline, symbols, open_files, lsp_info, rag_hits, repo_map) = tokio::join!(
             git_fut,
-            memory_fut,
             outline_fut,
             symbols_fut,
             open_files_fut,
@@ -418,7 +416,6 @@ impl ContextBuilder {
 
         let ctx = QueryContext {
             git,
-            memory,
             cwd: self.cwd.clone(),
             date,
             additional_instructions: Vec::new(),
@@ -571,7 +568,8 @@ impl FocusPathRegistry {
 
 fn collect_outline_for_focus(focus: &[PathBuf], query: Option<&str>) -> Vec<OutlineNode> {
     const MAX_OUTLINE_NODES: usize = 80;
-    const MAX_OUTLINE_BYTES: usize = 4096;
+    let max_outline_bytes =
+        crate::agent::token::budget::InjectionBudget::current().outline_bytes;
     let query_terms: Vec<String> = query
         .map(|q| {
             q.split(|c: char| !(c.is_alphanumeric() || c == '_'))
@@ -613,7 +611,7 @@ fn collect_outline_for_focus(focus: &[PathBuf], query: Option<&str>) -> Vec<Outl
     let mut out = Vec::new();
     let mut used = 0usize;
     for (_, approx, node) in scored {
-        if out.len() >= MAX_OUTLINE_NODES || used + approx > MAX_OUTLINE_BYTES {
+        if out.len() >= MAX_OUTLINE_NODES || used + approx > max_outline_bytes {
             break;
         }
         used += approx;

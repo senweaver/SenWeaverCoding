@@ -665,6 +665,7 @@ impl CodeEditExecutor {
             contents: body.clone(),
             overwrite: false,
             encoding: None,
+            expected_pre_sha256: None,
         });
         let applier = OpsApplier::locked_for_workspace(workspace_root.to_path_buf());
         match applier.apply_batch(batch).await {

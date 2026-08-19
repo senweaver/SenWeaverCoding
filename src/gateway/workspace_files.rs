@@ -23,11 +23,59 @@ const MAX_FILE_READ_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RAW_READ_BYTES: u64 = 64 * 1024 * 1024;
 const MAX_UPLOAD_BYTES: usize = 10 * 1024 * 1024;
 const MAX_SEARCH_RESULTS: usize = 500;
+const MAX_DELETE_HISTORY_SNAPSHOTS: usize = 200;
 
-const HIDDEN_DEFAULT_DIRS: &[&str] = &[];
+const HIDDEN_DEFAULT_DIRS: &[&str] = &[
+    ".git",
+    ".hg",
+    ".svn",
+    ".sen",
+    "node_modules",
+    "target",
+    "__pycache__",
+    ".venv",
+    "venv",
+    ".mypy_cache",
+    ".pytest_cache",
+    ".ruff_cache",
+    ".next",
+    ".nuxt",
+    ".turbo",
+    ".DS_Store",
+];
+
+#[cfg(feature = "fs-watch")]
+fn is_watch_ignored(rel: &str) -> bool {
+    let mut last = rel;
+    for seg in rel.split('/') {
+        if seg.is_empty() {
+            continue;
+        }
+        if HIDDEN_DEFAULT_DIRS.contains(&seg) {
+            return true;
+        }
+        last = seg;
+    }
+    last.starts_with('.') && last.contains(".tmp.")
+}
+
+#[cfg(feature = "fs-watch")]
+fn git_status_relevant(rel: &str) -> bool {
+    if rel == ".git" {
+        return false;
+    }
+    if let Some(rest) = rel.strip_prefix(".git/") {
+        return rest == "HEAD"
+            || rest == "index"
+            || rest == "MERGE_HEAD"
+            || rest == "ORIG_HEAD"
+            || rest.starts_with("refs/");
+    }
+    !is_watch_ignored(rel)
+}
 
 #[derive(Debug)]
-enum FsError {
+pub(super) enum FsError {
     NotFound,
     OutsideRoot,
     InvalidName,
@@ -38,7 +86,7 @@ enum FsError {
 }
 
 impl FsError {
-    fn into_response(self) -> axum::response::Response {
+    pub(super) fn into_response(self) -> axum::response::Response {
         match self {
             FsError::NotFound => (StatusCode::NOT_FOUND, Json(json!({"error": "Not found"}))).into_response(),
             FsError::OutsideRoot => (
@@ -120,7 +168,10 @@ fn session_allowed_workspace_canonicals(state: &AppState) -> Vec<PathBuf> {
     out
 }
 
-async fn allowed_workspace_root(state: &AppState, requested: &str) -> Result<PathBuf, FsError> {
+pub(super) async fn allowed_workspace_root(
+    state: &AppState,
+    requested: &str,
+) -> Result<PathBuf, FsError> {
     let state = state.clone();
     let requested = requested.to_string();
     tokio::task::spawn_blocking(move || {
@@ -145,7 +196,11 @@ async fn allowed_workspace_root(state: &AppState, requested: &str) -> Result<Pat
     .map_err(|_| FsError::RootUnresolved)?
 }
 
-fn resolve_within(root: &Path, rel: &str, must_exist: bool) -> Result<PathBuf, FsError> {
+pub(super) fn resolve_within(
+    root: &Path,
+    rel: &str,
+    must_exist: bool,
+) -> Result<PathBuf, FsError> {
     let rel = rel.trim();
     if rel.is_empty() || rel == "." {
         if !must_exist {
@@ -175,6 +230,100 @@ fn resolve_within(root: &Path, rel: &str, must_exist: bool) -> Result<PathBuf, F
         return Err(FsError::OutsideRoot);
     }
     Ok(resolved)
+}
+
+fn resolve_within_no_follow(root: &Path, rel: &str) -> Result<PathBuf, FsError> {
+    let rel = rel.trim();
+    if rel.is_empty() || rel == "." {
+        return Ok(root.to_path_buf());
+    }
+    let rel_path = PathBuf::from(rel.trim_start_matches(['/', '\\']));
+    if rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(FsError::OutsideRoot);
+    }
+    let joined = root.join(&rel_path);
+    let Some(name) = joined.file_name().map(|n| n.to_os_string()) else {
+        return Err(FsError::InvalidName);
+    };
+    let parent = joined.parent().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
+    if !parent.exists() {
+        return Err(FsError::NotFound);
+    }
+    let parent_resolved = parent
+        .canonicalize()
+        .map(crate::util::strip_verbatim_prefix)
+        .map_err(FsError::Io)?;
+    if !crate::util::path_is_within(&parent_resolved, root) {
+        return Err(FsError::OutsideRoot);
+    }
+    let resolved = parent_resolved.join(name);
+    if std::fs::symlink_metadata(&resolved).is_err() {
+        return Err(FsError::NotFound);
+    }
+    Ok(resolved)
+}
+
+fn resolve_within_target(root: &Path, rel: &str) -> Result<PathBuf, FsError> {
+    let rel = rel.trim();
+    if rel.is_empty() || rel == "." {
+        return Err(FsError::InvalidName);
+    }
+    let rel_path = PathBuf::from(rel.trim_start_matches(['/', '\\']));
+    if rel_path.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
+        return Err(FsError::OutsideRoot);
+    }
+    let joined = root.join(&rel_path);
+    let Some(name) = joined.file_name().map(|n| n.to_os_string()) else {
+        return Err(FsError::InvalidName);
+    };
+    let parent = joined.parent().map(Path::to_path_buf).unwrap_or_else(|| root.to_path_buf());
+    let parent_resolved = if parent.exists() {
+        parent
+            .canonicalize()
+            .map(crate::util::strip_verbatim_prefix)
+            .map_err(FsError::Io)?
+    } else {
+        crate::util::normalize_path_for_containment(&parent)
+    };
+    if !crate::util::path_is_within(&parent_resolved, root) {
+        return Err(FsError::OutsideRoot);
+    }
+    Ok(parent_resolved.join(name))
+}
+
+#[cfg(windows)]
+fn move_to_recycle_bin(path: &Path) -> std::io::Result<()> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::UI::Shell::{
+        SHFileOperationW, FOF_ALLOWUNDO, FOF_NOCONFIRMATION, FOF_NOERRORUI, FOF_SILENT,
+        FO_DELETE, SHFILEOPSTRUCTW,
+    };
+    let mut from: Vec<u16> = path.as_os_str().encode_wide().collect();
+    if from.contains(&0) {
+        return Err(std::io::Error::other("path contains interior NUL"));
+    }
+    from.push(0);
+    from.push(0);
+    let mut op = SHFILEOPSTRUCTW {
+        hwnd: std::ptr::null_mut(),
+        wFunc: FO_DELETE as u32,
+        pFrom: from.as_ptr(),
+        pTo: std::ptr::null(),
+        fFlags: (FOF_ALLOWUNDO | FOF_NOCONFIRMATION | FOF_SILENT | FOF_NOERRORUI) as u16,
+        fAnyOperationsAborted: 0,
+        hNameMappings: std::ptr::null_mut(),
+        lpszProgressTitle: std::ptr::null(),
+    };
+    let code = unsafe { SHFileOperationW(&mut op) };
+    if code != 0 {
+        return Err(std::io::Error::other(format!(
+            "move to recycle bin failed (code 0x{code:X})"
+        )));
+    }
+    if op.fAnyOperationsAborted != 0 {
+        return Err(std::io::Error::other("move to recycle bin was aborted"));
+    }
+    Ok(())
 }
 
 fn relative_path(root: &Path, target: &Path) -> String {
@@ -401,10 +550,11 @@ pub async fn handle_workspace_file_get(
     let modified = modified_at(&metadata);
     let mime = mime_from_extension(&target);
     let payload = match classify_file_content(&target, &bytes) {
-        Some(text) => json!({
+        Some((text, lossy)) => json!({
             "content": text,
             "encoding": "utf8",
             "isBinary": false,
+            "lossy": lossy,
             "sizeBytes": metadata.len(),
             "modifiedAt": modified,
             "mimeType": mime,
@@ -413,6 +563,7 @@ pub async fn handle_workspace_file_get(
             "content": base64::engine::general_purpose::STANDARD.encode(&bytes),
             "encoding": "base64",
             "isBinary": true,
+            "lossy": false,
             "sizeBytes": metadata.len(),
             "modifiedAt": modified,
             "mimeType": mime,
@@ -436,7 +587,8 @@ fn raw_id_for_root(root: &Path) -> String {
 
 fn all_allowed_canonicals_blocking(state: &AppState) -> Vec<PathBuf> {
     let mut out: Vec<PathBuf> = Vec::new();
-    if let Ok(ws) = state.config.lock().workspace_dir.clone().canonicalize() {
+    let workspace_dir = state.config.lock().workspace_dir.clone();
+    if let Ok(ws) = normalize_workspace_root(&workspace_dir) {
         out.push(ws);
     }
     out.extend(session_allowed_workspace_canonicals(state));
@@ -514,21 +666,25 @@ pub async fn handle_workspace_raw_get(
         .into_response()
 }
 
-fn classify_file_content(path: &Path, bytes: &[u8]) -> Option<String> {
+fn classify_file_content(path: &Path, bytes: &[u8]) -> Option<(String, bool)> {
     if bytes.is_empty() {
-        return Some(String::new());
+        return Some((String::new(), false));
     }
     if let Some(text) = decode_with_bom(bytes) {
-        return Some(strip_bom_prefix(text));
+        let lossy = bytes.starts_with(b"\xEF\xBB\xBF")
+            && std::str::from_utf8(&bytes[3..]).is_err();
+        return Some((strip_bom_prefix(text), lossy));
     }
     if looks_text_by_content(bytes) {
-        return Some(decode_text_best_effort(bytes));
+        let lossy = std::str::from_utf8(bytes).is_err();
+        return Some((decode_text_best_effort(bytes), lossy));
     }
     if is_known_text_path(path) {
         if let Some(text) = try_decode_utf16_no_bom(bytes) {
-            return Some(strip_bom_prefix(text));
+            return Some((strip_bom_prefix(text), false));
         }
-        return Some(decode_text_best_effort(bytes));
+        let lossy = std::str::from_utf8(bytes).is_err();
+        return Some((decode_text_best_effort(bytes), lossy));
     }
     None
 }
@@ -1027,6 +1183,7 @@ async fn write_file_inner(
     };
 
     let target_for_io = target.clone();
+    let root_for_history = root.clone();
     let if_match = body.if_match_mtime.clone();
     let bytes_for_io = bytes;
     enum WriteOutcome {
@@ -1056,6 +1213,10 @@ async fn write_file_inner(
                 }
             }
         }
+
+        let history =
+            crate::tools::edit_history::EditHistory::shared_for_workspace(&root_for_history);
+        let _ = history.snapshot_before_write(&target_for_io, "editor_save", "manual save");
 
         if let Err(e) = atomic_write(&target_for_io, &bytes_for_io) {
             return WriteOutcome::Err(e);
@@ -1092,6 +1253,8 @@ async fn write_file_inner(
     }
 }
 
+static ATOMIC_WRITE_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
 fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let parent = target.parent().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "no parent")
@@ -1100,7 +1263,11 @@ fn atomic_write(target: &Path, bytes: &[u8]) -> std::io::Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("tmp");
-    let tmp = parent.join(format!(".{file_name}.tmp.{}", std::process::id()));
+    let seq = ATOMIC_WRITE_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let tmp = parent.join(format!(
+        ".{file_name}.tmp.{}-{seq}",
+        std::process::id()
+    ));
     {
         use std::io::Write;
         let mut file = std::fs::File::create(&tmp)?;
@@ -1171,18 +1338,44 @@ pub async fn handle_workspace_move(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    let from = match resolve_within(&root, &body.from_path, true) {
+    let from = match resolve_within_no_follow(&root, &body.from_path) {
         Ok(p) => p,
         Err(e) => return e.into_response(),
     };
-    let to = match resolve_within(&root, &body.to_path, false) {
+    let to = match resolve_within_target(&root, &body.to_path) {
         Ok(p) => p,
         Err(e) => return e.into_response(),
     };
+    if from == to {
+        return Json(json!({
+            "ok": true,
+            "fromPath": relative_path(&root, &from),
+            "toPath": relative_path(&root, &to),
+        }))
+        .into_response();
+    }
+    if to.starts_with(&from) {
+        return FsError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "Cannot move an entry into itself",
+        ))
+        .into_response();
+    }
     let from_io = from.clone();
     let to_io = to.clone();
     let io: Result<(), FsError> = tokio::task::spawn_blocking(move || {
-        if to_io.exists() {
+        let case_only_rename = {
+            #[cfg(any(windows, target_os = "macos"))]
+            {
+                from_io.to_string_lossy().to_lowercase()
+                    == to_io.to_string_lossy().to_lowercase()
+            }
+            #[cfg(not(any(windows, target_os = "macos")))]
+            {
+                false
+            }
+        };
+        if !case_only_rename && to_io.exists() {
             return Err(FsError::Io(std::io::Error::new(
                 std::io::ErrorKind::AlreadyExists,
                 "Destination already exists",
@@ -1489,7 +1682,7 @@ pub async fn handle_workspace_delete(
         Ok(r) => r,
         Err(e) => return e.into_response(),
     };
-    let target = match resolve_within(&root, &q.path, true) {
+    let target = match resolve_within_no_follow(&root, &q.path) {
         Ok(p) => p,
         Err(e) => return e.into_response(),
     };
@@ -1497,26 +1690,91 @@ pub async fn handle_workspace_delete(
         return FsError::OutsideRoot.into_response();
     }
     let target_io = target.clone();
+    let root_for_history = root.clone();
     let recursive = q.recursive.unwrap_or(false);
-    let io: Result<(), FsError> = tokio::task::spawn_blocking(move || {
-        let metadata = std::fs::metadata(&target_io).map_err(FsError::Io)?;
-        let result = if metadata.is_dir() {
-            if recursive {
-                std::fs::remove_dir_all(&target_io)
-            } else {
-                std::fs::remove_dir(&target_io)
+    let io: Result<bool, FsError> = tokio::task::spawn_blocking(move || {
+        let metadata = std::fs::symlink_metadata(&target_io).map_err(FsError::Io)?;
+        let file_type = metadata.file_type();
+        if file_type.is_symlink() {
+            #[cfg(windows)]
+            {
+                use std::os::windows::fs::FileTypeExt;
+                if file_type.is_symlink_dir() {
+                    std::fs::remove_dir(&target_io).map_err(FsError::Io)?;
+                } else {
+                    std::fs::remove_file(&target_io).map_err(FsError::Io)?;
+                }
             }
+            #[cfg(not(windows))]
+            {
+                std::fs::remove_file(&target_io).map_err(FsError::Io)?;
+            }
+            return Ok(false);
+        }
+        if metadata.is_dir() && !recursive {
+            let mut entries = std::fs::read_dir(&target_io).map_err(FsError::Io)?;
+            if entries.next().is_some() {
+                return Err(FsError::Io(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    "Directory is not empty",
+                )));
+            }
+        }
+        let history =
+            crate::tools::edit_history::EditHistory::shared_for_workspace(&root_for_history);
+        let to_snapshot: Vec<PathBuf> = if metadata.is_dir() {
+            crate::tools::fs_ops::collect_files_bounded(&target_io, MAX_DELETE_HISTORY_SNAPSHOTS)
         } else {
-            std::fs::remove_file(&target_io)
+            vec![target_io.clone()]
         };
-        result.map_err(FsError::Io)
+        for file in &to_snapshot {
+            let _ = history.snapshot_before_write(file, "delete", "pre-delete snapshot");
+        }
+        #[cfg(windows)]
+        {
+            match move_to_recycle_bin(&target_io) {
+                Ok(()) => Ok(true),
+                Err(trash_err) => {
+                    tracing::warn!(
+                        target: "workspace.delete",
+                        err = %trash_err,
+                        "recycle bin move failed; falling back to permanent delete"
+                    );
+                    let result = if metadata.is_dir() {
+                        if recursive {
+                            std::fs::remove_dir_all(&target_io)
+                        } else {
+                            std::fs::remove_dir(&target_io)
+                        }
+                    } else {
+                        std::fs::remove_file(&target_io)
+                    };
+                    result.map_err(FsError::Io)?;
+                    Ok(false)
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            let result = if metadata.is_dir() {
+                if recursive {
+                    std::fs::remove_dir_all(&target_io)
+                } else {
+                    std::fs::remove_dir(&target_io)
+                }
+            } else {
+                std::fs::remove_file(&target_io)
+            };
+            result.map_err(FsError::Io)?;
+            Ok(false)
+        }
     })
     .await
     .unwrap_or_else(|e| Err(FsError::Io(std::io::Error::other(e.to_string()))));
-    if let Err(e) = io {
-        return e.into_response();
+    match io {
+        Ok(trashed) => Json(json!({"ok": true, "trashed": trashed})).into_response(),
+        Err(e) => e.into_response(),
     }
-    Json(json!({"ok": true})).into_response()
 }
 
 #[derive(Debug, Deserialize)]
@@ -1560,12 +1818,16 @@ pub async fn handle_workspace_upload(
         return FsError::TooLarge(bytes.len() as u64).into_response();
     }
     let target_io = target.clone();
+    let root_for_history = root.clone();
     let io: Result<Option<std::fs::Metadata>, FsError> = tokio::task::spawn_blocking(move || {
         if let Some(parent) = target_io.parent() {
             if !parent.exists() {
                 std::fs::create_dir_all(parent).map_err(FsError::Io)?;
             }
         }
+        let history =
+            crate::tools::edit_history::EditHistory::shared_for_workspace(&root_for_history);
+        let _ = history.snapshot_before_write(&target_io, "upload", "pre-upload snapshot");
         atomic_write(&target_io, &bytes).map_err(FsError::Io)?;
         Ok(std::fs::metadata(&target_io).ok())
     })
@@ -1659,7 +1921,19 @@ pub async fn handle_workspace_search(
 
         let needle_lower = needle_raw.to_ascii_lowercase();
         let mut scored: Vec<FuzzyHit> = Vec::new();
-        walk_filenames_fuzzy(&root_io, &root_io, &needle_lower, show_hidden, &mut scored);
+        let mut budget = FuzzyWalkBudget {
+            deadline: std::time::Instant::now()
+                + std::time::Duration::from_millis(FUZZY_WALK_TIMEOUT_MS),
+            visited: 0,
+        };
+        walk_filenames_fuzzy(
+            &root_io,
+            &root_io,
+            &needle_lower,
+            show_hidden,
+            &mut scored,
+            &mut budget,
+        );
         scored.sort_by(|a, b| {
             b.score
                 .cmp(&a.score)
@@ -1702,14 +1976,31 @@ struct FuzzyHit {
     score: i64,
 }
 
+const FUZZY_WALK_TIMEOUT_MS: u64 = 1500;
+
+const FUZZY_WALK_MAX_VISITED: usize = 120_000;
+
+struct FuzzyWalkBudget {
+    deadline: std::time::Instant,
+    visited: usize,
+}
+
+impl FuzzyWalkBudget {
+    fn exhausted(&self) -> bool {
+        self.visited >= FUZZY_WALK_MAX_VISITED
+            || (self.visited % 256 == 0 && std::time::Instant::now() >= self.deadline)
+    }
+}
+
 fn walk_filenames_fuzzy(
     root: &Path,
     dir: &Path,
     needle_lower: &str,
     show_hidden: bool,
     out: &mut Vec<FuzzyHit>,
+    budget: &mut FuzzyWalkBudget,
 ) {
-    if out.len() >= MAX_SEARCH_RESULTS * 4 {
+    if out.len() >= MAX_SEARCH_RESULTS * 4 || budget.exhausted() {
         return;
     }
     let Ok(read) = std::fs::read_dir(dir) else {
@@ -1719,7 +2010,14 @@ fn walk_filenames_fuzzy(
         if out.len() >= MAX_SEARCH_RESULTS * 4 {
             return;
         }
+        budget.visited += 1;
+        if budget.exhausted() {
+            return;
+        }
         let name = entry.file_name().to_string_lossy().to_string();
+        if name == ".git" {
+            continue;
+        }
         if !show_hidden && is_hidden_default(&name) {
             continue;
         }
@@ -1729,7 +2027,7 @@ fn walk_filenames_fuzzy(
         let depth = rel_path.matches('/').count() as u32;
         let name_lower = name.to_ascii_lowercase();
         let rel_lower = rel_path.to_ascii_lowercase();
-        if let Some(score) = fuzzy_score(&name_lower, &rel_lower, needle_lower, depth) {
+        if let Some(score) = fuzzy_score(&name, &name_lower, &rel_lower, needle_lower, depth) {
             out.push(FuzzyHit {
                 name,
                 rel_path,
@@ -1740,12 +2038,13 @@ fn walk_filenames_fuzzy(
             });
         }
         if is_dir {
-            walk_filenames_fuzzy(root, &path, needle_lower, show_hidden, out);
+            walk_filenames_fuzzy(root, &path, needle_lower, show_hidden, out, budget);
         }
     }
 }
 
 fn fuzzy_score(
+    name_raw: &str,
     name_lower: &str,
     rel_lower: &str,
     needle_lower: &str,
@@ -1783,7 +2082,7 @@ fn fuzzy_score(
     } else {
         return None;
     }
-    let camel_bonus = camel_hump_bonus(name_lower, needle_lower);
+    let camel_bonus = camel_hump_bonus(name_raw, needle_lower);
     score += camel_bonus;
     score -= depth as i64 * 3;
     Some(score)
@@ -1866,250 +2165,72 @@ fn run_content_search(
     opts: ContentSearchOptions,
     max_file_size_bytes: u64,
 ) -> Vec<serde_json::Value> {
-    if let Some(rg_results) = run_ripgrep_search(
-        root,
-        pattern,
-        limit,
-        opts,
-        max_file_size_bytes,
-    ) {
-        return rg_results;
-    }
-    fallback_content_search(
-        root,
-        pattern,
-        limit,
-        opts.show_hidden,
-        opts.case_sensitive,
-        opts.whole_word,
-        max_file_size_bytes,
-    )
-}
-
-fn run_ripgrep_search(
-    root: &Path,
-    pattern: &str,
-    limit: usize,
-    opts: ContentSearchOptions,
-    max_file_size_bytes: u64,
-) -> Option<Vec<serde_json::Value>> {
-    let mut cmd = crate::util::hidden_sync_command("rg");
-    cmd.arg("--json")
-        .arg("--max-count=20")
-        .arg("--max-filesize")
-        .arg(format!("{}b", max_file_size_bytes));
-    if !opts.regex {
-        cmd.arg("--fixed-strings");
-    }
-    if opts.whole_word {
-        cmd.arg("--word-regexp");
-    }
-    if !opts.case_sensitive {
-        cmd.arg("--ignore-case");
-    }
+    let mut exclude_globs: Vec<String> = Vec::new();
     if !opts.show_hidden {
-        cmd.arg("--hidden");
         for excl in HIDDEN_DEFAULT_DIRS {
-            cmd.arg("--glob").arg(format!("!**/{}/**", excl));
-            cmd.arg("--glob").arg(format!("!**/{}", excl));
+            exclude_globs.push(format!("!**/{excl}/**"));
+            exclude_globs.push(format!("!**/{excl}"));
         }
-    } else {
-        cmd.arg("--hidden");
     }
-    cmd.arg("--").arg(pattern).arg(root);
-    let output = cmd.output().ok()?;
-    let stdout = String::from_utf8(output.stdout).ok()?;
-    let mut results: Vec<serde_json::Value> = Vec::new();
-    for line in stdout.lines() {
-        if results.len() >= limit {
-            break;
-        }
-        let Ok(value): Result<serde_json::Value, _> = serde_json::from_str(line) else {
-            continue;
-        };
-        let kind = value
-            .get("type")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default();
-        if kind != "match" {
-            continue;
-        }
-        let data = match value.get("data") {
-            Some(d) => d,
-            None => continue,
-        };
-        let path_text = data
-            .get("path")
-            .and_then(|p| p.get("text"))
-            .and_then(|t| t.as_str())
-            .unwrap_or_default();
-        if path_text.is_empty() {
-            continue;
-        }
-        let abs = PathBuf::from(path_text);
-        let rel = relative_path(root, &abs);
-        let line_number = data.get("line_number").and_then(|v| v.as_u64()).unwrap_or(0);
-        let line_text = data
-            .get("lines")
-            .and_then(|l| l.get("text"))
-            .and_then(|s| s.as_str())
-            .unwrap_or_default()
-            .trim_end_matches(['\n', '\r'])
-            .to_string();
-        let mut submatches_json: Vec<serde_json::Value> = Vec::new();
-        if let Some(arr) = data.get("submatches").and_then(|v| v.as_array()) {
-            for sm in arr {
-                let start = sm.get("start").and_then(|v| v.as_u64()).unwrap_or(0);
-                let end = sm.get("end").and_then(|v| v.as_u64()).unwrap_or(0);
-                submatches_json.push(json!({
-                    "start": start,
-                    "end": end,
-                }));
-            }
-        }
-        results.push(json!({
-            "name": abs.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-            "relPath": rel,
-            "isDir": false,
-            "line": line_number.saturating_sub(1),
-            "preview": line_text,
-            "submatches": submatches_json,
-        }));
-    }
-    Some(results)
-}
-
-fn fallback_content_search(
-    root: &Path,
-    pattern: &str,
-    limit: usize,
-    show_hidden: bool,
-    case_sensitive: bool,
-    whole_word: bool,
-    max_file_size_bytes: u64,
-) -> Vec<serde_json::Value> {
-    let needle = if case_sensitive {
-        pattern.to_string()
-    } else {
-        pattern.to_ascii_lowercase()
+    let request = crate::tools::content_search::engine::SearchRequest {
+        root: root.to_path_buf(),
+        pattern: pattern.to_string(),
+        fixed_string: !opts.regex,
+        case_sensitive: opts.case_sensitive,
+        smart_case: false,
+        whole_word: opts.whole_word,
+        multiline: false,
+        include_globs: exclude_globs,
+        respect_ignore: true,
+        include_hidden: true,
+        max_file_size: Some(max_file_size_bytes),
+        max_count_per_file: Some(20),
+        context_before: 0,
+        context_after: 0,
+        encoding: None,
+        timeout: Some(std::time::Duration::from_secs(20)),
+        max_total_matches: limit as u64,
+        collect_lines: true,
     };
-    let mut out: Vec<serde_json::Value> = Vec::new();
-    walk_content(
-        root,
-        root,
-        &needle,
-        show_hidden,
-        case_sensitive,
-        whole_word,
-        max_file_size_bytes,
-        limit,
-        &mut out,
-    );
-    out
-}
-
-fn walk_content(
-    root: &Path,
-    dir: &Path,
-    needle: &str,
-    show_hidden: bool,
-    case_sensitive: bool,
-    whole_word: bool,
-    max_size: u64,
-    limit: usize,
-    out: &mut Vec<serde_json::Value>,
-) {
-    if out.len() >= limit {
-        return;
-    }
-    let Ok(read) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in read.flatten() {
-        if out.len() >= limit {
-            return;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if !show_hidden && is_hidden_default(&name) {
-            continue;
-        }
-        let path = entry.path();
-        let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
-        if is_dir {
-            walk_content(
-                root,
-                &path,
-                needle,
-                show_hidden,
-                case_sensitive,
-                whole_word,
-                max_size,
-                limit,
-                out,
+    let outcome = match crate::tools::content_search::engine::search(&request) {
+        Ok(outcome) => outcome,
+        Err(err) => {
+            tracing::debug!(
+                target: "gateway.workspace_files",
+                error = %err,
+                "content search failed"
             );
-            continue;
+            return Vec::new();
         }
-        let metadata = match entry.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if metadata.len() > max_size {
-            continue;
-        }
-        let Ok(text) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for (idx, line) in text.lines().enumerate() {
-            if out.len() >= limit {
-                return;
+    };
+    let mut results: Vec<serde_json::Value> = Vec::new();
+    'outer: for file in &outcome.files {
+        let rel = relative_path(root, &file.path);
+        let name = file
+            .path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        for lm in &file.lines {
+            if results.len() >= limit {
+                break 'outer;
             }
-            let haystack = if case_sensitive {
-                line.to_string()
-            } else {
-                line.to_ascii_lowercase()
-            };
-            let mut found = false;
-            if whole_word {
-                let needle_chars: Vec<char> = needle.chars().collect();
-                let line_chars: Vec<char> = haystack.chars().collect();
-                if needle_chars.is_empty() {
-                    continue;
-                }
-                let n = needle_chars.len();
-                'outer: for start in 0..line_chars.len().saturating_sub(n - 1) {
-                    if &line_chars[start..start + n] != needle_chars.as_slice() {
-                        continue;
-                    }
-                    let before = if start == 0 {
-                        None
-                    } else {
-                        Some(line_chars[start - 1])
-                    };
-                    let after = line_chars.get(start + n).copied();
-                    let is_word = |c: Option<char>| match c {
-                        Some(ch) => ch.is_alphanumeric() || ch == '_',
-                        None => false,
-                    };
-                    if !is_word(before) && !is_word(after) {
-                        found = true;
-                        break 'outer;
-                    }
-                }
-            } else if haystack.contains(needle) {
-                found = true;
-            }
-            if found {
-                let preview = line.trim_end_matches('\r').to_string();
-                out.push(json!({
-                    "name": path.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default(),
-                    "relPath": relative_path(root, &path),
-                    "isDir": false,
-                    "line": idx as u64,
-                    "preview": preview,
-                }));
-            }
+            let submatches_json: Vec<serde_json::Value> = lm
+                .submatches
+                .iter()
+                .map(|(start, end)| json!({ "start": start, "end": end }))
+                .collect();
+            results.push(json!({
+                "name": name,
+                "relPath": rel,
+                "isDir": false,
+                "line": lm.line_number.saturating_sub(1),
+                "preview": lm.text,
+                "submatches": submatches_json,
+            }));
         }
     }
+    results
 }
 
 #[derive(Debug, Deserialize)]
@@ -2271,13 +2392,16 @@ mod watch_impl {
     ) -> std::io::Result<Sse<impl Stream<Item = Result<SseEvent, Infallible>>>> {
         let (raw_tx, mut raw_rx) =
             tokio::sync::mpsc::channel::<notify::Result<notify::Event>>(RAW_WATCH_CHANNEL_SIZE);
+        let overflow_flag = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let overflow_for_cb = overflow_flag.clone();
         let config = Config::default().with_poll_interval(Duration::from_millis(500));
         let mut watcher = RecommendedWatcher::new(
             move |res: notify::Result<notify::Event>| {
                 if let Err(tokio::sync::mpsc::error::TrySendError::Full(_)) = raw_tx.try_send(res) {
+                    overflow_for_cb.store(true, std::sync::atomic::Ordering::Relaxed);
                     tracing::warn!(
                         target: "workspace.watch",
-                        "file watch event buffer full; dropping event (client may need manual refresh)"
+                        "file watch event buffer full; dropping event and scheduling resync"
                     );
                 }
             },
@@ -2299,6 +2423,8 @@ mod watch_impl {
             let mut recent_removed: VecDeque<RecentRemoved> =
                 VecDeque::with_capacity(RECENT_REMOVED_CAP);
             let mut deadline: Option<tokio::time::Instant> = None;
+            let mut last_resync = Instant::now() - Duration::from_secs(60);
+            let mut pending_resync = false;
 
             loop {
                 let sleep_fut: OptionFuture<_> =
@@ -2307,7 +2433,30 @@ mod watch_impl {
 
                 tokio::select! {
                     biased;
+                    _ = out_tx.closed() => {
+                        return;
+                    }
                     Some(_) = &mut sleep_fut => {
+                        if pending_resync
+                            && last_resync.elapsed() >= Duration::from_secs(2)
+                        {
+                            pending_resync = false;
+                            last_resync = Instant::now();
+                            pending.clear();
+                            pending_renames.clear();
+                            recent_removed.clear();
+                            deadline = None;
+                            crate::gateway::git_routes::invalidate_root(
+                                &git_status_cache,
+                                &root,
+                            );
+                            let payload = json!({"kind": "resync", "relPath": ""});
+                            let sse = SseEvent::default().data(payload.to_string());
+                            if out_tx.send(Ok(sse)).await.is_err() {
+                                return;
+                            }
+                            continue;
+                        }
                         let now = Instant::now();
                         let stale_keys: Vec<usize> = pending_renames
                             .iter()
@@ -2341,6 +2490,15 @@ mod watch_impl {
                             pending.drain().collect();
                         deadline =
                             compute_next_deadline(&pending_renames, &recent_removed);
+                        if pending_resync {
+                            let retry_after = Duration::from_secs(2)
+                                .saturating_sub(last_resync.elapsed());
+                            let resync_at = tokio::time::Instant::now() + retry_after;
+                            deadline = Some(match deadline {
+                                Some(existing) => existing.min(resync_at),
+                                None => resync_at,
+                            });
+                        }
                         for (rel, info) in drained {
                             let mut payload = json!({
                                 "kind": info.kind,
@@ -2364,17 +2522,66 @@ mod watch_impl {
                                 continue;
                             }
                         };
+                        let overflowed = overflow_flag.swap(false, std::sync::atomic::Ordering::Relaxed);
+                        let rescan = event.need_rescan();
+                        if overflowed || rescan {
+                            if last_resync.elapsed() >= Duration::from_secs(2) {
+                                pending_resync = false;
+                                last_resync = Instant::now();
+                                pending.clear();
+                                pending_renames.clear();
+                                recent_removed.clear();
+                                deadline = None;
+                                crate::gateway::git_routes::invalidate_root(
+                                    &git_status_cache,
+                                    &root,
+                                );
+                                let payload = json!({"kind": "resync", "relPath": ""});
+                                let sse = SseEvent::default().data(payload.to_string());
+                                if out_tx.send(Ok(sse)).await.is_err() {
+                                    return;
+                                }
+                                if rescan {
+                                    continue;
+                                }
+                            } else {
+                                pending_resync = true;
+                                let retry_after = Duration::from_secs(2)
+                                    .saturating_sub(last_resync.elapsed());
+                                let resync_at = tokio::time::Instant::now() + retry_after;
+                                deadline = Some(match deadline {
+                                    Some(existing) => existing.min(resync_at),
+                                    None => resync_at,
+                                });
+                                if rescan {
+                                    continue;
+                                }
+                            }
+                        }
                         let mut should_invalidate_git = false;
-                        let rels: Vec<String> = event
+                        let all_rels: Vec<String> = event
                             .paths
                             .iter()
                             .map(|p| relative_path(&root, p))
                             .filter(|r| !r.is_empty())
                             .collect();
-                        for rel in &rels {
-                            if !rel.starts_with(".git/") && rel != ".git" {
+                        for rel in &all_rels {
+                            if super::git_status_relevant(rel) {
                                 should_invalidate_git = true;
                             }
+                        }
+                        let rels: Vec<String> = all_rels
+                            .into_iter()
+                            .filter(|r| !super::is_watch_ignored(r))
+                            .collect();
+                        if rels.is_empty() {
+                            if should_invalidate_git {
+                                crate::gateway::git_routes::invalidate_root(
+                                    &git_status_cache,
+                                    &root,
+                                );
+                            }
+                            continue;
                         }
                         let mut handled = false;
                         match &event.kind {
@@ -2499,7 +2706,7 @@ mod watch_impl {
                         let needs_deadline = !pending.is_empty()
                             || !pending_renames.is_empty()
                             || !recent_removed.is_empty();
-                        if deadline.is_none() && needs_deadline {
+                        if needs_deadline {
                             let wait = if !pending.is_empty() {
                                 DEBOUNCE_MS
                             } else if !pending_renames.is_empty() {
@@ -2507,10 +2714,12 @@ mod watch_impl {
                             } else {
                                 RECENT_REMOVED_TTL_MS
                             };
-                            deadline = Some(
-                                tokio::time::Instant::now()
-                                    + Duration::from_millis(wait),
-                            );
+                            let candidate = tokio::time::Instant::now()
+                                + Duration::from_millis(wait);
+                            deadline = Some(match deadline {
+                                Some(existing) => existing.min(candidate),
+                                None => candidate,
+                            });
                         }
                     }
                 }

@@ -116,7 +116,9 @@ impl EventSink {
 fn turn_event_is_droppable(event: &TurnEvent) -> bool {
     matches!(
         event,
-        TurnEvent::ProgressTick { .. } | TurnEvent::StatusUpdate { .. }
+        TurnEvent::ProgressTick { .. }
+            | TurnEvent::StatusUpdate { .. }
+            | TurnEvent::ToolArgsDelta { .. }
     )
 }
 
@@ -138,6 +140,17 @@ pub fn draft_to_turn(event: DraftEvent) -> Option<TurnEvent> {
             name,
             args,
             tool_call_id,
+        }),
+        DraftEvent::ToolArgsDelta {
+            call_index,
+            name,
+            args_delta,
+            args_total_len,
+        } => Some(TurnEvent::ToolArgsDelta {
+            call_index,
+            name,
+            args_delta,
+            args_total_len,
         }),
         DraftEvent::ToolResult {
             name,

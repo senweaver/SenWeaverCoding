@@ -4,6 +4,7 @@ powershell = "Execute a PowerShell command on Windows with workspace sandboxing 
 file_read = "Read file contents from the workspace with optional line-range (offset/limit) and a compaction level (smart/signatures), so you can avoid loading whole large files."
 file_write = "Create or overwrite a workspace file with the provided content."
 file_edit = "Apply a precise search-and-replace edit to an existing workspace file."
+apply_edit = "Merge a lazy edit snippet (with `// ... existing code ...` markers) into an existing file via a fast apply model; best for multi-region or structural edits."
 multi_edit = "Apply multiple coordinated file edits atomically across one or more files."
 notebook_edit = "Edit Jupyter notebook cells while preserving notebook structure and metadata."
 glob_search = "Find workspace files matching a glob pattern, sorted by modification time."

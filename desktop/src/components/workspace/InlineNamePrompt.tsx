@@ -16,6 +16,7 @@ export function InlineNamePrompt({ initial, placeholder, onCancel, onSubmit }: P
   const t = useTranslation()
   const [value, setValue] = useState(initial ?? '')
   const ref = useRef<HTMLInputElement | null>(null)
+  const doneRef = useRef(false)
 
   useEffect(() => {
     ref.current?.focus()
@@ -29,15 +30,27 @@ export function InlineNamePrompt({ initial, placeholder, onCancel, onSubmit }: P
       value={value}
       onChange={(e) => setValue(e.target.value)}
       placeholder={placeholder ?? t('files.namePlaceholder')}
-      onBlur={() => onCancel()}
+      onBlur={() => {
+        if (doneRef.current) return
+        doneRef.current = true
+        const trimmed = value.trim()
+        if (trimmed.length > 0 && trimmed !== (initial ?? '')) {
+          onSubmit(trimmed)
+        } else {
+          onCancel()
+        }
+      }}
       onKeyDown={(event) => {
         if (event.key === 'Enter') {
           event.preventDefault()
+          if (doneRef.current) return
+          doneRef.current = true
           const trimmed = value.trim()
           if (trimmed.length > 0) onSubmit(trimmed)
           else onCancel()
         } else if (event.key === 'Escape') {
           event.preventDefault()
+          doneRef.current = true
           onCancel()
         }
       }}

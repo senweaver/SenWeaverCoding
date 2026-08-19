@@ -479,9 +479,7 @@ impl OpenRouterProvider {
     }
 
     async fn api_error_text(response: reqwest::Response) -> (reqwest::StatusCode, String) {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        (status, body)
+        super::stream_error_body_with_retry_after(response).await
     }
 
     fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<NativeToolSpec>> {
@@ -902,7 +900,7 @@ impl Provider for OpenRouterProvider {
                 return Box::pin(self.chat_with_system(system_prompt, message, model, temperature))
                     .await;
             }
-            anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
+            return Err(super::provider_http_error("OpenRouter", status, &body));
         }
 
         let body = Self::read_response_body("OpenRouter", response).await?;
@@ -998,7 +996,7 @@ impl Provider for OpenRouterProvider {
                 Self::blacklist_reasoning(model);
                 return Box::pin(self.chat_with_history(messages, model, temperature)).await;
             }
-            anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
+            return Err(super::provider_http_error("OpenRouter", status, &body));
         }
 
         let body = Self::read_response_body("OpenRouter", response).await?;
@@ -1131,7 +1129,7 @@ impl Provider for OpenRouterProvider {
                     .await?;
                 return Ok(ProviderChatResponse::text_only(Some(text), None));
             }
-            anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
+            return Err(super::provider_http_error("OpenRouter", status, &body));
         }
 
         let body = Self::read_response_body("OpenRouter", response).await?;
@@ -1285,7 +1283,7 @@ impl Provider for OpenRouterProvider {
                 let text = self.chat_with_history(messages, model, temperature).await?;
                 return Ok(ProviderChatResponse::text_only(Some(text), None));
             }
-            anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
+            return Err(super::provider_http_error("OpenRouter", status, &body));
         }
 
         let body = Self::read_response_body("OpenRouter", response).await?;
@@ -1402,7 +1400,7 @@ impl Provider for OpenRouterProvider {
                 ))
                 .await;
             }
-            anyhow::bail!("OpenRouter API error ({status}): {sanitized}");
+            return Err(super::provider_http_error("OpenRouter", status, &body));
         }
 
         let body = Self::read_response_body("OpenRouter", response).await?;
@@ -1569,7 +1567,12 @@ impl Provider for OpenRouterProvider {
                     }
 
                     let _ = tx
-                        .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
+                        .send(Err(super::stream_upstream_error(
+                            "OpenRouter",
+                            status,
+                            &error,
+                            &sanitized,
+                        )))
                         .await;
                     return;
                 }
@@ -1715,7 +1718,12 @@ impl Provider for OpenRouterProvider {
                     }
 
                     let _ = tx
-                        .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
+                        .send(Err(super::stream_upstream_error(
+                            "OpenRouter",
+                            status,
+                            &error,
+                            &sanitized,
+                        )))
                         .await;
                     return;
                 }
@@ -1851,7 +1859,12 @@ impl Provider for OpenRouterProvider {
                     }
 
                     let _ = tx
-                        .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
+                        .send(Err(super::stream_upstream_error(
+                            "OpenRouter",
+                            status,
+                            &error,
+                            &sanitized,
+                        )))
                         .await;
                     return;
                 }

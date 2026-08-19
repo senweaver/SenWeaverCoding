@@ -253,6 +253,13 @@ impl WorkerSupervisor {
             .model
             .clone()
             .filter(|s| !s.trim().is_empty())
+            .or_else(|| {
+                ctx.config
+                    .agent_runtime
+                    .subagent_model
+                    .clone()
+                    .filter(|s| !s.trim().is_empty())
+            })
             .unwrap_or_else(|| {
                 ctx.config
                     .default_model

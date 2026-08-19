@@ -67,7 +67,7 @@ pub async fn check(target_version: Option<&str>) -> Result<UpdateInfo> {
     })
 }
 
-pub async fn run(target_version: Option<&str>) -> Result<()> {
+pub async fn run(target_version: Option<&str>, force: bool) -> Result<()> {
 
     info!("Step 1/6: Preflight checks...");
     let update_info = check(target_version).await?;
@@ -81,6 +81,19 @@ pub async fn run(target_version: Option<&str>) -> Result<()> {
         "Update available: v{} -> v{}",
         update_info.current_version, update_info.latest_version
     );
+
+    if !force {
+        use std::io::Write;
+        print!("Proceed with in-place update? This replaces the current binary. [y/N] ");
+        let _ = std::io::stdout().flush();
+        let mut line = String::new();
+        let _ = std::io::stdin().read_line(&mut line);
+        let answer = line.trim().to_ascii_lowercase();
+        if answer != "y" && answer != "yes" {
+            println!("Update cancelled. Re-run with --force to skip this prompt.");
+            return Ok(());
+        }
+    }
 
     let download_url = update_info
         .download_url

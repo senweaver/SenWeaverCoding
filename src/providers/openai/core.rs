@@ -691,7 +691,12 @@ impl OpenAiProvider {
                     super::super::stream_error_body_with_retry_after(response).await;
                 let sanitized = super::super::sanitize_api_error(&error_body);
                 let _ = tx
-                    .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
+                    .send(Err(super::super::stream_upstream_error(
+                        "OpenAI",
+                        status,
+                        &error_body,
+                        &sanitized,
+                    )))
                     .await;
                 return;
             }
@@ -1142,7 +1147,12 @@ impl Provider for OpenAiProvider {
                     super::super::stream_error_body_with_retry_after(response).await;
                 let sanitized = super::super::sanitize_api_error(&error_body);
                 let _ = tx
-                    .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
+                    .send(Err(super::super::stream_upstream_error(
+                        "OpenAI",
+                        status,
+                        &error_body,
+                        &sanitized,
+                    )))
                     .await;
                 return;
             }

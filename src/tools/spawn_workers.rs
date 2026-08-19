@@ -256,7 +256,7 @@ impl Tool for SpawnWorkersTool {
                             },
                             "model": {
                                 "type": "string",
-                                "description": "Optional model override; defaults to the parent session's model."
+                                "description": "Optional model override; when omitted, falls back to the configured subagent model (agent_runtime.subagent_model) and then to the parent session's model."
                             },
                             "context": {
                                 "type": "string",
@@ -785,9 +785,10 @@ impl SpawnWorkersTool {
             model_context_windows: self.config.model_context_windows.clone(),
             model_providers: self.config.model_providers.clone(),
         };
-        let provider = crate::providers::create_provider_with_options_async(
+        let provider = crate::providers::create_resilient_runtime_provider_async(
             provider_name,
             self.config.api_key.clone(),
+            self.config.api_url.clone(),
             runtime_options,
         )
         .await

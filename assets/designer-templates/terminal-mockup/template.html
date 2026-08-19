@@ -1,56 +1,82 @@
+<!-- SenWeaverCoding built-in template -->
 <!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Terminal</title>
     <style>
       :root {
+        --od-accent: #4ec9b0;
+        --od-scale: 1;
+        --od-density: 1;
+        --od-motion: 1;
+        --accent: var(--od-accent);
+        --page: #0e0e10;
         --bg: #1e1e1e;
+        --chrome: #2d2d2d;
         --fg: #d4d4d4;
-        --accent: #4ec9b0;
         --prompt: #569cd6;
         --muted: #858585;
         --error: #f48771;
+        --shadow: 0 30px 70px rgba(0, 0, 0, 0.5);
+        --fs-13: calc(13px * var(--od-scale));
+        --fs-14: calc(14px * var(--od-scale));
+        --pad-page: calc(32px * var(--od-density));
+        --pad-chrome: calc(10px * var(--od-density)) calc(14px * var(--od-density));
+        --pad-body: calc(18px * var(--od-density)) calc(20px * var(--od-density));
+        --dur-blink: calc(1s * var(--od-motion));
+        --font-mono: "SF Mono", Menlo, Consolas, "Cascadia Mono", monospace;
+      }
+      html[data-od-mode="light"] {
+        --page: #e8e9ec;
+        --bg: #fbfbfc;
+        --chrome: #ececef;
+        --fg: #2c2f36;
+        --prompt: #1f66c1;
+        --muted: #8a8f98;
+        --error: #c4442e;
+        --shadow: 0 30px 70px rgba(24, 28, 40, 0.18);
       }
       * { box-sizing: border-box; }
       body {
         margin: 0;
-        background: #0e0e10;
-        font-family: "SF Mono", Menlo, Consolas, monospace;
+        background: var(--page);
+        font-family: var(--font-mono);
         min-height: 100vh;
         display: flex;
         align-items: center;
         justify-content: center;
-        padding: 32px;
+        padding: var(--pad-page);
       }
       .terminal {
         width: 100%;
         max-width: 880px;
         background: var(--bg);
         border-radius: 12px;
-        box-shadow: 0 30px 70px rgba(0,0,0,0.5);
+        box-shadow: var(--shadow);
         overflow: hidden;
         color: var(--fg);
       }
       .titlebar {
-        background: #2d2d2d;
-        padding: 10px 14px;
+        background: var(--chrome);
+        padding: var(--pad-chrome);
         display: flex;
         align-items: center;
-        gap: 8px;
+        gap: calc(8px * var(--od-density));
       }
       .dot { width: 12px; height: 12px; border-radius: 50%; }
       .dot.r { background: #ff5f57; }
       .dot.y { background: #febc2e; }
       .dot.g { background: #28c840; }
       .title {
-        flex: 1; text-align: center; font-size: 13px; color: var(--muted);
+        flex: 1; text-align: center; font-size: var(--fs-13); color: var(--muted);
       }
       .body {
-        padding: 18px 20px;
-        height: 480px;
+        padding: var(--pad-body);
+        height: calc(480px * var(--od-density));
         overflow-y: auto;
-        font-size: 14px;
+        font-size: var(--fs-14);
         line-height: 1.55;
       }
       .line { white-space: pre-wrap; }
@@ -58,7 +84,7 @@
       .accent { color: var(--accent); }
       .muted { color: var(--muted); }
       .error { color: var(--error); }
-      .input-row { display: flex; gap: 8px; }
+      .input-row { display: flex; gap: calc(8px * var(--od-density)); }
       .input-row input {
         flex: 1;
         background: transparent;
@@ -70,24 +96,27 @@
       .cursor::after {
         content: "▎";
         color: var(--fg);
-        animation: blink 1s steps(2) infinite;
+        animation: blink var(--dur-blink) steps(2) infinite;
       }
       @keyframes blink { 50% { opacity: 0; } }
+      @media (prefers-reduced-motion: reduce) {
+        .cursor::after { animation: none; }
+      }
     </style>
   </head>
   <body>
-    <div class="terminal">
-      <div class="titlebar">
+    <div class="terminal" data-od-id="terminal-window" data-od-label="Terminal window">
+      <div class="titlebar" data-od-id="terminal-titlebar" data-od-label="Title bar">
         <span class="dot r"></span>
         <span class="dot y"></span>
         <span class="dot g"></span>
-        <span class="title">user@host: ~/project</span>
+        <span class="title" data-od-id="terminal-title" data-od-label="Session title">user@host: ~/project</span>
       </div>
-      <div class="body" id="body">
+      <div class="body" id="body" data-od-id="terminal-body" data-od-label="Terminal output">
         <div class="line"><span class="accent">welcome</span> to the demo terminal. type <span class="muted">help</span></div>
-        <div class="input-row">
+        <div class="input-row" data-od-id="terminal-input" data-od-label="Command input">
           <span class="prompt">~/project ❯</span>
-          <input id="input" autocomplete="off" />
+          <input id="input" autocomplete="off" aria-label="Terminal command input" />
         </div>
       </div>
     </div>

@@ -13,6 +13,8 @@ import { useTranslation } from '../i18n'
 import { MessageList } from '../components/chat/MessageList'
 import { SectionErrorBoundary } from '../components/layout/SectionErrorBoundary'
 import { ChatInput } from '../components/chat/ChatInput'
+import { TurnCheckpointTimeline } from '../components/chat/TurnCheckpointTimeline'
+import { StreamingEditPreview } from '../components/chat/StreamingEditPreview'
 import { DebugResultCard } from '../components/debug/DebugResultCard'
 import { TeamStatusBar } from '../components/teams/TeamStatusBar'
 import { SessionTaskBar } from '../components/chat/SessionTaskBar'
@@ -301,6 +303,16 @@ export function ActiveSession() {
         </SectionErrorBoundary>
       )}
 
+      {activeTabId && !isMemberSession && (
+        <SectionErrorBoundary label="StreamingEditPreview" resetKeys={[activeTabId]}>
+          <StreamingEditPreview sessionId={activeTabId} />
+        </SectionErrorBoundary>
+      )}
+      {activeTabId && !isMemberSession && (
+        <SectionErrorBoundary label="TurnCheckpointTimeline" resetKeys={[activeTabId]}>
+          <TurnCheckpointTimeline sessionId={activeTabId} />
+        </SectionErrorBoundary>
+      )}
       <SectionErrorBoundary label="ChatInput" resetKeys={[activeTabId]}>
         <ChatInput variant={isEmpty && !isMemberSession ? 'hero' : 'default'} />
       </SectionErrorBoundary>

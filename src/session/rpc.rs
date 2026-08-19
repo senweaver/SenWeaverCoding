@@ -53,9 +53,80 @@ fn secrets_match(a: &str, b: &str) -> bool {
 #[async_trait::async_trait]
 pub trait SessionRpcTransport: Send + Sync + 'static {
 
-    async fn send(&self, delta: &SessionDelta) -> std::io::Result<()>;
+    async fn send(&self, session_id: &str, delta: &SessionDelta) -> std::io::Result<()>;
+}
 
-    async fn recv(&self) -> std::io::Result<SessionDelta>;
+pub fn rpc_socket_dir(workspace_root: &Path) -> PathBuf {
+    workspace_root.join(".sen").join("session-rpc")
+}
+
+pub fn rpc_socket_path(workspace_root: &Path, session_id: &str) -> PathBuf {
+    rpc_socket_dir(workspace_root).join(session_id)
+}
+
+static SESSION_SOCKET_REGISTRY: once_cell::sync::Lazy<
+    parking_lot::RwLock<std::collections::HashMap<String, PathBuf>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
+
+fn register_session_socket(session_id: &str, socket_path: PathBuf) {
+    SESSION_SOCKET_REGISTRY
+        .write()
+        .insert(session_id.to_string(), socket_path);
+}
+
+fn lookup_session_socket(session_id: &str) -> Option<PathBuf> {
+    SESSION_SOCKET_REGISTRY.read().get(session_id).cloned()
+}
+
+pub struct PeerSocketTransport;
+
+impl PeerSocketTransport {
+    #[must_use]
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Default for PeerSocketTransport {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait::async_trait]
+impl SessionRpcTransport for PeerSocketTransport {
+    async fn send(&self, session_id: &str, delta: &SessionDelta) -> std::io::Result<()> {
+        let Some(path) = lookup_session_socket(session_id) else {
+            return Ok(());
+        };
+        send_delta_to_peer(&path, delta).await
+    }
+}
+
+pub fn enable_cross_process_sync(
+    workspace_root: &Path,
+    session_id: &str,
+    actor: &Arc<SessionActor>,
+) {
+    let dir = rpc_socket_dir(workspace_root);
+    let _ = std::fs::create_dir_all(&dir);
+    let socket = dir.join(session_id);
+    register_session_socket(session_id, socket.clone());
+    let actor_clone = Arc::clone(actor);
+    let session_for_log = session_id.to_string();
+    crate::runtime::spawn_supervised("session.rpc.bootstrap", async move {
+        let _ = spawn_rpc_listener(actor_clone, socket).await;
+        tracing::debug!(
+            target: "session.rpc",
+            session_id = %session_for_log,
+            "cross-process session sync listener requested"
+        );
+    });
+    static TRANSPORT_INSTALLED: std::sync::Once = std::sync::Once::new();
+    TRANSPORT_INSTALLED.call_once(move || {
+        crate::session::sync::SessionSyncHub::global()
+            .with_transport(Arc::new(PeerSocketTransport::new()));
+    });
 }
 
 #[cfg(unix)]

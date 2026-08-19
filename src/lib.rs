@@ -126,7 +126,6 @@ pub mod lsp;
 
 pub mod inline_edit;
 pub mod integrations;
-pub mod memdir;
 pub mod memory;
 pub mod migration;
 pub mod multimodal;
@@ -580,6 +579,12 @@ pub enum MemoryCommands {
 
         #[arg(long)]
         category: Option<String>,
+
+        #[arg(long)]
+        yes: bool,
+    },
+
+    Reembed {
 
         #[arg(long)]
         yes: bool,

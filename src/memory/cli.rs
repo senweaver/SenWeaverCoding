@@ -23,7 +23,53 @@ pub async fn handle_command(command: crate::MemoryCommands, config: &Config) -> 
         crate::MemoryCommands::Clear { key, category, yes } => {
             handle_clear(config, key, category, yes).await
         }
+        crate::MemoryCommands::Reembed { yes } => handle_reembed(config, yes).await,
     }
+}
+
+async fn handle_reembed(config: &Config, yes: bool) -> Result<()> {
+    if !yes {
+        println!(
+            "{}",
+            style(
+                "This re-embeds every stored memory with the current embedding model \
+                 (needed after switching embedding models) and clears the embedding cache. \
+                 Re-run with --yes to proceed."
+            )
+            .yellow()
+        );
+        return Ok(());
+    }
+    let mem = super::create_memory_with_storage_and_routes_async(
+        config.memory.clone(),
+        config.embedding_routes.clone(),
+        Some(config.storage.provider.config.clone()),
+        config.workspace_dir.clone(),
+        config.api_key.clone(),
+    )
+    .await?;
+    println!("Re-embedding stored memories with the current model...");
+    let updated = mem.reembed_all().await?;
+    println!(
+        "{}",
+        style(format!("Re-embedded {updated} memory entries.")).green()
+    );
+
+    let rag_snapshot_dir = config.workspace_dir.join(".sen").join("rag");
+    if rag_snapshot_dir.exists() {
+        match std::fs::remove_dir_all(&rag_snapshot_dir) {
+            Ok(()) => println!(
+                "Cleared code RAG snapshot ({}); it will rebuild with the current embedder on next use.",
+                rag_snapshot_dir.display()
+            ),
+            Err(e) => tracing::warn!(
+                path = %rag_snapshot_dir.display(),
+                error = %e,
+                "failed to clear code RAG snapshot during reembed"
+            ),
+        }
+    }
+    Ok(())
 }
 
 fn create_cli_memory(config: &Config) -> Result<Box<dyn Memory>> {

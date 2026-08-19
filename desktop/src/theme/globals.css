@@ -142,6 +142,18 @@ body.sen-file-dragging * {
   --color-error-container: #FFDAD6;
   --color-on-error-container: #410002;
 
+  --color-surface-elevated: var(--color-surface-container-lowest);
+  --color-surface-raised: var(--color-surface-container-high);
+  --color-surface-secondary: var(--color-surface-container);
+  --color-accent: var(--color-brand);
+  --color-on-accent: var(--color-on-primary);
+  --color-on-primary-container: var(--color-on-primary);
+  --color-danger: var(--color-error);
+  --color-success-container: #D8F0DC;
+  --color-warning-container: #FBE6C8;
+  --color-info: #2D628F;
+  --color-info-container: #D6E7F8;
+
   --color-inverse-surface: #2F312E;
   --color-inverse-on-surface: #F2F1ED;
   --color-inverse-primary: #F6CC78;
@@ -335,6 +347,18 @@ body.sen-file-dragging * {
   --color-error-container: #93000A;
   --color-on-error-container: #FFDAD6;
 
+  --color-surface-elevated: var(--color-surface-container-high);
+  --color-surface-raised: var(--color-surface-container-high);
+  --color-surface-secondary: var(--color-surface-container);
+  --color-accent: var(--color-brand);
+  --color-on-accent: var(--color-on-primary);
+  --color-on-primary-container: var(--color-on-primary);
+  --color-danger: var(--color-error);
+  --color-success-container: #25402C;
+  --color-warning-container: #423318;
+  --color-info: #9ACBFE;
+  --color-info-container: #22405C;
+
   --color-inverse-surface: #E5E2E1;
   --color-inverse-on-surface: #1B1C1A;
   --color-inverse-primary: #A16900;
@@ -468,22 +492,24 @@ body.sen-file-dragging * {
   --color-selection-fg: #FBE7E1;
 }
 
-.material-symbols-outlined {
-  font-family: 'Material Symbols Outlined';
-  font-weight: normal;
-  font-style: normal;
-  font-size: 24px;
-  line-height: 1;
-  letter-spacing: normal;
-  text-transform: none;
-  display: inline-block;
-  white-space: nowrap;
-  word-wrap: normal;
-  direction: ltr;
-  -webkit-font-feature-settings: 'liga';
-  -webkit-font-smoothing: antialiased;
-  font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
-  vertical-align: middle;
+@layer base {
+  .material-symbols-outlined {
+    font-family: 'Material Symbols Outlined';
+    font-weight: normal;
+    font-style: normal;
+    font-size: 24px;
+    line-height: 1;
+    letter-spacing: normal;
+    text-transform: none;
+    display: inline-block;
+    white-space: nowrap;
+    word-wrap: normal;
+    direction: ltr;
+    -webkit-font-feature-settings: 'liga';
+    -webkit-font-smoothing: antialiased;
+    font-variation-settings: 'FILL' 0, 'wght' 400, 'GRAD' 0, 'opsz' 24;
+    vertical-align: middle;
+  }
 }
 
 * {

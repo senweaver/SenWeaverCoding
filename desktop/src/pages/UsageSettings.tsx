@@ -146,6 +146,14 @@ export function UsageSettings() {
   const runtimeLoading = useRuntimeStore((s) => s.isLoading)
   const fetchRuntime = useRuntimeStore((s) => s.fetch)
   const [completionStats, setCompletionStats] = useState<CompletionStats | null>(null)
+  const [dismissedErrors, setDismissedErrors] = useState<string[]>([])
+
+  const errorMessages = useMemo(() => {
+    const unique = Array.from(
+      new Set([error, runtimeError].filter((msg): msg is string => Boolean(msg))),
+    )
+    return unique.filter((msg) => !dismissedErrors.includes(msg))
+  }, [error, runtimeError, dismissedErrors])
 
   const fetchCompletionStats = useCallback(() => {
     editorAssistApi
@@ -317,16 +325,24 @@ export function UsageSettings() {
         </Button>
       </div>
 
-      {error && (
-        <div className="rounded-md border border-[var(--color-error-container)] bg-[var(--color-error-container)] px-3 py-2 text-xs text-[var(--color-error)]">
-          {error}
+      {errorMessages.map((msg) => (
+        <div
+          key={msg}
+          className="flex items-start justify-between gap-2 rounded-md border border-[var(--color-error-container)] bg-[var(--color-error-container)] px-3 py-2 text-xs text-[var(--color-error)]"
+        >
+          <span className="min-w-0 break-words">{msg}</span>
+          <button
+            type="button"
+            onClick={() => setDismissedErrors((prev) => [...prev, msg])}
+            className="shrink-0 rounded p-0.5 hover:bg-[var(--color-error)]/10 cursor-pointer"
+            aria-label={t('common.close')}
+          >
+            <span className="material-symbols-outlined text-[14px] leading-none align-middle">
+              close
+            </span>
+          </button>
         </div>
-      )}
-      {runtimeError && (
-        <div className="rounded-md border border-[var(--color-error-container)] bg-[var(--color-error-container)] px-3 py-2 text-xs text-[var(--color-error)]">
-          {runtimeError}
-        </div>
-      )}
+      ))}
 
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
         <KpiCard
@@ -406,9 +422,9 @@ export function UsageSettings() {
             {t('settings.usage.empty')}
           </p>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto overflow-y-auto max-h-80">
             <table className="w-full text-xs">
-              <thead className="text-[var(--color-text-tertiary)]">
+              <thead className="sticky top-0 z-10 bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
                 <tr className="border-b border-[var(--color-border)]/40">
                   <Th>{t('settings.usage.colProvider')}</Th>
                   <Th align="right">{t('settings.usage.colModelCount')}</Th>
@@ -472,9 +488,9 @@ export function UsageSettings() {
             {t('settings.usage.empty')}
           </p>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto overflow-y-auto max-h-80">
             <table className="w-full text-xs">
-              <thead className="text-[var(--color-text-tertiary)]">
+              <thead className="sticky top-0 z-10 bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
                 <tr className="border-b border-[var(--color-border)]/40">
                   <Th>{t('settings.usage.colWorkspace')}</Th>
                   <Th align="right">{t('settings.usage.colSessionCount')}</Th>
@@ -535,9 +551,9 @@ export function UsageSettings() {
             {t('settings.usage.empty')}
           </p>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto overflow-y-auto max-h-80">
             <table className="w-full text-xs">
-              <thead className="text-[var(--color-text-tertiary)]">
+              <thead className="sticky top-0 z-10 bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
                 <tr className="border-b border-[var(--color-border)]/40">
                   <Th>{t('settings.usage.colModel')}</Th>
                   <Th align="right">{t('settings.usage.colRequests')}</Th>
@@ -601,9 +617,9 @@ export function UsageSettings() {
             {t('settings.usage.empty')}
           </p>
         ) : (
-          <div className="overflow-x-auto">
+          <div className="overflow-x-auto overflow-y-auto max-h-80">
             <table className="w-full text-xs">
-              <thead className="text-[var(--color-text-tertiary)]">
+              <thead className="sticky top-0 z-10 bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
                 <tr className="border-b border-[var(--color-border)]/40">
                   <Th>{t('settings.usage.colSession')}</Th>
                   <Th>{t('settings.usage.colWorkspace')}</Th>
@@ -899,9 +915,9 @@ function BackgroundTasksSection({
           {t('settings.usage.tasksEmpty')}
         </p>
       ) : (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto overflow-y-auto max-h-80">
           <table className="w-full text-xs">
-            <thead className="text-[var(--color-text-tertiary)]">
+            <thead className="sticky top-0 z-10 bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
               <tr className="border-b border-[var(--color-border)]/40">
                 <Th>{t('settings.usage.colTaskName')}</Th>
                 <Th align="right">{t('settings.usage.colTaskCount')}</Th>
@@ -1004,9 +1020,9 @@ function CodingModeSection({
       </div>
 
       {noData ? null : (
-        <div className="overflow-x-auto">
+        <div className="overflow-x-auto overflow-y-auto max-h-80">
           <table className="w-full text-xs">
-            <thead className="text-[var(--color-text-tertiary)]">
+            <thead className="sticky top-0 z-10 bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
               <tr className="border-b border-[var(--color-border)]/40">
                 <Th>{t('settings.usage.colCodingMode')}</Th>
                 <Th align="right">{t('settings.usage.colRequests')}</Th>

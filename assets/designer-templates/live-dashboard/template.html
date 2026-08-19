@@ -1,23 +1,5 @@
+<!-- SenWeaverCoding built-in template -->
 <!DOCTYPE html>
-<!--
-  OD · live-dashboard · template seed
-  ----------------------------------------------------------------------
-  This is the skeleton an agent starts from. The structure is locked.
-  The agent is expected to:
-
-   1. Replace every {{placeholder}} with the user's brief or DESIGN.md.
-   2. Fill the four SEED_* arrays at the bottom (people, rows, feed,
-      series) with plausible mock data — this is what shows when the
-      connector is offline or the user picks `inputs.connector === mock`.
-   3. Re-skin the CSS custom-property block (`:root`) using the active
-      DESIGN.md tokens. Do not introduce new property names.
-   4. Wire the Refresh button to a real connector by replacing the
-      contents of `seedNextChange()` with a `poll()` call into
-      `/api/od/connectors/poll`. See references/connectors.md.
-   5. Honor `prefers-reduced-motion: reduce` everywhere.
-
-  Hard nos: see references/checklist.md (P0 rows are non-negotiable).
--->
 <html lang="en">
 <head>
 <meta charset="UTF-8" />
@@ -26,105 +8,153 @@
 <title>{{workspace_name}} · {{page_title}}</title>
 <style>
   :root {
+    --od-accent: oklch(72% 0.10 198);
+    --od-scale: 1;
+    --od-density: 1;
+    --od-motion: 1;
     --bg: #ffffff;
     --bg-soft: #f7f6f3;
     --bg-hover: #efeeec;
+    --surface: #ffffff;
     --ink: #37352f;
     --ink-2: #787774;
     --ink-3: #9b9a97;
     --line: #ececea;
     --line-strong: #d3d1cb;
-    --accent: oklch(72% 0.10 var(--accent-hue, 198));
-    --accent-ink: oklch(45% 0.12 var(--accent-hue, 198));
+    --accent: var(--od-accent);
+    --accent-ink: color-mix(in oklch, var(--accent) 72%, black);
+    --accent-fill: color-mix(in oklch, var(--accent) 10%, transparent);
+    --accent-wash: color-mix(in oklch, var(--accent) 6%, transparent);
+    --accent-flash: color-mix(in oklch, var(--accent) 18%, transparent);
+    --ok: #2ecc71;
+    --warn: #e6a23c;
+    --delta-up: #2b8a3e;
+    --delta-down: #c0392b;
+    --toast-bg: #1f1f1f;
+    --toast-fg: #ffffff;
     --pill-done-bg: #dbeddb;       --pill-done-ink: #2b593f;
     --pill-progress-bg: #fdecc8;   --pill-progress-ink: #976d23;
     --pill-blocked-bg: #ffe2dd;    --pill-blocked-ink: #b13b2c;
     --pill-todo-bg: #e9e5e3;       --pill-todo-ink: #5a534f;
     --pill-review-bg: #d3e5ef;     --pill-review-ink: #1f5b78;
+    --fs-10: calc(10px * var(--od-scale));
+    --fs-11: calc(11px * var(--od-scale));
+    --fs-12: calc(12px * var(--od-scale));
+    --fs-13: calc(13px * var(--od-scale));
+    --fs-14: calc(14px * var(--od-scale));
+    --fs-18: calc(18px * var(--od-scale));
+    --fs-32: calc(32px * var(--od-scale));
+    --fs-40: calc(40px * var(--od-scale));
+    --pad-card: calc(16px * var(--od-density)) calc(18px * var(--od-density));
+    --gap-col: calc(24px * var(--od-density));
+    --dur-fast: calc(.15s * var(--od-motion));
+    --dur-value: calc(.25s * var(--od-motion));
+    --dur-toast: calc(.2s * var(--od-motion));
+    --dur-pulse: calc(1.8s * var(--od-motion));
+    --dur-spin: calc(.8s * var(--od-motion));
+    --dur-rowflash: calc(1.4s * var(--od-motion));
     --radius-sm: 4px; --radius-md: 6px; --radius-lg: 10px;
+  }
+  html[data-od-mode="dark"] {
+    --bg: #191919;
+    --bg-soft: #202020;
+    --bg-hover: #2a2a2a;
+    --surface: #1f1f1f;
+    --ink: #d4d4d0;
+    --ink-2: #97968f;
+    --ink-3: #6f6e68;
+    --line: #2e2d2b;
+    --line-strong: #45443f;
+    --toast-bg: #ececea;
+    --toast-fg: #1f1f1f;
+    --delta-up: #57b877;
+    --delta-down: #e07a68;
+    --pill-done-bg: #1f3a2a;       --pill-done-ink: #7fc79a;
+    --pill-progress-bg: #3d3222;   --pill-progress-ink: #dbaf5a;
+    --pill-blocked-bg: #3f2521;    --pill-blocked-ink: #e58374;
+    --pill-todo-bg: #33312e;       --pill-todo-ink: #a5a09b;
+    --pill-review-bg: #21343f;     --pill-review-ink: #7db4d0;
   }
   * { box-sizing: border-box; }
   html, body { margin: 0; padding: 0; background: var(--bg); color: var(--ink);
     font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue",
                  "Noto Sans", "PingFang SC", "Hiragino Sans GB", sans-serif;
-    font-size: 14px; line-height: 1.5; -webkit-font-smoothing: antialiased; }
+    font-size: var(--fs-14); line-height: 1.5; -webkit-font-smoothing: antialiased; }
   a { color: inherit; text-decoration: none; }
 
   .app { display: grid; grid-template-columns: 240px 1fr; min-height: 100vh; }
 
-  /* sidebar */
   .side { background: var(--bg-soft); border-right: 1px solid var(--line);
-          padding: 14px 8px; user-select: none; }
+          padding: calc(14px * var(--od-density)) 8px; user-select: none; }
   .ws { display: flex; align-items: center; gap: 8px; padding: 6px 8px;
         border-radius: var(--radius-sm); cursor: pointer; }
   .ws:hover { background: var(--bg-hover); }
   .ws-icon { width: 22px; height: 22px; border-radius: 4px;
              background: linear-gradient(135deg,#1f1f1f,#3a3a3a); color: #fff;
-             display: grid; place-items: center; font-weight: 600; font-size: 12px; }
-  .ws-name { font-weight: 600; flex: 1; font-size: 14px; }
-  .ws-caret { color: var(--ink-3); font-size: 12px; }
+             display: grid; place-items: center; font-weight: 600; font-size: var(--fs-12); }
+  .ws-name { font-weight: 600; flex: 1; font-size: var(--fs-14); }
+  .ws-caret { color: var(--ink-3); font-size: var(--fs-12); }
   .side-search { margin: 12px 4px 6px; padding: 5px 8px; color: var(--ink-3);
-                 font-size: 13px; display: flex; align-items: center; gap: 8px;
+                 font-size: var(--fs-13); display: flex; align-items: center; gap: 8px;
                  border-radius: var(--radius-sm); cursor: pointer; }
   .side-search:hover { background: var(--bg-hover); }
-  .side-search kbd { margin-left: auto; font-family: inherit; font-size: 11px;
-                     color: var(--ink-3); background: #fff; border: 1px solid var(--line);
+  .side-search kbd { margin-left: auto; font-family: inherit; font-size: var(--fs-11);
+                     color: var(--ink-3); background: var(--surface); border: 1px solid var(--line);
                      padding: 1px 5px; border-radius: 3px; }
   .side-section { margin-top: 14px; padding: 0 8px; color: var(--ink-3);
-                  font-size: 12px; letter-spacing: .02em; text-transform: uppercase; }
+                  font-size: var(--fs-12); letter-spacing: .02em; text-transform: uppercase; }
   .nav { margin-top: 4px; display: flex; flex-direction: column; gap: 1px; }
   .nav-item { display: flex; align-items: center; gap: 8px; padding: 4px 8px;
               border-radius: var(--radius-sm); color: var(--ink); cursor: pointer; }
   .nav-item:hover { background: var(--bg-hover); }
-  .nav-item.active { background: #e8e6e1; font-weight: 500; }
+  .nav-item.active { background: var(--bg-hover); font-weight: 500; }
   .nav-icon { width: 18px; text-align: center; }
-  .nav-caret { margin-left: auto; color: var(--ink-3); font-size: 10px; }
+  .nav-caret { margin-left: auto; color: var(--ink-3); font-size: var(--fs-10); }
 
-  /* main */
   .main { display: flex; flex-direction: column; min-width: 0; }
   .topbar { height: 44px; padding: 0 16px; border-bottom: 1px solid var(--line);
             display: flex; align-items: center; gap: 12px;
-            color: var(--ink-2); font-size: 13px; }
+            color: var(--ink-2); font-size: var(--fs-13); }
   .crumbs span:not(:last-child)::after { content: "/"; margin: 0 6px; color: var(--ink-3); }
   .topbar-spacer { flex: 1; }
 
   .pill-live { display: inline-flex; align-items: center; gap: 6px;
-               padding: 2px 8px 2px 6px; background: #fff;
+               padding: 2px 8px 2px 6px; background: var(--surface);
                border: 1px solid var(--line-strong); border-radius: 999px;
-               font-size: 12px; color: var(--ink-2); }
+               font-size: var(--fs-12); color: var(--ink-2); }
   .pill-live .dot { width: 7px; height: 7px; border-radius: 50%;
-                    background: #2ecc71; box-shadow: 0 0 0 0 rgba(46,204,113,.55);
-                    animation: pulse 1.8s infinite; }
+                    background: var(--ok); box-shadow: 0 0 0 0 rgba(46,204,113,.55);
+                    animation: pulse var(--dur-pulse) infinite; }
   .pill-live.syncing .dot { background: var(--accent); animation: none; }
-  .pill-live.stale   .dot { background: #e6a23c; animation: none; }
+  .pill-live.stale   .dot { background: var(--warn); animation: none; }
   @keyframes pulse {
     0% { box-shadow: 0 0 0 0 rgba(46,204,113,.55); }
     70% { box-shadow: 0 0 0 7px rgba(46,204,113,0); }
     100% { box-shadow: 0 0 0 0 rgba(46,204,113,0); }
   }
 
-  .page { padding: 56px max(80px, 8vw) 80px; max-width: 1100px; width: 100%; align-self: center; }
+  .page { padding: calc(56px * var(--od-density)) max(calc(80px * var(--od-density)), 8vw) calc(80px * var(--od-density)); max-width: 1100px; width: 100%; align-self: center; }
   .page-cover { height: 24px; }
-  .page-emoji { font-size: 64px; line-height: 1; margin: -4px 0 12px; }
-  h1.page-title { font-size: calc(40px * var(--display-scale, 1));
+  .page-emoji { font-size: calc(64px * var(--od-scale)); line-height: 1; margin: -4px 0 12px; }
+  h1.page-title { font-size: var(--fs-40);
                   line-height: 1.15; font-weight: 700; letter-spacing: -0.01em;
                   margin: 0 0 8px; color: var(--ink); }
 
   .page-meta { display: flex; align-items: center; gap: 14px;
-               color: var(--ink-2); font-size: 13px; margin-bottom: 28px; }
+               color: var(--ink-2); font-size: var(--fs-13); margin-bottom: calc(28px * var(--od-density)); }
   .page-meta .updated { display: inline-flex; align-items: center; gap: 6px; }
   .page-meta .updated .who { width: 18px; height: 18px; border-radius: 50%;
                               background: #f1c40f; color: #5a4500;
                               display: inline-grid; place-items: center;
-                              font-size: 11px; font-weight: 700; }
+                              font-size: var(--fs-11); font-weight: 700; }
 
   .btn { display: inline-flex; align-items: center; gap: 6px; padding: 4px 10px;
-         font-size: 13px; color: var(--ink); background: #fff;
+         font-size: var(--fs-13); color: var(--ink); background: var(--surface);
          border: 1px solid var(--line-strong); border-radius: var(--radius-sm);
-         cursor: pointer; transition: background .15s ease, transform .15s ease; }
+         cursor: pointer; transition: background var(--dur-fast) ease, transform var(--dur-fast) ease; }
   .btn:hover { background: var(--bg-hover); }
   .btn .ico { width: 14px; height: 14px; display: inline-block; }
-  .btn .ico.spin { animation: spin .8s linear infinite; }
+  .btn .ico.spin { animation: spin var(--dur-spin) linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
   .btn.primary { background: var(--accent); color: #fff; border-color: transparent; }
   .btn.primary:hover { background: var(--accent-ink); }
@@ -132,81 +162,81 @@
   .btn.ghost:hover { background: var(--bg-hover); }
 
   .callout { background: var(--bg-soft); border-radius: var(--radius-md);
-             padding: 14px 16px; display: flex; gap: 12px;
-             align-items: flex-start; margin: 10px 0 28px; color: var(--ink); }
-  .callout .emj { font-size: 18px; line-height: 1.4; }
+             padding: calc(14px * var(--od-density)) calc(16px * var(--od-density)); display: flex; gap: 12px;
+             align-items: flex-start; margin: 10px 0 calc(28px * var(--od-density)); color: var(--ink); }
+  .callout .emj { font-size: var(--fs-18); line-height: 1.4; }
   .callout small { color: var(--ink-2); }
 
   .kpis { display: grid; grid-template-columns: repeat(var(--kpi-count, 4), 1fr);
           gap: 1px; background: var(--line); border: 1px solid var(--line);
-          border-radius: var(--radius-md); overflow: hidden; margin: 8px 0 32px; }
-  .kpi { background: #fff; padding: 18px 20px;
+          border-radius: var(--radius-md); overflow: hidden; margin: 8px 0 calc(32px * var(--od-density)); }
+  .kpi { background: var(--surface); padding: calc(18px * var(--od-density)) calc(20px * var(--od-density));
          display: flex; flex-direction: column; gap: 4px; }
-  .kpi .label { color: var(--ink-2); font-size: 12px; letter-spacing: .03em;
+  .kpi .label { color: var(--ink-2); font-size: var(--fs-12); letter-spacing: .03em;
                 text-transform: uppercase; font-weight: 500; }
-  .kpi .value { font-size: 32px; font-weight: 600; letter-spacing: -0.01em;
+  .kpi .value { font-size: var(--fs-32); font-weight: 600; letter-spacing: -0.01em;
                 color: var(--ink); font-variant-numeric: tabular-nums;
-                transition: color .25s ease; }
+                transition: color var(--dur-value) ease; }
   .kpi .value.flash { color: var(--accent-ink); }
-  .kpi .delta { font-size: 12px; color: var(--ink-2); }
-  .kpi .delta.up   { color: #2b8a3e; }
-  .kpi .delta.down { color: #c0392b; }
+  .kpi .delta { font-size: var(--fs-12); color: var(--ink-2); }
+  .kpi .delta.up   { color: var(--delta-up); }
+  .kpi .delta.down { color: var(--delta-down); }
   .kpi .delta .arr { display: inline-block; width: 10px; }
 
-  h2.h { font-size: 18px; font-weight: 600; margin: 32px 0 8px;
+  h2.h { font-size: var(--fs-18); font-weight: 600; margin: calc(32px * var(--od-density)) 0 8px;
          letter-spacing: -0.005em; }
-  .h-sub { color: var(--ink-2); font-size: 13px; margin-bottom: 12px; }
+  .h-sub { color: var(--ink-2); font-size: var(--fs-13); margin-bottom: 12px; }
 
-  .two-col { display: grid; grid-template-columns: 1.1fr 1fr; gap: 24px;
+  .two-col { display: grid; grid-template-columns: 1.1fr 1fr; gap: var(--gap-col);
              margin-bottom: 8px; }
-  .card { background: #fff; border: 1px solid var(--line);
-          border-radius: var(--radius-md); padding: 16px 18px; }
+  .card { background: var(--surface); border: 1px solid var(--line);
+          border-radius: var(--radius-md); padding: var(--pad-card); }
   .card-title { display: flex; align-items: center; justify-content: space-between;
-                font-size: 13px; color: var(--ink-2); margin-bottom: 8px; }
+                font-size: var(--fs-13); color: var(--ink-2); margin-bottom: 8px; }
   .card-title strong { color: var(--ink); font-weight: 600; }
   .spark { width: 100%; height: 120px; }
-  .spark-axis { color: var(--ink-3); font-size: 11px; }
-  .spark-fill { fill: rgba(46,170,220,.10); }
+  .spark-axis { color: var(--ink-3); font-size: var(--fs-11); }
+  .spark-fill { fill: var(--accent-fill); }
   .spark-line { fill: none; stroke: var(--accent); stroke-width: 2; }
   .spark-dot  { fill: var(--accent); }
   .spark-grid line { stroke: var(--line); stroke-dasharray: 2 3; }
 
   .feed { display: flex; flex-direction: column; }
-  .feed-row { display: flex; gap: 12px; padding: 10px 4px;
+  .feed-row { display: flex; gap: 12px; padding: calc(10px * var(--od-density)) 4px;
               border-bottom: 1px solid var(--line); }
   .feed-row:last-child { border-bottom: none; }
   .feed-row .av { flex: 0 0 26px; width: 26px; height: 26px; border-radius: 50%;
-                  display: grid; place-items: center; color: #fff; font-size: 11px; font-weight: 700; }
-  .feed-row .body { flex: 1; min-width: 0; font-size: 13px; }
+                  display: grid; place-items: center; color: #fff; font-size: var(--fs-11); font-weight: 700; }
+  .feed-row .body { flex: 1; min-width: 0; font-size: var(--fs-13); }
   .feed-row .body .who { font-weight: 600; }
   .feed-row .body .what { color: var(--ink); }
   .feed-row .body .target { color: var(--accent-ink);
                             border-bottom: 1px dotted var(--accent); cursor: pointer; }
-  .feed-row .time { color: var(--ink-3); font-size: 12px; flex: 0 0 auto; }
-  .feed-row.new { background: rgba(46,170,220,.06); }
+  .feed-row .time { color: var(--ink-3); font-size: var(--fs-12); flex: 0 0 auto; }
+  .feed-row.new { background: var(--accent-wash); }
   .feed-row.new .body .who::before { content: "•"; color: var(--accent); margin-right: 6px; }
 
   .db { border: 1px solid var(--line); border-radius: var(--radius-md);
-        overflow: hidden; margin-top: 4px; background: #fff; }
+        overflow: hidden; margin-top: 4px; background: var(--surface); }
   .db-head, .db-row {
     display: grid; grid-template-columns: 32px 2.4fr 1fr 1fr 0.9fr 0.9fr;
-    align-items: center; padding: 8px 12px;
-    border-bottom: 1px solid var(--line); font-size: 13px;
+    align-items: center; padding: calc(8px * var(--od-density)) calc(12px * var(--od-density));
+    border-bottom: 1px solid var(--line); font-size: var(--fs-13);
   }
   .db-head { background: var(--bg-soft); color: var(--ink-2);
-             font-size: 12px; text-transform: uppercase; letter-spacing: .03em;
+             font-size: var(--fs-12); text-transform: uppercase; letter-spacing: .03em;
              font-weight: 500; }
   .db-row:last-child { border-bottom: none; }
   .db-row:hover { background: var(--bg-soft); }
-  .db-row.changed { animation: rowflash 1.4s ease; }
+  .db-row.changed { animation: rowflash var(--dur-rowflash) ease; }
   @keyframes rowflash {
-    0% { background: rgba(46,170,220,.18); }
+    0% { background: var(--accent-flash); }
     100% { background: transparent; }
   }
   .db-cell.title { font-weight: 500; display: flex; align-items: center; gap: 6px; min-width: 0; }
   .db-cell.title .t { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
   .db-cell .pill { display: inline-flex; align-items: center; gap: 4px;
-                   padding: 2px 8px; border-radius: 3px; font-size: 12px; font-weight: 500; }
+                   padding: 2px 8px; border-radius: 3px; font-size: var(--fs-12); font-weight: 500; }
   .pill.done     { background: var(--pill-done-bg);     color: var(--pill-done-ink); }
   .pill.progress { background: var(--pill-progress-bg); color: var(--pill-progress-ink); }
   .pill.blocked  { background: var(--pill-blocked-bg);  color: var(--pill-blocked-ink); }
@@ -215,20 +245,20 @@
   .person { display: inline-flex; align-items: center; gap: 6px; }
   .person .av { width: 18px; height: 18px; border-radius: 50%;
                 color: #fff; display: grid; place-items: center;
-                font-size: 10px; font-weight: 700; }
+                font-size: var(--fs-10); font-weight: 700; }
 
-  .footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid var(--line);
-            color: var(--ink-3); font-size: 12px;
+  .footer { margin-top: calc(32px * var(--od-density)); padding-top: 16px; border-top: 1px solid var(--line);
+            color: var(--ink-3); font-size: var(--fs-12);
             display: flex; align-items: center; gap: 8px; }
   .footer .key { font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
                  background: var(--bg-soft); padding: 1px 5px;
                  border-radius: 3px; color: var(--ink-2); }
 
   .toast { position: fixed; bottom: 20px; left: 50%; transform: translateX(-50%);
-           background: #1f1f1f; color: #fff; padding: 8px 14px;
-           border-radius: 8px; font-size: 13px;
+           background: var(--toast-bg); color: var(--toast-fg); padding: 8px 14px;
+           border-radius: 8px; font-size: var(--fs-13);
            opacity: 0; pointer-events: none;
-           transition: opacity .2s ease, transform .2s ease; }
+           transition: opacity var(--dur-toast) ease, transform var(--dur-toast) ease; }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(-2px); }
 
   @media (prefers-reduced-motion: reduce) {
@@ -247,56 +277,51 @@
 </head>
 <body>
 
-<div class="app">
+<div class="app" data-od-id="app" data-od-label="Live dashboard">
 
-  <!--
-    Sidebar nav rows are interactive — keep the keyboard semantics
-    (role="button" + tabindex="0") on every clickable .ws / .side-search
-    / .nav-item even if the agent re-skins the visuals.
-  -->
-  <aside class="side">
-    <div class="ws" role="button" tabindex="0">
+  <aside class="side" data-od-id="sidebar" data-od-label="Sidebar">
+    <div class="ws" role="button" tabindex="0" data-od-id="workspace-switcher" data-od-label="Workspace switcher">
       <div class="ws-icon">{{workspace_initial}}</div>
       <div class="ws-name">{{workspace_name}}</div>
       <div class="ws-caret">⌄</div>
     </div>
     <div class="side-search" role="button" tabindex="0"><span>🔎</span><span>Search</span><kbd>⌘K</kbd></div>
     <div class="side-search" role="button" tabindex="0"><span>⌚</span><span>Updates</span></div>
-    <div class="side-search" role="button" tabindex="0"><span>⚙️</span><span>Settings & members</span></div>
+    <div class="side-search" role="button" tabindex="0"><span>⚙️</span><span>Settings &amp; members</span></div>
 
     <div class="side-section">Workspace</div>
-    <div class="nav">
+    <div class="nav" data-od-id="sidebar-pages" data-od-label="Workspace pages">
       <div class="nav-item active" role="button" tabindex="0" aria-current="page"><span class="nav-icon">📊</span><span>{{page_title}}</span></div>
       <!-- AGENT: list 3-5 plausible sibling pages here ("Tasks", "Docs", "Roadmap", …); keep role="button" + tabindex="0" on every nav-item. -->
     </div>
 
     <div class="side-section">Connections</div>
-    <div class="nav">
+    <div class="nav" data-od-id="sidebar-connections" data-od-label="Connections">
       <div class="nav-item" role="button" tabindex="0"><span class="nav-icon">🔌</span><span>{{connector_label}}</span></div>
     </div>
   </aside>
 
-  <main class="main">
+  <main class="main" data-od-id="main" data-od-label="Main column">
 
-    <div class="topbar">
+    <div class="topbar" data-od-id="topbar" data-od-label="Top bar">
       <div class="crumbs">
         <span>{{workspace_name}}</span>
         <span>Workspace</span>
         <span>{{page_title}}</span>
       </div>
       <div class="topbar-spacer"></div>
-      <div class="pill-live" id="livePill">
+      <div class="pill-live" id="livePill" data-od-id="live-pill" data-od-label="Live status pill">
         <span class="dot"></span>
         <span id="liveText">Live · synced</span>
       </div>
     </div>
 
-    <div class="page">
+    <div class="page" data-od-id="page" data-od-label="Page body">
       <div class="page-cover"></div>
       <div class="page-emoji">{{page_emoji}}</div>
-      <h1 class="page-title">{{page_title}}</h1>
+      <h1 class="page-title" data-od-id="page-title" data-od-label="Page title">{{page_title}}</h1>
 
-      <div class="page-meta">
+      <div class="page-meta" data-od-id="page-meta" data-od-label="Page meta and actions">
         <div class="updated">
           <span class="who">{{owner_initials}}</span>
           <span>Last edited by <strong>{{owner_name}}</strong></span>
@@ -305,13 +330,13 @@
         <span id="updatedAt">Last refreshed just now</span>
         <span style="flex:1"></span>
         <button class="btn ghost" id="autoBtn" title="Auto refresh"><span>⏱</span><span id="autoLbl">Auto · on</span></button>
-        <button class="btn primary" id="refreshBtn" title="Pull latest from {{connector_label}}">
+        <button class="btn primary" id="refreshBtn" title="Pull latest from {{connector_label}}" data-od-id="refresh-button" data-od-label="Refresh button">
           <span class="ico" id="refreshIco">↻</span>
           <span>Refresh from {{connector_label}}</span>
         </button>
       </div>
 
-      <div class="callout">
+      <div class="callout" data-od-id="live-callout" data-od-label="Live artifact callout">
         <div class="emj"><svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M9 18h6"/><path d="M10 21h4"/><path d="M12 3a6 6 0 0 0-4 10.5c.7.6 1 1.5 1 2.5h6c0-1 .3-1.9 1-2.5A6 6 0 0 0 12 3z"/></svg></div>
         <div>
           <div><strong>This page is a Live Artifact.</strong> Numbers below are pulled from
@@ -321,10 +346,10 @@
       </div>
 
       <!-- AGENT: render <inputs.kpi_count> .kpi cells inside this grid. -->
-      <div class="kpis" id="kpis" style="--kpi-count: {{kpi_count}}"></div>
+      <div class="kpis" id="kpis" style="--kpi-count: {{kpi_count}}" data-od-id="kpi-band" data-od-label="KPI band"></div>
 
       <div class="two-col">
-        <div class="card">
+        <div class="card" data-od-id="trend-card" data-od-label="Trend card">
           <div class="card-title">
             <strong>Tasks created · last 7 days</strong>
             <span id="sparkSum">— total</span>
@@ -341,7 +366,7 @@
             <g id="sparkLabels" class="spark-axis"></g>
           </svg>
         </div>
-        <div class="card">
+        <div class="card" data-od-id="activity-card" data-od-label="Activity card">
           <div class="card-title">
             <strong>Recent activity</strong>
             <span>From <span style="color: var(--accent-ink)">{{connector_label}}</span></span>
@@ -350,9 +375,9 @@
         </div>
       </div>
 
-      <h2 class="h">📋 Tasks · Active sprint</h2>
+      <h2 class="h" data-od-id="tasks-heading" data-od-label="Tasks heading">📋 Tasks · Active sprint</h2>
       <div class="h-sub">Linked database · filtered by Status ≠ Done · sorted by Updated time</div>
-      <div class="db" id="db">
+      <div class="db" id="db" data-od-id="tasks-table" data-od-label="Tasks table">
         <div class="db-head">
           <div></div><div>Name</div><div>Status</div><div>Assignee</div>
           <div class="db-cell due">Due</div>
@@ -360,7 +385,7 @@
         </div>
       </div>
 
-      <div class="footer">
+      <div class="footer" data-od-id="page-footer" data-od-label="Page footer">
         <span>Source: {{connector_label}} API · workspace <strong>{{workspace_slug}}</strong></span>
         <span>·</span>
         <span>Connector <span class="key">composio.{{connector_slug}}</span></span>
@@ -374,15 +399,6 @@
 <div class="toast" id="toast">Synced</div>
 
 <script>
-/* =====================================================================
-   live-dashboard runtime
-   ---------------------------------------------------------------------
-   The agent fills SEED_PEOPLE / SEED_ROWS / SEED_FEED / SEED_SERIES
-   below. The runtime renders, refreshes (mock or real), and tracks
-   staleness. Replace seedNextChange() with poll() to wire a real
-   connector.
-   ===================================================================== */
-
 /* --- AGENT FILL: people, rows, feed, series ------------------------ */
 const SEED_PEOPLE = [
   /* { id: "SC", name: "Sarah Chen", color: "#f1c40f" }, … */
@@ -432,25 +448,24 @@ function e(v) {
     .replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;")
     .replaceAll('"', "&quot;").replaceAll("'", "&#39;");
 }
-/* Tween + flash hooks for the live-refresh pass — wired to .flash /
-   .feed-row.new / .db-row.changed in the CSS above. renderKpi(prev) is
-   the public entry; pass the previous KPI snapshot in to get tween +
-   highlight on changed values. Both helpers honor
-   prefers-reduced-motion: reduce — the CSS @media block already
-   neutralizes animations/transitions, but tweenText() schedules JS rAF
-   updates and flash() toggles a highlight class, so we short-circuit
-   them here for reduced-motion users (P0 row in checklist.md). */
 function reduceMotion() {
   return typeof window !== "undefined"
     && typeof window.matchMedia === "function"
     && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 }
+function motionFactor() {
+  const raw = getComputedStyle(document.documentElement).getPropertyValue("--od-motion");
+  const parsed = parseFloat(raw);
+  if (!Number.isFinite(parsed) || parsed < 0) return 1;
+  return parsed;
+}
 function tweenText(el, from, to, ms = 600) {
   if (!el) return;
-  if (from === to || reduceMotion()) { el.textContent = String(to); return; }
+  const scaled = ms * motionFactor();
+  if (from === to || reduceMotion() || scaled <= 0) { el.textContent = String(to); return; }
   const start = performance.now();
   function step(now) {
-    const t = Math.min(1, (now - start) / ms);
+    const t = Math.min(1, (now - start) / scaled);
     const eased = 1 - Math.pow(1 - t, 3);
     el.textContent = String(Math.round(from + (to - from) * eased));
     if (t < 1) requestAnimationFrame(step);
@@ -458,9 +473,9 @@ function tweenText(el, from, to, ms = 600) {
   requestAnimationFrame(step);
 }
 function flash(el) {
-  if (!el || reduceMotion()) return;
+  if (!el || reduceMotion() || motionFactor() <= 0) return;
   el.classList.add("flash");
-  setTimeout(() => el.classList.remove("flash"), 700);
+  setTimeout(() => el.classList.remove("flash"), 700 * motionFactor());
 }
 
 /* connector hook: replace this with a real poll() — see references/connectors.md */
@@ -482,8 +497,6 @@ async function seedNextChange() {
 /* render: KPI / spark / feed / rows  --------------------------------- */
 function renderKpi(prev) {
   const wrap = $("kpis");
-  // First render: build the cards from scratch (escaped) so KPI labels /
-  // deltas / values can come from any connector payload safely.
   if (!wrap.children.length) {
     wrap.innerHTML = KPI_DEFS.map(def => `
       <div class="kpi">
@@ -493,8 +506,6 @@ function renderKpi(prev) {
       </div>`).join("");
     return;
   }
-  // Subsequent renders: tween numeric KPIs from prev → current and
-  // flash the cell when the value actually changed.
   for (const def of KPI_DEFS) {
     const cell = $(def.id);
     if (!cell) continue;
@@ -509,8 +520,6 @@ function renderKpi(prev) {
     }
   }
 }
-/* Snapshot the values KPI_DEFS produced so the next renderKpi can
-   tween from "old" → "new". Call before mutating state. */
 function snapshotKpi() {
   const out = {};
   for (const def of KPI_DEFS) out[def.id] = Number(def.get());
@@ -536,8 +545,6 @@ const STATUS_LABEL = { done: "Done", progress: "In progress", blocked: "Blocked"
    titles, activity descriptors, person names). Every dynamic value
    below goes through e() before it lands in innerHTML. */
 function renderFeed(highlightId) {
-  // Drop the transient .new highlight under reduced-motion so the row
-  // doesn't get a coloured background pulse for users who opted out.
   const effectiveHighlight = reduceMotion() ? null : highlightId;
   $("feed").innerHTML = feed.slice(0,6).map(it=>{
     const init = String(it.who||"").split(" ").map(s=>s[0]).join("").slice(0,2).toUpperCase();
@@ -557,8 +564,6 @@ function personChip(id) {
   return `<span class="person"><span class="av" style="background:${e(p.color||"#888")}">${e(p.id||"")}</span><span>${e(p.name||"")}</span></span>`;
 }
 function renderRows(changedId) {
-  // Same reduced-motion gate as renderFeed: skip the .changed row-flash
-  // class so we don't paint a transient highlight for opted-out users.
   const effectiveChanged = reduceMotion() ? null : changedId;
   const db=$("db"); [...db.querySelectorAll(".db-row")].forEach(n=>n.remove());
   [...rows].sort((a,b)=>b.updated-a.updated).forEach(r=>{
@@ -580,8 +585,6 @@ async function refresh({silent=false}={}) {
   if (busy) return; busy = true;
   $("refreshIco").classList.add("spin");
   $("livePill").classList.add("syncing"); $("liveText").textContent="Syncing…";
-  // Snapshot KPIs before mutation so renderKpi(prev) can tween from
-  // old → new and flash on values that actually changed.
   const prev = snapshotKpi();
   try {
     const result = await seedNextChange(); /* AGENT: replace with real poll() */
@@ -611,10 +614,6 @@ function updateTimes() {
 function startAuto() { stopAuto(); autoTimer = setInterval(()=>refresh({silent:true}), {{refresh_seconds}} * 1000); }
 function stopAuto()  { if (autoTimer) clearInterval(autoTimer); autoTimer = null; }
 
-// .ws / .side-search / .nav-item are styled as clickable rows but they
-// are <div>, so keyboard users get nothing for free. Map Enter/Space
-// onto a synthetic click for any role="button" element that is not
-// already a real button/link.
 document.addEventListener("keydown", (ev) => {
   if (ev.key !== "Enter" && ev.key !== " ") return;
   const t = ev.target;
@@ -637,7 +636,7 @@ setInterval(()=>renderFeed(), 15000);
 
 renderKpi(); renderSpark(); renderFeed(); renderRows(); updateTimes();
 if (autoOn) startAuto();
-setTimeout(()=>refresh({silent:true}), 600);   // refresh-on-open
+setTimeout(()=>refresh({silent:true}), 600);
 </script>
 </body>
 </html>

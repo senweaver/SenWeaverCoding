@@ -133,9 +133,10 @@ impl Tool for LlmTaskTool {
             prompt.to_string()
         };
 
-        let provider: Box<dyn Provider> = match providers::create_provider_with_options_async(
+        let provider: Box<dyn Provider> = match providers::create_resilient_runtime_provider_async(
             self.default_provider.clone(),
             self.api_key.clone(),
+            None,
             self.provider_runtime_options.clone(),
         )
         .await

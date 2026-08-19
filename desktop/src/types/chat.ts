@@ -85,6 +85,7 @@ type ServerMessagePayload =
   | { type: 'content_delta'; text?: string }
   | { type: 'content_reset' }
   | { type: 'tool_use_complete'; toolName: string; toolUseId: string; input: unknown; parentToolUseId?: string; sessionId?: string }
+  | { type: 'tool_use_args_delta'; toolName: string; callIndex: number; argsSnapshot: string; sessionId?: string }
   | { type: 'tool_result'; toolUseId: string; content: unknown; isError: boolean; parentToolUseId?: string }
   | { type: 'plan_progress'; planPath: string; title: string; todos: unknown; timestampMs?: number; handoffKind?: 'plan' | 'curator' }
   | {
@@ -341,6 +342,7 @@ export type UIMessage =
       deletions: number
       diff?: string | null
       editBatchId?: string | null
+      reverted?: boolean
       timestamp: number
     })
 
@@ -388,7 +390,8 @@ export type UIMessage =
 
       markdown?: string
       modelLabel?: string
-      status: 'writing' | 'completed'
+      status: 'writing' | 'completed' | 'failed'
+      error?: string
 
       pendingHydration?: boolean
 

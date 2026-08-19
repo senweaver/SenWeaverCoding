@@ -23,6 +23,7 @@ pub fn classify_turn_error_code(message: &str) -> &'static str {
     }
 
     let lower = message.to_ascii_lowercase();
+    let status = crate::error::extract_http_status_code(&lower);
 
     if contains_any(
         &lower,
@@ -65,10 +66,9 @@ pub fn classify_turn_error_code(message: &str) -> &'static str {
             "unauthorized",
             "permission denied",
             "forbidden",
-            "401",
-            "403",
         ],
-    ) {
+    ) || matches!(status, Some(401) | Some(403))
+    {
         return "AUTH_ERROR";
     }
 
@@ -90,25 +90,27 @@ pub fn classify_turn_error_code(message: &str) -> &'static str {
     if contains_any(
         &lower,
         &[
-            "overloaded",
-            "currently overloaded",
+            "overloaded_error",
+            "engine_overloaded",
+            "server_overloaded",
+            "service_overloaded",
             "server is busy",
             "service unavailable",
-            "503",
         ],
-    ) {
+    ) || matches!(status, Some(503) | Some(529))
+    {
         return "ENGINE_OVERLOADED";
     }
 
     if contains_any(
         &lower,
         &[
-            "rate limit",
-            "rate_limit",
-            "too many requests",
-            "429",
+            "rate_limit_error",
+            "rate_limit_exceeded",
+            "too_many_requests",
         ],
-    ) {
+    ) || status == Some(429)
+    {
         return "RATE_LIMITED";
     }
 
@@ -134,10 +136,9 @@ pub fn classify_turn_error_code(message: &str) -> &'static str {
         return "CONNECTION_FAILED";
     }
 
-    if contains_any(
-        &lower,
-        &["bad gateway", "502", "500 internal", "internal server error", "504"],
-    ) {
+    if contains_any(&lower, &["bad gateway", "internal server error"])
+        || matches!(status, Some(500) | Some(502) | Some(504))
+    {
         return "GATEWAY_ERROR";
     }
 

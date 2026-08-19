@@ -134,6 +134,29 @@ pub fn normalize_tool_call_arguments(function_name: &str, arguments: String) -> 
     if serde_json::from_str::<Value>(&arguments).is_ok() {
         return arguments;
     }
+    if let Some(repaired) = repair_partial_tool_input_json(&arguments) {
+        tracing::warn!(
+            function = %function_name,
+            original_len = arguments.len(),
+            repaired_len = repaired.len(),
+            "Recovered truncated tool-call arguments via partial-JSON repair"
+        );
+        crate::observability::runtime_trace::record_event(
+            "tool_args_repaired",
+            None,
+            None,
+            None,
+            None,
+            Some(true),
+            Some("truncated tool-call arguments recovered via partial-JSON repair"),
+            serde_json::json!({
+                "function": function_name,
+                "original_len": arguments.len(),
+                "repaired_len": repaired.len(),
+            }),
+        );
+        return repaired;
+    }
     tracing::error!(
         function = %function_name,
         arguments_len = arguments.len(),
@@ -309,7 +332,8 @@ pub fn normalize_chat_messages_for_provider_ext(
     kind: ProviderKind,
     consumes_reasoning_envelope: bool,
 ) -> Vec<ChatMessage> {
-    let mirrored = mirror_tool_ids_in_chat_messages(messages);
+    let canonical = canonicalize_tool_envelopes_in_chat_messages(messages, kind);
+    let mirrored = mirror_tool_ids_in_chat_messages(canonical);
     let cleaned = clean_empty_assistant_tool_calls_in_chat_messages(mirrored);
     let non_empty = drop_payloadless_assistant_messages(cleaned);
     let reasoning_normalized = match kind {
@@ -1260,4 +1284,192 @@ fn extract_tool_call_id_from_tool_message(content: &str) -> Option<String> {
         }
     }
     None
+}
+
+fn canonicalize_tool_envelopes_in_chat_messages(
+    messages: Vec<ChatMessage>,
+    kind: ProviderKind,
+) -> Vec<ChatMessage> {
+    messages
+        .into_iter()
+        .map(|mut msg| {
+            match msg.role.as_str() {
+                "assistant" => {
+                    if let Some(rewritten) = canonicalize_assistant_content(&msg.content, kind) {
+                        msg.content = rewritten;
+                    }
+                }
+                "tool" if kind != ProviderKind::Anthropic => {
+                    if let Some(rewritten) = canonicalize_tool_content(&msg.content) {
+                        msg.content = rewritten;
+                    }
+                }
+                _ => {}
+            }
+            msg
+        })
+        .collect()
+}
+
+fn canonicalize_assistant_content(content: &str, kind: ProviderKind) -> Option<String> {
+    let trimmed = content.trim_start();
+    if trimmed.starts_with('{') {
+        let mut value: Value = serde_json::from_str(trimmed).ok()?;
+        let obj = value.as_object_mut()?;
+        let calls = obj.get_mut("tool_calls").and_then(Value::as_array_mut)?;
+        let mut changed = false;
+        for call in calls.iter_mut() {
+            if flatten_nested_function_call(call) {
+                changed = true;
+            }
+        }
+        if changed {
+            return serde_json::to_string(&value).ok();
+        }
+        return None;
+    }
+    if trimmed.starts_with('[') && kind != ProviderKind::Anthropic {
+        let arr: Vec<Value> = serde_json::from_str(trimmed).ok()?;
+        return convert_assistant_block_array_to_envelope(&arr);
+    }
+    None
+}
+
+fn flatten_nested_function_call(call: &mut Value) -> bool {
+    let Some(func) = call.get("function").cloned() else {
+        return false;
+    };
+    let Some(obj) = call.as_object_mut() else {
+        return false;
+    };
+    if let Some(name) = func.get("name").and_then(Value::as_str) {
+        obj.insert("name".to_string(), Value::String(name.to_string()));
+    }
+    if let Some(args) = func.get("arguments") {
+        let args_str = match args {
+            Value::String(s) => s.clone(),
+            other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+        };
+        obj.insert("arguments".to_string(), Value::String(args_str));
+    }
+    obj.remove("function");
+    if obj.get("type").and_then(Value::as_str) == Some("function") {
+        obj.remove("type");
+    }
+    true
+}
+
+fn convert_assistant_block_array_to_envelope(arr: &[Value]) -> Option<String> {
+    let mut text = String::new();
+    let mut tool_calls: Vec<Value> = Vec::new();
+    let mut reasoning: Option<String> = None;
+    let mut signature: Option<String> = None;
+    for block in arr {
+        match block.get("type").and_then(Value::as_str) {
+            Some("text") => {
+                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    text.push_str(t);
+                }
+            }
+            Some("tool_use") => {
+                let id = block
+                    .get("id")
+                    .and_then(Value::as_str)
+                    .or_else(|| block.get("tool_use_id").and_then(Value::as_str))
+                    .unwrap_or_default()
+                    .to_string();
+                let name = block
+                    .get("name")
+                    .and_then(Value::as_str)
+                    .unwrap_or_default()
+                    .to_string();
+                let input = block.get("input").cloned().unwrap_or(Value::Null);
+                let args = match &input {
+                    Value::String(s) => s.clone(),
+                    Value::Null => "{}".to_string(),
+                    other => serde_json::to_string(other).unwrap_or_else(|_| "{}".to_string()),
+                };
+                tool_calls.push(serde_json::json!({
+                    "id": id,
+                    "name": name,
+                    "arguments": args,
+                }));
+            }
+            Some("thinking") | Some("redacted_thinking") => {
+                if let Some(t) = block.get("thinking").and_then(Value::as_str) {
+                    reasoning.get_or_insert_with(String::new).push_str(t);
+                }
+                if signature.is_none() {
+                    if let Some(s) = block.get("signature").and_then(Value::as_str) {
+                        signature = Some(s.to_string());
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    if tool_calls.is_empty() && reasoning.is_none() {
+        return None;
+    }
+    let mut envelope = serde_json::Map::new();
+    envelope.insert("content".to_string(), Value::String(text));
+    if !tool_calls.is_empty() {
+        envelope.insert("tool_calls".to_string(), Value::Array(tool_calls));
+    }
+    if let Some(r) = reasoning {
+        envelope.insert("reasoning_content".to_string(), Value::String(r));
+    }
+    if let Some(s) = signature {
+        envelope.insert("thinking_signature".to_string(), Value::String(s));
+    }
+    serde_json::to_string(&Value::Object(envelope)).ok()
+}
+
+fn canonicalize_tool_content(content: &str) -> Option<String> {
+    let trimmed = content.trim_start();
+    if !trimmed.starts_with('[') {
+        return None;
+    }
+    let arr: Vec<Value> = serde_json::from_str(trimmed).ok()?;
+    for block in &arr {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        let id = block
+            .get("tool_use_id")
+            .and_then(Value::as_str)
+            .or_else(|| block.get("tool_call_id").and_then(Value::as_str))
+            .unwrap_or_default()
+            .to_string();
+        let content_val = block.get("content").cloned().unwrap_or(Value::Null);
+        let content_str = tool_result_content_to_string(&content_val);
+        let obj = serde_json::json!({
+            "tool_call_id": id,
+            "tool_use_id": id,
+            "content": content_str,
+        });
+        return serde_json::to_string(&obj).ok();
+    }
+    None
+}
+
+fn tool_result_content_to_string(v: &Value) -> String {
+    match v {
+        Value::String(s) => s.clone(),
+        Value::Null => String::new(),
+        Value::Array(arr) => {
+            let mut out = String::new();
+            for item in arr {
+                if let Some(t) = item.get("text").and_then(Value::as_str) {
+                    out.push_str(t);
+                }
+            }
+            if out.is_empty() {
+                v.to_string()
+            } else {
+                out
+            }
+        }
+        other => other.to_string(),
+    }
 }

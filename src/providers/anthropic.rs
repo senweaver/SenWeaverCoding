@@ -994,6 +994,7 @@ impl AnthropicProvider {
         let mut tool_input_json = String::new();
         let mut tool_args_overflow = false;
         let mut total_tool_args_bytes: usize = 0;
+        let mut emitted_tool_calls: u32 = 0;
         let mut made_progress = false;
         let mut saw_stop_reason = false;
         let mut usage_acc = AnthropicStreamUsage::default();
@@ -1099,6 +1100,7 @@ impl AnthropicProvider {
                                                 &name, input,
                                             );
                                         made_progress = true;
+                                        emitted_tool_calls = emitted_tool_calls.saturating_add(1);
                                         let _ = tx
                                             .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
                                                 id,
@@ -1177,6 +1179,28 @@ impl AnthropicProvider {
                                             tool_input_json.push_str(json);
                                             total_tool_args_bytes =
                                                 total_tool_args_bytes.saturating_add(json.len());
+                                            let args_total_len = tool_input_json
+                                                .len()
+                                                .min(u32::MAX as usize)
+                                                as u32;
+                                            if let Some(name) = tool_name
+                                                .as_deref()
+                                                .filter(|n| !n.trim().is_empty())
+                                            {
+                                                if !json.is_empty()
+                                                    && tx
+                                                        .send(Ok(StreamEvent::ToolCallArgsDelta {
+                                                            call_index: emitted_tool_calls,
+                                                            name: name.to_string(),
+                                                            args_delta: json.to_string(),
+                                                            args_total_len,
+                                                        }))
+                                                        .await
+                                                        .is_err()
+                                                {
+                                                    return;
+                                                }
+                                            }
                                         } else if !tool_args_overflow {
                                             tool_args_overflow = true;
                                             tracing::warn!(
@@ -1252,6 +1276,7 @@ impl AnthropicProvider {
                                         &name, input,
                                     );
                                 made_progress = true;
+                                emitted_tool_calls = emitted_tool_calls.saturating_add(1);
                                 let _ = tx
                                     .send(Ok(StreamEvent::ToolCall(ProviderToolCall {
                                         id,
@@ -1286,13 +1311,29 @@ impl AnthropicProvider {
                         return;
                     }
                     "error" => {
+                        let code = event
+                            .get("error")
+                            .and_then(|e| e.get("type"))
+                            .and_then(|t| t.as_str())
+                            .map(|s| s.trim().to_ascii_lowercase())
+                            .filter(|s| !s.is_empty());
                         let msg = event
                             .get("error")
                             .and_then(|e| e.get("message"))
                             .and_then(|m| m.as_str())
                             .unwrap_or("unknown streaming error");
                         let sanitized = super::sanitize_api_error(msg);
-                        let _ = tx.send(Err(StreamError::Provider(sanitized))).await;
+                        let message = match code.as_deref() {
+                            Some(code) => format!("anthropic stream error ({code}): {sanitized}"),
+                            None => format!("anthropic stream error: {sanitized}"),
+                        };
+                        let _ = tx
+                            .send(Err(super::stream_declared_error(
+                                "Anthropic",
+                                code,
+                                message,
+                            )))
+                            .await;
                         return;
                     }
                     _ => {}
@@ -1884,7 +1925,12 @@ impl Provider for AnthropicProvider {
                     super::stream_error_body_with_retry_after(response).await;
                 let sanitized = super::sanitize_api_error(&error);
                 let _ = tx
-                    .send(Err(StreamError::Provider(format!("{status}: {sanitized}"))))
+                    .send(Err(super::stream_upstream_error(
+                        "Anthropic",
+                        status,
+                        &error,
+                        &sanitized,
+                    )))
                     .await;
                 return;
             }

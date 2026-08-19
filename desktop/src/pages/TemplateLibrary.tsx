@@ -6,6 +6,8 @@ import { useEffect, useMemo, useState } from 'react'
 import Editor, { DiffEditor } from '@monaco-editor/react'
 import { useTranslation } from '../i18n'
 import { useUIStore } from '../stores/uiStore'
+import { useTabStore } from '../stores/tabStore'
+import { useChatStore } from '../stores/chatStore'
 import { useTemplateLibraryStore } from '../stores/templateLibraryStore'
 import { useDesignerStore } from '../stores/designerStore'
 import {
@@ -15,6 +17,10 @@ import {
   type TemplateKindId,
 } from '../api/templateLibrary'
 import { TemplateLibraryPreview } from '../components/templateLibrary/TemplateLibraryPreview'
+import {
+  TemplateCardThumb,
+  invalidateThumbCache,
+} from '../components/templateLibrary/TemplateCardThumb'
 import '../lib/monacoSetup'
 
 type CategoryKey =
@@ -165,10 +171,12 @@ function TemplateDetail({
   item,
   onBack,
   onChanged,
+  onUseTemplate,
 }: {
   item: TemplateItem
   onBack: () => void
   onChanged: () => void
+  onUseTemplate: (item: TemplateItem) => void
 }) {
   const t = useTranslation()
   const theme = useUIStore((s) => s.theme)
@@ -312,6 +320,16 @@ function TemplateDetail({
             {item.id ? ` · ${item.id}` : ''}
           </div>
         </div>
+        {item.kind === 'designer-template' && (
+          <button
+            type="button"
+            onClick={() => onUseTemplate(item)}
+            className="flex h-7 items-center gap-1 rounded-md bg-[var(--color-accent)] px-2.5 text-[12px] font-medium text-[var(--color-on-accent)] hover:opacity-90"
+          >
+            <span className="material-symbols-outlined text-[16px]">brush</span>
+            {t('templateLibrary.action.useTemplate')}
+          </button>
+        )}
         {item.source === 'user' && (
           <button
             type="button"
@@ -603,11 +621,26 @@ function CreateForm({
 export function TemplateLibrary() {
   const t = useTranslation()
   const close = useUIStore((s) => s.closeTemplateLibrary)
+  const addToast = useUIStore((s) => s.addToast)
   const { catalog, loading, error, load } = useTemplateLibraryStore()
   const [activeCategory, setActiveCategory] = useState<CategoryKey>('designSystems')
   const [selectedKey, setSelectedKey] = useState<string | null>(null)
   const [search, setSearch] = useState('')
   const [creating, setCreating] = useState(false)
+
+  const applyTemplate = (item: TemplateItem) => {
+    const tabId = useTabStore.getState().activeTabId
+    if (!tabId) {
+      addToast({ type: 'error', message: t('templateLibrary.toast.useTemplateNoSession') })
+      return
+    }
+    useChatStore.getState().setSessionCodingMode(tabId, 'designer')
+    const designer = useDesignerStore.getState()
+    designer.selectSubmode(tabId, 'template')
+    designer.setParam(tabId, 'template', 'htmlTemplate', item.id)
+    addToast({ type: 'success', message: t('templateLibrary.toast.useTemplateApplied') })
+    close()
+  }
 
   useEffect(() => {
     void load()
@@ -703,9 +736,11 @@ export function TemplateLibrary() {
               item={selectedItem}
               onBack={() => setSelectedKey(null)}
               onChanged={() => {
+                invalidateThumbCache()
                 void load()
                 void useDesignerStore.getState().refresh()
               }}
+              onUseTemplate={applyTemplate}
             />
           ) : (
             <>
@@ -754,6 +789,7 @@ export function TemplateLibrary() {
                       onClick={() => setSelectedKey(itemKey(item))}
                       className="flex flex-col gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] p-3 text-left transition-shadow hover:shadow-md"
                     >
+                      <TemplateCardThumb item={item} />
                       <div className="flex items-start justify-between gap-2">
                         <span className="min-w-0 flex-1 truncate text-[13px] font-medium text-[var(--color-text-primary)]">
                           {item.name}
@@ -783,6 +819,7 @@ export function TemplateLibrary() {
           onClose={() => setCreating(false)}
           onCreated={(id, surface) => {
             setCreating(false)
+            invalidateThumbCache()
             void load()
             void useDesignerStore.getState().refresh()
             setSelectedKey(`${activeKind}|${id}|${surface ?? ''}`)

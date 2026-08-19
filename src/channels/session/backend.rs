@@ -249,6 +249,10 @@ pub trait SessionBackend: Send + Sync {
         Vec::new()
     }
 
+    fn session_for_edit_batch(&self, _edit_batch_id: &str) -> Option<String> {
+        None
+    }
+
     fn drop_edit_batches_after(
         &self,
         _session_key: &str,

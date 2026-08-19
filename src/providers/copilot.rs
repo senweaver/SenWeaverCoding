@@ -892,13 +892,16 @@ impl Provider for CopilotProvider {
                 }
             };
             if !response.status().is_success() {
-                let status = response.status();
-                let text = response.text().await.unwrap_or_default();
+                let (status, text) =
+                    crate::providers::stream_error_body_with_retry_after(response).await;
+                let sanitized = crate::providers::sanitize_api_error(&text);
                 let _ = tx
-                    .send(Err(StreamError::Provider(format!(
-                        "GitHub Copilot API error ({status}): {}",
-                        crate::providers::sanitize_api_error(&text)
-                    ))))
+                    .send(Err(crate::providers::stream_upstream_error(
+                        "GitHub Copilot",
+                        status,
+                        &text,
+                        &sanitized,
+                    )))
                     .await;
                 return;
             }

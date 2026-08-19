@@ -6,31 +6,63 @@ import { useEffect, useState } from 'react'
 import { useTranslation } from '../i18n'
 import { Button } from '../components/shared/Button'
 import { useSkillStore } from '../stores/skillStore'
-import { useUIStore } from '../stores/uiStore'
+import { useUIStore, type CustomSettingsSubTab } from '../stores/uiStore'
+import { McpSettings } from './McpSettings'
+import { WebResearchSettings } from './WebResearchSettings'
+import { CustomToolList } from '../components/tools/CustomToolList'
+import { RuleList } from '../components/rules/RuleList'
+import { UserRulesList } from '../components/rules/UserRulesList'
 import { SkillList } from '../components/skills/SkillList'
 import { SkillDetail } from '../components/skills/SkillDetail'
-import { UserRulesList } from '../components/rules/UserRulesList'
-import { SubagentList } from '../components/subagents/SubagentList'
 import { skillsApi } from '../api/skills'
 
-type SubTab = 'rules' | 'skills' | 'subagents'
-
-export function RulesSkillsSubagentsSettings() {
+export function CustomSettings() {
   const t = useTranslation()
-  const [tab, setTab] = useState<SubTab>('rules')
+  const pendingCustomSubTab = useUIStore((s) => s.pendingCustomSubTab)
+  const [tab, setTab] = useState<CustomSettingsSubTab>('tools')
+
+  useEffect(() => {
+    if (!pendingCustomSubTab) return
+    setTab(pendingCustomSubTab)
+    useUIStore.getState().setPendingCustomSubTab(null)
+  }, [pendingCustomSubTab])
 
   return (
     <div className="space-y-4">
       <div>
         <h2 className="text-xs font-semibold text-[var(--color-text-primary)]">
-          {t('settings.rsk.title')}
+          {t('settings.custom.title')}
         </h2>
         <p className="text-xs text-[var(--color-text-secondary)] mt-1">
-          {t('settings.rsk.description')}
+          {t('settings.custom.description')}
         </p>
       </div>
 
-      <div className="flex items-center gap-1 border-b border-[var(--color-border)]">
+      <div className="flex items-center gap-1 border-b border-[var(--color-border)] flex-wrap">
+        <SubTabButton
+          active={tab === 'tools'}
+          onClick={() => setTab('tools')}
+          icon="extension"
+          label={t('settings.toolsAndMcps.subtabTools')}
+        />
+        <SubTabButton
+          active={tab === 'guardrails'}
+          onClick={() => setTab('guardrails')}
+          icon="shield"
+          label={t('settings.toolsAndMcps.subtabGuardrails')}
+        />
+        <SubTabButton
+          active={tab === 'web'}
+          onClick={() => setTab('web')}
+          icon="public"
+          label={t('settings.toolsAndMcps.subtabWeb')}
+        />
+        <SubTabButton
+          active={tab === 'mcps'}
+          onClick={() => setTab('mcps')}
+          icon="hub"
+          label={t('settings.toolsAndMcps.subtabMcps')}
+        />
         <SubTabButton
           active={tab === 'rules'}
           onClick={() => setTab('rules')}
@@ -43,17 +75,14 @@ export function RulesSkillsSubagentsSettings() {
           icon="auto_awesome"
           label={t('settings.rsk.subtabSkills')}
         />
-        <SubTabButton
-          active={tab === 'subagents'}
-          onClick={() => setTab('subagents')}
-          icon="smart_toy"
-          label={t('settings.rsk.subtabSubagents')}
-        />
       </div>
 
+      {tab === 'tools' && <CustomToolList />}
+      {tab === 'guardrails' && <RuleList />}
+      {tab === 'web' && <WebResearchSettings />}
+      {tab === 'mcps' && <McpSettings />}
       {tab === 'rules' && <UserRulesList />}
       {tab === 'skills' && <SkillsTab />}
-      {tab === 'subagents' && <SubagentList />}
     </div>
   )
 }

@@ -94,7 +94,9 @@ impl SessionSyncHub {
                             "session.sync_transport",
                             async move {
                                 while let Some(delta) = rx.recv().await {
-                                    if let Err(e) = transport_for_task.send(&delta).await {
+                                    if let Err(e) =
+                                        transport_for_task.send(&session_id, &delta).await
+                                    {
                                         tracing::warn!(
                                             target: "session.sync",
                                             session_id = %session_id,

@@ -600,6 +600,7 @@ impl RpcCtx {
                     )
                     .await;
                 }
+                TurnEvent::ToolArgsDelta { .. } => {}
                 TurnEvent::ToolResult {
                     name,
                     output,

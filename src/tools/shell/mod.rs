@@ -5,5 +5,7 @@
 pub mod core;
 pub mod foreground;
 pub mod preflight;
+#[cfg(feature = "pty")]
+pub mod pty;
 
 pub use core::*;

@@ -45,6 +45,13 @@ pub enum TurnEvent {
         tool_call_id: Option<String>,
     },
 
+    ToolArgsDelta {
+        call_index: u32,
+        name: String,
+        args_delta: String,
+        args_total_len: u32,
+    },
+
     ToolResult {
         name: String,
         output: String,
@@ -866,10 +873,11 @@ impl Agent {
 
         let _ = crate::runtime::spawn_supervised("agent.summary.rolling_refresh", async move {
             let _done_guard = InflightReset(inflight);
-            let provider = match crate::providers::create_provider_with_url_async(
+            let provider = match crate::providers::create_resilient_runtime_provider_async(
                 provider_name,
                 api_key,
                 api_url,
+                crate::providers::ProviderRuntimeOptions::default(),
             )
             .await
             {

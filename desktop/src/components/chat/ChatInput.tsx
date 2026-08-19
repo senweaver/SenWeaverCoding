@@ -10,7 +10,8 @@ import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useSettingsStore } from '../../stores/settingsStore'
-import { useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
+import { useSessionRuntimeStore, DRAFT_RUNTIME_SELECTION_KEY } from '../../stores/sessionRuntimeStore'
+import { skillsApi } from '../../api/skills'
 import { useTeamStore } from '../../stores/teamStore'
 import { useProviderStore } from '../../stores/providerStore'
 import { sessionsApi } from '../../api/sessions'
@@ -73,12 +74,13 @@ type Attachment = {
 type ChatInputProps = {
   variant?: 'default' | 'hero'
   onSubmit?: ReturnType<typeof useChatStore.getState>['sendMessage']
+  draftWorkDir?: string
 }
 
 const EMPTY_DOCK_TABS: BrowserDockTabInfo[] = []
 const EMPTY_SLASH_COMMANDS: Array<{ name: string; description: string }> = []
 
-export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
+export function ChatInput({ variant = 'default', onSubmit, draftWorkDir }: ChatInputProps) {
   const t = useTranslation()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
@@ -97,6 +99,8 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
   const composingRef = useRef(false)
   const composerRef = useRef<RichComposerHandle>(null)
   const caretRef = useRef(0)
+  const historyCursorRef = useRef(-1)
+  const historyDraftRef = useRef<string | null>(null)
   const slashMenuRef = useRef<HTMLDivElement>(null)
   const fileSearchRef = useRef<FileSearchMenuHandle>(null)
   const slashItemRefs = useRef<(HTMLButtonElement | null)[]>([])
@@ -120,7 +124,32 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
   )
   const chatState = sessionView.chatState
   const stopRequested = sessionView.stopRequested
-  const slashCommands = sessionView.slashCommands ?? EMPTY_SLASH_COMMANDS
+  const [draftSlashCommands, setDraftSlashCommands] = useState<
+    Array<{ name: string; description: string }>
+  >(EMPTY_SLASH_COMMANDS)
+  useEffect(() => {
+    if (activeTabId) return
+    let cancelled = false
+    skillsApi
+      .list(draftWorkDir || undefined)
+      .then(({ skills }) => {
+        if (cancelled) return
+        setDraftSlashCommands(
+          skills
+            .filter((skill) => skill.userInvocable)
+            .map((skill) => ({ name: skill.name, description: skill.description })),
+        )
+      })
+      .catch(() => {
+        if (!cancelled) setDraftSlashCommands(EMPTY_SLASH_COMMANDS)
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [activeTabId, draftWorkDir])
+  const slashCommands = activeTabId
+    ? sessionView.slashCommands ?? EMPTY_SLASH_COMMANDS
+    : draftSlashCommands
   const composerPrefill = sessionView.composerPrefill
   const globalCodingMode = useSettingsStore((s) => s.codingMode)
   const sessionCodingMode = useChatStore((s) =>
@@ -175,7 +204,9 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
   const providers = useProviderStore((s) => s.providers)
   const settingsCurrentModel = useSettingsStore((s) => s.currentModel)
   const settingsAvailableModels = useSettingsStore((s) => s.availableModels)
-  const sessionRuntimeSelection = useSessionRuntimeStore((s) => activeTabId ? s.selections[activeTabId] : undefined)
+  const sessionRuntimeSelection = useSessionRuntimeStore((s) =>
+    s.selections[activeTabId ?? DRAFT_RUNTIME_SELECTION_KEY],
+  )
   const openSettingsOverlay = useUIStore((s) => s.openSettingsOverlay)
 
   const designerSubmodeMeta = useMemo(
@@ -461,7 +492,7 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
     (input.trim().length > 0 || (!isMemberSession && attachments.length > 0))
   const actAsStopButton = !isMemberSession && isActive && !canSubmit
   const isHeroComposer = variant === 'hero' && !isMemberSession
-  const resolvedWorkDir = activeSession?.workDir || gitInfo?.workDir || undefined
+  const resolvedWorkDir = activeSession?.workDir || gitInfo?.workDir || draftWorkDir || undefined
   const resolvedWorkDirRef = useRef(resolvedWorkDir)
   useEffect(() => {
     resolvedWorkDirRef.current = resolvedWorkDir
@@ -770,7 +801,21 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
       setGitInfo(null)
       return
     }
-    sessionsApi.getGitInfo(activeTabId).then(setGitInfo).catch(() => setGitInfo(null))
+    let cancelled = false
+    const requestedTabId = activeTabId
+    sessionsApi
+      .getGitInfo(requestedTabId)
+      .then((info) => {
+        if (cancelled || requestedTabId !== activeTabId) return
+        setGitInfo(info)
+      })
+      .catch(() => {
+        if (cancelled || requestedTabId !== activeTabId) return
+        setGitInfo(null)
+      })
+    return () => {
+      cancelled = true
+    }
   }, [activeTabId, isMemberSession])
 
   useEffect(() => {
@@ -1053,6 +1098,20 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
     sendMessage(targetTabId, text, attachmentPayload)
   }
 
+  const getPromptHistory = (): string[] => {
+    if (!activeTabId) return []
+    const session = useChatStore.getState().sessions[activeTabId]
+    if (!session) return []
+    const out: string[] = []
+    for (const m of session.messages) {
+      if (m.type === 'user_text' && typeof m.content === 'string') {
+        const trimmed = m.content.trim()
+        if (trimmed.length > 0 && out[out.length - 1] !== trimmed) out.push(trimmed)
+      }
+    }
+    return out
+  }
+
   const handleKeyDown = (event: React.KeyboardEvent) => {
 
     if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) return
@@ -1107,6 +1166,54 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
         setSlashMenuOpen(false)
         return
       }
+    }
+
+    if (
+      (event.key === 'ArrowUp' || event.key === 'ArrowDown') &&
+      !event.shiftKey &&
+      !event.metaKey &&
+      !event.ctrlKey &&
+      !event.altKey &&
+      !slashMenuOpen &&
+      !fileSearchOpen
+    ) {
+      const composer = composerRef.current
+      if (composer) {
+        const value = composer.getValue()
+        const caret = composer.getCaret()
+        const promptHistory = getPromptHistory()
+        if (event.key === 'ArrowUp' && promptHistory.length > 0 && caret === 0) {
+          event.preventDefault()
+          if (historyCursorRef.current === -1) {
+            historyDraftRef.current = value
+            historyCursorRef.current = promptHistory.length - 1
+          } else if (historyCursorRef.current > 0) {
+            historyCursorRef.current -= 1
+          }
+          const recalled = promptHistory[historyCursorRef.current] ?? ''
+          composer.setValue(recalled, 0)
+          return
+        }
+        if (event.key === 'ArrowDown' && historyCursorRef.current !== -1) {
+          event.preventDefault()
+          if (historyCursorRef.current < promptHistory.length - 1) {
+            historyCursorRef.current += 1
+            const recalled = promptHistory[historyCursorRef.current] ?? ''
+            composer.setValue(recalled, 0)
+          } else {
+            const draft = historyDraftRef.current ?? ''
+            historyCursorRef.current = -1
+            historyDraftRef.current = null
+            composer.setValue(draft, draft.length)
+          }
+          return
+        }
+      }
+    }
+
+    if (event.key !== 'ArrowUp' && event.key !== 'ArrowDown') {
+      historyCursorRef.current = -1
+      historyDraftRef.current = null
     }
 
     if (event.key === 'Enter' && !event.shiftKey) {
@@ -1820,7 +1927,10 @@ export function ChatInput({ variant = 'default', onSubmit }: ChatInputProps) {
                           disabled={isActive}
                         />
                       ) : (
-                        <ModelSelector runtimeKey={activeTabId} disabled={isActive} />
+                        <ModelSelector
+                          runtimeKey={activeTabId ?? DRAFT_RUNTIME_SELECTION_KEY}
+                          disabled={isActive}
+                        />
                       )
                     )}
                   </div>

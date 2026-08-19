@@ -13,16 +13,17 @@ type RuntimeStore = {
   fetch: () => Promise<void>
 }
 
-export const useRuntimeStore = create<RuntimeStore>((set) => ({
+export const useRuntimeStore = create<RuntimeStore>((set, get) => ({
   snapshot: null,
   isLoading: false,
   error: null,
 
   fetch: async () => {
-    set({ isLoading: true, error: null })
+    if (get().isLoading) return
+    set({ isLoading: true })
     try {
       const snapshot = await runtimeApi.snapshot()
-      set({ snapshot, isLoading: false })
+      set({ snapshot, isLoading: false, error: null })
     } catch (err) {
       set({
         isLoading: false,

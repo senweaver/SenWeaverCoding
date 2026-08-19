@@ -73,6 +73,7 @@ export type PerSessionState = {
   chatState: ChatState
   connectionState: ConnectionState
   streamingText: string
+  streamingToolArgs: { toolName: string; callIndex: number; argsSnapshot: string } | null
   activeToolUseId: string | null
   activeToolName: string | null
   activeThinkingId: string | null
@@ -190,6 +191,7 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   chatState: 'idle',
   connectionState: 'disconnected',
   streamingText: '',
+  streamingToolArgs: null,
   activeToolUseId: null,
   activeToolName: null,
   activeThinkingId: null,
@@ -364,6 +366,8 @@ type ChatStore = {
   clearPendingEdits: (sessionId: string) => void
 
   undoAllPendingEdits: (sessionId: string) => Promise<void>
+
+  revertToTurnCheckpoint: (sessionId: string, suffixBatchIds: string[]) => Promise<void>
 
   undoPendingEditFile: (sessionId: string, path: string) => Promise<void>
 
@@ -730,7 +734,15 @@ function upgradePlanCardFromResult(
   isError: boolean,
 ): Extract<UIMessage, { type: 'plan_card' }> {
   if (isError) {
-    return { ...card, status: 'writing' }
+    return {
+      ...card,
+      status: 'failed',
+      error:
+        (typeof rawContent === 'string'
+          ? rawContent
+          : extractTextFromRawContent(rawContent)) ||
+        (t('plan.failedHint') || 'Plan generation did not finish.'),
+    }
   }
   const text = typeof rawContent === 'string' ? rawContent : extractTextFromRawContent(rawContent)
 
@@ -889,6 +901,17 @@ function resolveDanglingCuratorCards(messages: UIMessage[]): UIMessage[] {
           m.error ||
           (t('curator.interrupted') ||
             'The turn ended before the document was finalized. Ask the assistant to continue.'),
+      }
+    }
+    if (m.type === 'plan_card' && m.status === 'writing') {
+      changed = true
+      return {
+        ...m,
+        status: 'failed' as const,
+        error:
+          m.error ||
+          (t('plan.failedHint') ||
+            'Plan generation did not finish. Ask the assistant to try again.'),
       }
     }
     return m
@@ -2817,17 +2840,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
     }
     wsManager.send(sessionId, { type: 'stop_generation' })
-    if (hasPendingDelta(sessionId)) {
-      const text = consumePendingDelta(sessionId)
-      set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, (sess) => ({ streamingText: sess.streamingText + text })) }))
-    } else {
-      consumePendingDelta(sessionId)
-    }
+    const pendingDelta = consumePendingDelta(sessionId)
     set((s) => {
       const session = s.sessions[sessionId]
       if (!session) return s
       const sealedMessages = sealThinkingForSession(sessionId, session)
-      const partialText = session.streamingText
+      const partialText = session.streamingText + pendingDelta
       const committedMessages = resolveDanglingCuratorCards(
         partialText.trim()
           ? appendAssistantTextMessage(sealedMessages, partialText, Date.now(), undefined, echoDedupOptions(sessionId))
@@ -3473,6 +3491,27 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }))
   },
 
+  revertToTurnCheckpoint: async (sessionId, suffixBatchIds) => {
+    const sess = get().sessions[sessionId]
+    if (!sess) return
+    const batchIds = Array.from(new Set(suffixBatchIds.filter(Boolean)))
+    if (batchIds.length === 0) return
+    await sessionsApi.revertBatches(sessionId, batchIds)
+    const revertedSet = new Set(batchIds)
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, (sc) => ({
+        messages: sc.messages.map((m) =>
+          m.type === 'file_edit' && m.editBatchId && revertedSet.has(m.editBatchId)
+            ? { ...m, reverted: true }
+            : m,
+        ),
+        pendingEdits: sc.pendingEdits.filter(
+          (e) => !e.editBatchIds.some((id) => revertedSet.has(id)),
+        ),
+      })),
+    }))
+  },
+
   undoPendingEditFile: async (sessionId, path) => {
     const sess = get().sessions[sessionId]
     if (!sess) return
@@ -3548,6 +3587,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               stopRequested: false,
             })),
           }))
+          setTimeout(() => {
+            const st = get().sessions[sessionId]
+            if (!st) return
+            const busy =
+              st.chatState === 'streaming' ||
+              st.chatState === 'thinking' ||
+              st.chatState === 'tool_executing' ||
+              st.chatState === 'permission_pending'
+            if (busy) return
+            void get().reloadHistory(sessionId)
+          }, 150)
         }
       }
     }
@@ -3579,10 +3629,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const preserveStreamingTurn = hasPendingStreamText && msg.state !== 'idle'
           const shouldFlush = hasPendingStreamText && msg.state === 'idle'
           const keepPending = msg.state === 'idle' && !!session.pendingPermission
-          const baseMessages =
+          const sealedMessages =
             msg.state === 'idle'
               ? sealThinkingForSession(sessionId, session)
               : session.messages
+          const baseMessages =
+            msg.state === 'idle' && !session.pendingPermission
+              ? resolveDanglingCuratorCards(sealedMessages)
+              : sealedMessages
           return {
             chatState: preserveStreamingTurn
               ? 'streaming'
@@ -3608,11 +3662,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
         })
         if (msg.state === 'idle') {
-          update((s) =>
-            s.pendingPermission
-              ? {}
-              : { messages: resolveDanglingCuratorCards(s.messages) },
-          )
           syncTasksAfterTurnEnd(sessionId, turnWasStopped)
           revealDesignCanvasIfPending(sessionId)
           if (dirtyMidTurnSessions.delete(sessionId)) {
@@ -3631,12 +3680,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const session = get().sessions[sessionId]
         if (!session) break
         const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
-        if (msg.blockType !== 'text' && pendingText.trim()) {
-          update((s) => ({
-            messages: appendAssistantTextMessage(s.messages, pendingText, Date.now(), undefined, echoDedupOptions(sessionId)),
-            streamingText: '',
-          }))
-        }
+        const flushText = msg.blockType !== 'text' && pendingText.trim().length > 0
         if (msg.blockType === 'text') {
           update((s) => ({
             messages: sealThinkingForSession(sessionId, s),
@@ -3650,8 +3694,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }))
         } else if (msg.blockType === 'tool_use') {
           update((s) => {
+            const flushed = flushText
+              ? appendAssistantTextMessage(s.messages, pendingText, Date.now(), undefined, echoDedupOptions(sessionId))
+              : s.messages
             return {
-              messages: sealThinkingForSession(sessionId, s),
+              messages: sealThinkingForSession(sessionId, { ...s, messages: flushed }),
+              ...(flushText ? { streamingText: '' } : {}),
               activeToolUseId: msg.toolUseId ?? null,
               activeToolName: msg.toolName ?? null,
               chatState: 'tool_executing',
@@ -3670,6 +3718,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               presentOnly: true,
             })
           }
+        } else if (flushText) {
+          update((s) => ({
+            messages: appendAssistantTextMessage(s.messages, pendingText, Date.now(), undefined, echoDedupOptions(sessionId)),
+            streamingText: '',
+          }))
         }
         break
       }
@@ -3721,6 +3774,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const patch = mergePendingThinkingIntoActive(s, sessionId)
           return {
             streamingText: '',
+            streamingToolArgs: null,
             activeThinkingId: patch.activeThinkingId,
             activeThinkingContent: patch.activeThinkingId
               ? patch.activeThinkingContent
@@ -3805,6 +3859,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         break
 
+      case 'tool_use_args_delta': {
+        const toolName = typeof msg.toolName === 'string' ? msg.toolName : ''
+        const argsSnapshot = typeof msg.argsSnapshot === 'string' ? msg.argsSnapshot : ''
+        const callIndex = typeof msg.callIndex === 'number' ? msg.callIndex : 0
+        if (toolName && argsSnapshot) {
+          update(() => ({
+            streamingToolArgs: { toolName, callIndex, argsSnapshot },
+          }))
+        }
+        break
+      }
+
       case 'tool_use_complete': {
         const session = get().sessions[sessionId]
         const toolName = msg.toolName || session?.activeToolName || 'unknown'
@@ -3869,6 +3935,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               next[lastIdx] = merged
               return {
                 messages: next,
+                streamingToolArgs: null,
                 activeToolUseId: null,
                 activeToolName: null,
                 activeThinkingId: null,
@@ -3886,6 +3953,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                   reason: modeBlockedReason,
                 },
               ],
+              streamingToolArgs: null,
               activeToolUseId: null,
               activeToolName: null,
               activeThinkingId: null,
@@ -3902,7 +3970,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             const curatorIdx = planIdx < 0 ? findLatestCuratorCardIdx(sealed) : -1
             if (planIdx < 0 && curatorIdx < 0) {
 
-              return { messages: sealed, activeThinkingId: null }
+              return { messages: sealed, streamingToolArgs: null, activeThinkingId: null }
             }
             if (planIdx >= 0) {
               const cur = sealed[planIdx] as Extract<UIMessage, { type: 'plan_card' }>
@@ -3911,13 +3979,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 : applyUpdatePlanUpdateToCard(cur, input as Record<string, unknown>)
 
               if (upgraded === null || upgraded === cur) {
-                return { messages: sealed, activeThinkingId: null }
+                return { messages: sealed, streamingToolArgs: null, activeThinkingId: null }
               }
               inlinedToCard = true
               const next = [...sealed]
               next[planIdx] = upgraded
               return {
                 messages: next,
+                streamingToolArgs: null,
                 activeToolUseId: null,
                 activeToolName: null,
                 activeThinkingId: null,
@@ -3931,13 +4000,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 )
               : applyUpdatePlanUpdateToCuratorCard(curCard, input as Record<string, unknown>)
             if (upgraded === null || upgraded === curCard) {
-              return { messages: sealed, activeThinkingId: null }
+              return { messages: sealed, streamingToolArgs: null, activeThinkingId: null }
             }
             inlinedToCard = true
             const next = [...sealed]
             next[curatorIdx] = upgraded
             return {
               messages: next,
+              streamingToolArgs: null,
               activeToolUseId: null,
               activeToolName: null,
               activeThinkingId: null,
@@ -3964,6 +4034,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               next[draftIdx] = { ...card, id: previous.id, timestamp: previous.timestamp }
               return {
                 messages: next,
+                streamingToolArgs: null,
                 activeToolUseId: null,
                 activeToolName: null,
                 activeThinkingId: null,
@@ -3971,6 +4042,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }
             return {
               messages: [...sealed, card],
+              streamingToolArgs: null,
               activeToolUseId: null,
               activeToolName: null,
               activeThinkingId: null,
@@ -3985,6 +4057,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               next[draftIdx] = { ...card, id: previous.id, timestamp: previous.timestamp }
               return {
                 messages: next,
+                streamingToolArgs: null,
                 activeToolUseId: null,
                 activeToolName: null,
                 activeThinkingId: null,
@@ -3992,6 +4065,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }
             return {
               messages: [...sealed, card],
+              streamingToolArgs: null,
               activeToolUseId: null,
               activeToolName: null,
               activeThinkingId: null,
@@ -4002,11 +4076,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             const card = makePendingPlanCardFromUpdatePlan(input, toolUseId)
             return {
               messages: [...sealed, card],
+              streamingToolArgs: null,
               activeToolUseId: null,
               activeToolName: null,
               activeThinkingId: null,
             }
           }
+          const spawnsSubagents = isSubagentParentTool(toolName) && !!toolUseId
           return {
             messages: [
               ...sealed,
@@ -4020,9 +4096,23 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 parentToolUseId: msg.parentToolUseId,
               },
             ],
+            streamingToolArgs: null,
             activeToolUseId: null,
             activeToolName: null,
             activeThinkingId: null,
+            ...(spawnsSubagents
+              ? {
+                  subagentTimelines: {
+                    ...s.subagentTimelines,
+                    [toolUseId]: {
+                      parentToolUseId: toolUseId,
+                      parentToolName: toolName,
+                      agents: {},
+                    },
+                  },
+                  activeTaskToolUseId: toolUseId,
+                }
+              : {}),
           }
         })
         if (TODO_TOOL_NAMES.has(toolName) && Array.isArray((input as any)?.todos)) {
@@ -4047,20 +4137,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               presentOnly: true,
             })
           }
-        }
-        if (isSubagentParentTool(toolName) && toolUseId) {
-
-          update((s) => ({
-            subagentTimelines: {
-              ...s.subagentTimelines,
-              [toolUseId]: {
-                parentToolUseId: toolUseId,
-                parentToolName: toolName,
-                agents: {},
-              },
-            },
-            activeTaskToolUseId: toolUseId,
-          }))
         }
         break
       }
@@ -4118,6 +4194,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         update((s) => {
           const sealed = sealThinkingForSession(sessionId, s)
+          const bucket = s.subagentTimelines[msg.toolUseId]
+          const subagentPatch: Partial<PerSessionState> = bucket
+            ? {
+                subagentTimelines: markSubagentBucketStatus(
+                  s.subagentTimelines,
+                  msg.toolUseId,
+                  msg.isError ? 'error' : 'completed',
+                  extractToolResultText(msg.content),
+                ),
+                activeTaskToolUseId:
+                  s.activeTaskToolUseId === msg.toolUseId
+                    ? null
+                    : s.activeTaskToolUseId,
+              }
+            : {}
 
           const cardIdx = sealed.findIndex(
             (m) => m.type === 'plan_card' && m.sourceToolUseId === msg.toolUseId,
@@ -4134,6 +4225,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               messages: next,
               chatState: 'thinking',
               activeThinkingId: null,
+              ...subagentPatch,
             }
           }
 
@@ -4159,6 +4251,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               messages: next,
               chatState: 'thinking',
               activeThinkingId: null,
+              ...subagentPatch,
             }
           }
           return {
@@ -4176,6 +4269,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             ],
             chatState: 'thinking',
             activeThinkingId: null,
+            ...subagentPatch,
           }
         })
         if (
@@ -4187,26 +4281,6 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ) {
           useCLITaskStore.getState().refreshTasks(sessionId)
         }
-
-        update((s) => {
-          const bucket = s.subagentTimelines[msg.toolUseId]
-          if (!bucket) return {}
-          const finalText = extractToolResultText(msg.content)
-          const nextTimelines = markSubagentBucketStatus(
-            s.subagentTimelines,
-            msg.toolUseId,
-            msg.isError ? 'error' : 'completed',
-            finalText,
-          )
-          const nextActive =
-            s.activeTaskToolUseId === msg.toolUseId
-              ? null
-              : s.activeTaskToolUseId
-          return {
-            subagentTimelines: nextTimelines,
-            activeTaskToolUseId: nextActive,
-          }
-        })
         break
 
       case 'permission_request':
@@ -4243,51 +4317,39 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const session = get().sessions[sessionId]
         if (!session) break
         const text = `${session.streamingText}${consumePendingDelta(sessionId)}`
-        if (text.trim()) {
-          update((s) => ({
-            messages: appendAssistantTextMessage(
-              sealThinkingForSession(sessionId, s),
-              text,
-              Date.now(),
-              undefined,
-              echoDedupOptions(sessionId),
-            ),
-            streamingText: '',
-            activeThinkingContent: '',
-            activeThinkingStartedAt: null,
-            activeThinkingLastChunkAt: null,
-          }))
-        } else if (text !== session.streamingText) {
-          update((s) => ({
-            messages: sealThinkingForSession(sessionId, s),
-            streamingText: text,
-            activeThinkingContent: '',
-            activeThinkingStartedAt: null,
-            activeThinkingLastChunkAt: null,
-          }))
-        } else {
-          update((s) => ({
-            messages: sealThinkingForSession(sessionId, s),
-            activeThinkingContent: '',
-            activeThinkingStartedAt: null,
-            activeThinkingLastChunkAt: null,
-          }))
-        }
-
         const turnDelta =
           (msg.usage?.input_tokens ?? 0) +
           (msg.usage?.output_tokens ?? 0) +
           (msg.usage?.cache_read_tokens ?? 0) +
           (msg.usage?.cache_creation_tokens ?? 0)
-        update((s) => ({
-          tokenUsage: msg.usage,
-          cumulativeTokens: (s.cumulativeTokens ?? 0) + Math.max(0, turnDelta),
-          chatState: s.pendingPermission ? s.chatState : 'idle',
-          messages: s.pendingPermission ? s.messages : resolveDanglingCuratorCards(s.messages),
-          activeThinkingId: null,
-          pendingResourceWaits: [],
-          providerRetry: null,
-        }))
+        update((s) => {
+          const sealed = sealThinkingForSession(sessionId, s)
+          const flushed = text.trim()
+            ? appendAssistantTextMessage(
+                sealed,
+                text,
+                Date.now(),
+                undefined,
+                echoDedupOptions(sessionId),
+              )
+            : sealed
+          return {
+            streamingToolArgs: null,
+            messages: s.pendingPermission
+              ? flushed
+              : resolveDanglingCuratorCards(flushed),
+            streamingText: text.trim() ? '' : text,
+            activeThinkingId: null,
+            activeThinkingContent: '',
+            activeThinkingStartedAt: null,
+            activeThinkingLastChunkAt: null,
+            tokenUsage: msg.usage,
+            cumulativeTokens: (s.cumulativeTokens ?? 0) + Math.max(0, turnDelta),
+            chatState: s.pendingPermission ? s.chatState : 'idle',
+            pendingResourceWaits: [],
+            providerRetry: null,
+          }
+        })
 
         void useUsageStore.getState().fetch()
         syncTasksAfterTurnEnd(sessionId, turnWasStopped)
@@ -4447,6 +4509,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeToolName: null,
             activeTaskToolUseId: null,
             streamingText: '',
+            streamingToolArgs: null,
             pendingPermission: null,
             pendingResourceWaits: [],
             providerRetry: null,
@@ -4567,7 +4630,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       }
       case 'usage_updated': {
         const cost = typeof msg.costUsd === 'number' ? msg.costUsd : 0
-        const belongsToThisSession = !!msg.sessionId
+        const belongsToThisSession = !!msg.sessionId && msg.sessionId === sessionId
         if (cost > 0 && belongsToThisSession) {
           update((s) => ({
             cumulativeCostUsd: (s.cumulativeCostUsd ?? 0) + cost,

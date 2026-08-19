@@ -4066,6 +4066,45 @@ pub async fn handle_agents_list(
             })
         })
         .collect();
+    {
+        let workspace_dir = config.workspace_dir.clone();
+        let profiles = tokio::task::spawn_blocking(move || {
+            crate::agent::profile::profiles::ProfileManager::new(&workspace_dir)
+                .list()
+                .unwrap_or_default()
+        })
+        .await
+        .unwrap_or_default();
+        let agents_dir = config.workspace_dir.join("agents");
+        for p in profiles {
+            if config.agents.contains_key(&p.name) {
+                continue;
+            }
+            let provider = p
+                .provider
+                .clone()
+                .or_else(|| config.default_provider.clone())
+                .unwrap_or_default();
+            let model = p
+                .model
+                .clone()
+                .or_else(|| config.default_model.clone())
+                .unwrap_or_default();
+            all_agents.push(serde_json::json!({
+                "agentType": p.name,
+                "description": if p.description.is_empty() { p.system_prompt.clone() } else { p.description.clone() },
+                "model": model,
+                "modelDisplay": format!("{provider}/{model}"),
+                "tools": p.allowed_tools,
+                "systemPrompt": p.system_prompt,
+                "color": null,
+                "source": "workspace-file",
+                "baseDir": agents_dir.join(&p.name).to_string_lossy(),
+                "overriddenBy": null,
+                "isActive": true,
+            }));
+        }
+    }
     all_agents.sort_by(|a, b| {
         a.get("agentType")
             .and_then(|v| v.as_str())
@@ -7458,49 +7497,51 @@ pub async fn handle_usage_get(
         return e.into_response();
     }
 
-    let summary_value = match state.cost_tracker {
-        Some(ref tracker) => match tracker.get_summary() {
-            Ok(summary) => match serde_json::to_value(&summary) {
-                Ok(v) => v,
-                Err(_) => serde_json::json!({}),
-            },
-            Err(e) => {
-                tracing::error!("usage: cost summary failed: {e}");
-                serde_json::json!({})
-            }
-        },
-        None => serde_json::json!({
-            "session_cost_usd": 0.0,
-            "daily_cost_usd": 0.0,
-            "monthly_cost_usd": 0.0,
-            "total_tokens": 0,
-            "request_count": 0,
-            "by_model": {},
-        }),
-    };
-
     let include_lifetime = q
         .period
         .as_deref()
         .map(|s| s.eq_ignore_ascii_case("all") || s.eq_ignore_ascii_case("lifetime"))
         .unwrap_or(true);
 
-    let aggregates = if include_lifetime {
-        let (workspace_dir, prices) = {
-            let cfg = state.live_config.load();
-            (
-                cfg.workspace_dir.clone(),
-                crate::cost::pricing::effective_model_prices(&cfg),
-            )
-        };
-        tokio::task::spawn_blocking(move || {
-            compute_lifetime_by_model_and_session(&workspace_dir, &prices)
-        })
-        .await
-        .unwrap_or_else(|_| UsageAggregates::empty())
-    } else {
-        UsageAggregates::empty()
+    let tracker = state.cost_tracker.clone();
+    let (workspace_dir, prices) = {
+        let cfg = state.live_config.load();
+        (
+            cfg.workspace_dir.clone(),
+            crate::cost::pricing::effective_model_prices(&cfg),
+        )
     };
+
+    let (summary_value, aggregates) = tokio::task::spawn_blocking(move || {
+        let summary_value = match tracker {
+            Some(ref tracker) => match tracker.get_summary() {
+                Ok(summary) => match serde_json::to_value(&summary) {
+                    Ok(v) => v,
+                    Err(_) => serde_json::json!({}),
+                },
+                Err(e) => {
+                    tracing::error!("usage: cost summary failed: {e}");
+                    serde_json::json!({})
+                }
+            },
+            None => serde_json::json!({
+                "session_cost_usd": 0.0,
+                "daily_cost_usd": 0.0,
+                "monthly_cost_usd": 0.0,
+                "total_tokens": 0,
+                "request_count": 0,
+                "by_model": {},
+            }),
+        };
+        let aggregates = if include_lifetime {
+            lifetime_aggregates_cached(&workspace_dir, &prices)
+        } else {
+            UsageAggregates::empty()
+        };
+        (summary_value, aggregates)
+    })
+    .await
+    .unwrap_or_else(|_| (serde_json::json!({}), UsageAggregates::empty()));
 
     let mut summary_camel = to_camel_case_keys(summary_value);
     if let serde_json::Value::Object(ref mut map) = summary_camel {
@@ -7551,6 +7592,7 @@ pub async fn handle_usage_get(
     Json(serde_json::json!({"cost": summary_camel})).into_response()
 }
 
+#[derive(Clone)]
 struct UsageAggregates {
     by_model: serde_json::Value,
     by_session: serde_json::Value,
@@ -7566,6 +7608,74 @@ struct UsageAggregates {
     last_7d_tokens: u64,
     last_7d_cost_usd: f64,
     last_7d_requests: u64,
+}
+
+struct UsageAggregatesCacheEntry {
+    path: std::path::PathBuf,
+    file_len: u64,
+    file_mtime: Option<std::time::SystemTime>,
+    prices_fingerprint: u64,
+    computed_at: std::time::Instant,
+    aggregates: UsageAggregates,
+}
+
+static USAGE_AGGREGATES_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<Option<UsageAggregatesCacheEntry>>,
+> = std::sync::OnceLock::new();
+
+const USAGE_AGGREGATES_CACHE_TTL: Duration = Duration::from_secs(10);
+
+fn usage_prices_fingerprint(
+    prices: &std::collections::HashMap<String, crate::config::schema::ModelPricing>,
+) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut keys: Vec<&String> = prices.keys().collect();
+    keys.sort();
+    for key in keys {
+        key.hash(&mut hasher);
+        if let Ok(serialized) = serde_json::to_string(&prices[key]) {
+            serialized.hash(&mut hasher);
+        }
+    }
+    hasher.finish()
+}
+
+fn lifetime_aggregates_cached(
+    workspace_dir: &std::path::Path,
+    prices: &std::collections::HashMap<String, crate::config::schema::ModelPricing>,
+) -> UsageAggregates {
+    let path = workspace_dir.join("state").join("costs.jsonl");
+    let (file_len, file_mtime) = match std::fs::metadata(&path) {
+        Ok(meta) => (meta.len(), meta.modified().ok()),
+        Err(_) => (0, None),
+    };
+    let fingerprint = usage_prices_fingerprint(prices);
+    let cache = USAGE_AGGREGATES_CACHE.get_or_init(|| std::sync::Mutex::new(None));
+    if let Ok(guard) = cache.lock() {
+        if let Some(entry) = guard.as_ref() {
+            if entry.path == path
+                && entry.file_len == file_len
+                && entry.file_mtime == file_mtime
+                && entry.prices_fingerprint == fingerprint
+                && entry.computed_at.elapsed() < USAGE_AGGREGATES_CACHE_TTL
+            {
+                return entry.aggregates.clone();
+            }
+        }
+    }
+    let aggregates = compute_lifetime_by_model_and_session(workspace_dir, prices);
+    if let Ok(mut guard) = cache.lock() {
+        *guard = Some(UsageAggregatesCacheEntry {
+            path,
+            file_len,
+            file_mtime,
+            prices_fingerprint: fingerprint,
+            computed_at: std::time::Instant::now(),
+            aggregates: aggregates.clone(),
+        });
+    }
+    aggregates
 }
 
 impl UsageAggregates {

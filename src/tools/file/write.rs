@@ -341,6 +341,7 @@ impl Tool for FileWriteTool {
                 contents: content.clone(),
                 overwrite: true,
                 encoding: preserved_encoding,
+                expected_pre_sha256: None,
             },
         };
         let batch = EditBatch::new(EditOrigin::FileWriteTool).with_op(op);

@@ -94,6 +94,7 @@ pub mod now;
 pub mod opencode_cli;
 pub mod diff_apply;
 pub mod patch_apply;
+pub mod apply_edit;
 pub mod write_plan;
 pub mod pdf_read;
 pub mod pipeline;
@@ -107,7 +108,6 @@ pub mod pushover;
 pub mod reaction;
 #[cfg(feature = "tool-search-social")]
 pub mod reddit_search;
-pub mod registry;
 pub mod restore_file;
 #[cfg(feature = "tool-cron")]
 pub mod schedule;
@@ -205,6 +205,7 @@ pub use plan_mode::exit::ExitPlanModeTool;
 pub use file::edit::FileEditTool;
 pub use file::read::FileReadTool;
 pub use file::write::FileWriteTool;
+pub use apply_edit::ApplyEditTool;
 pub use flow::rollback::FlowRollbackTool;
 pub use flow::run::FlowRunTool;
 pub use fs_ops::{CopyPathTool, CreateDirectoryTool, DeletePathTool, MovePathTool};
@@ -290,7 +291,6 @@ pub use read::skill::ReadSkillTool;
 pub use read::user_rule::ReadUserRuleTool;
 #[cfg(feature = "tool-search-social")]
 pub use reddit_search::RedditSearchTool;
-pub use registry::ToolRegistry;
 #[cfg(feature = "tool-reports")]
 pub use report::template_tool::ReportTemplateTool;
 pub use restore_file::RestoreFileTool;
@@ -488,6 +488,11 @@ pub fn default_tools_with_runtime(
                 .with_ops_applier(shared_ops.clone())
                 .with_edit_history(shared_edit_history.clone()),
         ),
+        Box::new(ApplyEditTool::new(
+            security.clone(),
+            shared_ops.clone(),
+            Some(shared_edit_history.clone()),
+        )),
         Box::new(
             MultiEditTool::new(security.clone())
                 .with_ops_applier(shared_ops.clone())
@@ -744,6 +749,11 @@ pub fn all_tools_with_runtime(
                 .with_ops_applier(shared_ops.clone())
                 .with_edit_history(shared_edit_history.clone()),
         ),
+        Arc::new(ApplyEditTool::new(
+            security.clone(),
+            shared_ops.clone(),
+            Some(shared_edit_history.clone()),
+        )),
         Arc::new(
             MultiEditTool::new(security.clone())
                 .with_ops_applier(shared_ops.clone())
@@ -1567,13 +1577,55 @@ pub fn all_tools_with_runtime(
         model_providers: root_config.model_providers.clone(),
     };
 
-    let delegate_handle: Option<DelegateParentToolsHandle> = if agents.is_empty() {
+    let combined_agents: HashMap<String, DelegateAgentConfig> = {
+        let mut merged: HashMap<String, DelegateAgentConfig> = HashMap::new();
+        let profile_mgr =
+            crate::agent::profile::profiles::ProfileManager::new(&root_config.workspace_dir);
+        if let Ok(profiles) = profile_mgr.list() {
+            let fallback_model = crate::providers::resolve_default_model(root_config).ok();
+            for p in profiles {
+                let provider = p
+                    .provider
+                    .clone()
+                    .or_else(|| root_config.default_provider.clone());
+                let model = p.model.clone().or_else(|| fallback_model.clone());
+                if let (Some(provider), Some(model)) = (provider, model) {
+                    merged.insert(
+                        p.name.clone(),
+                        DelegateAgentConfig {
+                            provider,
+                            model,
+                            system_prompt: if p.system_prompt.is_empty() {
+                                None
+                            } else {
+                                Some(p.system_prompt.clone())
+                            },
+                            api_key: None,
+                            temperature: p.temperature,
+                            max_depth: crate::config::domain::delegate_agents::default_max_depth(),
+                            agentic: true,
+                            allowed_tools: p.allowed_tools.clone(),
+                            max_iterations: p.max_tool_iterations.unwrap_or_else(
+                                crate::config::domain::delegate_agents::default_max_tool_iterations,
+                            ),
+                            timeout_secs: None,
+                            agentic_timeout_secs: None,
+                            skills_directory: None,
+                        },
+                    );
+                }
+            }
+        }
+        for (name, cfg) in agents.iter() {
+            merged.insert(name.clone(), cfg.clone());
+        }
+        merged
+    };
+
+    let delegate_handle: Option<DelegateParentToolsHandle> = if combined_agents.is_empty() {
         None
     } else {
-        let delegate_agents: HashMap<String, DelegateAgentConfig> = agents
-            .iter()
-            .map(|(name, cfg)| (name.clone(), cfg.clone()))
-            .collect();
+        let delegate_agents: HashMap<String, DelegateAgentConfig> = combined_agents.clone();
         let parent_tools = Arc::new(RwLock::new(tool_arcs.clone()));
         let delegate_tool = DelegateTool::new_with_options(
             delegate_agents,
@@ -1609,10 +1661,7 @@ pub fn all_tools_with_runtime(
     }
 
     if !root_config.swarms.is_empty() {
-        let swarm_agents: HashMap<String, DelegateAgentConfig> = agents
-            .iter()
-            .map(|(name, cfg)| (name.clone(), cfg.clone()))
-            .collect();
+        let swarm_agents: HashMap<String, DelegateAgentConfig> = combined_agents.clone();
         tool_arcs.push(Arc::new(SwarmTool::new(
             root_config.swarms.clone(),
             swarm_agents,

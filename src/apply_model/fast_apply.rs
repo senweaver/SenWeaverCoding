@@ -53,6 +53,29 @@ impl FastApplyRefiner {
         }
     }
 
+    pub async fn merge_lazy_snippet(
+        &self,
+        source: &str,
+        edit_snippet: &str,
+        instruction: Option<&str>,
+        path: Option<&std::path::Path>,
+    ) -> Result<String, ApplyError> {
+        let merged = self.merge_full_file(source, edit_snippet, instruction).await?;
+        if source.len() >= MERGE_SHRINK_GUARD_MIN_SOURCE_LEN && merged.len() < source.len() / 2 {
+            return Err(ApplyError::LlmError(
+                "merged result shrank by more than half; rejecting as likely truncated".to_string(),
+            ));
+        }
+        let report = super::validator::validate_edit(Some(source), &merged, path);
+        if report.is_confident_failure() {
+            return Err(ApplyError::LlmError(format!(
+                "merged result failed tree-sitter validation: {}",
+                report.advisory_summary()
+            )));
+        }
+        Ok(merged)
+    }
+
     async fn merge_full_file(
         &self,
         source: &str,
@@ -144,6 +167,7 @@ pub struct LadderRefinedContent {
     pub contents: String,
     pub encoding: Option<String>,
     pub tier: FastPathTier,
+    pub pre_sha256: Option<String>,
 }
 
 pub fn runtime_ladder_refiner() -> Option<Arc<FastApplyRefiner>> {
@@ -169,6 +193,7 @@ pub async fn refine_failing_diff_to_content(
     if crate::tools::file::encoding::is_probably_binary(&raw_bytes) {
         return None;
     }
+    let pre_sha256 = super::edit_op::sha256_hex(&raw_bytes);
     let (source, encoding_label) =
         crate::tools::file::encoding::decode_for_edit(&raw_bytes).ok()?;
     let options = ApplyOptions {
@@ -199,6 +224,7 @@ pub async fn refine_failing_diff_to_content(
                 contents: outcome.applied,
                 encoding,
                 tier,
+                pre_sha256: Some(pre_sha256),
             })
         }
         Err(err) => {

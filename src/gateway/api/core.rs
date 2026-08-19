@@ -3478,7 +3478,7 @@ fn edit_review_rel_path_ok(rel: &str) -> bool {
         return false;
     }
     let p = std::path::Path::new(rel);
-    if p.is_absolute() {
+    if p.is_absolute() || p.has_root() {
         return false;
     }
     !p.components().any(|c| {
@@ -3558,6 +3558,7 @@ pub async fn handle_api_session_edit_review(
         return e.into_response();
     }
     let session_key = format!("{GW_SESSION_PREFIX}{id}");
+    let session_id_for_scope = id.clone();
     let files = {
         let state_cl = state.clone();
         tokio::task::spawn_blocking(move || {
@@ -3565,7 +3566,7 @@ pub async fn handle_api_session_edit_review(
             let history =
                 crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
             let mut out: Vec<serde_json::Value> = Vec::new();
-            for file in history.session_edited_files() {
+            for file in history.session_edited_files(Some(&session_id_for_scope)) {
                 if let Some(entry) = edit_review_file_entry(&workspace, &history, &file) {
                     out.push(entry);
                 }
@@ -3600,30 +3601,56 @@ pub async fn handle_api_session_edit_review_file(
             .into_response();
     }
     let session_key = format!("{GW_SESSION_PREFIX}{id}");
+    let session_id_for_scope = id.clone();
     let rel_path = query.path.clone();
-    let result = {
+    let result: Result<serde_json::Value, (StatusCode, String)> = {
         let state_cl = state.clone();
         tokio::task::spawn_blocking(move || {
             let workspace = resolve_session_workspace(&state_cl, &session_key);
             let history =
                 crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
             let abs = workspace.join(&rel_path);
-            let Some((_, pre_image)) = history.session_first_index_for(&abs) else {
-                return None;
+            let Some((_, pre_image)) =
+                history.session_first_index_for(&abs, Some(&session_id_for_scope))
+            else {
+                return Err((
+                    StatusCode::NOT_FOUND,
+                    "no session edit history for this path".to_string(),
+                ));
             };
             let before_bytes: Vec<u8> = if pre_image.absent {
                 Vec::new()
             } else {
-                history.read_blob(&pre_image.sha256).unwrap_or_default()
+                match history.read_blob(&pre_image.sha256) {
+                    Ok(bytes) => bytes,
+                    Err(e) => {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!(
+                                "edit-history blob {} unreadable: {e}",
+                                pre_image.sha256
+                            ),
+                        ));
+                    }
+                }
             };
-            let after_bytes = std::fs::read(&abs).unwrap_or_default();
+            let after_bytes = match std::fs::read(&abs) {
+                Ok(bytes) => bytes,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+                Err(e) => {
+                    return Err((
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        format!("cannot read current file contents: {e}"),
+                    ));
+                }
+            };
             let before_truncated = before_bytes.len() > EDIT_REVIEW_MAX_SIDE_BYTES;
             let after_truncated = after_bytes.len() > EDIT_REVIEW_MAX_SIDE_BYTES;
             let clip = |bytes: &[u8]| -> String {
                 let end = bytes.len().min(EDIT_REVIEW_MAX_SIDE_BYTES);
                 String::from_utf8_lossy(&bytes[..end]).into_owned()
             };
-            Some(serde_json::json!({
+            Ok(serde_json::json!({
                 "path": rel_path,
                 "before": clip(&before_bytes),
                 "after": clip(&after_bytes),
@@ -3633,15 +3660,429 @@ pub async fn handle_api_session_edit_review_file(
             }))
         })
         .await
-        .unwrap_or(None)
+        .unwrap_or_else(|_| {
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "edit review task failed".to_string(),
+            ))
+        })
     };
     match result {
-        Some(body) => Json(body).into_response(),
-        None => (
+        Ok(body) => Json(body).into_response(),
+        Err((status, message)) => {
+            (status, Json(serde_json::json!({ "error": message }))).into_response()
+        }
+    }
+}
+
+fn split_lines_inclusive(text: &str) -> Vec<&str> {
+    text.split_inclusive('\n').collect()
+}
+
+struct ReviewHunkSpan {
+    old_start: usize,
+    old_end: usize,
+    new_start: usize,
+    new_end: usize,
+}
+
+fn compute_review_hunk_spans(
+    before_lines: &[&str],
+    after_lines: &[&str],
+) -> Vec<ReviewHunkSpan> {
+    let diff = similar::TextDiff::from_slices(before_lines, after_lines);
+    let mut spans = Vec::new();
+    for group in diff.grouped_ops(3) {
+        let mut old_start = usize::MAX;
+        let mut old_end = 0usize;
+        let mut new_start = usize::MAX;
+        let mut new_end = 0usize;
+        for op in &group {
+            let or = op.old_range();
+            let nr = op.new_range();
+            old_start = old_start.min(or.start);
+            old_end = old_end.max(or.end);
+            new_start = new_start.min(nr.start);
+            new_end = new_end.max(nr.end);
+        }
+        if old_start == usize::MAX {
+            old_start = 0;
+        }
+        if new_start == usize::MAX {
+            new_start = 0;
+        }
+        spans.push(ReviewHunkSpan {
+            old_start,
+            old_end,
+            new_start,
+            new_end,
+        });
+    }
+    spans
+}
+
+struct EditReviewSides {
+    abs: std::path::PathBuf,
+    before_text: String,
+    after_text: String,
+    after_sha256: String,
+    created_in_session: bool,
+}
+
+enum EditReviewSidesError {
+    NoHistory,
+    TooLarge,
+    NonUtf8,
+    HistoryUnavailable(String),
+    Io(String),
+}
+
+fn load_edit_review_sides(
+    workspace: &std::path::Path,
+    history: &crate::tools::edit_history::EditHistory,
+    session_id: &str,
+    rel_path: &str,
+) -> Result<EditReviewSides, EditReviewSidesError> {
+    let abs = workspace.join(rel_path);
+    let Some((_, pre_image)) = history.session_first_index_for(&abs, Some(session_id)) else {
+        return Err(EditReviewSidesError::NoHistory);
+    };
+    let before_bytes: Vec<u8> = if pre_image.absent {
+        Vec::new()
+    } else {
+        match history.read_blob(&pre_image.sha256) {
+            Ok(bytes) => bytes,
+            Err(e) => {
+                return Err(EditReviewSidesError::HistoryUnavailable(format!(
+                    "edit-history blob {} unreadable: {e}",
+                    pre_image.sha256
+                )));
+            }
+        }
+    };
+    let after_bytes = match std::fs::read(&abs) {
+        Ok(bytes) => bytes,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(e) => {
+            return Err(EditReviewSidesError::Io(format!(
+                "cannot read current file contents: {e}"
+            )));
+        }
+    };
+    if before_bytes.len() > EDIT_REVIEW_MAX_SIDE_BYTES
+        || after_bytes.len() > EDIT_REVIEW_MAX_SIDE_BYTES
+    {
+        return Err(EditReviewSidesError::TooLarge);
+    }
+    let after_sha256 = crate::apply_model::edit_op::sha256_hex(&after_bytes);
+    let before_text =
+        String::from_utf8(before_bytes).map_err(|_| EditReviewSidesError::NonUtf8)?;
+    let after_text =
+        String::from_utf8(after_bytes).map_err(|_| EditReviewSidesError::NonUtf8)?;
+    Ok(EditReviewSides {
+        abs,
+        before_text,
+        after_text,
+        after_sha256,
+        created_in_session: pre_image.absent,
+    })
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EditReviewHunksQuery {
+    pub path: String,
+}
+
+pub async fn handle_api_session_edit_review_hunks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Query(query): Query<EditReviewHunksQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if !edit_review_rel_path_ok(&query.path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid path"})),
+        )
+            .into_response();
+    }
+    let session_key = format!("{GW_SESSION_PREFIX}{id}");
+    let session_id_for_scope = id.clone();
+    let rel_path = query.path.clone();
+    let result = {
+        let state_cl = state.clone();
+        tokio::task::spawn_blocking(move || {
+            let workspace = resolve_session_workspace(&state_cl, &session_key);
+            let history =
+                crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
+            match load_edit_review_sides(&workspace, &history, &session_id_for_scope, &rel_path)
+            {
+                Ok(sides) => {
+                    let before_lines = split_lines_inclusive(&sides.before_text);
+                    let after_lines = split_lines_inclusive(&sides.after_text);
+                    let spans = compute_review_hunk_spans(&before_lines, &after_lines);
+                    let hunks: Vec<serde_json::Value> = spans
+                        .iter()
+                        .enumerate()
+                        .map(|(index, span)| {
+                            serde_json::json!({
+                                "index": index,
+                                "oldStart": span.old_start,
+                                "oldEnd": span.old_end,
+                                "newStart": span.new_start,
+                                "newEnd": span.new_end,
+                                "beforeText": before_lines[span.old_start..span.old_end].concat(),
+                                "afterText": after_lines[span.new_start..span.new_end].concat(),
+                            })
+                        })
+                        .collect();
+                    Ok(serde_json::json!({
+                        "path": rel_path,
+                        "afterSha256": sides.after_sha256,
+                        "createdInSession": sides.created_in_session,
+                        "hunks": hunks,
+                    }))
+                }
+                Err(err) => Err(err),
+            }
+        })
+        .await
+        .unwrap_or(Err(EditReviewSidesError::NoHistory))
+    };
+    match result {
+        Ok(body) => Json(body).into_response(),
+        Err(EditReviewSidesError::NoHistory) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "no session edit history for this path"})),
         )
             .into_response(),
+        Err(EditReviewSidesError::TooLarge) => (
+            StatusCode::PAYLOAD_TOO_LARGE,
+            Json(serde_json::json!({"error": "file too large for per-hunk review"})),
+        )
+            .into_response(),
+        Err(EditReviewSidesError::NonUtf8) => (
+            StatusCode::UNPROCESSABLE_ENTITY,
+            Json(serde_json::json!({"error": "file is not valid UTF-8; use whole-file revert"})),
+        )
+            .into_response(),
+        Err(EditReviewSidesError::HistoryUnavailable(detail))
+        | Err(EditReviewSidesError::Io(detail)) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": detail })),
+        )
+            .into_response(),
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EditReviewApplyHunksBody {
+    pub path: String,
+    pub rejected_hunk_indices: Vec<usize>,
+    pub expected_after_sha256: String,
+}
+
+pub async fn handle_api_session_edit_review_apply_hunks(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+    Json(body): Json<EditReviewApplyHunksBody>,
+) -> impl IntoResponse {
+    if let Err(e) = require_auth(&state, &headers) {
+        return e.into_response();
+    }
+    if !edit_review_rel_path_ok(&body.path) {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(serde_json::json!({"error": "invalid path"})),
+        )
+            .into_response();
+    }
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
+    let _rewind_guard = acquire_rewind_lock(&id).await;
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
+
+    let session_key = format!("{GW_SESSION_PREFIX}{id}");
+    let abs_for_guard =
+        resolve_session_workspace(&state, &session_key).join(&body.path);
+    let _file_guard = match crate::session::acquire_file_write_guard(&abs_for_guard).await {
+        Ok(guard) => guard,
+        Err(e) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": format!("file is locked by another operation: {e}")
+                })),
+            )
+                .into_response();
+        }
+    };
+    let session_id_for_scope = id.clone();
+    let rel_path = body.path.clone();
+    let rejected: std::collections::BTreeSet<usize> =
+        body.rejected_hunk_indices.iter().copied().collect();
+    let expected_sha = body.expected_after_sha256.clone();
+    let result: Result<serde_json::Value, (StatusCode, String)> = {
+        let state_cl = state.clone();
+        tokio::task::spawn_blocking(move || {
+            let workspace = resolve_session_workspace(&state_cl, &session_key);
+            let history =
+                crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
+            let sides = match load_edit_review_sides(
+                &workspace,
+                &history,
+                &session_id_for_scope,
+                &rel_path,
+            ) {
+                Ok(sides) => sides,
+                Err(EditReviewSidesError::NoHistory) => {
+                    return Err((
+                        StatusCode::NOT_FOUND,
+                        "no session edit history for this path".to_string(),
+                    ));
+                }
+                Err(EditReviewSidesError::TooLarge) => {
+                    return Err((
+                        StatusCode::PAYLOAD_TOO_LARGE,
+                        "file too large for per-hunk review".to_string(),
+                    ));
+                }
+                Err(EditReviewSidesError::NonUtf8) => {
+                    return Err((
+                        StatusCode::UNPROCESSABLE_ENTITY,
+                        "file is not valid UTF-8; use whole-file revert".to_string(),
+                    ));
+                }
+                Err(EditReviewSidesError::HistoryUnavailable(detail))
+                | Err(EditReviewSidesError::Io(detail)) => {
+                    return Err((StatusCode::INTERNAL_SERVER_ERROR, detail));
+                }
+            };
+            if !sides.after_sha256.eq_ignore_ascii_case(&expected_sha) {
+                return Err((
+                    StatusCode::CONFLICT,
+                    "file changed on disk since hunks were listed; reload and retry".to_string(),
+                ));
+            }
+            let before_lines = split_lines_inclusive(&sides.before_text);
+            let after_lines = split_lines_inclusive(&sides.after_text);
+            let spans = compute_review_hunk_spans(&before_lines, &after_lines);
+            if rejected.iter().any(|&idx| idx >= spans.len()) {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    format!("hunk index out of range (have {} hunks)", spans.len()),
+                ));
+            }
+            if rejected.is_empty() {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "path": rel_path,
+                    "newSha256": sides.after_sha256,
+                    "rejectedHunks": 0,
+                    "changed": false,
+                }));
+            }
+            let mut rebuilt = String::with_capacity(sides.after_text.len());
+            let mut cursor_after = 0usize;
+            for (index, span) in spans.iter().enumerate() {
+                rebuilt.push_str(&after_lines[cursor_after..span.new_start].concat());
+                if rejected.contains(&index) {
+                    rebuilt.push_str(&before_lines[span.old_start..span.old_end].concat());
+                } else {
+                    rebuilt.push_str(&after_lines[span.new_start..span.new_end].concat());
+                }
+                cursor_after = span.new_end;
+            }
+            rebuilt.push_str(&after_lines[cursor_after..].concat());
+
+            if rebuilt == sides.after_text {
+                return Ok(serde_json::json!({
+                    "ok": true,
+                    "path": rel_path,
+                    "newSha256": sides.after_sha256,
+                    "rejectedHunks": rejected.len(),
+                    "changed": false,
+                }));
+            }
+
+            let revert_batch_id = format!("hunk-reject-{}", uuid::Uuid::new_v4().simple());
+            if let Err(e) = history.snapshot_before_write_with_batch(
+                &sides.abs,
+                "edit_review_hunks",
+                "reject review hunks",
+                Some(revert_batch_id.clone()),
+            ) {
+                tracing::warn!(
+                    target: "rewind",
+                    error = %e,
+                    "apply-hunks: snapshot before write failed; continuing without undo point"
+                );
+            }
+            let deletes_created_file = sides.created_in_session && rebuilt.is_empty();
+            if deletes_created_file {
+                if let Err(e) = std::fs::remove_file(&sides.abs) {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        return Err((
+                            StatusCode::INTERNAL_SERVER_ERROR,
+                            format!("failed to delete created file: {e}"),
+                        ));
+                    }
+                }
+            } else if let Err(e) = crate::util::atomic_write(&sides.abs, rebuilt.as_bytes()) {
+                return Err((
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    format!("failed to write file: {e}"),
+                ));
+            }
+            let new_sha = crate::apply_model::edit_op::sha256_hex(rebuilt.as_bytes());
+            Ok(serde_json::json!({
+                "ok": true,
+                "path": rel_path,
+                "newSha256": new_sha,
+                "rejectedHunks": rejected.len(),
+                "revertBatchId": revert_batch_id,
+                "changed": true,
+                "fileDeleted": deletes_created_file,
+            }))
+        })
+        .await
+        .unwrap_or_else(|_| {
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "apply-hunks task failed".to_string(),
+            ))
+        })
+    };
+
+    match result {
+        Ok(body_json) => {
+            let changed = body_json
+                .get("changed")
+                .and_then(|v| v.as_bool())
+                .unwrap_or(false);
+            if changed {
+                crate::gateway::ws::desktop::broadcast_session_event(
+                    &id,
+                    &serde_json::json!({
+                        "type": "session_history_changed",
+                        "sessionId": id,
+                        "reason": "hunk_reject",
+                    }),
+                );
+            }
+            Json(body_json).into_response()
+        }
+        Err((status, message)) => {
+            (status, Json(serde_json::json!({ "error": message }))).into_response()
+        }
     }
 }
 
@@ -3665,6 +4106,7 @@ pub async fn handle_api_session_revert_files(
     let _rewind_guard = acquire_rewind_lock(&id).await;
 
     let session_key = format!("{GW_SESSION_PREFIX}{id}");
+    let session_id_for_scope = id.clone();
     let (reverted, failed) = {
         let state_cl = state.clone();
         let paths = body.paths.clone();
@@ -3680,7 +4122,7 @@ pub async fn handle_api_session_revert_files(
                     continue;
                 }
                 let abs = workspace.join(&rel);
-                match history.revert_to_session_start(&abs) {
+                match history.revert_to_session_start(&abs, Some(&session_id_for_scope)) {
                     Ok(()) => reverted.push(rel),
                     Err(e) => {
                         failed.push(serde_json::json!({
@@ -3795,6 +4237,276 @@ pub async fn handle_api_workflows_validate(
     }
 }
 
+fn resolve_workflow_step_agent(
+    agent: &crate::workflows::StepAgent,
+) -> Option<crate::agent::registry::AgentInfo> {
+    let rt = crate::agent::multi_agent_runtime::global_runtime()?;
+    match agent {
+        crate::workflows::StepAgent::Default => None,
+        crate::workflows::StepAgent::ById { id } => rt.registry.get(id),
+        crate::workflows::StepAgent::ByName { name } => {
+            rt.registry.all().into_iter().find(|a| a.name == *name)
+        }
+    }
+}
+
+fn workflow_steps_dag_expressible(workflow: &crate::workflows::Workflow) -> bool {
+    workflow.steps.iter().all(|step| {
+        matches!(
+            step.mode,
+            crate::workflows::StepMode::Sequential
+                | crate::workflows::StepMode::FanOut
+                | crate::workflows::StepMode::Collect
+        ) && matches!(step.error_mode, crate::workflows::ErrorMode::Fail)
+            && step.output_var.is_none()
+    })
+}
+
+fn expand_workflow_variables_keep_input(
+    template: &str,
+    variables: &std::collections::HashMap<String, String>,
+) -> String {
+    let mut out = template.to_string();
+    for (key, value) in variables {
+        if key == "input" {
+            continue;
+        }
+        out = out.replace(&format!("{{{{{key}}}}}"), value);
+    }
+    out
+}
+
+async fn execute_workflow_via_scheduler(
+    workflow: &crate::workflows::Workflow,
+    cfg: crate::config::Config,
+    temperature: f64,
+) -> axum::response::Response {
+    use std::collections::{HashMap, HashSet};
+
+    const COLLECT_JOIN_SEPARATOR: &str = "\n\n---\n\n";
+    const BARRIER_JOIN_SEPARATOR: &str = "\n\n";
+
+    let mut tasks: Vec<crate::agent::scheduler::SchedulableTask> = Vec::new();
+    let mut agent_by_task: HashMap<String, crate::workflows::StepAgent> = HashMap::new();
+    let mut input_deps_by_task: HashMap<String, (Vec<String>, &'static str)> = HashMap::new();
+    let mut timeout_by_task: HashMap<String, u64> = HashMap::new();
+    let mut task_order: Vec<String> = Vec::new();
+    let mut last_barrier: Option<String> = None;
+    let mut open_fanout: Vec<String> = Vec::new();
+    for (idx, step) in workflow.steps.iter().enumerate() {
+        let task_id = format!("step-{idx}");
+        let prompt =
+            expand_workflow_variables_keep_input(&step.prompt_template, &workflow.variables);
+        let barrier_deps: Vec<String> = last_barrier.iter().cloned().collect();
+        let (schedule_deps, input_deps, separator): (Vec<String>, Vec<String>, &'static str) =
+            match step.mode {
+                crate::workflows::StepMode::FanOut => (
+                    barrier_deps.clone(),
+                    barrier_deps,
+                    BARRIER_JOIN_SEPARATOR,
+                ),
+                crate::workflows::StepMode::Collect => {
+                    let consumed = std::mem::take(&mut open_fanout);
+                    let mut schedule = consumed.clone();
+                    for dep in &barrier_deps {
+                        if !schedule.contains(dep) {
+                            schedule.push(dep.clone());
+                        }
+                    }
+                    (schedule, consumed, COLLECT_JOIN_SEPARATOR)
+                }
+                _ => {
+                    let mut schedule = barrier_deps.clone();
+                    for dep in &open_fanout {
+                        if !schedule.contains(dep) {
+                            schedule.push(dep.clone());
+                        }
+                    }
+                    (schedule, barrier_deps, BARRIER_JOIN_SEPARATOR)
+                }
+            };
+        if matches!(step.mode, crate::workflows::StepMode::FanOut) {
+            open_fanout.push(task_id.clone());
+        } else {
+            last_barrier = Some(task_id.clone());
+        }
+        let mut task = crate::agent::scheduler::SchedulableTask::new(
+            task_id.clone(),
+            step.name.clone(),
+            prompt,
+        );
+        for dep in schedule_deps {
+            task = task.with_dependency(dep);
+        }
+        tasks.push(task);
+        agent_by_task.insert(task_id.clone(), step.agent.clone());
+        input_deps_by_task.insert(task_id.clone(), (input_deps, separator));
+        timeout_by_task.insert(task_id.clone(), step.timeout_secs);
+        task_order.push(task_id);
+    }
+
+    let dependents: HashSet<String> = tasks
+        .iter()
+        .flat_map(|t| t.depends_on.iter().cloned())
+        .collect();
+    let terminal_ids: HashSet<String> = tasks
+        .iter()
+        .filter(|t| !dependents.contains(&t.id))
+        .map(|t| t.id.clone())
+        .collect();
+
+    let outputs: std::sync::Arc<parking_lot::Mutex<HashMap<String, String>>> =
+        std::sync::Arc::new(parking_lot::Mutex::new(HashMap::new()));
+    let outputs_for_exec = std::sync::Arc::clone(&outputs);
+    let executor: crate::agent::scheduler::runtime::TaskExecutor =
+        std::sync::Arc::new(move |task, ct| {
+            let cfg = cfg.clone();
+            let outputs = std::sync::Arc::clone(&outputs_for_exec);
+            let (input_deps, separator) = input_deps_by_task
+                .get(&task.id)
+                .cloned()
+                .unwrap_or((Vec::new(), BARRIER_JOIN_SEPARATOR));
+            let step_timeout_secs = timeout_by_task.get(&task.id).copied().unwrap_or(0);
+            let agent = agent_by_task
+                .get(&task.id)
+                .cloned()
+                .unwrap_or(crate::workflows::StepAgent::Default);
+            let prompt_template = task.prompt.clone();
+            let task_id = task.id.clone();
+            Box::pin(async move {
+                if ct.is_cancelled() {
+                    return Err("task cancelled before execution".to_string());
+                }
+                let input_context = {
+                    let guard = outputs.lock();
+                    input_deps
+                        .iter()
+                        .filter_map(|d| guard.get(d).cloned())
+                        .collect::<Vec<_>>()
+                        .join(separator)
+                };
+                let prompt = prompt_template.replace("{{input}}", &input_context);
+                let (provider_override, model_override) =
+                    match resolve_workflow_step_agent(&agent) {
+                        Some(info) => (
+                            (!info.provider.trim().is_empty()).then_some(info.provider),
+                            (!info.model.trim().is_empty()).then_some(info.model),
+                        ),
+                        None => (None, None),
+                    };
+                let run_fut = Box::pin(crate::agent::run(
+                    cfg,
+                    Some(prompt),
+                    provider_override,
+                    model_override,
+                    temperature,
+                    Vec::new(),
+                    false,
+                    None,
+                    None,
+                    None,
+                ));
+                let run_result = if step_timeout_secs > 0 {
+                    match tokio::time::timeout(
+                        std::time::Duration::from_secs(step_timeout_secs),
+                        run_fut,
+                    )
+                    .await
+                    {
+                        Ok(result) => result,
+                        Err(_) => {
+                            return Err(format!(
+                                "Step timeout after {step_timeout_secs} seconds"
+                            ));
+                        }
+                    }
+                } else {
+                    run_fut.await
+                };
+                match run_result {
+                    Ok(output) => {
+                        outputs.lock().insert(task_id, output.clone());
+                        Ok(output)
+                    }
+                    Err(e) => Err(format!("{e:#}")),
+                }
+            })
+        });
+
+    let graph_cancel = crate::providers::current_session_cancel_token()
+        .map(|token| token.child_token())
+        .unwrap_or_default();
+    let runtime = crate::agent::multi_agent_runtime::init_global_runtime();
+    let submit = runtime.submit_task_graph_with_context(
+        tasks,
+        4,
+        executor,
+        None,
+        Some(graph_cancel.clone()),
+    );
+    let submitted = if workflow.timeout_secs > 0 {
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(workflow.timeout_secs),
+            submit,
+        )
+        .await
+        {
+            Ok(result) => result,
+            Err(_) => {
+                graph_cancel.cancel();
+                return (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(serde_json::json!({
+                        "error": format!(
+                            "Workflow timeout after {} seconds",
+                            workflow.timeout_secs
+                        ),
+                    })),
+                )
+                    .into_response();
+            }
+        }
+    } else {
+        submit.await
+    };
+    match submitted {
+        Ok(outcomes) => {
+            let all_ok = outcomes.iter().all(|o| o.success);
+            let mut terminal_outcomes: Vec<_> = outcomes
+                .iter()
+                .filter(|o| o.success && terminal_ids.contains(&o.task_id))
+                .collect();
+            terminal_outcomes.sort_by_key(|o| {
+                task_order
+                    .iter()
+                    .position(|id| *id == o.task_id)
+                    .unwrap_or(usize::MAX)
+            });
+            let final_output = terminal_outcomes
+                .iter()
+                .map(|o| o.result.clone())
+                .collect::<Vec<_>>()
+                .join("\n\n");
+            Json(serde_json::json!({
+                "status": if all_ok { "Completed" } else { "Failed" },
+                "steps": outcomes.len(),
+                "output": if final_output.is_empty() {
+                    serde_json::Value::Null
+                } else {
+                    serde_json::Value::String(final_output)
+                },
+                "engine": "scheduler",
+            }))
+            .into_response()
+        }
+        Err(e) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(serde_json::json!({ "error": e })),
+        )
+            .into_response(),
+    }
+}
+
 pub async fn handle_api_workflows_execute(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -3812,31 +4524,22 @@ pub async fn handle_api_workflows_execute(
             .into_response();
     }
 
-    let mut run = crate::workflows::WorkflowRun::new(workflow.id.clone(), "");
-    run.variables = workflow.variables.clone();
-
     let cfg = state.config.lock().clone();
     let temperature = cfg.default_temperature;
 
-    fn resolve_step_agent(
-        agent: &crate::workflows::StepAgent,
-    ) -> Option<crate::agent::registry::AgentInfo> {
-        let rt = crate::agent::multi_agent_runtime::global_runtime()?;
-        match agent {
-            crate::workflows::StepAgent::Default => None,
-            crate::workflows::StepAgent::ById { id } => rt.registry.get(id),
-            crate::workflows::StepAgent::ByName { name } => {
-                rt.registry.all().into_iter().find(|a| a.name == *name)
-            }
-        }
+    if workflow_steps_dag_expressible(&workflow) {
+        return execute_workflow_via_scheduler(&workflow, cfg, temperature).await;
     }
 
+    let mut run = crate::workflows::WorkflowRun::new(workflow.id.clone(), "");
+    run.variables = workflow.variables.clone();
+
     let resolver = |agent: &crate::workflows::StepAgent| -> Option<(String, String)> {
-        resolve_step_agent(agent).map(|info| (info.id, info.name))
+        resolve_workflow_step_agent(agent).map(|info| (info.id, info.name))
     };
     let executor = move |agent: crate::workflows::StepAgent, prompt: String| {
         let cfg = cfg.clone();
-        let resolved = resolve_step_agent(&agent);
+        let resolved = resolve_workflow_step_agent(&agent);
         async move {
             let (provider_override, model_override) = match resolved {
                 Some(info) => (
@@ -3876,6 +4579,7 @@ pub async fn handle_api_workflows_execute(
         "status": format!("{:?}", result.status),
         "steps": result.step_results.len(),
         "output": result.output,
+        "engine": "linear",
     }))
     .into_response()
 }

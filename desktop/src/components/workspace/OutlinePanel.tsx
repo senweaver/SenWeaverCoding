@@ -255,7 +255,7 @@ export function OutlinePanel({ workDir, onJump }: Props) {
       setSymbols([])
       return
     }
-    if (lastRequestKey.current === key && symbols.length > 0) return
+    if (lastRequestKey.current === key) return
     lastRequestKey.current = key
 
     const id = ++requestId.current
@@ -277,6 +277,7 @@ export function OutlinePanel({ workDir, onJump }: Props) {
         setSymbols(flat)
       } catch {
         if (requestId.current !== id) return
+        lastRequestKey.current = ''
         setSymbols([])
       } finally {
         if (requestId.current === id) setLoading(false)
@@ -284,7 +285,7 @@ export function OutlinePanel({ workDir, onJump }: Props) {
     }, 300)
 
     return () => window.clearTimeout(handle)
-  }, [activeTab, buffer, isMarkdownFallback, languageId, supported, symbols.length, workDir])
+  }, [activeTab, buffer, isMarkdownFallback, languageId, supported, workDir])
 
   return (
     <div className="flex flex-shrink-0 flex-col border-t border-[var(--color-border)]">

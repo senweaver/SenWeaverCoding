@@ -6,7 +6,6 @@ use anyhow::{bail, Result};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-use super::group::op::{GroupOp, GroupOpsEntry, GroupVvEntry};
 use super::share::types::ShareWire;
 
 pub const KIND_CONTROL: u8 = 1;
@@ -42,10 +41,6 @@ pub enum ControlMessage {
         is_dir: bool,
         #[serde(rename = "totalSize")]
         total_size: u64,
-        #[serde(rename = "groupId", default, skip_serializing_if = "String::is_empty")]
-        group_id: String,
-        #[serde(rename = "docId", default, skip_serializing_if = "String::is_empty")]
-        doc_id: String,
         #[serde(rename = "shareId", default, skip_serializing_if = "String::is_empty")]
         share_id: String,
     },
@@ -62,28 +57,6 @@ pub enum ControlMessage {
     },
     Ack {
         id: String,
-    },
-    GroupGossip {
-        #[serde(rename = "groupId")]
-        group_id: String,
-        ops: Vec<GroupOp>,
-    },
-    GroupSyncRequest {
-        groups: Vec<GroupVvEntry>,
-    },
-    GroupSyncResponse {
-        groups: Vec<GroupOpsEntry>,
-    },
-    GroupInvite {
-        #[serde(rename = "groupId")]
-        group_id: String,
-        ops: Vec<GroupOp>,
-    },
-    GroupDocRequest {
-        #[serde(rename = "groupId")]
-        group_id: String,
-        #[serde(rename = "docId")]
-        doc_id: String,
     },
     ShareListRequest,
     ShareListResponse {

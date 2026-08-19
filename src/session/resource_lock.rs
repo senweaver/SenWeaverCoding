@@ -95,7 +95,9 @@ pub enum AcquireError {
     Shutdown,
     #[error(
         "Cross-process lock failed for `{kind}` ({target}): {message}. \
-         Check that the workspace's .sen/locks directory is writable."
+         Check that the advisory-lock directory (the workspace `.sen/locks` folder, \
+         or the OS temp `senweavercoding/locks` folder when the target is outside a \
+         workspace) is writable."
     )]
     CrossProcess {
         kind: &'static str,

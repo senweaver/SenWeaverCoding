@@ -57,9 +57,10 @@ impl SwarmTool {
             None => agent_config.provider.clone(),
         };
 
-        providers::create_provider_with_options_async(
+        providers::create_resilient_runtime_provider_async(
             runtime_provider_name,
             credential,
+            None,
             self.provider_runtime_options.clone(),
         )
         .await
@@ -249,9 +250,10 @@ impl SwarmTool {
                         }
                         None => provider_name.clone(),
                     };
-                    let provider = match providers::create_provider_with_options_async(
+                    let provider = match providers::create_resilient_runtime_provider_async(
                         runtime_provider_name,
                         credential,
+                        None,
                         runtime_options,
                     )
                     .await

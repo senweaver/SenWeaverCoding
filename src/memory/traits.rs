@@ -159,6 +159,13 @@ pub trait Memory: Send + Sync {
         Ok(())
     }
 
+    async fn reembed_all(&self) -> anyhow::Result<usize> {
+        anyhow::bail!(
+            "the '{}' memory backend does not support re-embedding; only the sqlite backend can migrate stored vectors",
+            self.name()
+        )
+    }
+
     async fn recall_namespaced(
         &self,
         namespace: &str,

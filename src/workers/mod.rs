@@ -8,6 +8,7 @@ pub mod router;
 pub mod runner;
 pub mod supervisor;
 pub mod worker;
+pub mod overlay;
 pub mod worktree;
 pub mod ws;
 

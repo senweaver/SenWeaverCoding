@@ -45,6 +45,13 @@ export function RightSidebarShell({
     setRoot(workDir)
   }, [setRoot, workDir])
 
+  useEffect(() => {
+    useWorkspaceFilesStore.getState().resumeWatcher()
+    return () => {
+      useWorkspaceFilesStore.getState().suspendWatcher()
+    }
+  }, [])
+
   const handleTreeSelect = useCallback(
     async (node: FileTreeNode) => {
       if (node.isDir) return

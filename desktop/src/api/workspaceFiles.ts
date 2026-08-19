@@ -12,7 +12,7 @@ import type {
 } from '../types/workspaceFile'
 
 export type WorkspaceWatchEvent = {
-  kind: 'created' | 'modified' | 'removed' | 'renamed'
+  kind: 'created' | 'modified' | 'removed' | 'renamed' | 'resync'
   relPath: string
   fromRelPath?: string
 }

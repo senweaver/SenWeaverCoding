@@ -37,7 +37,7 @@ function uriToRel(uri: string, workDir: string): string | null {
   if (!uri || !uri.startsWith('file://')) return null
   let p = uri.slice('file://'.length)
   try {
-    p = decodeURI(p)
+    p = decodeURIComponent(p)
   } catch {
   }
   let abs = p

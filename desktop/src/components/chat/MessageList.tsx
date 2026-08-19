@@ -849,20 +849,39 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     return next
   }, [childToolCallsByParent, toolResultMap])
 
+  const subagentTimelines = useChatStore(
+    useShallow((s) =>
+      resolvedSessionId
+        ? s.sessions[resolvedSessionId]?.subagentTimelines ?? EMPTY_SUBAGENT_TIMELINES
+        : EMPTY_SUBAGENT_TIMELINES,
+    ),
+  )
+
   const listRenderItems = useMemo(() => {
     let end = renderItems.length
     if (chatState === 'idle' && streamingText.trim().length === 0) {
       while (end > 0) {
         const item = renderItems[end - 1]!
-        if (item.kind === 'message' && item.message.type === 'thinking') {
+        if (
+          item.kind === 'message' &&
+          item.message.type === 'thinking' &&
+          !item.message.content.trim()
+        ) {
           end -= 1
         } else {
           break
         }
       }
     }
-    return end === renderItems.length ? renderItems : renderItems.slice(0, end)
-  }, [renderItems, chatState, streamingText])
+    const trimmed = end === renderItems.length ? renderItems : renderItems.slice(0, end)
+    const isFoldedSubagentChunk = (item: RenderItem) =>
+      item.kind === 'message' &&
+      item.message.type === 'subagent_chunk' &&
+      !!item.message.parentToolUseId &&
+      !!subagentTimelines[item.message.parentToolUseId]
+    if (!trimmed.some(isFoldedSubagentChunk)) return trimmed
+    return trimmed.filter((item) => !isFoldedSubagentChunk(item))
+  }, [renderItems, chatState, streamingText, subagentTimelines])
 
   useLayoutEffect(() => {
     const keys = listRenderItems.map(renderItemKey)
@@ -964,14 +983,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const assistantTurnCopyByMsgId = useMemo(
     () => buildAssistantTurnCopyMap(messages),
     [messages],
-  )
-
-  const subagentTimelines = useChatStore(
-    useShallow((s) =>
-      resolvedSessionId
-        ? s.sessions[resolvedSessionId]?.subagentTimelines ?? EMPTY_SUBAGENT_TIMELINES
-        : EMPTY_SUBAGENT_TIMELINES,
-    ),
   )
 
   const isTailRendering = useMemo(() => {
@@ -1953,6 +1964,7 @@ export const MessageBlock = memo(function MessageBlock({
           markdown={message.markdown}
           modelLabel={message.modelLabel}
           status={message.status}
+          error={message.error}
           superseded={message.superseded}
           sessionId={sessionId}
         />

@@ -4,6 +4,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { useTranslation } from '../../i18n'
+import { parentOf } from '../../stores/workspaceFilesStore'
 import type { FileTreeNode } from '../../types/workspaceFile'
 import type { LanPeer } from '../../types/lan'
 
@@ -17,13 +18,17 @@ type Props = {
   target: ContextMenuTarget
   canReveal: boolean
   canOpenTerminal: boolean
+  multiSelectionCount?: number
   onClose: () => void
-  onNewFile: (parent: FileTreeNode | null) => void
-  onNewFolder: (parent: FileTreeNode | null) => void
+  onNewFile: (parentRelPath: string) => void
+  onNewFolder: (parentRelPath: string) => void
   onRename: (node: FileTreeNode) => void
   onDelete: (node: FileTreeNode) => void
   onRefresh: () => void
-  onUpload: (parent: FileTreeNode | null) => void
+  onUpload: (parentRelPath: string) => void
+  onAddToChat: (node: FileTreeNode) => void
+  onFindInFolder: (node: FileTreeNode) => void
+  onShowHistory: (node: FileTreeNode) => void
   onCopyAbsolutePath: (node: FileTreeNode) => void
   onCopyRelativePath: (node: FileTreeNode) => void
   onCopyAsMarkdown?: (node: FileTreeNode) => void
@@ -36,7 +41,6 @@ type Props = {
   lanEnabled: boolean
   lanPeers: LanPeer[]
   onSendToPeer: (node: FileTreeNode, peerId: string) => void
-  onUploadToGroup: (node: FileTreeNode) => void
   onShareToLan: (node: FileTreeNode) => void
 }
 
@@ -46,6 +50,7 @@ export function FileTreeContextMenu({
   target,
   canReveal,
   canOpenTerminal,
+  multiSelectionCount = 0,
   onClose,
   onNewFile,
   onNewFolder,
@@ -53,6 +58,9 @@ export function FileTreeContextMenu({
   onDelete,
   onRefresh,
   onUpload,
+  onAddToChat,
+  onFindInFolder,
+  onShowHistory,
   onCopyAbsolutePath,
   onCopyRelativePath,
   onCopyAsMarkdown,
@@ -65,7 +73,6 @@ export function FileTreeContextMenu({
   lanEnabled,
   lanPeers,
   onSendToPeer,
-  onUploadToGroup,
   onShareToLan,
 }: Props) {
   const t = useTranslation()
@@ -110,7 +117,19 @@ export function FileTreeContextMenu({
 
   const node = target.kind === 'node' ? target.node : null
   const isDir = node?.isDir ?? true
-  const parent = target.kind === 'node' ? (node?.isDir ? node : null) : null
+  const newParentRel = node
+    ? node.isDir
+      ? node.relPath
+      : parentOf(node.relPath)
+    : ''
+  const deleteLabel =
+    node && multiSelectionCount > 1
+      ? t('files.deleteSelected', { count: multiSelectionCount })
+      : t('files.delete')
+  const addToChatLabel =
+    node && multiSelectionCount > 1
+      ? t('files.tree.addToChatSelected', { count: multiSelectionCount })
+      : t('files.tree.addToChat')
 
   return (
     <div
@@ -119,49 +138,70 @@ export function FileTreeContextMenu({
       style={{ left: pos.x, top: pos.y, boxShadow: 'var(--shadow-dropdown)' }}
       className="fixed z-50 min-w-[180px] rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] py-1 text-xs"
     >
-      {isDir && (
+      <MenuItem
+        label={t('files.newFile')}
+        icon="note_add"
+        onClick={() => {
+          onNewFile(newParentRel)
+          onClose()
+        }}
+      />
+      <MenuItem
+        label={t('files.newFolder')}
+        icon="create_new_folder"
+        onClick={() => {
+          onNewFolder(newParentRel)
+          onClose()
+        }}
+      />
+      <MenuItem
+        label={t('files.upload')}
+        icon="upload_file"
+        onClick={() => {
+          onUpload(newParentRel)
+          onClose()
+        }}
+      />
+      {canPaste && (
+        <MenuItem
+          label={t('workspace.paste')}
+          icon="content_paste"
+          onClick={() => {
+            onPasteInto(newParentRel)
+            onClose()
+          }}
+        />
+      )}
+      <Separator />
+      {node && (
         <>
           <MenuItem
-            label={t('files.newFile')}
-            icon="note_add"
+            label={addToChatLabel}
+            icon="forum"
             onClick={() => {
-              onNewFile(parent)
+              onAddToChat(node)
               onClose()
             }}
           />
           <MenuItem
-            label={t('files.newFolder')}
-            icon="create_new_folder"
+            label={t('files.tree.findInFolder')}
+            icon="manage_search"
             onClick={() => {
-              onNewFolder(parent)
+              onFindInFolder(node)
               onClose()
             }}
           />
-          <MenuItem
-            label={t('files.upload')}
-            icon="upload_file"
-            onClick={() => {
-              onUpload(parent)
-              onClose()
-            }}
-          />
-          {canPaste && (
+          {!isDir && (
             <MenuItem
-              label={t('workspace.paste')}
-              icon="content_paste"
+              label={t('files.history.menu')}
+              icon="history"
               onClick={() => {
-                onPasteInto(parent?.relPath ?? '')
+                onShowHistory(node)
                 onClose()
               }}
             />
           )}
-          {(target.kind === 'node' || target.kind === 'root') && (
-            <Separator />
-          )}
-        </>
-      )}
-      {node && (
-        <>
+          <Separator />
           <MenuItem
             label={t('files.rename')}
             icon="edit"
@@ -171,7 +211,7 @@ export function FileTreeContextMenu({
             }}
           />
           <MenuItem
-            label={t('files.delete')}
+            label={deleteLabel}
             icon="delete"
             danger
             onClick={() => {
@@ -249,14 +289,6 @@ export function FileTreeContextMenu({
             peers={lanEnabled ? lanPeers.filter((p) => p.online) : []}
             onSelectPeer={(peerId) => {
               onSendToPeer(node, peerId)
-              onClose()
-            }}
-          />
-          <MenuItem
-            label={t('files.tree.uploadToGroup')}
-            icon="groups"
-            onClick={() => {
-              onUploadToGroup(node)
               onClose()
             }}
           />

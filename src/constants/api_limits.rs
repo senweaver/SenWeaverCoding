@@ -42,6 +42,11 @@ pub static MODEL_CONTEXT_WINDOWS: LazyLock<HashMap<&'static str, u32>> = LazyLoc
     m.insert("gpt-5-mini", 272_000);
     m.insert("gpt-5-nano", 272_000);
     m.insert("gpt-5-codex", 272_000);
+    m.insert("gpt-5.1", 272_000);
+    m.insert("gpt-5.1-codex", 272_000);
+    m.insert("gpt-5.2", 272_000);
+    m.insert("gpt-5.2-codex", 272_000);
+    m.insert("gpt-5.3", 272_000);
     m.insert("o1", 200_000);
     m.insert("o3", 200_000);
     m.insert("o4-mini", 200_000);
@@ -50,6 +55,9 @@ pub static MODEL_CONTEXT_WINDOWS: LazyLock<HashMap<&'static str, u32>> = LazyLoc
     m.insert("gemini-2.0-flash", 1_000_000);
     m.insert("gemini-2.5-pro", 1_000_000);
     m.insert("gemini-2.5-flash", 1_000_000);
+    m.insert("gemini-3-pro", 1_000_000);
+    m.insert("gemini-3-flash", 1_000_000);
+    m.insert("gemini-3-pro-preview", 1_000_000);
     m.insert("deepseek-chat", 64_000);
     m.insert("deepseek-reasoner", 64_000);
     m.insert("deepseek-v3", 128_000);
@@ -108,6 +116,7 @@ fn infer_context_window_from_id(id: &str) -> Option<u32> {
     if id.starts_with("gemini-1.5")
         || id.starts_with("gemini-2.0")
         || id.starts_with("gemini-2.5")
+        || id.starts_with("gemini-3")
     {
         return Some(1_000_000);
     }

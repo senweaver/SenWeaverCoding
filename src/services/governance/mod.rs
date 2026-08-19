@@ -5,4 +5,3 @@
 pub mod credential_vault;
 pub mod pii_sanitizer;
 pub mod policy_limits;
-pub mod rate_limit;
