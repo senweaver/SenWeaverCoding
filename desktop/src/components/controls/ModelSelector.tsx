@@ -2,9 +2,10 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation, type TranslationKey } from '../../i18n'
+import { useAnchoredDropdown } from '../../hooks/useAnchoredDropdown'
 import { useProviderStore } from '../../stores/providerStore'
 import { DRAFT_RUNTIME_SELECTION_KEY, useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useSettingsStore } from '../../stores/settingsStore'
@@ -98,14 +99,11 @@ export function ModelSelector({
     runtimeKey ? state.selections[runtimeKey] : undefined,
   )
   const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-  const triggerRef = useRef<HTMLButtonElement>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
-  const [dropdownPos, setDropdownPos] = useState<{
-    top: number
-    left: number
-    direction: 'up' | 'down'
-  } | null>(null)
+  const { triggerRef, menuRef, style, portalTarget } = useAnchoredDropdown<HTMLButtonElement>(
+    open,
+    () => setOpen(false),
+    { estimatedHeight: 420, align: 'right' },
+  )
   const requestedProvidersRef = useRef(false)
   const lastAutoSyncedRef = useRef<string | null>(null)
 
@@ -124,53 +122,6 @@ export function ModelSelector({
     requestedProvidersRef.current = true
     void fetchProviders()
   }, [fetchProviders, isRuntimeScoped, providersLoading])
-
-  const MENU_WIDTH = 220
-
-  const updateDropdownPos = useCallback(() => {
-    if (!triggerRef.current) return
-    const rect = triggerRef.current.getBoundingClientRect()
-    const DROPDOWN_HEIGHT = 460
-    const spaceAbove = rect.top
-    const spaceBelow = window.innerHeight - rect.bottom
-    const direction = spaceBelow >= DROPDOWN_HEIGHT || spaceBelow >= spaceAbove ? 'down' : 'up'
-    const left = Math.max(8, Math.min(rect.right - MENU_WIDTH, window.innerWidth - MENU_WIDTH - 8))
-    setDropdownPos({
-      top: direction === 'down' ? rect.bottom + 4 : rect.top - 4,
-      left,
-      direction,
-    })
-  }, [])
-
-  useEffect(() => {
-    if (!open) return
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as Node
-      if (ref.current?.contains(target)) return
-      if (menuRef.current?.contains(target)) return
-      setOpen(false)
-    }
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', handleClick)
-    document.addEventListener('keydown', handleEsc)
-    return () => {
-      document.removeEventListener('mousedown', handleClick)
-      document.removeEventListener('keydown', handleEsc)
-    }
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    updateDropdownPos()
-    window.addEventListener('scroll', updateDropdownPos, true)
-    window.addEventListener('resize', updateDropdownPos)
-    return () => {
-      window.removeEventListener('scroll', updateDropdownPos, true)
-      window.removeEventListener('resize', updateDropdownPos)
-    }
-  }, [open, updateDropdownPos])
 
   const typeLookup = useMemo(() => buildModelTypeLookup(providers), [providers])
 
@@ -312,18 +263,18 @@ export function ModelSelector({
   }
 
   return (
-    <div ref={ref} className="relative">
+    <div className="relative">
       <button
         ref={triggerRef}
         onClick={() => !buttonDisabled && setOpen(!open)}
         disabled={buttonDisabled}
         title={noConfiguredModels ? t('model.unconfiguredPlaceholder') : undefined}
-        className={`flex items-center gap-1.5 rounded-full bg-[var(--color-surface-container-low)] px-2.5 py-0.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-50 ${
+        className={`flex items-center gap-1.5 rounded-full bg-[var(--color-surface-container-low)] px-2.5 py-0.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-50 ${
           isRuntimeScoped ? 'w-[220px] shrink-0' : 'max-w-[260px]'
         }`}
       >
         <div className="flex min-w-0 flex-1 items-center gap-1.5">
-          <span className="min-w-0 flex-1 truncate text-[12px] font-semibold text-[var(--color-text-primary)]">
+          <span className="min-w-0 flex-1 truncate text-xs font-semibold text-[var(--color-text-primary)]">
             {buttonModelLabel}
           </span>
           {buttonProviderLabel && (
@@ -332,24 +283,17 @@ export function ModelSelector({
             </span>
           )}
         </div>
-        <span className="material-symbols-outlined flex-shrink-0 text-[11px]">expand_more</span>
+        <span className="material-symbols-outlined flex-shrink-0 text-[12px]">expand_more</span>
       </button>
 
-      {open && dropdownPos && createPortal(
+      {open && style && createPortal(
         <div
           ref={menuRef}
           role="menu"
-          className="w-[220px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
-          style={{
-            position: 'fixed',
-            left: dropdownPos.left,
-            ...(dropdownPos.direction === 'down'
-              ? { top: dropdownPos.top }
-              : { bottom: window.innerHeight - dropdownPos.top }),
-            zIndex: 9999,
-          }}
+          className="w-[280px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
+          style={style}
         >
-          <div className="max-h-[420px] overflow-y-auto p-2">
+          <div className="p-2">
             <div className="mb-1.5 px-1 text-[10px] font-bold uppercase tracking-widest text-[var(--color-outline)]">
               {t('model.configuration')}
             </div>
@@ -365,7 +309,7 @@ export function ModelSelector({
                   <div key={choice.providerId} className="space-y-1">
                     <div className="flex items-center gap-1.5 px-1.5 pt-1">
                       <span
-                        className="min-w-0 flex-1 truncate text-[11px] font-semibold tracking-[0.01em] text-[var(--color-text-secondary)]"
+                        className="min-w-0 flex-1 truncate text-xs font-semibold tracking-[0.01em] text-[var(--color-text-secondary)]"
                         title={choice.providerName}
                       >
                         {choice.providerName}
@@ -405,14 +349,14 @@ export function ModelSelector({
 
                               <div className="min-w-0 flex-1">
                                 <div
-                                  className="truncate text-[13px] font-semibold text-[var(--color-text-primary)]"
+                                  className="truncate text-xs font-semibold text-[var(--color-text-primary)]"
                                   title={model.name}
                                 >
                                   {model.name}
                                 </div>
                                 {model.description && (
                                   <div
-                                    className="mt-0.5 truncate text-[10px] text-[var(--color-text-tertiary)]"
+                                    className="mt-0.5 truncate text-xs text-[var(--color-text-tertiary)]"
                                     title={model.description}
                                   >
                                     {model.description}
@@ -458,7 +402,7 @@ export function ModelSelector({
                         )}
                       </div>
                       <div className="min-w-0 flex-1">
-                        <div className="truncate text-[13px] font-semibold text-[var(--color-text-primary)]">
+                        <div className="truncate text-xs font-semibold text-[var(--color-text-primary)]">
                           {t('model.autoDefault')}
                         </div>
                       </div>
@@ -497,14 +441,14 @@ export function ModelSelector({
 
                         <div className="min-w-0 flex-1">
                           <div
-                            className="truncate text-[13px] font-semibold text-[var(--color-text-primary)]"
+                            className="truncate text-xs font-semibold text-[var(--color-text-primary)]"
                             title={model.name}
                           >
                             {model.name}
                           </div>
                           {model.description && (
                             <div
-                              className="mt-0.5 truncate text-[10px] text-[var(--color-text-tertiary)]"
+                              className="mt-0.5 truncate text-xs text-[var(--color-text-tertiary)]"
                               title={model.description}
                             >
                               {model.description}
@@ -537,9 +481,9 @@ export function ModelSelector({
                       }}
                       title={opt.label}
                       className={`
-                        rounded-lg py-1.5 text-center text-[11px] font-semibold transition-colors
+                        rounded-lg py-1.5 text-center text-xs font-semibold transition-colors
                         ${isSelected
-                          ? 'bg-[var(--color-brand)] text-white'
+                          ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)]'
                           : 'bg-[var(--color-surface-container-high)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
                         }
                       `}
@@ -552,7 +496,7 @@ export function ModelSelector({
             </div>
           )}
         </div>,
-        document.body,
+        portalTarget,
       )}
     </div>
   )

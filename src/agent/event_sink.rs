@@ -116,9 +116,7 @@ impl EventSink {
 fn turn_event_is_droppable(event: &TurnEvent) -> bool {
     matches!(
         event,
-        TurnEvent::ProgressTick { .. }
-            | TurnEvent::StatusUpdate { .. }
-            | TurnEvent::ToolArgsDelta { .. }
+        TurnEvent::ProgressTick { .. } | TurnEvent::ToolArgsDelta { .. }
     )
 }
 
@@ -127,9 +125,10 @@ pub fn draft_to_turn(event: DraftEvent) -> Option<TurnEvent> {
     match event {
         DraftEvent::Clear => Some(TurnEvent::StreamReset),
         DraftEvent::Progress(text) => Some(TurnEvent::StatusUpdate {
-            action: "thinking".into(),
+            action: "preparing".into(),
             detail: text,
         }),
+        DraftEvent::Phase { action, detail } => Some(TurnEvent::StatusUpdate { action, detail }),
         DraftEvent::Content(text) => Some(TurnEvent::Chunk { delta: text }),
         DraftEvent::Thinking(text) => Some(TurnEvent::Thinking { delta: text }),
         DraftEvent::ToolCall {

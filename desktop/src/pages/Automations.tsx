@@ -27,20 +27,20 @@ export function Automations() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="px-10 py-8">
-        <div className="flex items-center justify-between mb-4">
+      <div className="px-6 py-4">
+        <div className="mb-4 flex items-center justify-between">
           <div>
-            <h1 className="text-2xl font-bold text-[var(--color-text-primary)]">{t('automations.page.title')}</h1>
-            <p className="mt-1 text-sm text-[var(--color-text-secondary)]">
+            <h1 className="text-xs font-semibold text-[var(--color-text-primary)]">{t('automations.page.title')}</h1>
+            <p className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">
               {t('automations.page.subtitle')}
             </p>
           </div>
-          <Button onClick={() => openModal('new-task')}>{t('tasks.newTask')}</Button>
+          <Button size="sm" onClick={() => openModal('new-task')}>{t('tasks.newTask')}</Button>
         </div>
 
-        <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-[var(--radius-md)] bg-[var(--color-warning)]/8 border border-[var(--color-warning)]/15 mb-6">
-          <span className="material-symbols-outlined text-[18px] text-[var(--color-warning)]">schedule</span>
-          <span className="text-xs text-[var(--color-text-secondary)]">
+        <div className="mb-4 flex items-center gap-2 rounded-xl border border-[var(--color-warning)]/15 bg-[var(--color-warning)]/8 px-3 py-2">
+          <span className="material-symbols-outlined text-[16px] text-[var(--color-warning)]">schedule</span>
+          <span className="text-xs text-[var(--color-text-tertiary)]">
             {t('automations.page.desktopNotice')}
           </span>
         </div>

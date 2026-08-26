@@ -85,7 +85,55 @@ const USER_FACING_ERROR_CODES = new Set([
   'UNKNOWN_ERROR',
   'TURN_CANCELLED',
   'VALIDATION_ERROR',
+  'CONTENT_FILTERED',
+  'SESSION_BUSY',
+  'REWIND_RESTORE_FAILED',
+  'REWIND_COMMIT_FAILED',
 ])
+
+function resolveRewindApiError(
+  error: unknown,
+  t: (key: TranslationKey) => string,
+): string {
+  if (error instanceof ApiError) {
+    const body = error.body
+    if (body && typeof body === 'object') {
+      const code =
+        'code' in body && typeof (body as { code: unknown }).code === 'string'
+          ? ((body as { code: string }).code)
+          : ''
+      if (code) {
+        const key = `error.${code}` as TranslationKey
+        const text = t(key)
+        if (text && text !== key) return text
+      }
+      if ('message' in body) {
+        return String((body as { message: unknown }).message)
+      }
+    }
+    return error.message
+  }
+  return error instanceof Error ? error.message : String(error)
+}
+
+function waitForSessionIdle(sessionId: string, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const startedAt = Date.now()
+    const check = () => {
+      const st = useChatStore.getState().sessions[sessionId]?.chatState ?? 'idle'
+      if (st === 'idle') {
+        resolve(true)
+        return
+      }
+      if (Date.now() - startedAt >= timeoutMs) {
+        resolve(false)
+        return
+      }
+      window.setTimeout(check, 250)
+    }
+    check()
+  })
+}
 
 function resolveErrorDisplay(
   message: { message: string; code: string; detail?: string },
@@ -224,7 +272,8 @@ export function buildRenderModel(
     }
 
     if (msg.type === 'thinking') {
-      buffer.push(msg)
+      flush()
+      items.push({ kind: 'message', message: msg })
       continue
     }
 
@@ -370,10 +419,9 @@ type MessageListProps = {
   sessionId?: string | null
 }
 
-const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 160
+const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 32
 const USER_SCROLL_UP_CANCEL_PX = 24
 
-const IDLE_INTERACTION_GRACE_MS = 1200
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 48
 const FIRST_ITEM_INDEX_BASE = 1_000_000
 
@@ -390,6 +438,7 @@ type ListFooterContext = {
   resolvedSessionId: string | null
   showRetryBanner: boolean
   showPlanningIndicator: boolean
+  planningPhaseAction: string
   awaitingWorkers: boolean
   planningLabel: string
   activeThinkingId: string | null
@@ -408,6 +457,7 @@ function ListFooter({ context }: { context?: ListFooterContext }) {
     resolvedSessionId,
     showRetryBanner,
     showPlanningIndicator,
+    planningPhaseAction,
     awaitingWorkers,
     planningLabel,
     activeThinkingId,
@@ -445,7 +495,7 @@ function ListFooter({ context }: { context?: ListFooterContext }) {
             </div>
           </div>
         ) : (
-          <StreamingIndicator />
+          <StreamingIndicator action={planningPhaseAction} />
         )
       )}
     </div>
@@ -462,6 +512,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     chatState,
     streamingText,
     activeThinkingId,
+    activeThinkingContent,
     pendingPermission,
     pendingRewind,
     providerRetry,
@@ -469,6 +520,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     historyHasMore,
     historyLoadingOlder,
     historyReloadNonce,
+    planningPhaseAction,
   } = useChatStore(
     useShallow((s) => {
       const st = resolvedSessionId ? s.sessions[resolvedSessionId] : undefined
@@ -477,6 +529,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
         chatState: st?.chatState ?? ('idle' as const),
         streamingText: st?.streamingText ?? '',
         activeThinkingId: st?.activeThinkingId ?? null,
+        activeThinkingContent: st?.activeThinkingContent ?? '',
         pendingPermission: st?.pendingPermission ?? null,
         pendingRewind: st?.pendingRewind ?? null,
         providerRetry: st?.providerRetry ?? null,
@@ -484,6 +537,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
         historyHasMore: st?.historyHasMore === true,
         historyLoadingOlder: st?.historyLoadingOlder === true,
         historyReloadNonce: st?.historyReloadNonce ?? 0,
+        planningPhaseAction: st?.planningPhaseAction ?? '',
       }
     }),
   )
@@ -518,7 +572,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const prevRenderKeysRef = useRef<string[]>([])
   const initialPinPendingRef = useRef(true)
   const initialPinDeadlineRef = useRef(0)
-  const lastScrollerPointerDownAtRef = useRef(0)
   const t = useTranslation()
   const [rewindTarget, setRewindTarget] = useState<{
     userMessageIndex: number
@@ -598,14 +651,13 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     const onScroll = () => {
       const st = next.scrollTop
       const distanceFromBottom = next.scrollHeight - st - next.clientHeight
-      const movedUp = st < lastScrollTopRef.current
       const draggedUp =
         userInteractingRef.current &&
         !programmaticScrollRef.current &&
         st < lastScrollTopRef.current - USER_SCROLL_UP_CANCEL_PX
       if (draggedUp && followRef.current) {
         cancelFollow()
-      } else if (!movedUp && distanceFromBottom <= AUTO_SCROLL_REARM_THRESHOLD_PX) {
+      } else if (st > lastScrollTopRef.current && distanceFromBottom <= AUTO_SCROLL_REARM_THRESHOLD_PX) {
         followRef.current = true
         setShowScrollToBottom((prev) => (prev ? false : prev))
       } else if (distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX && followRef.current) {
@@ -621,7 +673,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     }
     const onPointerDown = () => {
       userInteractingRef.current = true
-      lastScrollerPointerDownAtRef.current = Date.now()
     }
     const endPointerInteraction = () => {
       userInteractingRef.current = false
@@ -668,7 +719,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     followRef.current = true
     atBottomRef.current = true
     setShowScrollToBottom(false)
-    lastScrollerPointerDownAtRef.current = 0
     scrollFollowToBottom(true)
   }, [scrollFollowToBottom])
 
@@ -677,7 +727,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     atBottomRef.current = true
     atTopRef.current = false
     userInteractingRef.current = false
-    lastScrollerPointerDownAtRef.current = 0
     prevRenderKeysRef.current = []
     initialPinPendingRef.current = true
     initialPinDeadlineRef.current = 0
@@ -746,6 +795,13 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   useEffect(() => {
     if (!resolvedSessionId || !rewindTarget) return
 
+    if (chatState !== 'idle') {
+      setIsLoadingPreview(false)
+      setRewindPreview(null)
+      setRewindError(null)
+      return
+    }
+
     let cancelled = false
     setIsLoadingPreview(true)
     setRewindPreview(null)
@@ -763,15 +819,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       })
       .catch((error) => {
         if (cancelled) return
-        const message =
-          error instanceof ApiError
-            ? typeof error.body === 'object' && error.body && 'message' in error.body
-              ? String((error.body as { message: unknown }).message)
-              : error.message
-            : error instanceof Error
-              ? error.message
-              : String(error)
-        setRewindError(message)
+        setRewindError(resolveRewindApiError(error, t))
       })
       .finally(() => {
         if (!cancelled) {
@@ -782,7 +830,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     return () => {
       cancelled = true
     }
-  }, [resolvedSessionId, rewindTarget])
+  }, [resolvedSessionId, rewindTarget, chatState, t])
 
   const childResultsByParentRef = useRef<Map<string, Map<string, Extract<UIMessage, { type: 'tool_result' }>>>>(new Map())
 
@@ -985,20 +1033,23 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     [messages],
   )
 
+  const hasLiveThinkingContent =
+    Boolean(activeThinkingId) && activeThinkingContent.trim().length > 0
+
   const isTailRendering = useMemo(() => {
     if (streamingText.trim().length > 0) return true
-    if (activeThinkingId) return true
+    if (hasLiveThinkingContent) return true
     for (let i = messages.length - 1; i >= 0; i--) {
       const m = messages[i]
       if (!m) continue
       if (m.type === 'tool_result') continue
-      if (m.type === 'thinking') return m.id === activeThinkingId
+      if (m.type === 'thinking') return m.id === activeThinkingId && hasLiveThinkingContent
       if (m.type === 'tool_use') return !toolResultMap.has(m.toolUseId)
 
       return false
     }
     return false
-  }, [messages, streamingText, activeThinkingId, toolResultMap])
+  }, [messages, streamingText, activeThinkingId, hasLiveThinkingContent, toolResultMap])
 
   const showPlanningIndicator =
     chatState !== 'idle' &&
@@ -1024,6 +1075,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     try {
       if (chatState !== 'idle') {
         stopGeneration(resolvedSessionId)
+        await waitForSessionIdle(resolvedSessionId, 15_000)
       }
 
       const result = await sessionsApi.rewind(resolvedSessionId, {
@@ -1090,15 +1142,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       setRewindTarget(null)
       setRewindPreview(null)
     } catch (error) {
-      const message =
-        error instanceof ApiError
-          ? typeof error.body === 'object' && error.body && 'message' in error.body
-            ? String((error.body as { message: unknown }).message)
-            : error.message
-          : error instanceof Error
-            ? error.message
-            : String(error)
-      setRewindError(message)
+      setRewindError(resolveRewindApiError(error, t))
     } finally {
       setIsExecutingRewind(false)
       setExecutingRewindChoice(null)
@@ -1116,26 +1160,48 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     t,
   ])
 
+  const lastAssistantText = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m?.type === 'assistant_text') return m.content
+    }
+    return ''
+  }, [messages])
+  const footerStreamingText = (() => {
+    if (!streamingText) return streamingText
+    if (!lastAssistantText) return streamingText
+    if (lastAssistantText === streamingText || lastAssistantText.endsWith(streamingText)) {
+      return ''
+    }
+    const committed = lastAssistantText.trimEnd()
+    const live = streamingText.trimEnd()
+    if (live && (committed === live || committed.endsWith(live))) return ''
+    return streamingText
+  })()
+
   const footerContext = useMemo<ListFooterContext>(
     () => ({
-      streamingText,
+      streamingText: footerStreamingText,
       isStreaming: chatState === 'streaming',
       resolvedSessionId: resolvedSessionId ?? null,
       showRetryBanner,
       showPlanningIndicator,
+      planningPhaseAction,
       awaitingWorkers: chatState === 'awaiting_workers',
       planningLabel:
         t('chat.willResumeWhenWorkersFinish') || 'Will resume when subagents finish',
-      activeThinkingId,
+      activeThinkingId: hasLiveThinkingContent ? activeThinkingId : null,
       onLiveThinkingGrow: handleLiveThinkingGrow,
     }),
     [
-      streamingText,
+      footerStreamingText,
       chatState,
       resolvedSessionId,
       showRetryBanner,
       showPlanningIndicator,
+      planningPhaseAction,
       t,
+      hasLiveThinkingContent,
       activeThinkingId,
       handleLiveThinkingGrow,
     ],
@@ -1357,18 +1423,12 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
             pinToLatestProgrammatically()
             return
           }
-          if (
-            chatState === 'idle' &&
-            Date.now() - lastScrollerPointerDownAtRef.current < IDLE_INTERACTION_GRACE_MS
-          ) {
-            return
-          }
+          if (chatState === 'idle') return
           scrollFollowToBottom()
         }}
         atBottomStateChange={(atBottom) => {
           atBottomRef.current = atBottom
           if (atBottom) {
-            followRef.current = true
             setShowScrollToBottom(false)
           } else if (!followRef.current) {
             setShowScrollToBottom(true)
@@ -1379,7 +1439,8 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
           if (atTop) maybeLoadOlder()
         }}
         atBottomThreshold={AUTO_SCROLL_BOTTOM_THRESHOLD_PX}
-        increaseViewportBy={{ top: 800, bottom: 1200 }}
+        defaultItemHeight={100}
+        increaseViewportBy={{ top: 240, bottom: 320 }}
         startReached={maybeLoadOlder}
         components={VIRTUOSO_COMPONENTS}
         itemContent={itemContent}
@@ -1440,7 +1501,11 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
         }
       >
         <div className="space-y-3">
-          {isLoadingPreview && !rewindPreview ? (
+          {chatState !== 'idle' && !rewindPreview ? (
+            <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
+              {t('chat.rewindWaitingIdle')}
+            </p>
+          ) : isLoadingPreview && !rewindPreview ? (
             <p className="text-sm leading-relaxed text-[var(--color-text-secondary)]">
               {t('chat.rewindLoading')}
             </p>
@@ -1889,7 +1954,7 @@ export const MessageBlock = memo(function MessageBlock({
       const { friendly, technicalDetail } = resolveErrorDisplay(message, t)
       return supersededWrap(
         <div className="mb-2 px-4 py-2 rounded-lg border border-[var(--color-error)]/20 bg-[var(--color-error-container)]/28 text-sm text-[var(--color-error)]">
-          <strong>Error:</strong> {friendly}
+          <strong>{t('chat.errorLabel')}</strong> {friendly}
           {technicalDetail && (
             <details className="mt-1 group">
               <summary className="cursor-pointer text-xs text-[var(--color-on-error-container)]/75 hover:text-[var(--color-on-error-container)] select-none">

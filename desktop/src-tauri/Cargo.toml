@@ -5,7 +5,7 @@ edition = "2021"
 
 [lib]
 name = "sen_desktop_lib"
-crate-type = ["staticlib", "cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [[bin]]
 name = "sen-desktop"

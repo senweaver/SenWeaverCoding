@@ -212,7 +212,7 @@ export function SkillsPane({ onReplayStarted }: SkillsPaneProps) {
                     }
                     disabled={busy || !hasModel || rec.step_count === 0}
                     title={t('computerUse.skills.smartReplayHint')}
-                    className="inline-flex flex-1 items-center justify-center gap-1 rounded-md bg-[var(--color-brand)] px-2 py-1 text-[10.5px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                    className="inline-flex flex-1 items-center justify-center gap-1 rounded-md bg-[var(--color-brand)] px-2 py-1 text-[10.5px] font-medium text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
                   >
                     <span className="material-symbols-outlined text-[13px]">auto_awesome</span>
                     {t('computerUse.skills.smartReplay')}
@@ -291,7 +291,7 @@ export function SkillsPane({ onReplayStarted }: SkillsPaneProps) {
                         })
                       }
                       disabled={busy || !hasModel}
-                      className="inline-flex items-center justify-center gap-1 rounded-md bg-[var(--color-brand)] px-2 py-1 text-[10.5px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                      className="inline-flex items-center justify-center gap-1 rounded-md bg-[var(--color-brand)] px-2 py-1 text-[10.5px] font-semibold text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
                     >
                       <span className="material-symbols-outlined text-[13px]">play_arrow</span>
                       {t('computerUse.skills.replayStart')}

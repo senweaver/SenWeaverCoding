@@ -115,8 +115,10 @@ export interface MinimalRecorderProgress {
 }
 
 export interface MinimalRecorderControl {
-  action: 'start' | 'stop' | 'discard' | 'generate' | 'reset'
+  action: 'start' | 'stop' | 'discard' | 'generate' | 'reset' | 'toggle-mute'
   task?: string
+  narrationEnabled?: boolean
+  narrationLanguage?: string
 }
 
 export interface MinimalComputerReplay {
@@ -154,6 +156,25 @@ export function isMinimalWindow(): boolean {
       __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: unknown } } }
     }).__TAURI_INTERNALS__
     return internals?.metadata?.currentWindow?.label === MINIMAL_WINDOW_LABEL
+  } catch {
+    return false
+  }
+}
+
+export function isMinimalInputWindow(): boolean {
+  if (typeof window === 'undefined') return false
+  try {
+    if (window.location.hash.replace(/^#/, '').split('?')[0] === MINIMAL_INPUT_WINDOW_LABEL) {
+      return true
+    }
+  } catch {
+
+  }
+  try {
+    const internals = (window as unknown as {
+      __TAURI_INTERNALS__?: { metadata?: { currentWindow?: { label?: unknown } } }
+    }).__TAURI_INTERNALS__
+    return internals?.metadata?.currentWindow?.label === MINIMAL_INPUT_WINDOW_LABEL
   } catch {
     return false
   }
@@ -202,8 +223,24 @@ export async function enterMinimalMode(variant?: MinimalVariant): Promise<void> 
 
     try {
       await minimal.show()
+      try {
+        await minimal.setAlwaysOnTop(true)
+      } catch (err) {
+        console.warn('[minimalMode] setAlwaysOnTop after show failed', err)
+      }
       await minimal.setFocus()
       await hideMainWindow()
+      try {
+        await minimal.setAlwaysOnTop(true)
+      } catch (err) {
+        console.warn('[minimalMode] setAlwaysOnTop after hide main failed', err)
+      }
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('minimal_pin_overlay')
+      } catch (err) {
+        console.warn('[minimalMode] pin overlay failed', err)
+      }
       void prewarmMinimalInputWindow()
     } catch (err) {
       console.warn('[minimalMode] reveal minimal window failed', err)
@@ -289,6 +326,36 @@ export async function hideMinimalInput(): Promise<void> {
     await invoke('minimal_input_hide')
   } catch (err) {
     console.warn('[minimalMode] hideMinimalInput failed', err)
+  }
+}
+
+export async function setMinimalInputKeepVisible(keep: boolean): Promise<void> {
+  if (!isTauriRuntime()) return
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('minimal_input_set_keep_visible', { keep })
+  } catch (err) {
+    console.warn('[minimalMode] setMinimalInputKeepVisible failed', err)
+  }
+}
+
+export async function minimalInputShouldStayVisible(): Promise<boolean> {
+  if (!isTauriRuntime()) return false
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    return await invoke<boolean>('minimal_input_should_stay_visible')
+  } catch {
+    return false
+  }
+}
+
+export async function activateMinimalInputWindow(): Promise<void> {
+  if (!isTauriRuntime()) return
+  try {
+    const { invoke } = await import('@tauri-apps/api/core')
+    await invoke('minimal_input_activate')
+  } catch (err) {
+    console.warn('[minimalMode] activateMinimalInputWindow failed', err)
   }
 }
 

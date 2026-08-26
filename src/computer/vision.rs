@@ -124,6 +124,20 @@ impl VisionClient {
         Ok(response.text.unwrap_or_default())
     }
 
+    pub async fn complete_messages(&self, messages: &[ChatMessage]) -> Result<String> {
+        let prepared =
+            crate::multimodal::prepare_messages_for_provider(messages, &self.multimodal).await?;
+        let request = ChatRequest {
+            messages: &prepared.messages,
+            tools: None,
+        };
+        let response = self
+            .provider
+            .chat(request, &self.model, self.temperature)
+            .await?;
+        Ok(response.text.unwrap_or_default())
+    }
+
     pub async fn complete_with_image(
         &self,
         system_prompt: &str,

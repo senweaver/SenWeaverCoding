@@ -13,12 +13,17 @@ import { isTauriRuntime } from './lib/desktopRuntime'
 import {
   MINIMAL_EVENT_INPUT_HIDDEN,
   MINIMAL_EVENT_INPUT_SHOW,
+  MINIMAL_INPUT_SIZE,
+  activateMinimalInputWindow,
+  minimalInputShouldStayVisible,
   prewarmMinimalInputWindow,
+  resizeMinimalWindow,
   revealMinimalInputWindow,
+  setMinimalInputKeepVisible,
 } from './lib/minimalMode'
 import type { MinimalVariant } from './lib/minimalMode'
 
-const noopHeight = () => {}
+const INPUT_CHROME_Y = 32
 
 function NoSessionHint() {
   const t = useTranslation()
@@ -50,9 +55,35 @@ export function MinimalInputWindow() {
   const activeTabId = useTabStore((s) => s.activeTabId)
   const prewarmingRef = useRef(false)
   const revealSeqRef = useRef(0)
+  const variantRef = useRef(variant)
+  variantRef.current = variant
+  const keepVisibleRef = useRef(false)
+  const blurHideTimerRef = useRef<number | null>(null)
+  const lastWindowHeightRef = useRef(0)
+  const dropHoldUntilRef = useRef(0)
+
+  const focusVisibleComposer = useCallback(() => {
+    requestAnimationFrame(() => {
+      const selector =
+        variantRef.current === 'computer'
+          ? '[data-minimal-pane="computer"] textarea'
+          : '[data-minimal-pane="code"] [data-role="chat-composer"]'
+      document.querySelector<HTMLElement>(selector)?.focus()
+    })
+  }, [])
+
+  const applyKeepVisible = useCallback(async (keep: boolean) => {
+    keepVisibleRef.current = keep
+    await setMinimalInputKeepVisible(keep)
+  }, [])
 
   const hideSelf = useCallback(async (opts?: { silent?: boolean }) => {
     if (!isTauriRuntime()) return
+    if (blurHideTimerRef.current != null) {
+      window.clearTimeout(blurHideTimerRef.current)
+      blurHideTimerRef.current = null
+    }
+    await applyKeepVisible(false)
     try {
       const { getCurrentWindow } = await import('@tauri-apps/api/window')
       const win = getCurrentWindow()
@@ -64,7 +95,25 @@ export function MinimalInputWindow() {
     } catch (err) {
       console.warn('[minimal-input] hide failed', err)
     }
+  }, [applyKeepVisible])
+
+  const applyContentHeight = useCallback((contentHeight: number) => {
+    const size = MINIMAL_INPUT_SIZE[variantRef.current] ?? MINIMAL_INPUT_SIZE.code
+    const nextH = Math.max(size.height, Math.round(contentHeight) + INPUT_CHROME_Y)
+    if (nextH === lastWindowHeightRef.current) return
+    lastWindowHeightRef.current = nextH
+    void resizeMinimalWindow(size.width, nextH)
   }, [])
+
+  const handleCodeHeight = useCallback((height: number) => {
+    if (variantRef.current === 'computer') return
+    applyContentHeight(height)
+  }, [applyContentHeight])
+
+  const handleComputerHeight = useCallback((height: number) => {
+    if (variantRef.current !== 'computer') return
+    applyContentHeight(height)
+  }, [applyContentHeight])
 
   useEffect(() => {
     if (!isTauriRuntime()) return
@@ -73,17 +122,32 @@ export function MinimalInputWindow() {
     void (async () => {
       try {
         const { getCurrentWindow } = await import('@tauri-apps/api/window')
-        const off = await getCurrentWindow().onFocusChanged(({ payload: focused }) => {
-          if (!focused) {
-            if (prewarmingRef.current) return
-            void hideSelf()
+        const win = getCurrentWindow()
+        const off = await win.onFocusChanged(({ payload: focused }) => {
+          if (blurHideTimerRef.current != null) {
+            window.clearTimeout(blurHideTimerRef.current)
+            blurHideTimerRef.current = null
+          }
+          if (focused) {
+            focusVisibleComposer()
             return
           }
-          requestAnimationFrame(() => {
-            document
-              .querySelector<HTMLElement>('[data-role="chat-composer"], textarea')
-              ?.focus()
-          })
+          if (prewarmingRef.current || keepVisibleRef.current) return
+          if (Date.now() < dropHoldUntilRef.current) return
+          blurHideTimerRef.current = window.setTimeout(() => {
+            blurHideTimerRef.current = null
+            void (async () => {
+              if (prewarmingRef.current || keepVisibleRef.current) return
+              if (Date.now() < dropHoldUntilRef.current) return
+              if (await minimalInputShouldStayVisible()) return
+              try {
+                if (await win.isFocused()) return
+              } catch {
+
+              }
+              void hideSelf()
+            })()
+          }, 80)
         })
         if (disposed) off()
         else unlisten = off
@@ -93,9 +157,69 @@ export function MinimalInputWindow() {
     })()
     return () => {
       disposed = true
+      if (blurHideTimerRef.current != null) {
+        window.clearTimeout(blurHideTimerRef.current)
+        blurHideTimerRef.current = null
+      }
       if (unlisten) unlisten()
     }
-  }, [hideSelf])
+  }, [hideSelf, focusVisibleComposer])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
+    let cancelled = false
+    let unlisten: (() => void) | null = null
+    void (async () => {
+      try {
+        const { getCurrentWebview } = await import('@tauri-apps/api/webview')
+        const webview = getCurrentWebview()
+        const off = await webview.onDragDropEvent((event) => {
+          const payload = event.payload as
+            | { type: 'enter'; paths: string[]; position: { x: number; y: number } }
+            | { type: 'over'; position: { x: number; y: number } }
+            | { type: 'drop'; paths: string[]; position: { x: number; y: number } }
+            | { type: 'leave' }
+          if (payload.type === 'enter' || payload.type === 'over') {
+            void applyKeepVisible(true)
+            return
+          }
+          if (payload.type === 'drop') {
+            dropHoldUntilRef.current = Date.now() + 800
+            void (async () => {
+              await activateMinimalInputWindow()
+              await applyKeepVisible(false)
+              focusVisibleComposer()
+              dropHoldUntilRef.current = Date.now() + 400
+            })()
+            return
+          }
+          void (async () => {
+            if (Date.now() < dropHoldUntilRef.current) return
+            await applyKeepVisible(false)
+            if (await minimalInputShouldStayVisible()) return
+            try {
+              const { getCurrentWindow } = await import('@tauri-apps/api/window')
+              if (await getCurrentWindow().isFocused()) return
+            } catch {
+
+            }
+            void hideSelf()
+          })()
+        })
+        if (cancelled) {
+          off()
+        } else {
+          unlisten = off
+        }
+      } catch {
+
+      }
+    })()
+    return () => {
+      cancelled = true
+      if (unlisten) unlisten()
+    }
+  }, [applyKeepVisible, focusVisibleComposer, hideSelf])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -144,7 +268,9 @@ export function MinimalInputWindow() {
             void (async () => {
               await waitForPaint()
               if (disposed || seq !== revealSeqRef.current) return
+              lastWindowHeightRef.current = 0
               await revealMinimalInputWindow(target)
+              focusVisibleComposer()
             })()
           },
         )
@@ -158,7 +284,7 @@ export function MinimalInputWindow() {
       disposed = true
       if (unlisten) unlisten()
     }
-  }, [])
+  }, [focusVisibleComposer])
 
   const handleSubmitted = useCallback(() => {
     void hideSelf()
@@ -166,29 +292,31 @@ export function MinimalInputWindow() {
 
   return (
     <div
-      className="relative flex h-screen w-screen flex-col justify-end overflow-hidden px-4 pt-4 pb-2"
+      className="relative flex h-full w-full min-h-0 min-w-0 flex-col justify-end overflow-hidden p-4"
       style={{ opacity: opacityPct / 100 }}
     >
       <div
+        data-minimal-pane="computer"
         aria-hidden={variant !== 'computer'}
         className={
           variant === 'computer'
-            ? 'min-h-0 max-h-full overflow-y-auto -m-3 p-3'
+            ? 'min-h-0 min-w-0 w-full max-h-full overflow-visible -m-3 p-3'
             : 'pointer-events-none absolute bottom-2 left-4 right-4 -z-10 opacity-0'
         }
       >
-        <ComputerPanel onHeightChange={noopHeight} onSubmitted={handleSubmitted} />
+        <ComputerPanel onHeightChange={handleComputerHeight} onSubmitted={handleSubmitted} />
       </div>
       <div
+        data-minimal-pane="code"
         aria-hidden={variant === 'computer'}
         className={
           variant === 'computer'
             ? 'pointer-events-none absolute bottom-2 left-4 right-4 -z-10 opacity-0'
-            : 'min-h-0 max-h-full overflow-y-auto -m-3 p-3'
+            : 'min-h-0 min-w-0 w-full max-h-full overflow-visible -m-3 p-3'
         }
       >
         {activeTabId ? (
-          <MinimalComposer onHeightChange={noopHeight} onSubmitted={handleSubmitted} />
+          <MinimalComposer onHeightChange={handleCodeHeight} onSubmitted={handleSubmitted} />
         ) : (
           <NoSessionHint />
         )}

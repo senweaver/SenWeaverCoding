@@ -3552,6 +3552,16 @@ pub async fn browser_dock_activate_tab(
             }
         }
     }
+    if let Some(prev) = state.active() {
+        if prev != tab_id {
+            if let Some(controller) = app.try_state::<TauriDockController>() {
+                controller.drain_pending_for_tab(
+                    prev,
+                    "dock tab was switched while a browser action was in flight; retry the action",
+                );
+            }
+        }
+    }
     state.set_active(tab_id)?;
     ensure_dock_webview(&app, state.inner())?;
     dock_navigate_active(&app, state.inner())?;
@@ -4470,6 +4480,9 @@ impl DockController for TauriDockController {
             tracing::warn!(
                 "[browser_dock] await_dock_ready before exec failed: {err}"
             );
+            if let Some(expected) = state.snapshot_tab(tab_id).0 {
+                state.record_state_url(tab_id, &expected);
+            }
         }
 
         let preview_id = self.0.next_req_id.load(Ordering::SeqCst);
@@ -4533,6 +4546,9 @@ impl DockController for TauriDockController {
             tracing::warn!(
                 "[browser_dock] await_dock_ready before screenshot failed: {err}"
             );
+            if let Some(expected) = state.snapshot_tab(tab_id).0 {
+                state.record_state_url(tab_id, &expected);
+            }
         }
 
         if full_page && dock_webview(&self.0.app).is_some() {
@@ -4685,6 +4701,14 @@ impl DockController for TauriDockController {
             .ok_or_else(|| anyhow::anyhow!("dock state not initialised"))?;
         let owner = state.tab_owner(tab_id);
         self.note_takeover_activity(tab_id, owner);
+        if let Some(prev) = state.active() {
+            if prev != tab_id {
+                self.drain_pending_for_tab(
+                    prev,
+                    "dock tab was switched while a browser action was in flight; retry the action",
+                );
+            }
+        }
         state
             .set_active(tab_id)
             .map_err(|e| anyhow::anyhow!("set_active: {e}"))?;
@@ -5011,9 +5035,33 @@ impl TauriDockController {
         });
         let payload_js = serde_json::to_string(&payload)
             .with_context(|| "serialise dock exec payload")?;
+        let no_bridge_error = serde_json::json!({
+            "reqId": req_id,
+            "ok": false,
+            "value": Value::Null,
+            "error": "dock bridge unavailable: the page has not finished loading, failed to load, or blocks injected scripts",
+        });
+        let no_bridge_json = serde_json::to_string(&no_bridge_error)
+            .with_context(|| "serialise dock no-bridge payload")?;
         let source = format!(
-            "window.__senDockBridge && window.__senDockBridge.exec({});",
-            payload_js
+            r#"(() => {{
+  const payload = {payload_js};
+  if (window.__senDockBridge) {{ window.__senDockBridge.exec(payload); return; }}
+  try {{
+    const base = window.__SEN_BRIDGE_BASE || {bridge_base:?};
+    const params = new URLSearchParams();
+    params.set('kind', 'result');
+    params.set('data', {no_bridge_json:?});
+    fetch(base + '/event?' + params.toString(), {{
+      method: 'GET',
+      mode: 'no-cors',
+      cache: 'no-store',
+      credentials: 'omit',
+      keepalive: true,
+    }}).catch(() => {{}});
+  }} catch (_) {{}}
+}})();"#,
+            bridge_base = bridge_base_url(),
         );
         if let Err(err) = with_dock_on_main_thread(&self.0.app, "dock exec eval", move |app| {
             let webview = dock_webview(app)
@@ -5036,10 +5084,25 @@ impl TauriDockController {
             }
             Err(_) => {
                 self.forget_request(req_id);
+                let diag = self
+                    .0
+                    .app
+                    .try_state::<DockSharedState>()
+                    .map(|state| {
+                        let (tab_url, _) = state.snapshot_tab(tab_id);
+                        let seen = state.last_state_url(tab_id);
+                        format!(
+                            " tab_url={} bridge_last_seen_url={}",
+                            tab_url.unwrap_or_else(|| "(none)".into()),
+                            seen.unwrap_or_else(|| "(never)".into()),
+                        )
+                    })
+                    .unwrap_or_default();
                 Err(anyhow::anyhow!(
-                    "dock bridge timed out waiting for kind={} (tab={})",
+                    "dock bridge timed out waiting for kind={} (tab={});{} the page may still be loading, may have failed to load, or its content security policy blocks bridge callbacks",
                     req.kind,
-                    tab_id
+                    tab_id,
+                    diag
                 ))
             }
         }

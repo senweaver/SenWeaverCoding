@@ -423,30 +423,116 @@ impl OpenAiCompatibleProvider {
         }
     }
 
-    fn reasoning_effort_for_model(&self, model: &str) -> Option<String> {
-        let id = model.rsplit('/').next().unwrap_or(model);
-        let supports_reasoning_effort = id.starts_with("gpt-5") || id.contains("codex");
-        supports_reasoning_effort
-            .then(|| self.reasoning_effort.clone())
-            .flatten()
-    }
-
-    fn model_supports_thinking_param(&self, model: &str) -> bool {
-        let vendor = self.name.to_ascii_lowercase();
-        let id = model
+    fn model_id_lower(model: &str) -> String {
+        model
             .rsplit('/')
             .next()
             .unwrap_or(model)
-            .to_ascii_lowercase();
+            .to_ascii_lowercase()
+    }
+
+    fn vendor_lower(&self) -> String {
+        self.name.to_ascii_lowercase()
+    }
+
+    fn is_deepseek_model(&self, model: &str) -> bool {
+        let vendor = self.vendor_lower();
+        let id = Self::model_id_lower(model);
+        vendor.contains("deepseek") || id.contains("deepseek")
+    }
+
+    fn is_qwen_thinking_model(&self, model: &str) -> bool {
+        let vendor = self.vendor_lower();
+        let id = Self::model_id_lower(model);
+        vendor.contains("qwen")
+            || vendor.contains("dashscope")
+            || vendor.contains("aliyun")
+            || vendor.contains("alibaba")
+            || id.starts_with("qwen3")
+            || id.contains("qwen3")
+            || id.starts_with("qwq")
+            || id.starts_with("qwen-qwq")
+    }
+
+    fn is_reasoning_roundtrip_model(&self, model: &str) -> bool {
+        let vendor = self.vendor_lower();
+        let id = Self::model_id_lower(model);
+        self.is_deepseek_model(model)
+            || id.contains("reasoner")
+            || id.starts_with("glm-")
+            || vendor.contains("zhipu")
+            || vendor.contains("z.ai")
+            || vendor.contains("zai")
+            || vendor.contains("bigmodel")
+            || (id.contains("kimi") && id.contains("thinking"))
+            || id.starts_with("kimi-thinking")
+            || self.is_qwen_thinking_model(model)
+    }
+
+    fn should_strip_outbound_reasoning(&self, model: &str) -> bool {
+        !self.is_reasoning_roundtrip_model(model)
+            && self.thinking_param_for_model(model).is_none()
+            && self.enable_thinking_bool_for_model(model).is_none()
+    }
+
+    fn map_deepseek_reasoning_effort(raw: &str) -> &'static str {
+        match raw {
+            "minimal" | "low" => "low",
+            "max" => "max",
+            _ => "high",
+        }
+    }
+
+    fn reasoning_effort_for_model(&self, model: &str) -> Option<String> {
+        if crate::providers::reasoning_suppressed() {
+            return None;
+        }
+        if self.is_reasoning_effort_blacklisted(model) {
+            return None;
+        }
+        let id = Self::model_id_lower(model);
+        let is_gpt5 = id.starts_with("gpt-5") || id.contains("codex");
+        let is_openai_reasoner = id.starts_with("o1")
+            || id.starts_with("o3")
+            || id.starts_with("o4")
+            || is_gpt5;
+        let is_deepseek = self.is_deepseek_model(model);
+        if is_deepseek {
+            return Some(
+                Self::map_deepseek_reasoning_effort(
+                    self.reasoning_effort.as_deref().unwrap_or("high"),
+                )
+                .to_string(),
+            );
+        }
+        if is_openai_reasoner {
+            return Some(
+                self.reasoning_effort
+                    .clone()
+                    .unwrap_or_else(|| "medium".to_string()),
+            );
+        }
+        self.reasoning_effort.clone()
+    }
+
+    fn model_supports_thinking_param(&self, model: &str) -> bool {
+        let vendor = self.vendor_lower();
+        let id = Self::model_id_lower(model);
         id.starts_with("glm-")
             || id.starts_with("minimax")
             || id.contains("minimax-")
             || id.starts_with("kimi-thinking")
+            || (id.contains("kimi") && id.contains("thinking"))
             || vendor.contains("zhipu")
             || vendor.contains("z.ai")
             || vendor.contains("zai")
             || vendor.contains("bigmodel")
             || vendor.contains("minimax")
+            || self.is_deepseek_model(model)
+            || id.contains("reasoner")
+            || id.contains("-thinking")
+            || id.starts_with("qwq")
+            || id.contains("qwen3")
     }
 
     fn thinking_param_for_model(&self, model: &str) -> Option<serde_json::Value> {
@@ -456,9 +542,136 @@ impl OpenAiCompatibleProvider {
         if self.is_thinking_blacklisted(model) {
             return None;
         }
+        if crate::providers::reasoning_suppressed() {
+            return Some(serde_json::json!({
+                "type": "disabled",
+            }));
+        }
         Some(serde_json::json!({
             "type": "enabled",
         }))
+    }
+
+    fn enable_thinking_bool_for_model(&self, model: &str) -> Option<bool> {
+        if self.is_enable_thinking_blacklisted(model) {
+            return None;
+        }
+        if self.is_qwen_thinking_model(model) {
+            return Some(!crate::providers::reasoning_suppressed());
+        }
+        None
+    }
+
+    fn chat_template_kwargs_for_model(&self, model: &str) -> Option<serde_json::Value> {
+        if self.is_enable_thinking_blacklisted(model) {
+            return None;
+        }
+        self.is_qwen_thinking_model(model).then(|| {
+            serde_json::json!({
+                "enable_thinking": !crate::providers::reasoning_suppressed(),
+            })
+        })
+    }
+
+    fn enable_thinking_blacklist_key(&self, model: &str) -> String {
+        format!("enable::{}", self.thinking_blacklist_key(model))
+    }
+
+    fn is_enable_thinking_blacklisted(&self, model: &str) -> bool {
+        let key = self.enable_thinking_blacklist_key(model);
+        thinking_blacklist_store()
+            .read()
+            .map(|set| set.contains(&key))
+            .unwrap_or(false)
+    }
+
+    fn blacklist_enable_thinking(&self, model: &str) {
+        let key = self.enable_thinking_blacklist_key(model);
+        if let Ok(mut set) = thinking_blacklist_store().write() {
+            set.insert(key);
+        }
+        persist_probe_cache();
+    }
+
+    fn should_retry_without_thinking_extras(&self, status: reqwest::StatusCode, error: &str, model: &str) -> bool {
+        if Self::is_enable_thinking_rejected(status, error) && !self.is_enable_thinking_blacklisted(model)
+        {
+            tracing::warn!(
+                target: "providers.compatible",
+                provider = %self.name,
+                model,
+                status = %status,
+                "enable_thinking rejected by upstream; retrying without it"
+            );
+            self.blacklist_enable_thinking(model);
+            return true;
+        }
+        if Self::is_reasoning_effort_rejected(status, error) && !self.is_reasoning_effort_blacklisted(model)
+        {
+            tracing::warn!(
+                target: "providers.compatible",
+                provider = %self.name,
+                model,
+                status = %status,
+                "reasoning_effort rejected by upstream; retrying without it"
+            );
+            self.blacklist_reasoning_effort(model);
+            return true;
+        }
+        if !self.is_thinking_blacklisted(model) && Self::is_thinking_param_unsupported(status, error) {
+            tracing::warn!(
+                target: "providers.compatible",
+                provider = %self.name,
+                model,
+                status = %status,
+                "thinking/reasoning parameter rejected by upstream; retrying without it"
+            );
+            self.blacklist_thinking(model);
+            return true;
+        }
+        false
+    }
+
+    fn is_enable_thinking_rejected(status: reqwest::StatusCode, error: &str) -> bool {
+        if !matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            return false;
+        }
+        let lower = error.to_lowercase();
+        lower.contains("enable_thinking") || lower.contains("chat_template_kwargs")
+    }
+
+    fn reasoning_effort_blacklist_key(&self, model: &str) -> String {
+        format!("effort::{}", self.thinking_blacklist_key(model))
+    }
+
+    fn is_reasoning_effort_blacklisted(&self, model: &str) -> bool {
+        let key = self.reasoning_effort_blacklist_key(model);
+        thinking_blacklist_store()
+            .read()
+            .map(|set| set.contains(&key))
+            .unwrap_or(false)
+    }
+
+    fn blacklist_reasoning_effort(&self, model: &str) {
+        let key = self.reasoning_effort_blacklist_key(model);
+        if let Ok(mut set) = thinking_blacklist_store().write() {
+            set.insert(key);
+        }
+        persist_probe_cache();
+    }
+
+    fn is_reasoning_effort_rejected(status: reqwest::StatusCode, error: &str) -> bool {
+        if !matches!(
+            status,
+            reqwest::StatusCode::BAD_REQUEST | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+        ) {
+            return false;
+        }
+        let lower = error.to_lowercase();
+        lower.contains("reasoning_effort")
     }
 
     fn thinking_blacklist_key(&self, model: &str) -> String {
@@ -502,8 +715,23 @@ impl OpenAiCompatibleProvider {
         lower.contains("thinking") || lower.contains("reasoning")
     }
 
-    fn reserved_output_tokens(&self, model: &str) -> usize {
+    fn budget_context_window_for(&self, model: &str) -> usize {
         let window = self.context_window_for(model);
+        let Some(cap) =
+            crate::constants::api_limits::thinking_context_cap_for_model(model)
+        else {
+            return window;
+        };
+        let cap = cap as usize;
+        if window > cap && self.thinking_param_for_model(model).is_some() {
+            cap
+        } else {
+            window
+        }
+    }
+
+    fn reserved_output_tokens(&self, model: &str) -> usize {
+        let window = self.budget_context_window_for(model);
         let configured = self.max_tokens.map(|v| v as usize);
         let in_curator = matches!(
             crate::agent::coding_mode::active_coding_mode(),
@@ -514,7 +742,10 @@ impl OpenAiCompatibleProvider {
         } else {
             (512usize, 16384usize)
         };
-        let default_reserve = (window / 8).clamp(lo, hi);
+        let mut default_reserve = (window / 8).clamp(lo, hi);
+        if self.thinking_param_for_model(model).is_some() {
+            default_reserve = default_reserve.max((window / 4).min(32_768));
+        }
         let raw = configured.unwrap_or(default_reserve);
         let max_reserve = window.saturating_sub(512).max(512);
         raw.clamp(256, max_reserve)
@@ -585,6 +816,10 @@ struct ApiChatRequest {
     reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -750,43 +985,46 @@ fn strip_think_tags(s: &str) -> String {
 #[derive(Debug, Deserialize, Serialize)]
 struct ResponseMessage {
     #[serde(default)]
-    content: Option<String>,
+    content: Option<serde_json::Value>,
 
     #[serde(default, alias = "reasoning")]
-    reasoning_content: Option<String>,
+    reasoning_content: Option<serde_json::Value>,
     #[serde(default)]
     tool_calls: Option<Vec<ToolCall>>,
 }
 
 impl ResponseMessage {
+    fn visible_and_reasoning(&self) -> (Option<String>, Option<String>) {
+        let (mut visible, mut reasoning) = self
+            .content
+            .as_ref()
+            .map(crate::providers::core::openai_sse::split_content_value)
+            .unwrap_or_default();
+        if let Some(text) = self
+            .reasoning_content
+            .as_ref()
+            .and_then(crate::providers::core::openai_sse::value_to_plain_text)
+        {
+            reasoning.push_str(&text);
+        }
+        visible = strip_think_tags(&visible);
+        reasoning = strip_think_tags(&reasoning);
+        (
+            (!visible.is_empty()).then_some(visible),
+            (!reasoning.is_empty()).then_some(reasoning),
+        )
+    }
 
     fn effective_content(&self) -> String {
-        if let Some(content) = self.content.as_ref().filter(|c| !c.is_empty()) {
-            let stripped = strip_think_tags(content);
-            if !stripped.is_empty() {
-                return stripped;
-            }
-        }
-
-        self.reasoning_content
-            .as_ref()
-            .map(|c| strip_think_tags(c))
-            .filter(|c| !c.is_empty())
+        let (visible, reasoning) = self.visible_and_reasoning();
+        visible
+            .or(reasoning)
             .unwrap_or_default()
     }
 
     fn effective_content_optional(&self) -> Option<String> {
-        if let Some(content) = self.content.as_ref().filter(|c| !c.is_empty()) {
-            let stripped = strip_think_tags(content);
-            if !stripped.is_empty() {
-                return Some(stripped);
-            }
-        }
-
-        self.reasoning_content
-            .as_ref()
-            .map(|c| strip_think_tags(c))
-            .filter(|c| !c.is_empty())
+        let (visible, reasoning) = self.visible_and_reasoning();
+        visible.or(reasoning)
     }
 }
 
@@ -869,6 +1107,10 @@ struct NativeChatRequest {
     reasoning_effort: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     thinking: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    enable_thinking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    chat_template_kwargs: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1578,7 +1820,7 @@ impl OpenAiCompatibleProvider {
 
     fn parse_native_response(message: ResponseMessage) -> ProviderChatResponse {
         let text = message.effective_content_optional();
-        let reasoning_content = message.reasoning_content.clone();
+        let reasoning_content = message.visible_and_reasoning().1;
         let tool_calls = message
             .tool_calls
             .unwrap_or_default()
@@ -1790,6 +2032,8 @@ impl Provider for OpenAiCompatibleProvider {
             stream_options: None,
             reasoning_effort: self.reasoning_effort_for_model(model),
             thinking: self.thinking_param_for_model(model),
+            enable_thinking: self.enable_thinking_bool_for_model(model),
+            chat_template_kwargs: self.chat_template_kwargs_for_model(model),
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -1843,17 +2087,7 @@ impl Provider for OpenAiCompatibleProvider {
             let (status, error) = super::stream_error_body_with_retry_after(response).await;
             let sanitized = super::sanitize_api_error(&error);
 
-            if !self.is_thinking_blacklisted(model)
-                && Self::is_thinking_param_unsupported(status, &sanitized)
-            {
-                tracing::warn!(
-                    target: "providers.compatible",
-                    provider = %self.name,
-                    model,
-                    status = %status,
-                    "thinking parameter rejected by upstream ({sanitized}); blacklisting model and retrying without thinking"
-                );
-                self.blacklist_thinking(model);
+            if self.should_retry_without_thinking_extras(status, &sanitized, model) {
                 return Box::pin(self.chat_with_system(
                     system_prompt,
                     message,
@@ -1943,7 +2177,7 @@ impl Provider for OpenAiCompatibleProvider {
             sanitized_input,
             model,
             self.reserved_output_tokens(model),
-            Some(self.context_window_for(model)),
+            Some(self.budget_context_window_for(model)),
         );
         let effective_messages = if self.merge_system_into_user {
             Self::flatten_system_messages(&budgeted_input)
@@ -1970,6 +2204,8 @@ impl Provider for OpenAiCompatibleProvider {
             stream_options: None,
             reasoning_effort: self.reasoning_effort_for_model(model),
             thinking: self.thinking_param_for_model(model),
+            enable_thinking: self.enable_thinking_bool_for_model(model),
+            chat_template_kwargs: self.chat_template_kwargs_for_model(model),
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -2011,17 +2247,7 @@ impl Provider for OpenAiCompatibleProvider {
             let (status, error_body) = super::stream_error_body_with_retry_after(response).await;
             let sanitized = super::sanitize_api_error(&error_body);
 
-            if !self.is_thinking_blacklisted(model)
-                && Self::is_thinking_param_unsupported(status, &sanitized)
-            {
-                tracing::warn!(
-                    target: "providers.compatible",
-                    provider = %self.name,
-                    model,
-                    status = %status,
-                    "thinking parameter rejected by upstream ({sanitized}); blacklisting model and retrying without thinking"
-                );
-                self.blacklist_thinking(model);
+            if self.should_retry_without_thinking_extras(status, &sanitized, model) {
                 return Box::pin(self.chat_with_history(messages, model, temperature)).await;
             }
 
@@ -2116,7 +2342,7 @@ impl Provider for OpenAiCompatibleProvider {
             model,
             self.reserved_output_tokens(model)
                 .saturating_add(json_tools_reserve),
-            Some(self.context_window_for(model)),
+            Some(self.budget_context_window_for(model)),
         );
         let api_messages: Vec<Message> = effective_messages
             .iter()
@@ -2167,6 +2393,8 @@ impl Provider for OpenAiCompatibleProvider {
             stream_options: None,
             reasoning_effort: self.reasoning_effort_for_model(model),
             thinking: self.thinking_param_for_model(model),
+            enable_thinking: self.enable_thinking_bool_for_model(model),
+            chat_template_kwargs: self.chat_template_kwargs_for_model(model),
             tool_stream: self.tool_stream_for_tools(allow_native_tools),
             tools: if allow_native_tools {
                 Some(tools.to_vec())
@@ -2202,17 +2430,7 @@ impl Provider for OpenAiCompatibleProvider {
             let (status, error_body) = super::stream_error_body_with_retry_after(response).await;
             let sanitized = super::sanitize_api_error(&error_body);
 
-            if !self.is_thinking_blacklisted(model)
-                && Self::is_thinking_param_unsupported(status, &sanitized)
-            {
-                tracing::warn!(
-                    target: "providers.compatible",
-                    provider = %self.name,
-                    model,
-                    status = %status,
-                    "thinking parameter rejected by upstream ({sanitized}); blacklisting model and retrying without thinking"
-                );
-                self.blacklist_thinking(model);
+            if self.should_retry_without_thinking_extras(status, &sanitized, model) {
                 return Box::pin(self.chat_with_tools(messages, tools, model, temperature))
                     .await;
             }
@@ -2316,7 +2534,7 @@ impl Provider for OpenAiCompatibleProvider {
             pre_budget,
             model,
             self.reserved_output_tokens(model).saturating_add(tools_reserve),
-            Some(self.context_window_for(model)),
+            Some(self.budget_context_window_for(model)),
         );
         let mut native_request = NativeChatRequest {
             model: model.to_string(),
@@ -2329,13 +2547,15 @@ impl Provider for OpenAiCompatibleProvider {
             stream_options: None,
             reasoning_effort: self.reasoning_effort_for_model(model),
             thinking: self.thinking_param_for_model(model),
+            enable_thinking: self.enable_thinking_bool_for_model(model),
+            chat_template_kwargs: self.chat_template_kwargs_for_model(model),
             tool_stream: self
                 .tool_stream_for_tools(tools.as_ref().is_some_and(|tools| !tools.is_empty())),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
             max_tokens: self.max_tokens,
         };
-        if native_request.thinking.is_none() {
+        if self.should_strip_outbound_reasoning(model) {
             for message in native_request.messages.iter_mut() {
                 message.reasoning_content = None;
             }
@@ -2384,17 +2604,7 @@ impl Provider for OpenAiCompatibleProvider {
             let (status, error) = super::stream_error_body_with_retry_after(response).await;
             let sanitized = super::sanitize_api_error(&error);
 
-            if !self.is_thinking_blacklisted(model)
-                && Self::is_thinking_param_unsupported(status, &sanitized)
-            {
-                tracing::warn!(
-                    target: "providers.compatible",
-                    provider = %self.name,
-                    model,
-                    status = %status,
-                    "thinking parameter rejected by upstream ({sanitized}); blacklisting model and retrying without thinking"
-                );
-                self.blacklist_thinking(model);
+            if self.should_retry_without_thinking_extras(status, &sanitized, model) {
                 return Box::pin(self.chat(request, model, temperature)).await;
             }
 
@@ -2643,7 +2853,7 @@ impl Provider for OpenAiCompatibleProvider {
                 effective_messages,
                 model,
                 self.reserved_output_tokens(model),
-                Some(self.context_window_for(model)),
+                Some(self.budget_context_window_for(model)),
             );
         } else {
             let tools_reserve = raw_tools_owned
@@ -2655,7 +2865,7 @@ impl Provider for OpenAiCompatibleProvider {
                 effective_messages,
                 model,
                 self.reserved_output_tokens(model).saturating_add(tools_reserve),
-                Some(self.context_window_for(model)),
+                Some(self.budget_context_window_for(model)),
             );
         }
 
@@ -2673,7 +2883,7 @@ impl Provider for OpenAiCompatibleProvider {
                 !self.merge_system_into_user,
             );
             let thinking_value = self.thinking_param_for_model(model);
-            if thinking_value.is_none() {
+            if self.should_strip_outbound_reasoning(model) {
                 for message in native_messages.iter_mut() {
                     message.reasoning_content = None;
                 }
@@ -2684,6 +2894,8 @@ impl Provider for OpenAiCompatibleProvider {
                 temperature: Self::adjust_temperature_for_model(model, temperature),
                 reasoning_effort: self.reasoning_effort_for_model(model),
                 thinking: thinking_value,
+                enable_thinking: self.enable_thinking_bool_for_model(model),
+            chat_template_kwargs: self.chat_template_kwargs_for_model(model),
                 tool_stream: if options.enabled {
                     self.tool_stream_for_tools(tool_list_non_empty)
                 } else {
@@ -2718,6 +2930,8 @@ impl Provider for OpenAiCompatibleProvider {
                 temperature: Self::adjust_temperature_for_model(model, temperature),
                 reasoning_effort: self.reasoning_effort_for_model(model),
                 thinking: self.thinking_param_for_model(model),
+            enable_thinking: self.enable_thinking_bool_for_model(model),
+            chat_template_kwargs: self.chat_template_kwargs_for_model(model),
                 tool_stream: None,
                 stream: Some(options.enabled),
                 stream_options: if options.enabled {
@@ -2782,17 +2996,11 @@ impl Provider for OpenAiCompatibleProvider {
                         super::stream_error_body_with_retry_after(response).await;
                     let sanitized = super::sanitize_api_error(&error_body);
 
-                    if !provider_clone.is_thinking_blacklisted(&model_owned)
-                        && Self::is_thinking_param_unsupported(status, &sanitized)
-                    {
-                        tracing::warn!(
-                            target: "providers.compatible.stream",
-                            provider = %provider_clone.name,
-                            model = %model_owned,
-                            status = %status,
-                            "thinking parameter rejected by upstream ({sanitized}); blacklisting model and re-issuing stream without thinking"
-                        );
-                        provider_clone.blacklist_thinking(&model_owned);
+                    if provider_clone.should_retry_without_thinking_extras(
+                        status,
+                        &sanitized,
+                        &model_owned,
+                    ) {
                         let retry_request = crate::providers::traits::ChatRequest {
                             messages: thinking_retry_messages.as_slice(),
                             tools: thinking_retry_tools.as_deref(),
@@ -2955,6 +3163,8 @@ impl Provider for OpenAiCompatibleProvider {
             },
             reasoning_effort: self.reasoning_effort_for_model(model),
             thinking: self.thinking_param_for_model(model),
+            enable_thinking: self.enable_thinking_bool_for_model(model),
+            chat_template_kwargs: self.chat_template_kwargs_for_model(model),
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -3002,17 +3212,11 @@ impl Provider for OpenAiCompatibleProvider {
                     super::stream_error_body_with_retry_after(response).await;
                 let sanitized = super::sanitize_api_error(&error);
 
-                if !provider_clone.is_thinking_blacklisted(&model_owned)
-                    && Self::is_thinking_param_unsupported(status, &sanitized)
-                {
-                    tracing::warn!(
-                        target: "providers.compatible.stream",
-                        provider = %provider_clone.name,
-                        model = %model_owned,
-                        status = %status,
-                        "thinking parameter rejected by upstream ({sanitized}); blacklisting model and re-issuing stream without thinking"
-                    );
-                    provider_clone.blacklist_thinking(&model_owned);
+                if provider_clone.should_retry_without_thinking_extras(
+                    status,
+                    &sanitized,
+                    &model_owned,
+                ) {
                     let mut retry_stream = provider_clone.stream_chat_with_system(
                         system_prompt_owned.as_deref(),
                         &message_owned,
@@ -3093,7 +3297,7 @@ impl Provider for OpenAiCompatibleProvider {
             sanitized_input,
             model,
             self.reserved_output_tokens(model),
-            Some(self.context_window_for(model)),
+            Some(self.budget_context_window_for(model)),
         );
         let effective_messages = if self.merge_system_into_user {
             Self::flatten_system_messages(&budgeted_input)
@@ -3124,6 +3328,8 @@ impl Provider for OpenAiCompatibleProvider {
             },
             reasoning_effort: self.reasoning_effort_for_model(model),
             thinking: self.thinking_param_for_model(model),
+            enable_thinking: self.enable_thinking_bool_for_model(model),
+            chat_template_kwargs: self.chat_template_kwargs_for_model(model),
             tool_stream: None,
             tools: None,
             tool_choice: None,
@@ -3171,17 +3377,11 @@ impl Provider for OpenAiCompatibleProvider {
                         super::stream_error_body_with_retry_after(response).await;
                     let sanitized = super::sanitize_api_error(&error);
 
-                    if !provider_clone.is_thinking_blacklisted(&model_owned)
-                        && Self::is_thinking_param_unsupported(status, &sanitized)
-                    {
-                        tracing::warn!(
-                            target: "providers.compatible.stream",
-                            provider = %provider_clone.name,
-                            model = %model_owned,
-                            status = %status,
-                            "thinking parameter rejected by upstream ({sanitized}); blacklisting model and re-issuing stream without thinking"
-                        );
-                        provider_clone.blacklist_thinking(&model_owned);
+                    if provider_clone.should_retry_without_thinking_extras(
+                        status,
+                        &sanitized,
+                        &model_owned,
+                    ) {
                         let mut retry_stream = provider_clone.stream_chat_with_history(
                             &retry_messages,
                             &model_owned,

@@ -94,6 +94,8 @@ export type PerSessionState = {
   cumulativeCostUsd: number
   elapsedSeconds: number
   statusVerb: string
+  planningPhaseAction: string
+  planningPhaseDetail: string
   slashCommands: Array<{ name: string; description: string }>
   agentTaskNotifications: Record<string, AgentTaskNotification>
   composerPrefill?: {
@@ -204,6 +206,8 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   cumulativeCostUsd: 0,
   elapsedSeconds: 0,
   statusVerb: '',
+  planningPhaseAction: '',
+  planningPhaseDetail: '',
   slashCommands: [],
   agentTaskNotifications: {},
   composerPrefill: null,
@@ -374,6 +378,8 @@ type ChatStore = {
   keepPendingEditFile: (sessionId: string, path: string) => void
 
   resumePlanExecution: (sessionId: string, planPath: string) => void
+
+  applyPlanCardDocument: (sessionId: string, messageId: string, markdown: string) => void
 
   resumeCuratorExecution: (sessionId: string, implBlueprintPath: string) => void
 
@@ -1579,6 +1585,7 @@ function consumePendingThinking(sessionId: string): string {
     cancelScheduledFlush(timer)
     thinkingFlushTimerBySession.delete(sessionId)
   }
+  deferredThinkingFlush.delete(sessionId)
   const text = pendingThinkingBySession.get(sessionId) ?? ''
   pendingThinkingBySession.delete(sessionId)
   pendingThinkingFirstAt.delete(sessionId)
@@ -1602,7 +1609,15 @@ function mergePendingThinkingIntoActive(
   sessionId: string,
 ): ThinkingActivePatch {
   const buffered = consumePendingThinking(sessionId)
-  if (!buffered) {
+  if (!buffered.trim()) {
+    if (!state.activeThinkingContent.trim()) {
+      return {
+        activeThinkingId: null,
+        activeThinkingContent: '',
+        activeThinkingStartedAt: null,
+        activeThinkingLastChunkAt: null,
+      }
+    }
     return {
       activeThinkingId: state.activeThinkingId,
       activeThinkingContent: state.activeThinkingContent,
@@ -1704,12 +1719,27 @@ function sealThinking(
   activeThinkingId: string | null,
   options?: { content?: string; startedAt?: number | null },
 ): UIMessage[] {
-  if (!activeThinkingId) return messages
   const content = options?.content ?? ''
   const startedAt = options?.startedAt ?? null
-  if (content) {
-    return commitActiveThinking(messages, activeThinkingId, content, startedAt, true)
+  if (content.trim()) {
+    if (activeThinkingId) {
+      return commitActiveThinking(messages, activeThinkingId, content, startedAt, true)
+    }
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (!m || m.type !== 'thinking') continue
+      if (m.completedAt) break
+      const next = [...messages]
+      next[i] = {
+        ...m,
+        content: m.content === content ? m.content : content,
+        completedAt: Date.now(),
+      }
+      return next
+    }
+    return commitActiveThinking(messages, nextId(), content, startedAt, true)
   }
+  if (!activeThinkingId) return messages
   const idx = messages.findIndex(
     (m) => m.id === activeThinkingId && m.type === 'thinking',
   )
@@ -1741,7 +1771,7 @@ function commitActiveThinking(
   startedAt: number | null,
   seal: boolean,
 ): UIMessage[] {
-  if (!activeThinkingId || !content) {
+  if (!activeThinkingId || !content.trim()) {
     return seal ? sealThinking(messages, activeThinkingId) : messages
   }
   const idx = messages.findIndex(
@@ -1772,41 +1802,96 @@ function commitActiveThinking(
   return next
 }
 
+function collapseRepeatedAssistantTextOnce(body: string): string {
+  if (body.length < 16) return body
+  const maxN = Math.min(40, Math.floor(body.length / 8))
+  for (let n = maxN; n >= 2; n--) {
+    if (body.length % n !== 0) continue
+    const unitLen = body.length / n
+    if (unitLen < 8) continue
+    let tiled = true
+    for (let i = 1; i < n && tiled; i++) {
+      const base = i * unitLen
+      for (let j = 0; j < unitLen; j++) {
+        if (body.charCodeAt(j) !== body.charCodeAt(base + j)) {
+          tiled = false
+          break
+        }
+      }
+    }
+    if (tiled) return body.slice(0, unitLen)
+  }
+  const firstNl = body.indexOf('\n')
+  if (firstNl >= 8) {
+    const unit = body.slice(0, firstNl)
+    const parts = body.split('\n')
+    if (parts.length >= 2 && parts.every((p) => p === unit)) return unit
+  }
+  return body
+}
+
+function collapseRepeatedAssistantText(text: string): string {
+  if (text.length < 16) return text
+  const trailing = text.match(/\n+$/)?.[0] ?? ''
+  let body = trailing ? text.slice(0, -trailing.length) : text
+  for (;;) {
+    const next = collapseRepeatedAssistantTextOnce(body)
+    if (next === body) break
+    body = next
+  }
+  return body + trailing
+}
+
+function assistantTextAlreadyIncludes(prev: string, next: string): boolean {
+  if (!next) return true
+  if (prev === next) return true
+  if (prev.endsWith(next)) return true
+  const a = prev.trimEnd()
+  const b = next.trimEnd()
+  if (!b) return true
+  if (a === b) return true
+  if (a.endsWith(b)) return true
+  return false
+}
+
+function mergeAssistantTextContent(prev: string, next: string): string | null {
+  const collapsedPrev = collapseRepeatedAssistantText(prev)
+  const collapsedNext = collapseRepeatedAssistantText(next)
+  if (assistantTextAlreadyIncludes(collapsedPrev, collapsedNext)) {
+    return collapsedPrev === prev ? null : collapsedPrev
+  }
+  if (collapsedPrev.length > 0 && collapsedNext.startsWith(collapsedPrev)) {
+    return collapsedNext
+  }
+  const a = collapsedPrev.trimEnd()
+  const b = collapsedNext.trimEnd()
+  if (a.length > 0 && b.startsWith(a)) return collapsedNext
+  return collapseRepeatedAssistantText(collapsedPrev + collapsedNext)
+}
+
 function appendAssistantTextMessage(
   messages: UIMessage[],
   content: string,
   timestamp: number,
   model?: string,
-  options?: { dedupEcho?: boolean },
+  _options?: { dedupEcho?: boolean },
 ): UIMessage[] {
   if (!content.trim()) return messages
 
   const last = messages[messages.length - 1]
   if (last?.type === 'assistant_text') {
-    const prevContent = last.content
-    if (options?.dedupEcho) {
-      if (prevContent === content) {
-        return messages
-      }
-      if (prevContent.endsWith(content) && content.length > 0) {
-        return messages
-      }
-      let mergedContent: string
-      if (content.startsWith(prevContent) && prevContent.length > 0) {
-        mergedContent = content
-      } else {
-        mergedContent = prevContent + content
-      }
-      const merged: UIMessage = {
+    const mergedContent = mergeAssistantTextContent(last.content, content)
+    if (mergedContent === null) {
+      if (!(model ?? last.model)) return messages
+      const touched: UIMessage = {
         ...last,
-        content: mergedContent,
         ...(model ?? last.model ? { model: model ?? last.model } : {}),
       }
-      return [...messages.slice(0, -1), merged]
+      return [...messages.slice(0, -1), touched]
     }
     const merged: UIMessage = {
       ...last,
-      content: prevContent + content,
+      content: mergedContent,
       ...(model ?? last.model ? { model: model ?? last.model } : {}),
     }
     return [...messages.slice(0, -1), merged]
@@ -1817,7 +1902,7 @@ function appendAssistantTextMessage(
     {
       id: nextId(),
       type: 'assistant_text',
-      content,
+      content: collapseRepeatedAssistantText(content),
       timestamp,
       ...(model ? { model } : {}),
     },
@@ -1826,6 +1911,366 @@ function appendAssistantTextMessage(
 
 function echoDedupOptions(sessionId: string): { dedupEcho: boolean } {
   return { dedupEcho: dirtyMidTurnSessions.has(sessionId) }
+}
+
+function isSessionUiBusy(chatState: ChatState): boolean {
+  return (
+    chatState === 'streaming' ||
+    chatState === 'thinking' ||
+    chatState === 'tool_executing' ||
+    chatState === 'permission_pending' ||
+    chatState === 'awaiting_workers'
+  )
+}
+
+function resolvePlanningPhaseAction(verb: string | undefined, previous: string): string {
+  const raw = (verb ?? '').trim()
+  if (!raw || raw.toLowerCase().startsWith('iter ')) {
+    return previous.trim() || 'waiting_model'
+  }
+  return raw
+}
+
+function absorbPendingStreamIntoSession(
+  sessionId: string,
+  session: {
+    messages: UIMessage[]
+    streamingText: string
+    activeThinkingId: string | null
+    activeThinkingContent: string
+    activeThinkingStartedAt: number | null
+    activeThinkingLastChunkAt: number | null
+  },
+): {
+  messages: UIMessage[]
+  streamingText: string
+  activeThinkingId: string | null
+  activeThinkingContent: string
+  activeThinkingStartedAt: number | null
+  activeThinkingLastChunkAt: number | null
+} {
+  const streamingText = flushPendingDeltaIntoStreaming(sessionId, session.streamingText)
+  const patch = mergePendingThinkingIntoActive(session, sessionId)
+  return {
+    messages: commitActiveThinking(
+      session.messages,
+      patch.activeThinkingId,
+      patch.activeThinkingContent,
+      patch.activeThinkingStartedAt,
+      false,
+    ),
+    streamingText,
+    activeThinkingId: patch.activeThinkingId,
+    activeThinkingContent: patch.activeThinkingContent,
+    activeThinkingStartedAt: patch.activeThinkingStartedAt,
+    activeThinkingLastChunkAt: patch.activeThinkingLastChunkAt,
+  }
+}
+
+function commitIdleEphemeralTranscript(
+  sessionId: string,
+  session: {
+    messages: UIMessage[]
+    streamingText: string
+    activeThinkingId: string | null
+    activeThinkingContent: string
+    activeThinkingStartedAt: number | null
+    activeThinkingLastChunkAt: number | null
+  },
+): UIMessage[] {
+  const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
+  let messages = sealThinkingForSession(sessionId, session)
+  if (pendingText.trim()) {
+    messages = appendAssistantTextMessage(
+      messages,
+      pendingText,
+      Date.now(),
+      undefined,
+      echoDedupOptions(sessionId),
+    )
+  }
+  return messages
+}
+
+function stableJsonFingerprint(value: unknown): string {
+  try {
+    return JSON.stringify(value ?? null) ?? ''
+  } catch {
+    return ''
+  }
+}
+
+function transcriptFingerprint(m: UIMessage): string | null {
+  switch (m.type) {
+    case 'thinking':
+      return `thinking:${m.content.trim()}`
+    case 'assistant_text':
+      return `assistant:${m.content.trim()}`
+    case 'user_text':
+      return `user:${typeof m.userMessageIndex === 'number' ? m.userMessageIndex : ''}:${m.content.trim()}`
+    case 'tool_use':
+      return m.toolUseId
+        ? `tool_use:${m.toolUseId}`
+        : `tool_use:${m.toolName}:${stableJsonFingerprint(m.input)}`
+    case 'tool_result':
+      return m.toolUseId ? `tool_result:${m.toolUseId}` : null
+    case 'file_edit':
+      return m.editBatchId
+        ? `file_edit:${m.editBatchId}`
+        : `file_edit:${m.path}:${m.additions}:${m.deletions}`
+    case 'command_preview':
+      return `command_preview:${m.toolName}:${stableJsonFingerprint(m.input)}`
+    case 'error':
+      return `error:${m.code}:${m.message}`
+    case 'plan_card':
+      return `plan_card:${m.sourceToolUseId || m.planPath || m.id}`
+    case 'curator_card':
+      return `curator_card:${m.sourceToolUseId || m.implBlueprintPath || m.id}`
+    case 'mode_switch_card':
+      return `mode_switch:${m.planPath}:${m.status}:${m.handoffKind ?? ''}`
+    case 'plan_progress':
+      return `plan_progress:${m.planPath}`
+    case 'permission_request':
+      return `permission:${m.requestId}`
+    case 'plan_mode_blocked':
+      return `plan_mode_blocked:${m.reason ?? ''}:${m.mode ?? ''}`
+    case 'plan_question_answers':
+      return `plan_qa:${m.items.map((item) => item.question).join('|')}`
+    case 'task_summary':
+      return `task_summary:${m.tasks.map((task) => task.id).join('|')}`
+    case 'system':
+      return `system:${m.content}`
+    case 'subagent_chunk':
+      return `subagent:${m.parentToolUseId ?? ''}:${m.agentId}:${m.chunkKind}:${m.delta}`
+  }
+}
+
+function transcriptTextsOverlap(a: string, b: string): boolean {
+  const x = a.trim()
+  const y = b.trim()
+  if (!x || !y) return false
+  if (x === y) return true
+  if (x.startsWith(y) || y.startsWith(x)) return true
+  return assistantTextAlreadyIncludes(x, y) || assistantTextAlreadyIncludes(y, x)
+}
+
+function pickThinkingTimes(
+  hydrated: Extract<UIMessage, { type: 'thinking' }>,
+  live: Extract<UIMessage, { type: 'thinking' }>,
+): { startedAt?: number; completedAt?: number } {
+  const liveDur = (live.completedAt ?? 0) - (live.startedAt ?? 0)
+  const hydDur = (hydrated.completedAt ?? 0) - (hydrated.startedAt ?? 0)
+  if (liveDur > hydDur) {
+    return {
+      startedAt: live.startedAt ?? hydrated.startedAt,
+      completedAt: live.completedAt ?? hydrated.completedAt,
+    }
+  }
+  return {
+    startedAt: hydrated.startedAt ?? live.startedAt,
+    completedAt: hydrated.completedAt ?? live.completedAt,
+  }
+}
+
+function mergeMatchedLiveMessage(hydrated: UIMessage, live: UIMessage): UIMessage {
+  if (hydrated.type === 'thinking' && live.type === 'thinking') {
+    const content =
+      live.content.trim().length > hydrated.content.trim().length ? live.content : hydrated.content
+    return {
+      ...hydrated,
+      content,
+      ...pickThinkingTimes(hydrated, live),
+    }
+  }
+  if (hydrated.type === 'assistant_text' && live.type === 'assistant_text') {
+    if (live.content.trim().length > hydrated.content.trim().length) {
+      return { ...hydrated, content: live.content }
+    }
+    return hydrated
+  }
+  if (hydrated.type === 'file_edit' && live.type === 'file_edit') {
+    return {
+      ...hydrated,
+      additions: Math.max(hydrated.additions, live.additions),
+      deletions: Math.max(hydrated.deletions, live.deletions),
+      diff: live.diff || hydrated.diff,
+    }
+  }
+  if (hydrated.type === 'plan_card' && live.type === 'plan_card') {
+    return live.status === 'completed' || live.todos.length >= hydrated.todos.length ? live : hydrated
+  }
+  if (hydrated.type === 'curator_card' && live.type === 'curator_card') {
+    return live.status === 'completed' || live.body.length >= hydrated.body.length ? live : hydrated
+  }
+  return hydrated
+}
+
+function isPendingUserText(m: UIMessage): boolean {
+  return m.type === 'user_text' && m.pending === true
+}
+
+function mergeHydratedHistoryWithLiveUi(hydrated: UIMessage[], live: UIMessage[]): UIMessage[] {
+  if (live.length === 0) return hydrated
+  if (hydrated.length === 0) {
+    return live.filter((m) => !isPendingUserText(m) || m.type === 'user_text')
+  }
+  const result = hydrated.slice()
+  const used = new Set<UIMessage>()
+  const findHydrated = (pred: (m: UIMessage) => boolean): UIMessage | undefined =>
+    result.find((m) => !used.has(m) && pred(m))
+  let lastPlaceIdx = -1
+
+  for (const liveMsg of live) {
+    const fp = transcriptFingerprint(liveMsg)
+    let match: UIMessage | undefined
+    if (fp) {
+      match = findHydrated((h) => transcriptFingerprint(h) === fp)
+    }
+    if (!match && liveMsg.type === 'assistant_text') {
+      match = findHydrated(
+        (h) => h.type === 'assistant_text' && transcriptTextsOverlap(h.content, liveMsg.content),
+      )
+    }
+    if (!match && liveMsg.type === 'thinking') {
+      match = findHydrated(
+        (h) => h.type === 'thinking' && transcriptTextsOverlap(h.content, liveMsg.content),
+      )
+    }
+    if (!match && liveMsg.type === 'user_text') {
+      match = findHydrated((h) => {
+        if (h.type !== 'user_text') return false
+        if (
+          typeof liveMsg.userMessageIndex === 'number' &&
+          h.userMessageIndex === liveMsg.userMessageIndex
+        ) {
+          return true
+        }
+        return h.content.trim() === liveMsg.content.trim()
+      })
+    }
+    if (match) {
+      used.add(match)
+      const idx = result.indexOf(match)
+      if (idx >= 0) {
+        result[idx] = mergeMatchedLiveMessage(match, liveMsg)
+        lastPlaceIdx = idx
+      }
+      continue
+    }
+    let insertAt: number
+    if (lastPlaceIdx >= 0) {
+      insertAt = Math.min(lastPlaceIdx + 1, result.length)
+    } else if (liveMsg.type === 'user_text') {
+      insertAt = result.length
+    } else {
+      let hydUserIdx = -1
+      for (let i = result.length - 1; i >= 0; i--) {
+        if (result[i]?.type === 'user_text') {
+          hydUserIdx = i
+          break
+        }
+      }
+      insertAt = hydUserIdx >= 0 ? hydUserIdx + 1 : result.length
+    }
+    result.splice(insertAt, 0, liveMsg)
+    used.add(liveMsg)
+    lastPlaceIdx = insertAt
+  }
+  return result
+}
+
+function dropHydratedBlockedToolUses(sessionId: string, messages: UIMessage[]): UIMessage[] {
+  const blocked = planModeBlockedToolUseIdsBySession.get(sessionId)
+  const inlined = updatePlanInlineToolUseIdsBySession.get(sessionId)
+  if ((!blocked || blocked.size === 0) && (!inlined || inlined.size === 0)) return messages
+  return messages.filter((m) => {
+    if (m.type !== 'tool_use' && m.type !== 'tool_result') return true
+    if (blocked && blocked.has(m.toolUseId)) return false
+    if (inlined && inlined.has(m.toolUseId)) return false
+    return true
+  })
+}
+
+function mergeSubagentTimelineRecords(
+  live: Record<string, SubagentTimelineBucket>,
+  restored: Record<string, SubagentTimelineBucket>,
+): Record<string, SubagentTimelineBucket> {
+  const out: Record<string, SubagentTimelineBucket> = { ...restored }
+  for (const [parentId, liveBucket] of Object.entries(live)) {
+    const rest = out[parentId]
+    if (!rest) {
+      out[parentId] = liveBucket
+      continue
+    }
+    const agents = { ...rest.agents }
+    for (const [agentId, liveTl] of Object.entries(liveBucket.agents)) {
+      const r = agents[agentId]
+      if (!r) {
+        agents[agentId] = liveTl
+        continue
+      }
+      const liveRicher =
+        (liveTl.entries?.length ?? 0) > (r.entries?.length ?? 0) || liveTl.updatedAt > r.updatedAt
+      agents[agentId] = liveRicher
+        ? {
+            ...r,
+            ...liveTl,
+            finalOutput: liveTl.finalOutput || r.finalOutput,
+          }
+        : {
+            ...liveTl,
+            ...r,
+            finalOutput: r.finalOutput || liveTl.finalOutput,
+          }
+    }
+    out[parentId] = {
+      ...rest,
+      parentToolName: rest.parentToolName || liveBucket.parentToolName,
+      agents,
+    }
+  }
+  return out
+}
+
+function mergeAgentNotifications(
+  live: Record<string, AgentTaskNotification>,
+  restored: Record<string, AgentTaskNotification>,
+): Record<string, AgentTaskNotification> {
+  const out: Record<string, AgentTaskNotification> = { ...restored }
+  for (const [id, n] of Object.entries(live)) {
+    const r = out[id]
+    if (!r) {
+      out[id] = n
+      continue
+    }
+    const summary =
+      (r.summary?.length ?? 0) >= (n.summary?.length ?? 0) ? r.summary : n.summary
+    out[id] = {
+      ...r,
+      ...n,
+      summary: summary || r.summary || n.summary,
+      status: r.status === 'completed' || n.status === 'completed' ? 'completed' : n.status,
+    }
+  }
+  return out
+}
+
+function remapActiveThinkingId(
+  messages: UIMessage[],
+  prevId: string | null,
+  prevContent: string,
+): string | null {
+  if (!prevId) return null
+  if (messages.some((m) => m.id === prevId && m.type === 'thinking')) return prevId
+  const needle = prevContent.trim()
+  if (!needle) return null
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]
+    if (m && m.type === 'thinking' && transcriptTextsOverlap(m.content, needle)) {
+      return m.id
+    }
+  }
+  return prevId
 }
 
 function updateSessionIn(
@@ -2068,8 +2513,9 @@ function reconstructSubagentTimelines(
 
   for (const msg of messages) {
     const baseTs = new Date(msg.timestamp).getTime()
-    if ((msg.type === 'assistant' || msg.type === 'tool_use') && Array.isArray(msg.content)) {
-      for (const rawBlock of msg.content as AssistantHistoryBlock[]) {
+    const historyBlocks = assistantBlocksFromMessage(msg)
+    if (historyBlocks.length > 0) {
+      for (const rawBlock of historyBlocks) {
         if (rawBlock.type === 'tool_use' && typeof rawBlock.name === 'string' && rawBlock.id) {
           if (isSubagentParentTool(rawBlock.name)) {
             if (!buckets[rawBlock.id]) {
@@ -2140,8 +2586,9 @@ function reconstructSubagentTimelines(
         }
       }
     }
-    if ((msg.type === 'user' || msg.type === 'tool_result') && Array.isArray(msg.content)) {
-      for (const rawBlock of msg.content as UserHistoryBlock[]) {
+    const userBlocks = userHistoryBlocksFromContent(msg.content)
+    if ((msg.type === 'user' || msg.type === 'tool_result') && userBlocks) {
+      for (const rawBlock of userBlocks) {
         if (rawBlock.type === 'tool_result' && typeof rawBlock.tool_use_id === 'string') {
           const bucket = buckets[rawBlock.tool_use_id]
           if (!bucket) continue
@@ -2181,23 +2628,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (options?.force) {
       wsManager.clearHandlers(sessionId)
       wsManager.disconnect(sessionId)
-      if (hasPendingDelta(sessionId) || hasPendingThinking(sessionId)) {
-        set((s) => {
-          const cur = s.sessions[sessionId]
-          if (!cur) return s
-          const merged = flushPendingDeltaIntoStreaming(sessionId, cur.streamingText)
-          const patch = mergePendingThinkingIntoActive(cur, sessionId)
-          return {
-            sessions: updateSessionIn(s.sessions, sessionId, () => ({
-              streamingText: merged,
-              activeThinkingId: patch.activeThinkingId,
-              activeThinkingContent: patch.activeThinkingContent,
-              activeThinkingStartedAt: patch.activeThinkingStartedAt,
-              activeThinkingLastChunkAt: patch.activeThinkingLastChunkAt,
-            })),
-          }
-        })
-      }
+    }
+    if (hasPendingDelta(sessionId) || hasPendingThinking(sessionId)) {
+      set((s) => {
+        const cur = s.sessions[sessionId]
+        if (!cur) return s
+        const absorbed = absorbPendingStreamIntoSession(sessionId, cur)
+        return {
+          sessions: updateSessionIn(s.sessions, sessionId, () => absorbed),
+        }
+      })
     }
 
     clearSessionStreamBuffers(sessionId)
@@ -2317,6 +2757,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const existing = get().sessions[workerId]
     if (existing && existing.connectionState !== 'disconnected') return
 
+    if (hasPendingDelta(workerId) || hasPendingThinking(workerId)) {
+      set((s) => {
+        const cur = s.sessions[workerId]
+        if (!cur) return s
+        const absorbed = absorbPendingStreamIntoSession(workerId, cur)
+        return {
+          sessions: updateSessionIn(s.sessions, workerId, () => absorbed),
+        }
+      })
+    }
+
     clearSessionStreamBuffers(workerId)
 
     set((s) => ({
@@ -2404,6 +2855,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         activeThinkingStartedAt: null,
         activeThinkingLastChunkAt: null,
         statusVerb: '',
+        planningPhaseAction: '',
+        planningPhaseDetail: '',
       })),
     }))
   },
@@ -2494,6 +2947,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return
     }
 
+    consumePendingThinking(sessionId)
     const taskStore = useCLITaskStore.getState()
     const sessionTasks = taskStore.tasksBySessionId[sessionId] ?? []
     const allTasksDone = sessionTasks.length > 0 && sessionTasks.every((t) => t.status === 'completed')
@@ -2543,6 +2997,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             elapsedSeconds: 0,
             streamingText: '',
             statusVerb: isMemberSession ? '' : randomSpinnerVerb(),
+            planningPhaseAction: 'waiting_model',
+            planningPhaseDetail: '',
+            activeThinkingId: null,
+            activeThinkingContent: '',
+            activeThinkingStartedAt: null,
+            activeThinkingLastChunkAt: null,
             pendingPermission: null,
             connectionState: isMemberSession ? 'connected' : session.connectionState,
           },
@@ -2785,16 +3245,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         set((s) => {
           const cur = s.sessions[sessionId]
           if (!cur) return s
-          const merged = flushPendingDeltaIntoStreaming(sessionId, cur.streamingText)
-          const patch = mergePendingThinkingIntoActive(cur, sessionId)
+          const absorbed = absorbPendingStreamIntoSession(sessionId, cur)
           return {
-            sessions: updateSessionIn(s.sessions, sessionId, () => ({
-              streamingText: merged,
-              activeThinkingId: patch.activeThinkingId,
-              activeThinkingContent: patch.activeThinkingContent,
-              activeThinkingStartedAt: patch.activeThinkingStartedAt,
-              activeThinkingLastChunkAt: patch.activeThinkingLastChunkAt,
-            })),
+            sessions: updateSessionIn(s.sessions, sessionId, () => absorbed),
           }
         })
       }
@@ -2894,50 +3347,45 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const session = state.sessions[sessionId]
         if (!session) return state
         if (session.historyLoaded === true) return state
-        const liveMessages = session.messages
-        const knownIds = new Set<string>()
-        for (const m of taggedMessages) {
-          if (m && m.id) knownIds.add(m.id)
-        }
-        const availableHistoryUserText = taggedMessages.filter(
-          (m) => m.type === 'user_text' && !m.superseded,
+        const uiBusy = isSessionUiBusy(session.chatState)
+        const absorbed = uiBusy
+          ? absorbPendingStreamIntoSession(sessionId, session)
+          : {
+              messages: commitIdleEphemeralTranscript(sessionId, session),
+              streamingText: '',
+              activeThinkingId: null as string | null,
+              activeThinkingContent: '',
+              activeThinkingStartedAt: null as number | null,
+              activeThinkingLastChunkAt: null as number | null,
+            }
+        const mergedRaw = dropHydratedBlockedToolUses(
+          sessionId,
+          mergeHydratedHistoryWithLiveUi(taggedMessages, absorbed.messages),
         )
-        const consumedHistory = new Set<number>()
-        const isDuplicateLiveUserText = (m: UIMessage): boolean => {
-          if (m.type !== 'user_text') return false
-          const matchIdx = availableHistoryUserText.findIndex(
-            (h, i) =>
-              !consumedHistory.has(i) &&
-              h.type === 'user_text' &&
-              h.content === m.content &&
-              Math.abs((h.timestamp ?? 0) - (m.timestamp ?? 0)) < 60_000,
-          )
-          if (matchIdx < 0) return false
-          consumedHistory.add(matchIdx)
-          return true
-        }
-        const liveOnly = liveMessages.filter(
-          (m) => !knownIds.has(m.id) && !isDuplicateLiveUserText(m),
-        )
-        const mergedRaw: UIMessage[] =
-          liveOnly.length === 0 ? taggedMessages : [...taggedMessages, ...liveOnly]
-        const sessionIsLive =
-          session.chatState === 'streaming' ||
-          session.chatState === 'thinking' ||
-          session.chatState === 'permission_pending'
-        const merged = sessionIsLive ? mergedRaw : resolveDanglingCuratorCards(mergedRaw)
+        const merged = uiBusy ? mergedRaw : resolveDanglingCuratorCards(mergedRaw)
         bumpHistoryGeneration(sessionId)
         return {
           sessions: updateSessionIn(state.sessions, sessionId, (s) => ({
             messages: merged,
-            agentTaskNotifications: {
-              ...s.agentTaskNotifications,
-              ...restoredNotifications,
-            },
-            subagentTimelines: {
-              ...s.subagentTimelines,
-              ...restoredSubagentTimelines,
-            },
+            streamingText: uiBusy ? absorbed.streamingText : '',
+            activeThinkingId: uiBusy
+              ? remapActiveThinkingId(
+                  merged,
+                  absorbed.activeThinkingId,
+                  absorbed.activeThinkingContent,
+                )
+              : null,
+            activeThinkingContent: uiBusy ? absorbed.activeThinkingContent : '',
+            activeThinkingStartedAt: uiBusy ? absorbed.activeThinkingStartedAt : null,
+            activeThinkingLastChunkAt: uiBusy ? absorbed.activeThinkingLastChunkAt : null,
+            agentTaskNotifications: mergeAgentNotifications(
+              s.agentTaskNotifications,
+              restoredNotifications,
+            ),
+            subagentTimelines: mergeSubagentTimelineRecords(
+              s.subagentTimelines,
+              restoredSubagentTimelines,
+            ),
             pendingRewind,
             historyLoaded: true,
             historyFirstIndex,
@@ -2988,38 +3436,52 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           sessions: updateSessionIn(state.sessions, sessionId, (s) => {
             const keepPermission =
               s.chatState === 'permission_pending' && s.pendingPermission != null
-            const knownIds = new Set<string>()
-            for (const m of taggedMessages) {
-              if (m && m.id) knownIds.add(m.id)
-            }
-            const livePermissionMessages = keepPermission
-              ? s.messages.filter(
-                  (m) => m.type === 'permission_request' && !knownIds.has(m.id),
-                )
-              : []
-            const rebuiltMessages =
-              livePermissionMessages.length > 0
-                ? [...taggedMessages, ...livePermissionMessages]
-                : taggedMessages
+            const uiBusy = keepPermission || isSessionUiBusy(s.chatState)
+            const absorbed = uiBusy
+              ? absorbPendingStreamIntoSession(sessionId, s)
+              : {
+                  messages: commitIdleEphemeralTranscript(sessionId, s),
+                  streamingText: '',
+                  activeThinkingId: null as string | null,
+                  activeThinkingContent: '',
+                  activeThinkingStartedAt: null as number | null,
+                  activeThinkingLastChunkAt: null as number | null,
+                }
+            const mergedRaw = dropHydratedBlockedToolUses(
+              sessionId,
+              mergeHydratedHistoryWithLiveUi(taggedMessages, absorbed.messages),
+            )
+            const rebuiltMessages = keepPermission
+              ? mergedRaw
+              : resolveDanglingCuratorCards(mergedRaw)
             return {
-              messages: keepPermission
-                ? rebuiltMessages
-                : resolveDanglingCuratorCards(rebuiltMessages),
-              agentTaskNotifications: {
-                ...s.agentTaskNotifications,
-                ...restoredNotifications,
-              },
-              subagentTimelines: {
-                ...s.subagentTimelines,
-                ...restoredSubagentTimelines,
-              },
-              chatState: keepPermission ? s.chatState : 'idle',
-              activeThinkingId: null,
-              activeToolUseId: null,
-              activeToolName: null,
-              streamingText: '',
+              messages: rebuiltMessages,
+              agentTaskNotifications: mergeAgentNotifications(
+                s.agentTaskNotifications,
+                restoredNotifications,
+              ),
+              subagentTimelines: mergeSubagentTimelineRecords(
+                s.subagentTimelines,
+                restoredSubagentTimelines,
+              ),
+              chatState: keepPermission || uiBusy ? s.chatState : 'idle',
+              activeThinkingId: uiBusy
+                ? remapActiveThinkingId(
+                    rebuiltMessages,
+                    absorbed.activeThinkingId,
+                    absorbed.activeThinkingContent,
+                  )
+                : null,
+              activeThinkingContent: uiBusy ? absorbed.activeThinkingContent : '',
+              activeThinkingStartedAt: uiBusy ? absorbed.activeThinkingStartedAt : null,
+              activeThinkingLastChunkAt: uiBusy ? absorbed.activeThinkingLastChunkAt : null,
+              activeToolUseId: uiBusy ? s.activeToolUseId : null,
+              activeToolName: uiBusy ? s.activeToolName : null,
+              streamingText: uiBusy ? absorbed.streamingText : '',
               pendingPermission: keepPermission ? s.pendingPermission : null,
-              statusVerb: keepPermission ? s.statusVerb : '',
+              statusVerb: keepPermission || uiBusy ? s.statusVerb : '',
+              planningPhaseAction: keepPermission || uiBusy ? s.planningPhaseAction : '',
+              planningPhaseDetail: keepPermission || uiBusy ? s.planningPhaseDetail : '',
               pendingRewind,
               historyLoaded: true,
               historyFirstIndex,
@@ -3426,6 +3888,40 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     })
   },
 
+  applyPlanCardDocument: (sessionId, messageId, markdown) => {
+    const parsed = parsePlanMarkdown(markdown)
+    set((s) => {
+      const session = s.sessions[sessionId]
+      if (!session) return s
+      let found = false
+      const messages = session.messages.map((m) => {
+        if (m.type !== 'plan_card' || m.id !== messageId) return m
+        found = true
+        const prevById = new Map(m.todos.map((todo) => [todo.id, todo]))
+        return {
+          ...m,
+          markdown,
+          title: parsed.title || parsed.name || m.title,
+          overview: parsed.overview,
+          todos: parsed.todos.map((todo) => {
+            const prev = prevById.get(todo.id)
+            const notes = prev?.notes
+            return {
+              id: todo.id,
+              content: todo.content,
+              status: todo.status,
+              ...(notes !== undefined && notes !== null ? { notes } : {}),
+            }
+          }),
+        }
+      })
+      if (!found) return s
+      return {
+        sessions: updateSessionIn(s.sessions, sessionId, () => ({ messages })),
+      }
+    })
+  },
+
   resumeCuratorExecution: (sessionId, implBlueprintPath) => {
     if (!sessionId || !implBlueprintPath) return
 
@@ -3623,8 +4119,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'status':
         update((session) => {
           const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
-          const hasPendingStreamText =
-            session.chatState === 'streaming' && pendingText.trim().length > 0
+          const hasPendingStreamText = pendingText.trim().length > 0
 
           const preserveStreamingTurn = hasPendingStreamText && msg.state !== 'idle'
           const shouldFlush = hasPendingStreamText && msg.state === 'idle'
@@ -3651,7 +4146,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               activeThinkingStartedAt: null,
               activeThinkingLastChunkAt: null,
               statusVerb: '',
-            } : {}),
+              planningPhaseAction: '',
+              planningPhaseDetail: '',
+            } : {
+              planningPhaseAction: resolvePlanningPhaseAction(
+                msg.verb,
+                session.planningPhaseAction,
+              ),
+              planningPhaseDetail:
+                typeof msg.detail === 'string' && msg.detail.length > 0
+                  ? msg.detail
+                  : session.planningPhaseDetail,
+            }),
             ...(shouldFlush ? {
               messages: appendAssistantTextMessage(baseMessages, pendingText, Date.now(), undefined, echoDedupOptions(sessionId)),
               streamingText: '',
@@ -3691,6 +4197,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeThinkingStartedAt: null,
             activeThinkingLastChunkAt: null,
             providerRetry: null,
+            planningPhaseAction: '',
+            planningPhaseDetail: '',
           }))
         } else if (msg.blockType === 'tool_use') {
           update((s) => {
@@ -3708,6 +4216,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               activeThinkingStartedAt: null,
               activeThinkingLastChunkAt: null,
               providerRetry: null,
+              planningPhaseAction: '',
+              planningPhaseDetail: '',
             }
           })
 
@@ -3800,15 +4310,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
           const flushThinking = () => {
             thinkingFlushTimerBySession.delete(sessionId)
-            if (isWindowBusy()) {
-              deferredThinkingFlush.set(sessionId, flushThinking)
-              ensureBusyIdleFlush()
-              return
-            }
+            deferredThinkingFlush.delete(sessionId)
             const buffered = pendingThinkingBySession.get(sessionId) ?? ''
             pendingThinkingBySession.delete(sessionId)
             pendingThinkingFirstAt.delete(sessionId)
-            if (!buffered) return
+            if (!buffered.trim()) return
             const THINKING_IDLE_THRESHOLD_MS = 5000
             update((s) => {
               const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
@@ -3834,13 +4340,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               const prevContent = hasActive ? s.activeThinkingContent : ''
               const nextContent = prevContent + buffered
               return {
-                messages: baseMessages,
+                messages: commitActiveThinking(baseMessages, id, nextContent, startedAt, false),
                 chatState: 'thinking',
                 activeThinkingId: id,
                 activeThinkingContent: nextContent,
                 activeThinkingStartedAt: startedAt,
                 activeThinkingLastChunkAt: now,
-                ...(pendingText !== s.streamingText ? { streamingText: '' } : {}),
+                planningPhaseAction: '',
+                planningPhaseDetail: '',
+                ...(pendingText.trim() ? { streamingText: '' } : {}),
               }
             })
           }
@@ -4338,7 +4846,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             messages: s.pendingPermission
               ? flushed
               : resolveDanglingCuratorCards(flushed),
-            streamingText: text.trim() ? '' : text,
+            streamingText: '',
             activeThinkingId: null,
             activeThinkingContent: '',
             activeThinkingStartedAt: null,
@@ -4361,12 +4869,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const now = Date.now()
         update((s) => {
           const merged = flushPendingDeltaIntoStreaming(sessionId, s.streamingText)
+          const sealed = sealThinkingForSession(sessionId, s)
           const baseMessages = merged.trim()
-            ? appendAssistantTextMessage(s.messages, merged, Date.now(), undefined, echoDedupOptions(sessionId))
-            : s.messages
+            ? appendAssistantTextMessage(sealed, merged, Date.now(), undefined, echoDedupOptions(sessionId))
+            : sealed
           return {
             messages: baseMessages,
             streamingText: '',
+            activeThinkingId: null,
+            activeThinkingContent: '',
+            activeThinkingStartedAt: null,
+            activeThinkingLastChunkAt: null,
             providerRetry: {
               attempt: msg.attempt,
               maxAttempts: msg.maxAttempts,
@@ -4742,8 +5255,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             chatState: 'idle',
             streamingText: '',
             statusVerb: '',
+            planningPhaseAction: '',
+            planningPhaseDetail: '',
           }))
           useTabStore.getState().updateTabStatus(sessionId, 'idle')
+          break
+        }
+        if (msg.subtype === 'status_detail') {
+          const text =
+            typeof msg.message === 'string' && msg.message.length > 0 ? msg.message : ''
+          if (text) {
+            update((s) => ({
+              planningPhaseDetail: text,
+              planningPhaseAction: s.planningPhaseAction,
+            }))
+          }
           break
         }
         const level = (msg as { level?: 'info' | 'warning' | 'error' }).level
@@ -5198,7 +5724,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           duration: 4000,
         })
         update((session) => {
-          let messages = session.messages
+          let messages = sealThinkingForSession(sessionId, session)
+          const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
+          if (pendingText.trim()) {
+            messages = appendAssistantTextMessage(
+              messages,
+              pendingText,
+              Date.now(),
+              undefined,
+              echoDedupOptions(sessionId),
+            )
+          }
           if (requeuedContent) {
             for (let i = messages.length - 1; i >= 0; i--) {
               const m = messages[i]
@@ -5216,10 +5752,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             }
           }
           return {
+            messages,
             chatState: 'idle',
             stopRequested: false,
             statusVerb: '',
-            ...(messages !== session.messages ? { messages } : {}),
+            planningPhaseAction: '',
+            planningPhaseDetail: '',
+            streamingText: '',
+            activeThinkingId: null,
+            activeThinkingContent: '',
+            activeThinkingStartedAt: null,
+            activeThinkingLastChunkAt: null,
           }
         })
         break
@@ -5295,6 +5838,97 @@ type AssistantHistoryBlock = {
 }
 type UserHistoryBlock = { type: string; text?: string; tool_use_id?: string; content?: unknown; is_error?: boolean; source?: { data?: string }; mimeType?: string; media_type?: string; name?: string }
 
+function coerceHistoryJsonContent(content: unknown): unknown {
+  if (typeof content !== 'string') return content
+  const s = content.trim()
+  if (s.length < 2) return content
+  const c0 = s.charCodeAt(0)
+  if (c0 !== 91 && c0 !== 123) return content
+  try {
+    return JSON.parse(s)
+  } catch {
+    return content
+  }
+}
+
+function userHistoryBlocksFromContent(content: unknown): UserHistoryBlock[] | null {
+  const value = coerceHistoryJsonContent(content)
+  if (Array.isArray(value)) return value as UserHistoryBlock[]
+  if (value && typeof value === 'object') {
+    const obj = value as Record<string, unknown>
+    if (typeof obj.type === 'string') return [obj as unknown as UserHistoryBlock]
+  }
+  return null
+}
+
+function assistantBlocksFromMessage(msg: MessageEntry): AssistantHistoryBlock[] {
+  if (msg.type !== 'assistant' && msg.type !== 'tool_use') return []
+  return normalizeAssistantHistoryContent(msg.content) ?? []
+}
+
+function thinkingTextFromBlock(block: AssistantHistoryBlock): string {
+  if (typeof block.thinking === 'string' && block.thinking.trim()) return block.thinking
+  if (block.type === 'thinking' && typeof block.text === 'string' && block.text.trim()) return block.text
+  return ''
+}
+
+function parseToolCallArguments(raw: unknown): unknown {
+  if (raw == null) return {}
+  if (typeof raw === 'string') {
+    try {
+      return JSON.parse(raw)
+    } catch {
+      return {}
+    }
+  }
+  return raw
+}
+
+function reasoningTextFromEnvelope(obj: Record<string, unknown>): string {
+  const keys = ['reasoning_content', 'reasoning', 'thinking', 'thinking_content', 'chain_of_thought']
+  for (const key of keys) {
+    const text = extractTextFromRawContent(obj[key])
+    if (text.trim()) return text
+  }
+  return ''
+}
+
+function normalizeAssistantHistoryContent(content: unknown): AssistantHistoryBlock[] | null {
+  const value = coerceHistoryJsonContent(content)
+  if (Array.isArray(value)) return value as AssistantHistoryBlock[]
+  if (!value || typeof value !== 'object') return null
+  const obj = value as Record<string, unknown>
+  if (typeof obj.type === 'string') return [obj as unknown as AssistantHistoryBlock]
+  const blocks: AssistantHistoryBlock[] = []
+  const reasoning = reasoningTextFromEnvelope(obj)
+  if (reasoning.trim()) {
+    blocks.push({ type: 'thinking', thinking: reasoning })
+  }
+  if (typeof obj.content === 'string' && obj.content.trim()) {
+    blocks.push({ type: 'text', text: obj.content })
+  } else {
+    const nestedText = extractTextFromRawContent(obj.content)
+    if (nestedText.trim()) {
+      blocks.push({ type: 'text', text: nestedText })
+    }
+  }
+  const calls = Array.isArray(obj.tool_calls) ? obj.tool_calls : []
+  for (const call of calls) {
+    if (!call || typeof call !== 'object') continue
+    const c = call as Record<string, unknown>
+    const name = typeof c.name === 'string' ? c.name : ''
+    const id = typeof c.id === 'string' ? c.id : ''
+    if (!name) continue
+    blocks.push({
+      type: 'tool_use',
+      name,
+      id,
+      input: parseToolCallArguments(c.input ?? c.arguments),
+    })
+  }
+  return blocks.length > 0 ? blocks : null
+}
+
 function isTeammateMessage(text: string): boolean {
   return text.includes('<teammate-message') && text.includes('</teammate-message>')
 }
@@ -5336,8 +5970,12 @@ function pushAssistantHistoryText(
 
   const last = messages[messages.length - 1]
   if (last?.type === 'assistant_text' && !!last.superseded === !!superseded) {
-
-    last.content += content
+    const merged = mergeAssistantTextContent(last.content, content)
+    if (merged === null) {
+      if (model && !last.model) last.model = model
+      return
+    }
+    last.content = merged
     if (model && !last.model) last.model = model
     return
   }
@@ -5345,7 +5983,7 @@ function pushAssistantHistoryText(
   messages.push({
     id: nextId(),
     type: 'assistant_text',
-    content,
+    content: collapseRepeatedAssistantText(content),
     timestamp,
     ...(model ? { model } : {}),
     ...(superseded ? { superseded: true } : {}),
@@ -5361,8 +5999,9 @@ export function reconstructAgentNotifications(messages: MessageEntry[]): Record<
   const agentNameToToolUseId = new Map<string, string>()
 
   for (const msg of messages) {
-    if ((msg.type === 'assistant' || msg.type === 'tool_use') && Array.isArray(msg.content)) {
-      for (const block of msg.content as AssistantHistoryBlock[]) {
+    const historyBlocks = assistantBlocksFromMessage(msg)
+    if (historyBlocks.length > 0) {
+      for (const block of historyBlocks) {
         if (block.type === 'tool_use' && block.name === 'Agent' && block.id) {
           const input = block.input as Record<string, unknown> | undefined
           const name = input?.name as string | undefined
@@ -5378,11 +6017,16 @@ export function reconstructAgentNotifications(messages: MessageEntry[]): Record<
   const teammateContent = new Map<string, string>()
   for (const msg of messages) {
     if (msg.type !== 'user') continue
-    const text = typeof msg.content === 'string'
-      ? msg.content
-      : Array.isArray(msg.content)
-        ? (msg.content as Array<{ type?: string; text?: string }>).filter((b) => b.type === 'text' && b.text).map((b) => b.text).join('\n')
-        : ''
+    const userBlocks = userHistoryBlocksFromContent(msg.content)
+    const text = userBlocks
+      ? userBlocks
+          .filter((b) => b.type === 'text' && b.text)
+          .map((b) => b.text ?? '')
+          .filter((t) => t.length > 0)
+          .join('\n')
+      : typeof msg.content === 'string'
+        ? msg.content
+        : extractTextFromRawContent(msg.content)
     if (!text.includes('<teammate-message')) continue
     for (const match of text.matchAll(TEAMMATE_CONTENT_REGEX)) {
       if (match[1] && match[2]) {
@@ -5501,10 +6145,13 @@ export function mapHistoryMessagesToUiMessages(
     const timestamp = new Date(msg.timestamp).getTime()
     const tombstoned = msg.tombstoned === true
     const sup = tombstoned ? { superseded: true } : {}
-    if (msg.type === 'user' && typeof msg.content === 'string') {
-      if (isTeammateMessage(msg.content)) {
+    if (msg.type === 'user') {
+      const coercedUser = coerceHistoryJsonContent(msg.content)
+      if (typeof coercedUser === 'string') {
+      const userText = typeof msg.content === 'string' ? msg.content : coercedUser
+      if (isTeammateMessage(userText)) {
         if (!includeTeammateMessages) continue
-        const teammateContents = extractVisibleTeammateMessageContents(msg.content)
+        const teammateContents = extractVisibleTeammateMessageContents(userText)
         if (teammateContents.length === 0) continue
         uiMessages.push({
           id: msg.id || nextId(),
@@ -5517,7 +6164,7 @@ export function mapHistoryMessagesToUiMessages(
         if (!tombstoned) liveUserCount++
         continue
       }
-      const parsedAsk = tryParseAskResponseUserText(msg.content)
+      const parsedAsk = tryParseAskResponseUserText(userText)
       if (parsedAsk) {
         uiMessages.push({
           id: msg.id || nextId(),
@@ -5532,14 +6179,14 @@ export function mapHistoryMessagesToUiMessages(
       const displayOverride = msg.displayContent?.trim()
       const legacyBrief = displayOverride
         ? null
-        : extractDisplayBriefFromTaskEnvelope(msg.content)
+        : extractDisplayBriefFromTaskEnvelope(userText)
       const persistedAttachments = mapPersistedAttachments(msg)
       uiMessages.push({
         id: msg.id || nextId(),
         type: 'user_text',
         content:
           displayOverride ||
-          (legacyBrief ?? stripAttachmentMarkersForDisplay(msg.content)),
+          (legacyBrief ?? stripAttachmentMarkersForDisplay(userText)),
         timestamp,
         ...(persistedAttachments ? { attachments: persistedAttachments } : {}),
         ...(msg.designRef ? { designRef: msg.designRef } : {}),
@@ -5553,31 +6200,31 @@ export function mapHistoryMessagesToUiMessages(
       })
       if (!tombstoned) liveUserCount++
       continue
+      }
     }
-    if (msg.type === 'assistant' && typeof msg.content === 'string') {
-      uiMessages.push({ id: msg.id || nextId(), type: 'assistant_text', content: msg.content, timestamp, model: msg.model, ...sup })
-      continue
-    }
-    if ((msg.type === 'assistant' || msg.type === 'tool_use') && Array.isArray(msg.content)) {
+    if (msg.type === 'assistant' || msg.type === 'tool_use') {
+      const historyBlocks = normalizeAssistantHistoryContent(msg.content)
+      if (historyBlocks) {
       let blockSeq = 0
       const blockId = (): string => (msg.id ? `${msg.id}:${blockSeq++}` : nextId())
-      for (const block of msg.content as AssistantHistoryBlock[]) {
-        if (block.type === 'thinking' && block.thinking) {
+      for (const block of historyBlocks) {
+        const thinkingText = thinkingTextFromBlock(block)
+        if (block.type === 'thinking' && thinkingText) {
           const startedAt =
             typeof block.started_at_ms === 'number' && Number.isFinite(block.started_at_ms)
               ? block.started_at_ms
-              : undefined
+              : timestamp
           const completedAt =
             typeof block.completed_at_ms === 'number' && Number.isFinite(block.completed_at_ms)
               ? block.completed_at_ms
-              : undefined
+              : startedAt
           uiMessages.push({
             id: blockId(),
             type: 'thinking',
-            content: block.thinking,
+            content: thinkingText,
             timestamp,
-            ...(startedAt !== undefined ? { startedAt } : {}),
-            ...(completedAt !== undefined ? { completedAt } : {}),
+            startedAt,
+            completedAt,
             ...sup,
           })
         }
@@ -5735,13 +6382,24 @@ export function mapHistoryMessagesToUiMessages(
         }
       }
       continue
+      }
+      if (msg.type === 'assistant') {
+        const text =
+          typeof msg.content === 'string'
+            ? msg.content
+            : extractTextFromRawContent(msg.content)
+        if (text) pushAssistantHistoryText(uiMessages, text, timestamp, msg.model, tombstoned)
+      }
+      continue
     }
-    if ((msg.type === 'user' || msg.type === 'tool_result') && Array.isArray(msg.content)) {
+    if (msg.type === 'user' || msg.type === 'tool_result') {
+      const mappedUserBlocks = userHistoryBlocksFromContent(msg.content)
+      if (!mappedUserBlocks) continue
       let blockSeq = 0
       const blockId = (): string => (msg.id ? `${msg.id}:${blockSeq++}` : nextId())
       const textParts: string[] = []
       const attachments: UIAttachment[] = []
-      for (const block of msg.content as UserHistoryBlock[]) {
+      for (const block of mappedUserBlocks) {
         if (block.type === 'text' && block.text && isTeammateMessage(block.text)) {
           if (!includeTeammateMessages) continue
           textParts.push(...extractVisibleTeammateMessageContents(block.text))
@@ -5885,8 +6543,8 @@ function extractLastTodoWriteFromHistory(messages: MessageEntry[]): Array<{ cont
   let todos: Array<{ content: string; status: string; activeForm?: string }> | null = null
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]!
-    if ((msg.type === 'assistant' || msg.type === 'tool_use') && Array.isArray(msg.content)) {
-      const blocks = msg.content as AssistantHistoryBlock[]
+    const blocks = assistantBlocksFromMessage(msg)
+    if (blocks.length > 0) {
       for (let j = blocks.length - 1; j >= 0; j--) {
         const block = blocks[j]!
         if (
@@ -5932,10 +6590,8 @@ function hasUserMessagesAfterTaskCompletion(messages: MessageEntry[]): boolean {
   let lastTaskIndex = -1
   for (let i = messages.length - 1; i >= 0; i--) {
     const msg = messages[i]!
-    if ((msg.type === 'assistant' || msg.type === 'tool_use') && Array.isArray(msg.content)) {
-      const blocks = msg.content as AssistantHistoryBlock[]
-      if (blocks.some((b) => b.type === 'tool_use' && TASK_RELATED_TOOL_NAMES.has(b.name ?? ''))) { lastTaskIndex = i; break }
-    }
+    const blocks = assistantBlocksFromMessage(msg)
+    if (blocks.some((b) => b.type === 'tool_use' && TASK_RELATED_TOOL_NAMES.has(b.name ?? ''))) { lastTaskIndex = i; break }
   }
   if (lastTaskIndex < 0) return false
   for (let i = lastTaskIndex + 1; i < messages.length; i++) { if (messages[i]!.type === 'user') return true }

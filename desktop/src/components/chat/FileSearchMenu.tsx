@@ -2,11 +2,14 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { forwardRef, useState, useEffect, useRef, useCallback, useImperativeHandle } from 'react'
+import { forwardRef, useState, useEffect, useRef, useCallback, useImperativeHandle, useMemo } from 'react'
 import { ApiError } from '../../api/client'
 import { filesystemApi } from '../../api/filesystem'
+import { sessionsApi } from '../../api/sessions'
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
+import type { SessionListItem } from '../../types/session'
+import { resolveSessionTitle } from '../../utils/sessionTitle'
 
 type DirEntry = {
   name: string
@@ -21,10 +24,15 @@ export type FileSearchMenuHandle = {
 type Props = {
   cwd: string
   filter?: string
+  currentSessionId?: string | null
   onSelect: (path: string, relativePath: string, isDir: boolean) => void
+  onSelectSession?: (sessionId: string, title: string) => void
 }
 
-export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, filter = '', onSelect }, ref) => {
+const SESSION_MATCH_LIMIT = 5
+
+export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(
+  ({ cwd, filter = '', currentSessionId = null, onSelect, onSelectSession }, ref) => {
   const t = useTranslation()
   const [entries, setEntries] = useState<DirEntry[]>([])
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
@@ -32,6 +40,7 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
   const [currentPath, setCurrentPath] = useState(cwd)
   const [loading, setLoading] = useState(false)
   const [selectedIndex, setSelectedIndex] = useState(0)
+  const [sessions, setSessions] = useState<SessionListItem[]>([])
   const listRef = useRef<HTMLDivElement>(null)
   const currentPathRef = useRef(cwd)
 
@@ -104,10 +113,52 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
     void loadDir(navigateTo, searchQuery)
   }, [cwd, filter, loadDir])
 
+  const sessionSourceEnabled = !!onSelectSession
+
+  useEffect(() => {
+    if (!sessionSourceEnabled) return
+    let cancelled = false
+    void sessionsApi
+      .list({ limit: 100 })
+      .then(({ sessions: items }) => {
+        if (!cancelled) setSessions(items)
+      })
+      .catch(() => {
+        if (!cancelled) setSessions([])
+      })
+    return () => {
+      cancelled = true
+    }
+  }, [sessionSourceEnabled])
+
+  const untitledLabel = t('sidebar.untitled')
+
+  const visibleSessions = useMemo(() => {
+    if (!sessionSourceEnabled) return []
+    if (filter.includes('/')) return []
+    const pool = sessions.filter((s) => s.id !== currentSessionId)
+    const needle = filter.trim().toLowerCase()
+    if (!needle) return pool.slice(0, SESSION_MATCH_LIMIT)
+    return pool
+      .filter((s) =>
+        resolveSessionTitle(s.title, untitledLabel).toLowerCase().includes(needle),
+      )
+      .slice(0, SESSION_MATCH_LIMIT)
+  }, [sessionSourceEnabled, sessions, currentSessionId, filter, untitledLabel])
+
+  const dirs = entries.filter((e) => e.isDirectory)
+  const files = entries.filter((e) => !e.isDirectory)
+  const orderedEntries = useMemo(() => {
+    return [...entries.filter((e) => e.isDirectory), ...entries.filter((e) => !e.isDirectory)]
+  }, [entries])
+
+  const sessionCount = visibleSessions.length
+  const totalCount = sessionCount + orderedEntries.length
+
   const handleKeyDown = useCallback((e: KeyboardEvent) => {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      setSelectedIndex((prev) => Math.min(prev + 1, entries.length - 1))
+      setSelectedIndex((prev) => Math.min(prev + 1, Math.max(totalCount - 1, 0)))
       return
     }
     if (e.key === 'ArrowUp') {
@@ -117,14 +168,29 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
     }
     if (e.key === 'Enter' || e.key === 'Tab') {
       e.preventDefault()
-      const entry = entries[selectedIndex]
+      if (selectedIndex < sessionCount) {
+        const session = visibleSessions[selectedIndex]
+        if (session && onSelectSession) {
+          onSelectSession(session.id, resolveSessionTitle(session.title, untitledLabel))
+        }
+        return
+      }
+      const entry = orderedEntries[selectedIndex - sessionCount]
       if (entry) {
         onSelect(entry.path, entry.name, entry.isDirectory)
       }
       return
     }
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [entries, selectedIndex])
+  }, [
+    orderedEntries,
+    visibleSessions,
+    sessionCount,
+    totalCount,
+    selectedIndex,
+    untitledLabel,
+    onSelect,
+    onSelectSession,
+  ])
 
   useImperativeHandle(ref, () => ({ handleKeyDown }), [handleKeyDown])
 
@@ -139,13 +205,16 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
     if (rel) breadcrumbs.push(...rel.split('/'))
   }
 
-  const dirs = entries.filter((e) => e.isDirectory)
-  const files = entries.filter((e) => !e.isDirectory)
+  const formatSessionDate = (iso: string): string => {
+    const ts = Date.parse(iso)
+    if (Number.isNaN(ts)) return ''
+    return new Date(ts).toLocaleDateString()
+  }
 
   return (
     <div
       id="file-search-menu"
-      className="absolute left-0 bottom-full mb-2 z-50 w-full min-w-[480px] overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
+      className="absolute left-0 bottom-full mb-2 z-50 w-full min-w-0 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
       onMouseDown={(e) => e.stopPropagation()}
     >
       {}
@@ -178,26 +247,60 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
 
       {}
       <div ref={listRef} className="max-h-[300px] overflow-y-auto py-1">
+        {sessionCount > 0 && (
+          <>
+            <div className="px-3 pb-1 pt-1.5 text-[10px] font-bold uppercase tracking-widest text-[var(--color-outline)]">
+              {t('fileSearch.sessions')}
+            </div>
+            {visibleSessions.map((session, i) => {
+              const title = resolveSessionTitle(session.title, untitledLabel)
+              return (
+                <button
+                  key={session.id}
+                  data-index={i}
+                  onClick={() => onSelectSession?.(session.id, title)}
+                  onMouseEnter={() => setSelectedIndex(i)}
+                  className={`w-full flex items-center gap-3 px-3 py-2 text-left transition-colors ${
+                    selectedIndex === i ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface-hover)]'
+                  }`}
+                >
+                  <span className="material-symbols-outlined text-[16px] text-[var(--color-accent)]">forum</span>
+                  <span className="min-w-0 flex-1 truncate text-sm text-[var(--color-text-primary)]">{title}</span>
+                  <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">
+                    {formatSessionDate(session.modifiedAt)}
+                  </span>
+                </button>
+              )
+            })}
+            {(entries.length > 0 || errorKey || errorMessage) && (
+              <div className="mx-3 my-1 border-t border-[var(--color-border)]/60" />
+            )}
+          </>
+        )}
         {loading && entries.length === 0 ? (
-          <div className="px-4 py-6 text-center text-xs text-[var(--color-text-tertiary)]">{t('fileSearch.searching')}</div>
+          sessionCount === 0 ? (
+            <div className="px-4 py-6 text-center text-xs text-[var(--color-text-tertiary)]">{t('fileSearch.searching')}</div>
+          ) : null
         ) : (errorKey || errorMessage) ? (
           <div className="px-4 py-6 text-center text-xs text-[var(--color-error)]">
             {errorKey ? t(errorKey) : errorMessage}
           </div>
         ) : entries.length === 0 ? (
-          <div className="px-4 py-6 text-center text-xs text-[var(--color-text-tertiary)]">
-            {filter ? t('fileSearch.noMatch') : t('fileSearch.noFiles')}
-          </div>
+          sessionCount === 0 ? (
+            <div className="px-4 py-6 text-center text-xs text-[var(--color-text-tertiary)]">
+              {filter ? t('fileSearch.noMatch') : t('fileSearch.noFiles')}
+            </div>
+          ) : null
         ) : (
           <>
             {}
             {dirs.map((entry, i) => (
               <div
                 key={entry.path}
-                data-index={i}
-                onMouseEnter={() => setSelectedIndex(i)}
+                data-index={sessionCount + i}
+                onMouseEnter={() => setSelectedIndex(sessionCount + i)}
                 className={`group flex w-full items-center gap-3 px-3 py-2 transition-colors ${
-                  selectedIndex === i ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface-hover)]'
+                  selectedIndex === sessionCount + i ? 'bg-[var(--color-surface-hover)]' : 'hover:bg-[var(--color-surface-hover)]'
                 }`}
               >
                 <button
@@ -225,7 +328,7 @@ export const FileSearchMenu = forwardRef<FileSearchMenuHandle, Props>(({ cwd, fi
 
             {}
             {files.map((entry, i) => {
-              const idx = dirs.length + i
+              const idx = sessionCount + dirs.length + i
               return (
                 <button
                   key={entry.path}

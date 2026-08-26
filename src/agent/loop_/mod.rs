@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 pub mod control;
+pub mod coverage;
 pub mod detector;
 pub mod policy;
 pub mod services;
@@ -48,6 +49,46 @@ pub(crate) use crate::agent::reward::cost_tracking::{
 const STREAM_CHUNK_MIN_CHARS: usize = 80;
 
 const DEDUP_RESULT_MARKER: &str = "[Deduplicated] Tool '";
+const LOOP_BLOCK_RESULT_MARKER: &str = "[Loop Detection  - BLOCKED] ";
+
+fn is_non_progress_tool_output(output: &str) -> bool {
+    output.starts_with(DEDUP_RESULT_MARKER)
+        || output.starts_with(crate::agent::loop_::coverage::COVERAGE_RESULT_MARKER)
+        || output.starts_with(LOOP_BLOCK_RESULT_MARKER)
+        || output.starts_with("[Loop guard]")
+}
+
+fn tool_is_dedup_exempt(name: &str, configured: &[String]) -> bool {
+    matches!(
+        name,
+        "background_status" | "background_logs" | "background_wait" | "now"
+    ) || configured.iter().any(|exempt| exempt == name)
+}
+
+fn format_dedup_skip_message(tool_name: &str, blob_id: Option<&str>) -> String {
+    match blob_id {
+        Some(id) => format!(
+            "{DEDUP_RESULT_MARKER}{tool_name}' with identical arguments was already executed in this turn. \
+             Do NOT run this call again. If the previous result is still in the conversation, use it. \
+             If it was compacted, retrieve it with tool_result_expand (id=\"{id}\")."
+        ),
+        None => format!(
+            "{DEDUP_RESULT_MARKER}{tool_name}' with identical arguments was already executed in this turn. \
+             Do NOT run this call again. Use the earlier result still in the conversation. \
+             If that output left the window, page into uncovered ranges or change arguments; \
+             do not repeat the original call."
+        ),
+    }
+}
+
+const TOOL_OUTPUT_BLOB_MIN_BYTES: usize = 2048;
+
+fn archive_tool_output_blob(output: &str) -> Option<String> {
+    if output.len() < TOOL_OUTPUT_BLOB_MIN_BYTES {
+        return None;
+    }
+    crate::agent::history::blob_store::put(output)
+}
 
 const STREAM_TOOL_MARKER_WINDOW_CHARS: usize = 512;
 
@@ -128,6 +169,11 @@ pub enum DraftEvent {
     Clear,
 
     Progress(String),
+
+    Phase {
+        action: String,
+        detail: String,
+    },
 
     Content(String),
 
@@ -282,7 +328,11 @@ pub fn current_tool_runtime_approved() -> bool {
 }
 
 pub(crate) fn resolve_compaction_context_window(model: &str) -> usize {
-    let model_window = crate::constants::api_limits::context_window_for_model(model) as usize;
+    let mut model_window =
+        crate::constants::api_limits::context_window_for_model(model) as usize;
+    if let Some(cap) = crate::constants::api_limits::thinking_context_cap_for_model(model) {
+        model_window = model_window.min(cap as usize);
+    }
     let budget_window = crate::agent::token::optimizer::global_optimizer()
         .map(|opt| opt.budget().context_window());
     match budget_window {
@@ -298,8 +348,7 @@ pub(crate) fn resolve_history_pruning_config(
     let mut prune_cfg = config.agent.history_pruning.clone();
     if prune_cfg.max_tokens == 0 {
         let window = resolve_compaction_context_window(model);
-        let compress_ratio = config.agent.context_compression.threshold_ratio;
-        let prune_ratio = (compress_ratio + 0.1).clamp(0.95, 0.98);
+        let prune_ratio = (crate::agent::context::compressor::SUMMARIZE_RATIO + 0.08).clamp(0.95, 0.98);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let derived = (window as f64 * prune_ratio) as usize;
         prune_cfg.max_tokens = derived.max(8_000);
@@ -1020,7 +1069,7 @@ fn current_turn_preserved_indices(
         });
     let mut idxs: Vec<usize> = Vec::new();
     if let Some(cur) = current {
-        idxs.push(cur);
+        idxs.extend(cur..h.len());
         if let Some(note_pos) = h[..cur].iter().rposition(|m| {
             m.role == "assistant"
                 && crate::agent::dangling_tool_repair::is_turn_close_note(&m.content)
@@ -1037,6 +1086,21 @@ fn current_turn_preserved_indices(
     idxs.sort_unstable();
     idxs.dedup();
     idxs
+}
+
+async fn emit_planning_phase(
+    on_delta: Option<&tokio::sync::mpsc::Sender<DraftEvent>>,
+    action: &str,
+    detail: impl Into<String>,
+) {
+    if let Some(tx) = on_delta {
+        let _ = tx
+            .send(DraftEvent::Phase {
+                action: action.to_string(),
+                detail: detail.into(),
+            })
+            .await;
+    }
 }
 
 fn build_intent_text_window(
@@ -1670,7 +1734,9 @@ async fn consume_provider_streaming_response(
                 }
 
                 if let Some(rc) = &chunk.reasoning {
-                    if !rc.is_empty() {
+                    let leading_whitespace_only =
+                        outcome.reasoning_content.is_empty() && rc.trim().is_empty();
+                    if !rc.is_empty() && !leading_whitespace_only {
                         progress.made_progress = true;
                         outcome.reasoning_content.push_str(rc);
                         if let Some(tx) = delta_sender {
@@ -3364,7 +3430,10 @@ pub(crate) async fn run_unified_loop_impl(
     let mut llm_resilience_attempt: u32 = 0;
     let mut llm_resilience_spent = Duration::ZERO;
 
-    let mut compression_retry_floor: Option<usize> = None;
+    let mut compression_retry_floor: Option<usize> =
+        crate::session::current_session_context().and_then(|ctx| {
+            crate::agent::context::compressor::session_compression_floor(&ctx.session_id)
+        });
 
     let mut pacing_break_reason: Option<crate::agent::executor_core::PacingExceeded> = None;
 
@@ -3403,7 +3472,13 @@ pub(crate) async fn run_unified_loop_impl(
             iter = iteration,
             "iteration start"
         );
-        let mut seen_tool_signatures: HashSet<(String, String)> = HashSet::new();
+
+        emit_planning_phase(
+            on_delta.as_ref(),
+            "preparing",
+            "Preparing the next model call…",
+        )
+        .await;
 
         let mut plan_finalized_this_iter: bool = false;
         #[cfg(feature = "tool-curator")]
@@ -3734,10 +3809,11 @@ pub(crate) async fn run_unified_loop_impl(
             let cfg_snapshot = svc.config();
             let compression_cfg = cfg_snapshot.agent.context_compression.clone();
             let context_window = resolve_compaction_context_window(model);
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let compression_threshold = ((context_window as f64
-                * compression_cfg.threshold_ratio) as usize)
-                .saturating_sub(tools_overhead_tokens);
+            let soft = crate::agent::context::compressor::payload_soft_limit(context_window);
+            let hard = crate::agent::context::compressor::payload_hard_limit_for_config(
+                context_window,
+                compression_cfg.threshold_ratio,
+            );
             let estimated_tokens =
                 crate::agent::token::budget::estimate_history_tokens_calibrated(history, model);
             let estimated_tokens = match crate::session::current_session_context() {
@@ -3747,13 +3823,50 @@ pub(crate) async fn run_unified_loop_impl(
                 ),
                 None => estimated_tokens,
             };
-            let over_threshold = estimated_tokens > compression_threshold;
+            let payload = crate::agent::context::compressor::payload_tokens(
+                estimated_tokens,
+                tools_overhead_tokens,
+            );
             let retry_blocked =
                 compression_retry_floor.is_some_and(|floor| estimated_tokens <= floor);
-            if compression_cfg.enabled && over_threshold && !retry_blocked {
+            let mut compressible_sufficient = true;
+            if compression_cfg.enabled && payload > soft && !retry_blocked {
+                let preserved_now = current_turn_preserved_indices(history);
+                let compressible =
+                    crate::agent::context::compressor::estimate_compressible_tokens(
+                        history,
+                        &compression_cfg,
+                        &preserved_now,
+                        model,
+                    );
+                let needed = payload.saturating_sub(soft);
+                compressible_sufficient =
+                    compressible.saturating_mul(4) >= needed.saturating_mul(5);
+                if !compressible_sufficient {
+                    tracing::debug!(
+                        target: "agent.context.compress",
+                        payload,
+                        soft,
+                        compressible,
+                        needed,
+                        "compaction skipped: compressible history cannot close the budget gap"
+                    );
+                }
+            }
+            if compression_cfg.enabled
+                && payload > soft
+                && !retry_blocked
+                && compressible_sufficient
+            {
                 if let Some(h) = hooks {
                     h.fire_pre_compact("proactive", estimated_tokens).await;
                 }
+                let mut compression_cfg = compression_cfg;
+                compression_cfg.timeout_secs = compression_cfg.timeout_secs.min(
+                    crate::agent::context::compressor::COMPACTION_WALL_BUDGET_SECS
+                        .saturating_sub(2)
+                        .max(1),
+                );
                 let compressor = crate::agent::context::compressor::ContextCompressor::new(
                     compression_cfg,
                     context_window,
@@ -3761,34 +3874,44 @@ pub(crate) async fn run_unified_loop_impl(
                 .with_tool_overhead_tokens(tools_overhead_tokens);
                 let preserved_fn: Box<crate::agent::context::compressor::PreservedIndexFn> =
                     Box::new(current_turn_preserved_indices);
-                if let Some(ref tx) = on_delta {
-                    let _ = tx
-                        .send(DraftEvent::Progress(
-                            "Compressing conversation context to fit the model window…".to_string(),
-                        ))
-                        .await;
-                }
                 let progress_cb: Option<
                     Box<crate::agent::context::compressor::CompressionProgressFn>,
                 > = on_delta.as_ref().map(|tx| {
                     let tx = tx.clone();
                     Box::new(
                         move |p: crate::agent::context::compressor::CompressionProgress| {
-                            let _ = tx.try_send(DraftEvent::Progress(format!(
-                                "Compressing conversation context (pass {}/{}, ~{} → target {} tokens)…",
-                                p.pass, p.max_passes, p.tokens_current, p.tokens_target,
-                            )));
+                            let tx = tx.clone();
+                            tokio::spawn(async move {
+                                let _ = tx
+                                    .send(DraftEvent::Phase {
+                                        action: "compressing".to_string(),
+                                        detail: format!(
+                                            "{} {} {} {}",
+                                            p.pass,
+                                            p.max_passes,
+                                            p.tokens_current,
+                                            p.tokens_target
+                                        ),
+                                    })
+                                    .await;
+                            });
                         },
                     )
                         as Box<crate::agent::context::compressor::CompressionProgressFn>
                 });
                 let compress_outcome = {
-                    let compress_fut = compressor.compress_if_needed_with_progress(
-                        history,
-                        provider,
-                        model,
-                        Some(&*preserved_fn),
-                        progress_cb.as_deref(),
+                    let wall_budget = Duration::from_secs(
+                        crate::agent::context::compressor::COMPACTION_WALL_BUDGET_SECS,
+                    );
+                    let compress_fut = tokio::time::timeout(
+                        wall_budget,
+                        compressor.compress_if_needed_with_progress(
+                            history,
+                            provider,
+                            model,
+                            Some(&*preserved_fn),
+                            progress_cb.as_deref(),
+                        ),
                     );
                     if let Some(token) = cancellation_token.as_ref() {
                         tokio::select! {
@@ -3808,10 +3931,29 @@ pub(crate) async fn run_unified_loop_impl(
                         );
                         return Err(tool_loop_cancelled());
                     }
-                    Some(Ok(result)) if result.compressed => {
-                        if result.tokens_after > compression_threshold {
-                            compression_retry_floor =
-                                Some(result.tokens_after + compression_threshold / 5);
+                    Some(Ok(Ok(result))) if result.compressed => {
+                        let payload_after = crate::agent::context::compressor::payload_tokens(
+                            result.tokens_after,
+                            tools_overhead_tokens,
+                        );
+                        let reduced = result
+                            .tokens_before
+                            .saturating_sub(result.tokens_after);
+                        let ineffective = result.summarized
+                            && result.tokens_before > 0
+                            && reduced.saturating_mul(20) < result.tokens_before;
+                        if result.summarized && payload_after > soft {
+                            if ineffective {
+                                compression_retry_floor = Some(
+                                    result
+                                        .tokens_after
+                                        .saturating_add(result.tokens_after / 4)
+                                        .max(result.tokens_after.saturating_add(hard / 2)),
+                                );
+                            } else {
+                                compression_retry_floor =
+                                    Some(result.tokens_after + hard / 5);
+                            }
                         } else {
                             compression_retry_floor = None;
                         }
@@ -3827,23 +3969,56 @@ pub(crate) async fn run_unified_loop_impl(
                             target: "agent.context.compress",
                             tokens_before = result.tokens_before,
                             tokens_after = result.tokens_after,
+                            payload,
+                            payload_after,
+                            soft,
+                            hard,
                             passes = result.passes_used,
-                            "history compressed before LLM call"
+                            duration_ms = result.duration_ms,
+                            context_window,
+                            tools_overhead = tools_overhead_tokens,
+                            summarized = result.summarized,
+                            ineffective,
+                            "history compacted before LLM call"
                         );
                     }
-                    Some(Ok(result)) => {
-                        compression_retry_floor =
-                            Some(result.tokens_after + compression_threshold / 5);
+                    Some(Ok(Ok(result))) => {
+                        tracing::debug!(
+                            target: "agent.context.compress",
+                            tokens = result.tokens_after,
+                            payload,
+                            soft,
+                            hard,
+                            context_window,
+                            tools_overhead = tools_overhead_tokens,
+                            "context within budget; skipped compaction"
+                        );
                     }
-                    Some(Err(err)) => {
-                        compression_retry_floor =
-                            Some(estimated_tokens + compression_threshold / 5);
+                    Some(Ok(Err(err))) => {
+                        compression_retry_floor = Some(estimated_tokens + hard / 5);
                         tracing::warn!(
                             target: "agent.context.compress",
                             error = %err,
                             "context compression failed; proceeding with un-compressed history"
                         );
                     }
+                    Some(Err(_)) => {
+                        compression_retry_floor = Some(estimated_tokens + hard / 5);
+                        tracing::warn!(
+                            target: "agent.context.compress",
+                            wall_budget_secs =
+                                crate::agent::context::compressor::COMPACTION_WALL_BUDGET_SECS,
+                            payload,
+                            soft,
+                            "context compression exceeded the wall budget; proceeding with current history"
+                        );
+                    }
+                }
+                if let Some(ctx) = crate::session::current_session_context() {
+                    crate::agent::context::compressor::set_session_compression_floor(
+                        &ctx.session_id,
+                        compression_retry_floor,
+                    );
                 }
             }
         }
@@ -3942,14 +4117,12 @@ pub(crate) async fn run_unified_loop_impl(
             prepared_messages.clone(),
         ));
 
-        if let Some(ref tx) = on_delta {
-            let phase = if iteration == 0 {
-                "\u{1f914} Thinking...\n".to_string()
-            } else {
-                format!("\u{1f914} Thinking (round {})...\n", iteration + 1)
-            };
-            let _ = tx.send(DraftEvent::Progress(phase)).await;
-        }
+        emit_planning_phase(
+            on_delta.as_ref(),
+            "waiting_model",
+            "Waiting for the model…",
+        )
+        .await;
 
         observer.record_event(&ObserverEvent::LlmRequest {
             provider: active_provider_name.to_string(),
@@ -4326,17 +4499,9 @@ pub(crate) async fn run_unified_loop_impl(
                                 let compression_cfg =
                                     svc.config().agent.context_compression.clone();
                                 if compression_cfg.enabled {
-                                    let budget_window =
-                                        crate::agent::token::optimizer::global_optimizer()
-                                            .map(|opt| opt.budget().context_window())
-                                            .unwrap_or(usize::MAX);
-                                    let model_window =
-                                        crate::constants::api_limits::context_window_for_model(
-                                            model,
-                                        ) as usize;
                                     let context_window = emergency_context_window
                                         .unwrap_or_else(|| {
-                                            model_window.min(budget_window).max(32_000)
+                                            resolve_compaction_context_window(model)
                                         });
                                     let mut emergency_compressor =
                                         crate::agent::context::compressor::ContextCompressor::new(
@@ -4347,14 +4512,12 @@ pub(crate) async fn run_unified_loop_impl(
                                     if let Some(h) = hooks {
                                         h.fire_pre_compact("error", 0).await;
                                     }
-                                    if let Some(ref tx) = on_delta {
-                                        let _ = tx
-                                            .send(DraftEvent::Progress(
-                                                "The model reported a context overflow; emergency-compressing history and retrying…"
-                                                    .to_string(),
-                                            ))
-                                            .await;
-                                    }
+                                    emit_planning_phase(
+                                        on_delta.as_ref(),
+                                        "compressing",
+                                        "The model reported a context overflow; emergency-compressing history and retrying…",
+                                    )
+                                    .await;
                                     let emergency_preserved: Box<
                                         crate::agent::context::compressor::PreservedIndexFn,
                                     > = Box::new(current_turn_preserved_indices);
@@ -4682,6 +4845,18 @@ pub(crate) async fn run_unified_loop_impl(
                 );
 
                 let reasoning_content = resp.reasoning_content.clone();
+                if !should_consume_provider_stream {
+                    if let Some(rc) = reasoning_content.as_deref() {
+                        let trimmed = rc.trim();
+                        if !trimmed.is_empty()
+                            && !trimmed.contains("chain-of-thought unavailable")
+                        {
+                            if let Some(ref tx) = on_delta {
+                                let _ = tx.send(DraftEvent::Thinking(rc.to_string())).await;
+                            }
+                        }
+                    }
+                }
                 let thinking_signature = resp.thinking_signature.clone();
                 let assistant_history_content = if resp.tool_calls.is_empty() {
                     if use_native_tools {
@@ -5106,8 +5281,7 @@ pub(crate) async fn run_unified_loop_impl(
             );
 
             if let Some(ref tx) = on_delta {
-                let should_emit_post_hoc_chunks =
-                    !response_streamed_live || display_text != response_text;
+                let should_emit_post_hoc_chunks = !response_streamed_live;
                 if !should_emit_post_hoc_chunks {
                     history.push(ChatMessage::assistant(response_text.clone()));
                     if crate::agent::plan_mode::execution_enforcement::should_auto_finalize_on_exit(
@@ -5256,7 +5430,7 @@ pub(crate) async fn run_unified_loop_impl(
         }
 
         if !display_text.is_empty() {
-            if !native_tool_calls.is_empty() {
+            if !native_tool_calls.is_empty() && !response_streamed_live {
                 if let Some(ref tx) = on_delta {
                     let mut narration = display_text.clone();
                     if !narration.ends_with('\n') {
@@ -6039,37 +6213,81 @@ pub(crate) async fn run_unified_loop_impl(
                 }
             }
 
-            let signature = (
-                tool_name.trim().to_ascii_lowercase(),
-                canonical_tool_args.clone(),
-            );
-            let dedup_exempt = dedup_exempt_tools.iter().any(|e| e == &tool_name);
-            if !dedup_exempt && !seen_tool_signatures.insert(signature) {
-
-                let deduplicated = format!(
-                    "{DEDUP_RESULT_MARKER}{tool_name}' with identical arguments was already \
-                    executed in this turn and its result was returned above. \
-                    No further action needed for this duplicate call."
-                );
+            let dedup_exempt = tool_is_dedup_exempt(&tool_name, dedup_exempt_tools);
+            let mut skip_reason: Option<String> =
+                loop_state.coverage.skip_reason(&tool_name, &tool_args);
+            if skip_reason.is_none()
+                && !dedup_exempt
+                && loop_state.has_completed_signature(&tool_name, &canonical_tool_args)
+            {
+                skip_reason = Some(format_dedup_skip_message(
+                    &tool_name,
+                    loop_state.completed_signature_blob(&tool_name, &canonical_tool_args),
+                ));
+            }
+            if skip_reason.is_none() && !dedup_exempt {
+                let window_count = loop_state
+                    .peek_window_repeat_count(&tool_name, &canonical_tool_args);
+                if loop_state.loop_detection_enabled()
+                    && window_count >= loop_state.loop_block_threshold()
+                {
+                    let blob = loop_state
+                        .completed_signature_blob(&tool_name, &canonical_tool_args);
+                    let blob_note = match blob {
+                        Some(id) => format!(
+                            " If the earlier output was compacted, retrieve it with tool_result_expand (id=\"{id}\")."
+                        ),
+                        None => String::new(),
+                    };
+                    skip_reason = Some(format!(
+                        "{LOOP_BLOCK_RESULT_MARKER}tool '{tool_name}' has already been called {window_count} \
+                         times in the recent window with identical arguments. Do NOT execute this call again. \
+                         Use the earlier result.{blob_note} Try a different approach."
+                    ));
+                }
+            }
+            if skip_reason.is_none()
+                && !dedup_exempt
+                && loop_state.claim_signature(&tool_name, &canonical_tool_args)
+            {
+                skip_reason = Some(format_dedup_skip_message(
+                    &tool_name,
+                    loop_state.completed_signature_blob(&tool_name, &canonical_tool_args),
+                ));
+            }
+            if let Some(skipped) = skip_reason {
                 runtime_trace::record_event(
                     "tool_call_result",
                     Some(channel_name),
                     Some(provider_name),
                     Some(model),
                     Some(&turn_id),
-                    Some(true),
-                    None::<&str>,
+                    Some(false),
+                    Some(skipped.as_str()),
                     serde_json::json!({
                         "iteration": iteration + 1,
                         "tool": tool_name.clone(),
                         "arguments": scrub_credentials(&tool_args.to_string()),
-                        "deduplicated": true,
+                        "deduplicated": skipped.starts_with(DEDUP_RESULT_MARKER),
+                        "coverage_skip": skipped.starts_with(
+                            crate::agent::loop_::coverage::COVERAGE_RESULT_MARKER
+                        ),
+                        "loop_block": skipped.starts_with(LOOP_BLOCK_RESULT_MARKER),
                     }),
                 );
                 if let Some(ref tx) = on_delta {
+                    let kind = if skipped.starts_with(LOOP_BLOCK_RESULT_MARKER) {
+                        "blocked"
+                    } else if skipped.starts_with(
+                        crate::agent::loop_::coverage::COVERAGE_RESULT_MARKER,
+                    ) {
+                        "covered"
+                    } else {
+                        "deduplicated"
+                    };
                     let _ = tx
                         .send(DraftEvent::Progress(format!(
-                            "\u{1f7e9} {}: deduplicated\n",
+                            "\u{1f6d1} {}: {kind}\n",
                             tool_name
                         )))
                         .await;
@@ -6078,9 +6296,9 @@ pub(crate) async fn run_unified_loop_impl(
                     tool_name.clone(),
                     call.tool_call_id.clone(),
                     ToolExecutionOutcome {
-                        output: deduplicated,
-                        success: true,
-                        error_reason: None,
+                        output: skipped.clone(),
+                        success: false,
+                        error_reason: Some(skipped),
                         duration: Duration::ZERO,
                     },
                 ));
@@ -6287,6 +6505,45 @@ pub(crate) async fn run_unified_loop_impl(
                     &call.name,
                     &call.arguments,
                 );
+                let canonical_executed =
+                    crate::agent::loop_::detector::canonicalise_args_string(&call.arguments);
+                let blob_id = archive_tool_output_blob(&outcome.output);
+                if !tool_is_dedup_exempt(&call.name, dedup_exempt_tools) {
+                    loop_state.complete_signature(
+                        &call.name,
+                        &canonical_executed,
+                        blob_id.clone(),
+                    );
+                }
+                if crate::agent::mode::effects::is_file_mutation_tool(call.name.as_str()) {
+                    loop_state.coverage.invalidate_after_mutation(
+                        &call.name,
+                        &call.arguments,
+                        &outcome.output,
+                    );
+                    loop_state.invalidate_read_signatures();
+                }
+                loop_state.coverage.record_success(
+                    &call.name,
+                    &call.arguments,
+                    blob_id.as_deref(),
+                    &outcome.output,
+                );
+            } else {
+                let canonical_executed =
+                    crate::agent::loop_::detector::canonicalise_args_string(&call.arguments);
+                if !tool_is_dedup_exempt(&call.name, dedup_exempt_tools) {
+                    loop_state.release_pending_signature(&call.name, &canonical_executed);
+                }
+                let blocked = match outcome.error_reason.as_deref() {
+                    Some(reason) if reason != outcome.output => {
+                        format!("{}\n{reason}", outcome.output)
+                    }
+                    _ => outcome.output.clone(),
+                };
+                loop_state
+                    .coverage
+                    .record_failure(&call.arguments, &blocked);
             }
 
             if outcome.success
@@ -6373,7 +6630,8 @@ pub(crate) async fn run_unified_loop_impl(
             .enumerate()
             .filter_map(|(i, opt)| opt.map(|v| (i, v)))
         {
-            if !loop_ignore_tools.contains(tool_name.as_str()) {
+            let is_skip = is_non_progress_tool_output(&outcome.output);
+            if !loop_ignore_tools.contains(tool_name.as_str()) && !is_skip {
                 let args = final_args_by_index
                     .get(result_index)
                     .and_then(|o| o.as_ref())
@@ -6443,8 +6701,9 @@ pub(crate) async fn run_unified_loop_impl(
             }
 
             turn_tool_results.push((tool_name.clone(), outcome.success));
-            let is_dedup = outcome.output.starts_with(DEDUP_RESULT_MARKER);
-            batch_had_success |= outcome.success && !is_dedup;
+            batch_had_success |= outcome.success
+                && !is_skip
+                && !tool_is_dedup_exempt(&tool_name, dedup_exempt_tools);
 
             crate::agent::profile::runtime_hooks::publish_tool_event(
                 &tool_name,
@@ -8157,6 +8416,13 @@ async fn run_impl(
                                         let _ = write!(
                                             std::io::stderr(),
                                             "\r\x1b[K\x1b[2m{text}\x1b[0m"
+                                        );
+                                        let _ = std::io::stderr().flush();
+                                    }
+                                    DraftEvent::Phase { detail, .. } => {
+                                        let _ = write!(
+                                            std::io::stderr(),
+                                            "\r\x1b[K\x1b[2m{detail}\x1b[0m"
                                         );
                                         let _ = std::io::stderr().flush();
                                     }

@@ -3459,7 +3459,6 @@ impl DesktopSqlitePersist {
 
     fn on_chunk(&mut self, delta: &str) {
         if !self.thinking_buf.is_empty() {
-            self.absorb_pending_text();
             self.absorb_pending_thinking();
         }
         self.text_buf.push_str(delta);
@@ -3508,6 +3507,7 @@ impl DesktopSqlitePersist {
 
     fn on_thinking(&mut self, delta: &str) {
         if self.thinking_buf.is_empty() && !delta.is_empty() {
+            self.absorb_pending_text();
             self.thinking_segment_started_ms = Some(Self::wallclock_ms_unix());
         }
         self.thinking_buf.push_str(delta);
@@ -3671,6 +3671,34 @@ impl DesktopSqlitePersist {
         }
         self.finalize_assistant_segment();
         self.out
+    }
+}
+
+fn assistant_object_has_visible_text(obj: &serde_json::Map<String, serde_json::Value>) -> bool {
+    match obj.get("content") {
+        Some(serde_json::Value::String(s)) => !s.trim().is_empty(),
+        Some(serde_json::Value::Array(parts)) => parts.iter().any(|p| match p {
+            serde_json::Value::String(s) => !s.trim().is_empty(),
+            serde_json::Value::Object(o) => o
+                .get("text")
+                .and_then(|t| t.as_str())
+                .is_some_and(|t| !t.trim().is_empty()),
+            _ => false,
+        }),
+        _ => false,
+    }
+}
+
+fn assistant_content_has_visible_text(content: &str) -> bool {
+    match serde_json::from_str::<serde_json::Value>(content) {
+        Ok(serde_json::Value::Array(blocks)) => blocks.iter().any(|b| {
+            b.get("type").and_then(|t| t.as_str()) == Some("text")
+                && b.get("text")
+                    .and_then(|t| t.as_str())
+                    .is_some_and(|t| !t.trim().is_empty())
+        }),
+        Ok(serde_json::Value::Object(obj)) => assistant_object_has_visible_text(&obj),
+        _ => !content.trim().is_empty(),
     }
 }
 
@@ -3938,6 +3966,7 @@ async fn run_turn(
         std::collections::HashMap::new();
     let mut accumulated_text = String::new();
     let mut streamed_turn_error: Option<String> = None;
+    let mut thinking_forwarded = false;
     let started = std::time::Instant::now();
 
     let user_message_index: i64 = if let Some(ref backend) = state.session_backend {
@@ -4197,10 +4226,13 @@ async fn run_turn(
                     .await;
                 }
                 TurnEvent::Thinking { delta } => {
-                    if let Ok(mut pg) = sqlite_persist_forward.lock() {
-                        pg.on_thinking(&delta);
+                    if thinking_forwarded || !delta.trim().is_empty() {
+                        thinking_forwarded = true;
+                        if let Ok(mut pg) = sqlite_persist_forward.lock() {
+                            pg.on_thinking(&delta);
+                        }
+                        let _ = outbound.send(OutboundFrame::Thinking(delta)).await;
                     }
-                    let _ = outbound.send(OutboundFrame::Thinking(delta)).await;
                 }
                 TurnEvent::ToolCall {
                     name,
@@ -4484,12 +4516,21 @@ async fn run_turn(
                     .await;
                 }
                 TurnEvent::StatusUpdate { action, detail } => {
+                    let state = match action.as_str() {
+                        "thinking"
+                        | "compressing"
+                        | "preparing"
+                        | "waiting_model"
+                        | "model_override" => "thinking",
+                        _ => "tool_executing",
+                    };
                     let _ = send_json(
                         outbound,
                         &serde_json::json!({
                             "type": "status",
-                            "state": "tool_executing",
+                            "state": state,
                             "verb": action,
+                            "detail": detail,
                             "tokens": null,
                         }),
                     )
@@ -4933,22 +4974,45 @@ async fn run_turn(
                     recorder.finish()
                 };
                 if !final_text.trim().is_empty() && (!turn_panicked || rows.is_empty()) {
-                    let has_assistant_text = rows.iter().any(|m| {
-                        if m.role != "assistant" {
-                            return false;
-                        }
-                        match serde_json::from_str::<serde_json::Value>(&m.content) {
-                            Ok(serde_json::Value::Array(blocks)) => blocks.iter().any(|b| {
-                                b.get("type").and_then(|t| t.as_str()) == Some("text")
-                                    && b.get("text")
-                                        .and_then(|t| t.as_str())
-                                        .is_some_and(|t| !t.trim().is_empty())
-                            }),
-                            _ => !m.content.trim().is_empty(),
-                        }
-                    });
+                    let has_assistant_text = rows
+                        .iter()
+                        .any(|m| m.role == "assistant" && assistant_content_has_visible_text(&m.content));
                     if !has_assistant_text {
-                        rows.push(crate::providers::ChatMessage::assistant(final_text.clone()));
+                        let merged_into_blocks = rows.iter_mut().rev().find(|m| m.role == "assistant").is_some_and(|last| {
+                            match serde_json::from_str::<serde_json::Value>(&last.content) {
+                                Ok(serde_json::Value::Array(mut blocks)) => {
+                                    blocks.push(json!({ "type": "text", "text": final_text }));
+                                    match serde_json::to_string(&blocks) {
+                                        Ok(serialized) => {
+                                            last.content = serialized;
+                                            true
+                                        }
+                                        Err(_) => false,
+                                    }
+                                }
+                                Ok(serde_json::Value::Object(mut obj)) => {
+                                    if assistant_object_has_visible_text(&obj) {
+                                        false
+                                    } else {
+                                        obj.insert(
+                                            "content".to_string(),
+                                            serde_json::Value::String(final_text.clone()),
+                                        );
+                                        match serde_json::to_string(&serde_json::Value::Object(obj)) {
+                                            Ok(serialized) => {
+                                                last.content = serialized;
+                                                true
+                                            }
+                                            Err(_) => false,
+                                        }
+                                    }
+                                }
+                                _ => false,
+                            }
+                        });
+                        if !merged_into_blocks {
+                            rows.push(crate::providers::ChatMessage::assistant(final_text.clone()));
+                        }
                     }
                 }
                 if turn_panicked {

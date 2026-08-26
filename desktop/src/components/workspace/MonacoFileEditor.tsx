@@ -3125,7 +3125,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             <button
               type="button"
               onClick={() => setLargeFileAck({ relPath: activeTab, mode: 'open' })}
-              className="rounded bg-[var(--color-warning)] px-2 py-0.5 font-medium text-white hover:opacity-90"
+              className="rounded bg-[var(--color-warning)] px-2 py-0.5 font-medium text-[var(--color-on-warning)] hover:opacity-90"
             >
               {t('files.preview.largeFileOpen')}
             </button>

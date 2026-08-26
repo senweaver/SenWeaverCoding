@@ -18,15 +18,13 @@ export function TaskList({ tasks }: Props) {
 
   return (
     <div>
-      {}
-      <div className="grid grid-cols-3 gap-4 mb-6">
+      <div className="mb-4 grid grid-cols-3 gap-3">
         <StatCard label={t('tasks.totalTasks')} value={String(tasks.length)} />
         <StatCard label={t('tasks.active')} value={String(enabledCount)} />
         <StatCard label={t('tasks.disabled')} value={String(tasks.length - enabledCount)} />
       </div>
 
-      {}
-      <div className="flex flex-col">
+      <div className="overflow-visible rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] divide-y divide-[var(--color-border)]">
         {tasks.map((task) => (
           <TaskRow
             key={task.id}
@@ -42,9 +40,9 @@ export function TaskList({ tasks }: Props) {
 
 function StatCard({ label, value }: { label: string; value: string }) {
   return (
-    <div className="px-4 py-3 rounded-[var(--radius-lg)] bg-[var(--color-surface-info)]">
-      <div className="text-2xl font-bold text-[var(--color-text-primary)]">{value}</div>
-      <div className="text-xs text-[var(--color-text-secondary)]">{label}</div>
+    <div className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] px-3 py-2">
+      <div className="text-xs font-semibold text-[var(--color-text-primary)]">{value}</div>
+      <div className="text-xs text-[var(--color-text-tertiary)]">{label}</div>
     </div>
   )
 }

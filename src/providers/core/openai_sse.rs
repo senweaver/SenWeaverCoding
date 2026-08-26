@@ -128,78 +128,256 @@ impl StreamUsageInfo {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
+pub struct StreamAssistantMessage {
+    #[serde(default)]
+    pub content: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub reasoning_content: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub reasoning: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub thinking: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub thinking_content: Option<serde_json::Value>,
+}
+
+impl StreamAssistantMessage {
+    fn reasoning_text(&self) -> Option<String> {
+        let mut buf = String::new();
+        let (_, from_content) = self
+            .content
+            .as_ref()
+            .map(split_content_value)
+            .unwrap_or_default();
+        buf.push_str(&from_content);
+        if let Some(text) = first_reasoning_text([
+            &self.reasoning_content,
+            &self.reasoning,
+            &self.thinking,
+            &self.thinking_content,
+        ]) {
+            buf.push_str(&text);
+        }
+        nonempty_text(buf)
+    }
+}
+
+#[derive(Debug, Deserialize, Default)]
 pub struct StreamChoice {
     #[serde(default)]
     pub delta: StreamDelta,
 
     #[serde(default)]
+    pub message: Option<StreamAssistantMessage>,
+
+    #[serde(default)]
     pub finish_reason: Option<String>,
+
+    #[serde(default)]
+    pub reasoning_content: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub reasoning: Option<serde_json::Value>,
+}
+
+impl StreamChoice {
+    fn choice_reasoning_text(&self) -> Option<String> {
+        first_reasoning_text([&self.reasoning_content, &self.reasoning])
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
 pub struct StreamDelta {
     #[serde(default)]
-    pub content: Option<String>,
-
-    #[serde(
-        default,
-        alias = "reasoning",
-        alias = "thinking",
-        alias = "thinking_content",
-        alias = "chain_of_thought",
-        deserialize_with = "deserialize_reasoning_content"
-    )]
-    pub reasoning_content: Option<String>,
+    pub content: Option<serde_json::Value>,
 
     #[serde(default)]
-    pub tool_calls: Option<Vec<StreamToolCallDelta>>,
+    pub reasoning_content: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub reasoning: Option<serde_json::Value>,
+
+    #[serde(default, rename = "chain_of_thought")]
+    pub chain_of_thought: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub reasoning_details: Option<serde_json::Value>,
+
+    #[serde(default, alias = "reasoning_text", alias = "thought")]
+    pub thinking: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub thinking_content: Option<serde_json::Value>,
+
+    #[serde(default)]
+    pub tool_calls: Option<serde_json::Value>,
 }
 
-fn deserialize_reasoning_content<'de, D>(de: D) -> std::result::Result<Option<String>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    use serde::Deserialize;
-    let value = serde_json::Value::deserialize(de)?;
-    match value {
-        serde_json::Value::Null => Ok(None),
-        serde_json::Value::String(text) => Ok(Some(text)),
-        serde_json::Value::Object(map) => {
-            for key in [
-                "text",
-                "content",
-                "thinking",
-                "reasoning",
-                "reasoning_content",
-            ] {
-                if let Some(text) = map.get(key).and_then(|v| v.as_str()) {
-                    if !text.is_empty() {
-                        return Ok(Some(text.to_string()));
-                    }
+impl StreamDelta {
+    pub fn visible_and_reasoning(&self) -> (Option<String>, Option<String>) {
+        let (visible, from_content) = self
+            .content
+            .as_ref()
+            .map(split_content_value)
+            .unwrap_or_default();
+        let mut reasoning = from_content;
+        if let Some(text) = first_reasoning_text([
+            &self.reasoning_content,
+            &self.reasoning,
+            &self.thinking,
+            &self.thinking_content,
+            &self.chain_of_thought,
+            &self.reasoning_details,
+        ]) {
+            reasoning.push_str(&text);
+        }
+        (nonempty_text(visible), nonempty_text(reasoning))
+    }
+
+    pub fn content_text(&self) -> Option<String> {
+        self.visible_and_reasoning().0
+    }
+
+    pub fn reasoning_text(&self) -> Option<String> {
+        self.visible_and_reasoning().1
+    }
+
+    pub fn tool_call_deltas(&self) -> Vec<StreamToolCallDelta> {
+        let Some(value) = &self.tool_calls else {
+            return Vec::new();
+        };
+        match value {
+            serde_json::Value::Array(items) => items
+                .iter()
+                .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                .collect(),
+            other => serde_json::from_value(other.clone())
+                .ok()
+                .into_iter()
+                .collect(),
+        }
+    }
+}
+
+fn nonempty_text(text: String) -> Option<String> {
+    if text.is_empty() {
+        None
+    } else {
+        Some(text)
+    }
+}
+
+fn is_reasoning_part_type(kind: &str) -> bool {
+    let kind = kind.to_ascii_lowercase();
+    kind.contains("think") || kind.contains("reason") || kind.contains("thought")
+}
+
+fn object_part_text(map: &serde_json::Map<String, serde_json::Value>) -> String {
+    for key in ["text", "content", "summary", "thinking", "reasoning", "reasoning_content"] {
+        if let Some(value) = map.get(key) {
+            if value.is_object() || value.is_array() {
+                let (visible, reasoning) = split_content_value(value);
+                let mut buf = visible;
+                buf.push_str(&reasoning);
+                if !buf.is_empty() {
+                    return buf;
+                }
+                continue;
+            }
+            if let Some(text) = value.as_str() {
+                if !text.is_empty() {
+                    return text.to_string();
                 }
             }
-            Ok(None)
         }
+    }
+    String::new()
+}
+
+pub(crate) fn split_content_value(value: &serde_json::Value) -> (String, String) {
+    match value {
+        serde_json::Value::Null => (String::new(), String::new()),
+        serde_json::Value::String(text) => (text.clone(), String::new()),
         serde_json::Value::Array(items) => {
-            let mut buf = String::new();
+            let mut visible = String::new();
+            let mut reasoning = String::new();
             for item in items {
-                if let Some(s) = item.as_str() {
-                    buf.push_str(s);
-                    continue;
-                }
-                if let Some(map) = item.as_object() {
-                    for key in ["text", "content", "thinking", "reasoning"] {
-                        if let Some(text) = map.get(key).and_then(|v| v.as_str()) {
-                            buf.push_str(text);
-                            break;
+                match item {
+                    serde_json::Value::String(text) => visible.push_str(text),
+                    serde_json::Value::Object(map) => {
+                        let kind = map
+                            .get("type")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("");
+                        let text = object_part_text(map);
+                        if is_reasoning_part_type(kind) {
+                            reasoning.push_str(&text);
+                        } else {
+                            visible.push_str(&text);
                         }
                     }
+                    serde_json::Value::Array(_) => {
+                        let (v, r) = split_content_value(item);
+                        visible.push_str(&v);
+                        reasoning.push_str(&r);
+                    }
+                    _ => {}
                 }
             }
-            if buf.is_empty() { Ok(None) } else { Ok(Some(buf)) }
+            (visible, reasoning)
         }
-        _ => Ok(None),
+        serde_json::Value::Object(map) => {
+            let kind = map
+                .get("type")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let text = object_part_text(map);
+            if is_reasoning_part_type(kind) {
+                (String::new(), text)
+            } else {
+                (text, String::new())
+            }
+        }
+        _ => (String::new(), String::new()),
+    }
+}
+
+pub(crate) fn value_to_plain_text(value: &serde_json::Value) -> Option<String> {
+    let (visible, reasoning) = split_content_value(value);
+    let mut buf = visible;
+    buf.push_str(&reasoning);
+    nonempty_text(buf)
+}
+
+fn first_reasoning_text<'a, const N: usize>(
+    values: [&'a Option<serde_json::Value>; N],
+) -> Option<String> {
+    for value in values {
+        if let Some(text) = reasoning_value_to_string(value.as_ref()) {
+            if !text.is_empty() {
+                return Some(text);
+            }
+        }
+    }
+    None
+}
+
+fn reasoning_value_to_string(value: Option<&serde_json::Value>) -> Option<String> {
+    let value = value?;
+    match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => nonempty_text(text.clone()),
+        other => {
+            let (visible, reasoning) = split_content_value(other);
+            let mut buf = visible;
+            buf.push_str(&reasoning);
+            nonempty_text(buf)
+        }
     }
 }
 
@@ -339,9 +517,89 @@ pub fn parse_sse_chunk(line: &str) -> StreamResult<Option<StreamChunkResponse>> 
         return Ok(None);
     }
 
-    serde_json::from_str(data)
-        .map(Some)
-        .map_err(StreamError::Json)
+    match serde_json::from_str::<StreamChunkResponse>(data) {
+        Ok(value) => Ok(Some(value)),
+        Err(err) => {
+            if let Ok(root) = serde_json::from_str::<serde_json::Value>(data) {
+                if let Some(salvaged) = salvage_stream_chunk(&root) {
+                    return Ok(Some(salvaged));
+                }
+            }
+            Err(StreamError::Json(err))
+        }
+    }
+}
+
+fn salvage_choice_delta(delta: &serde_json::Value) -> StreamDelta {
+    if delta.is_string() {
+        return StreamDelta {
+            content: Some(delta.clone()),
+            ..StreamDelta::default()
+        };
+    }
+    serde_json::from_value(delta.clone()).unwrap_or_else(|_| {
+        let mut fallback = StreamDelta::default();
+        if let Some(obj) = delta.as_object() {
+            fallback.content = obj.get("content").cloned();
+            fallback.reasoning_content = obj.get("reasoning_content").cloned();
+            fallback.reasoning = obj.get("reasoning").cloned();
+            fallback.thinking = obj.get("thinking").cloned();
+            fallback.thinking_content = obj.get("thinking_content").cloned();
+            fallback.chain_of_thought = obj
+                .get("chain_of_thought")
+                .cloned()
+                .or_else(|| obj.get("reasoning_details").cloned());
+            fallback.reasoning_details = obj.get("reasoning_details").cloned();
+            fallback.tool_calls = obj.get("tool_calls").cloned();
+        }
+        fallback
+    })
+}
+
+fn salvage_stream_choice(item: &serde_json::Value) -> StreamChoice {
+    let delta = item
+        .get("delta")
+        .map(salvage_choice_delta)
+        .unwrap_or_default();
+    let message = item
+        .get("message")
+        .and_then(|m| serde_json::from_value(m.clone()).ok());
+    StreamChoice {
+        delta,
+        message,
+        finish_reason: item
+            .get("finish_reason")
+            .and_then(|v| v.as_str())
+            .map(str::to_string),
+        reasoning_content: item.get("reasoning_content").cloned(),
+        reasoning: item.get("reasoning").cloned(),
+    }
+}
+
+fn salvage_stream_chunk(root: &serde_json::Value) -> Option<StreamChunkResponse> {
+    if let Ok(parsed) = serde_json::from_value::<StreamChunkResponse>(root.clone()) {
+        return Some(parsed);
+    }
+    let mut choices = Vec::new();
+    if let Some(arr) = root.get("choices").and_then(|v| v.as_array()) {
+        choices.extend(arr.iter().map(salvage_stream_choice));
+    } else if root.get("delta").is_some() || root.get("content").is_some() {
+        choices.push(salvage_stream_choice(root));
+    }
+    let usage = root
+        .get("usage")
+        .cloned()
+        .and_then(|v| serde_json::from_value(v).ok());
+    let error = root.get("error").cloned();
+    if choices.is_empty() && usage.is_none() && error.as_ref().is_none_or(serde_json::Value::is_null)
+    {
+        return None;
+    }
+    Some(StreamChunkResponse {
+        choices,
+        usage,
+        error,
+    })
 }
 
 pub fn parse_sse_chunk_tolerant(line: &str) -> Option<StreamChunkResponse> {
@@ -396,18 +654,7 @@ pub fn parse_proxy_tool_event(line: &str) -> Option<StreamEvent> {
 }
 
 pub fn extract_sse_text_delta(choice: &StreamChoice) -> Option<String> {
-    if let Some(content) = &choice.delta.content {
-        if !content.is_empty() {
-            return Some(content.clone());
-        }
-    }
-
-    choice
-        .delta
-        .reasoning_content
-        .as_ref()
-        .filter(|value| !value.is_empty())
-        .cloned()
+    choice.delta.content_text()
 }
 
 pub fn sse_bytes_to_chunks(
@@ -626,12 +873,37 @@ pub fn sse_bytes_to_events(
 
                             let mut should_emit_tool_calls = false;
                             for choice in &chunk.choices {
+                                let (visible, mut reasoning_text) = choice.delta.visible_and_reasoning();
+                                if reasoning_text.is_none() {
+                                    reasoning_text = choice.choice_reasoning_text();
+                                }
+                                if reasoning_text.is_none() && !saw_reasoning_content {
+                                    reasoning_text = choice
+                                        .message
+                                        .as_ref()
+                                        .and_then(StreamAssistantMessage::reasoning_text);
+                                }
 
-                                if let Some(content) = &choice.delta.content {
+                                if let Some(reasoning) = reasoning_text {
+                                    if !reasoning.is_empty() {
+                                        made_progress = true;
+                                        saw_reasoning_content = true;
+                                        let reasoning_chunk = StreamChunk::reasoning(reasoning);
+                                        if tx
+                                            .send(Ok(StreamEvent::TextDelta(reasoning_chunk)))
+                                            .await
+                                            .is_err()
+                                        {
+                                            return;
+                                        }
+                                    }
+                                }
+
+                                if let Some(content) = visible {
                                     if !content.is_empty() {
                                         made_progress = true;
                                         saw_text_content = true;
-                                        let mut text_chunk = StreamChunk::delta(content.clone());
+                                        let mut text_chunk = StreamChunk::delta(content);
                                         if count_tokens {
                                             text_chunk = text_chunk.with_token_estimate();
                                         }
@@ -644,24 +916,10 @@ pub fn sse_bytes_to_events(
                                         }
                                     }
                                 }
-                                if let Some(reasoning) = &choice.delta.reasoning_content {
-                                    if !reasoning.is_empty() {
-                                        made_progress = true;
-                                        saw_reasoning_content = true;
-                                        let reasoning_chunk =
-                                            StreamChunk::reasoning(reasoning.clone());
-                                        if tx
-                                            .send(Ok(StreamEvent::TextDelta(reasoning_chunk)))
-                                            .await
-                                            .is_err()
-                                        {
-                                            return;
-                                        }
-                                    }
-                                }
 
-                                if let Some(deltas) = choice.delta.tool_calls.as_ref() {
-                                    for delta in deltas {
+                                let deltas = choice.delta.tool_call_deltas();
+                                if !deltas.is_empty() {
+                                    for delta in &deltas {
                                         let index = match delta.index {
                                             Some(i) => i,
                                             None => {
@@ -848,17 +1106,17 @@ pub fn sse_bytes_to_events(
 
 fn chunk_text_from_response(chunk: &StreamChunkResponse) -> Option<StreamChunk> {
     let choice = chunk.choices.first()?;
-    let content = choice
-        .delta
-        .content
-        .as_deref()
-        .filter(|c| !c.is_empty());
-    let reasoning = choice
-        .delta
-        .reasoning_content
-        .as_deref()
-        .filter(|r| !r.is_empty());
-    match (content, reasoning) {
+    let (content, mut reasoning) = choice.delta.visible_and_reasoning();
+    if reasoning.is_none() {
+        reasoning = choice.choice_reasoning_text();
+    }
+    if reasoning.is_none() {
+        reasoning = choice
+            .message
+            .as_ref()
+            .and_then(StreamAssistantMessage::reasoning_text);
+    }
+    match (content.as_deref(), reasoning.as_deref()) {
         (None, None) => None,
         (content, reasoning) => Some(StreamChunk {
             delta: content.unwrap_or("").to_string(),

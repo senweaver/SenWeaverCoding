@@ -2,12 +2,13 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState, useRef, useEffect, useCallback } from 'react'
+import { useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
+import { useAnchoredDropdown } from '../../hooks/useAnchoredDropdown'
 import type { CodingModeId } from '../../types/codingMode'
 import {
   isVisibleCodingMode,
@@ -17,7 +18,6 @@ import {
 import type { TranslationKey } from '../../i18n'
 
 type Props = {
-
   value?: CodingModeId
   onChange?: (mode: CodingModeId) => void
 }
@@ -71,14 +71,11 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
     activeTabId ? s.sessionAutoResolvedMode[activeTabId] : undefined,
   )
   const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-  const triggerRef = useRef<HTMLButtonElement>(null)
-  const menuRef = useRef<HTMLDivElement>(null)
-  const [dropdownPos, setDropdownPos] = useState<{
-    top: number
-    left: number
-    direction: 'up' | 'down'
-  } | null>(null)
+  const { triggerRef, menuRef, style, portalTarget } = useAnchoredDropdown<HTMLButtonElement>(
+    open,
+    () => setOpen(false),
+    { estimatedHeight: 420 },
+  )
 
   const isControlled = value !== undefined
   const currentMode: CodingModeId = isControlled
@@ -119,50 +116,6 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
       : undefined
   const currentLabel = resolvedLabel ? `${baseLabel} → ${resolvedLabel}` : baseLabel
 
-  const updateDropdownPos = useCallback(() => {
-    if (!triggerRef.current) return
-    const rect = triggerRef.current.getBoundingClientRect()
-    const DROPDOWN_HEIGHT = 480
-    const spaceAbove = rect.top
-    const spaceBelow = window.innerHeight - rect.bottom
-    const direction = spaceBelow >= DROPDOWN_HEIGHT || spaceBelow >= spaceAbove ? 'down' : 'up'
-    setDropdownPos({
-      top: direction === 'down' ? rect.bottom + 4 : rect.top - 4,
-      left: rect.left,
-      direction,
-    })
-  }, [])
-
-  useEffect(() => {
-    if (!open) return
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as Node
-      if (ref.current?.contains(target)) return
-      if (menuRef.current?.contains(target)) return
-      setOpen(false)
-    }
-    const handleEsc = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', handleClick)
-    document.addEventListener('keydown', handleEsc)
-    return () => {
-      document.removeEventListener('mousedown', handleClick)
-      document.removeEventListener('keydown', handleEsc)
-    }
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    updateDropdownPos()
-    window.addEventListener('scroll', updateDropdownPos, true)
-    window.addEventListener('resize', updateDropdownPos)
-    return () => {
-      window.removeEventListener('scroll', updateDropdownPos, true)
-      window.removeEventListener('resize', updateDropdownPos)
-    }
-  }, [open, updateDropdownPos])
-
   async function applyMode(modeId: CodingModeId) {
     if (isControlled) {
       onChange?.(modeId)
@@ -182,14 +135,14 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
 
   const accentTokens = CODING_MODE_ACCENT[currentMode]
   const triggerClass = accentTokens
-    ? 'flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium transition-colors hover:brightness-95'
-    : 'flex items-center gap-1 rounded-full bg-[var(--color-surface-container-low)] px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]'
+    ? 'flex items-center gap-1 rounded-full px-2 py-0.5 text-xs font-medium transition-colors hover:brightness-95'
+    : 'flex items-center gap-1 rounded-full bg-[var(--color-surface-container-low)] px-2 py-0.5 text-xs font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)]'
   const triggerStyle = accentTokens
     ? { backgroundColor: accentTokens.container, color: accentTokens.onContainer }
     : undefined
 
   return (
-    <div ref={ref} className="relative">
+    <div className="relative">
       <button
         ref={triggerRef}
         onClick={() => setOpen(!open)}
@@ -201,22 +154,15 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
           {MODE_BADGE_GLYPH[currentMode] ?? 'tune'}
         </span>
         <span>{currentLabel}</span>
-        <span className="material-symbols-outlined text-[11px]">expand_more</span>
+        <span className="material-symbols-outlined text-[12px]">expand_more</span>
       </button>
 
-      {open && dropdownPos && createPortal(
+      {open && style && createPortal(
         <div
           ref={menuRef}
           role="menu"
-          className="w-[220px] max-h-[480px] overflow-y-auto rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-border)] shadow-[var(--shadow-dropdown)] py-2"
-          style={{
-            position: 'fixed',
-            left: dropdownPos.left,
-            ...(dropdownPos.direction === 'down'
-              ? { top: dropdownPos.top }
-              : { bottom: window.innerHeight - dropdownPos.top }),
-            zIndex: 9999,
-          }}
+          className="w-[280px] rounded-xl bg-[var(--color-surface-container-lowest)] border border-[var(--color-border)] shadow-[var(--shadow-dropdown)] py-2"
+          style={style}
         >
           <div className="px-3 py-1.5 text-[10px] font-bold uppercase tracking-widest text-[var(--color-outline)]">
             {t('codingMode.title')}
@@ -243,23 +189,23 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
                 `}
               >
                 <span
-                  className={`material-symbols-outlined text-[18px] mt-0.5 shrink-0 ${iconColorClass}`}
+                  className={`material-symbols-outlined text-[16px] mt-0.5 shrink-0 ${iconColorClass}`}
                   style={itemAccent ? { color: itemAccent.accent } : undefined}
                 >
                   {MODE_BADGE_GLYPH[item.id] ?? 'tune'}
                 </span>
                 <div className="flex-1 min-w-0">
-                  <div className="text-sm font-semibold text-[var(--color-text-primary)] flex items-center gap-1.5">
+                  <div className="text-xs font-semibold text-[var(--color-text-primary)] flex items-center gap-1.5">
                     <span className="truncate" title={item.label}>
                       {item.label}
                     </span>
                     {autonomous && (
-                      <span className="shrink-0 text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/12 text-[var(--color-error)]">
+                      <span className="shrink-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[var(--color-error)]/12 text-[var(--color-error)]">
                         {t('codingMode.tag.autonomous')}
                       </span>
                     )}
                     {readOnly && (
-                      <span className="shrink-0 text-[9px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
+                      <span className="shrink-0 text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded-full bg-[var(--color-surface-container)] text-[var(--color-text-tertiary)]">
                         {t('codingMode.tag.readOnly')}
                       </span>
                     )}
@@ -283,7 +229,7 @@ export function CodingModeSelector({ value, onChange }: Props = {}) {
             )
           })}
         </div>,
-        document.body,
+        portalTarget,
       )}
 
     </div>

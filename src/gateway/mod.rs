@@ -1752,7 +1752,46 @@ async fn run_gateway_inner(
         .route(
             "/api/computer/recordings/{name}/rename",
             post(computer::record::handle_rename_recording),
-        );
+        )
+        .route(
+            "/ws/computer-analyze/{rec_id}",
+            get(computer::analyze::handle_ws_analyze),
+        )
+        .route(
+            "/ws/computer-build/{rec_id}",
+            get(computer::build_ws::handle_ws_build),
+        )
+        .route(
+            "/api/computer/recordings/{name}/analysis",
+            get(computer::analyze::handle_get_analysis)
+                .put(computer::analyze::handle_put_analysis),
+        )
+        .route(
+            "/api/computer/recordings/{name}/sensitive-report",
+            get(computer::analyze::handle_get_sensitive_report),
+        )
+        .route(
+            "/api/computer/recordings/{name}/audio",
+            post(computer::misc::handle_upload_audio)
+                .layer(RequestBodyLimitLayer::new(32 * 1024 * 1024)),
+        )
+        .route(
+            "/api/computer/recordings/{name}/transcribe",
+            post(computer::misc::handle_transcribe),
+        )
+        .route(
+            "/api/computer/recordings/{name}/export-debug",
+            post(computer::misc::handle_export_debug),
+        )
+        .route(
+            "/api/computer/privacy",
+            get(computer::misc::handle_get_privacy).put(computer::misc::handle_put_privacy),
+        )
+        .route(
+            "/api/computer/build-targets",
+            get(computer::misc::handle_build_targets),
+        )
+        .route("/api/computer/doctor", get(computer::misc::handle_doctor));
 
     #[cfg(feature = "lan-comms")]
     let lan_router: Router<AppState> = Router::new()

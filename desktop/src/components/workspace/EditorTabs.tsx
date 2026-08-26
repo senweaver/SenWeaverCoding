@@ -293,7 +293,7 @@ export function EditorTabs() {
                 aria-label={t('files.tab.aiBadge')}
                 title={t('files.tab.aiBadge')}
                 style={{ opacity: aiOpacity, transition: 'opacity 250ms linear' }}
-                className="flex h-4 min-w-[16px] items-center justify-center rounded-sm bg-[var(--color-warning)]/85 px-1 text-[10px] font-bold leading-none text-white"
+                className="flex h-4 min-w-[16px] items-center justify-center rounded-sm bg-[var(--color-warning)]/85 px-1 text-[10px] font-bold leading-none text-[var(--color-on-warning)]"
               >
                 M
               </span>

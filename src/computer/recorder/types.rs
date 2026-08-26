@@ -97,7 +97,7 @@ pub struct RecordingManifest {
     pub run_config: Option<RunConfig>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct RecordingSummary {
     pub name: String,
     pub task: String,
@@ -105,6 +105,24 @@ pub struct RecordingSummary {
     pub step_count: usize,
     pub has_skill: bool,
     pub has_trace: bool,
+    #[serde(default)]
+    pub processed: bool,
+    #[serde(default)]
+    pub has_narration: bool,
+    #[serde(default)]
+    pub has_audio: bool,
+    #[serde(default)]
+    pub has_analysis: bool,
+    #[serde(default)]
+    pub has_automation: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub duration_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub event_count: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub size_bytes: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub analysis: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

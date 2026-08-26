@@ -157,9 +157,11 @@ export function WorkerSession({ workerId }: Props) {
       </div>
 
       {hydrated ? (
-        <SectionErrorBoundary label="MessageList" resetKeys={[workerId]}>
-          <MessageList sessionId={workerId} />
-        </SectionErrorBoundary>
+        <div className="relative flex flex-1 min-h-0 flex-col">
+          <SectionErrorBoundary label="MessageList" resetKeys={[workerId]}>
+            <MessageList sessionId={workerId} />
+          </SectionErrorBoundary>
+        </div>
       ) : (
         <div className="flex flex-1 items-center justify-center text-[var(--color-text-tertiary)] text-sm">
           {t('common.loading') || 'Loading...'}

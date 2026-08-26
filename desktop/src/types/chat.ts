@@ -98,7 +98,7 @@ type ServerMessagePayload =
     }
   | { type: 'message_complete'; usage: TokenUsage }
   | { type: 'thinking'; text: string }
-  | { type: 'status'; state: ChatState; verb?: string; elapsed?: number; tokens?: number }
+  | { type: 'status'; state: ChatState; verb?: string; elapsed?: number; tokens?: number; detail?: string }
   | { type: 'error'; message: string; code: string; detail?: string; retryable?: boolean }
   | {
       type: 'provider_retry'

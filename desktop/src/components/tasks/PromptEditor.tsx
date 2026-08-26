@@ -48,17 +48,17 @@ export function PromptEditor({
 }: Props) {
   const t = useTranslation()
   return (
-    <div className="rounded-[var(--radius-lg)] border border-[var(--color-border)] focus-within:border-[var(--color-border-focus)] transition-colors overflow-visible">
+    <div className="overflow-visible rounded-xl border border-[var(--color-border)] transition-colors focus-within:border-[var(--color-border-focus)]">
       <textarea
         value={value}
         onChange={(e) => onChange(e.target.value)}
         placeholder={placeholder}
         rows={4}
-        className="w-full resize-y bg-transparent px-3 py-2.5 text-sm leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
+        className="w-full resize-y bg-transparent px-3 py-2.5 text-xs leading-relaxed text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)]"
         style={{ minHeight: 120 }}
       />
 
-      <div className="border-t border-[var(--color-border)]/40 px-3 py-2 flex flex-col gap-2 bg-[var(--color-surface-container-low)] rounded-b-[var(--radius-lg)]">
+      <div className="flex flex-col gap-2 rounded-b-xl border-t border-[var(--color-border)]/40 bg-[var(--color-surface-container-low)] px-3 py-2">
         <div className="flex flex-wrap items-center gap-2 justify-between">
           <div className="flex flex-wrap items-center gap-2 min-w-0">
             <CodingModeSelector value={codingMode} onChange={onCodingModeChange} />
@@ -72,7 +72,7 @@ export function PromptEditor({
         </div>
 
         {permissionMode === 'bypassPermissions' && (
-          <div className="flex items-center gap-1.5 px-2 py-1.5 rounded-md bg-[var(--color-error)]/8 text-[10px] text-[var(--color-error)]">
+          <div className="flex items-center gap-1.5 rounded-lg bg-[var(--color-error)]/8 px-2 py-1.5 text-xs text-[var(--color-error)]">
             <span className="material-symbols-outlined text-[12px]">warning</span>
             {t('promptEditor.bypassWarning')}{folderPath ? ` ${t('promptEditor.within')} ${folderPath}` : ` ${t('promptEditor.selectFolder')}`}.
           </div>

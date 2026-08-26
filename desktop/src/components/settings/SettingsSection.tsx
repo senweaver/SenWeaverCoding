@@ -18,7 +18,7 @@ export function SettingsSection({
   footer?: ReactNode
 }) {
   return (
-    <section className="rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)] overflow-hidden">
+    <section className="shrink-0 overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface)]">
       <div className="px-3 py-2 border-b border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
         <h2 className="text-xs font-semibold text-[var(--color-text-primary)]">{title}</h2>
         {description && (

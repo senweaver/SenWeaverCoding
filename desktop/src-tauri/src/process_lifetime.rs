@@ -146,6 +146,103 @@ pub fn install_kill_on_close_job() {
     platform::install_kill_on_close_job();
 }
 
+#[cfg(target_os = "windows")]
+mod singleton {
+    use std::sync::OnceLock;
+
+    use windows::core::w;
+    use windows::Win32::Foundation::{
+        CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_ABANDONED,
+        WAIT_OBJECT_0, WIN32_ERROR,
+    };
+    use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+
+    struct MutexOwner(HANDLE);
+
+    unsafe impl Send for MutexOwner {}
+    unsafe impl Sync for MutexOwner {}
+
+    impl Drop for MutexOwner {
+        fn drop(&mut self) {
+            unsafe {
+                let _ = CloseHandle(self.0);
+            }
+        }
+    }
+
+    static MUTEX: OnceLock<MutexOwner> = OnceLock::new();
+
+    pub fn claim_or_exit() {
+        unsafe {
+            SetLastError(WIN32_ERROR(0));
+            let handle = match CreateMutexW(None, true, w!("Local\\com.senweaver.desktop.runtime")) {
+                Ok(h) if !h.is_invalid() => h,
+                _ => return,
+            };
+            if GetLastError() == ERROR_ALREADY_EXISTS {
+                tracing::info!(
+                    "[sen-desktop] another desktop process still holds the runtime lock; waiting to take over"
+                );
+                let wait = WaitForSingleObject(handle, 12_000);
+                if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
+                    tracing::warn!(
+                        "[sen-desktop] another desktop process is still running; exiting this duplicate instance"
+                    );
+                    let _ = CloseHandle(handle);
+                    std::process::exit(0);
+                }
+            }
+            let _ = MUTEX.set(MutexOwner(handle));
+        }
+    }
+}
+
+#[cfg(unix)]
+mod singleton {
+    use std::fs::OpenOptions;
+    use std::os::unix::io::AsRawFd;
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    static LOCK_FILE: OnceLock<std::fs::File> = OnceLock::new();
+
+    pub fn claim_or_exit() {
+        let path = std::env::temp_dir().join("com.senweaver.desktop.runtime.lock");
+        let file = match OpenOptions::new().create(true).read(true).write(true).open(&path) {
+            Ok(f) => f,
+            Err(err) => {
+                tracing::warn!("[sen-desktop] could not open runtime lock file ({err}); continuing without singleton lock");
+                return;
+            }
+        };
+        let fd = file.as_raw_fd();
+        let deadline = Instant::now() + Duration::from_secs(12);
+        loop {
+            let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
+            if rc == 0 {
+                let _ = LOCK_FILE.set(file);
+                return;
+            }
+            if Instant::now() >= deadline {
+                tracing::warn!(
+                    "[sen-desktop] another desktop process is still running; exiting this duplicate instance"
+                );
+                std::process::exit(0);
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+    }
+}
+
+#[cfg(not(any(target_os = "windows", unix)))]
+mod singleton {
+    pub fn claim_or_exit() {}
+}
+
+pub fn claim_singleton_or_exit() {
+    singleton::claim_or_exit();
+}
+
 static SHUTDOWN_LATCH: AtomicBool = AtomicBool::new(false);
 
 pub fn is_shutting_down() -> bool {

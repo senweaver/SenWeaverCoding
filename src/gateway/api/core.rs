@@ -2926,7 +2926,8 @@ fn reject_if_session_running(state: &AppState, id: &str) -> Option<axum::respons
             (
                 StatusCode::CONFLICT,
                 Json(serde_json::json!({
-                    "error": "Cannot modify workspace files while the session is generating; stop the turn first"
+                    "error": "Cannot modify workspace files while the session is generating; stop the turn first",
+                    "code": "SESSION_BUSY"
                 })),
             )
                 .into_response(),
@@ -3906,9 +3907,6 @@ pub async fn handle_api_session_edit_review_apply_hunks(
         return resp;
     }
     let _rewind_guard = acquire_rewind_lock(&id).await;
-    if let Some(resp) = reject_if_session_running(&state, &id) {
-        return resp;
-    }
 
     let session_key = format!("{GW_SESSION_PREFIX}{id}");
     let abs_for_guard =

@@ -62,6 +62,8 @@ pub static MODEL_CONTEXT_WINDOWS: LazyLock<HashMap<&'static str, u32>> = LazyLoc
     m.insert("deepseek-reasoner", 64_000);
     m.insert("deepseek-v3", 128_000);
     m.insert("deepseek-v3.1", 128_000);
+    m.insert("deepseek-v4-pro", 1_000_000);
+    m.insert("deepseek-v4-flash", 1_000_000);
     m.insert("moonshot-v1-8k", 8_192);
     m.insert("moonshot-v1-32k", 32_768);
     m.insert("moonshot-v1-128k", 128_000);
@@ -103,12 +105,28 @@ pub fn context_window_for_model(model: &str) -> u32 {
     DEFAULT_CONTEXT_WINDOW
 }
 
+#[must_use]
+pub fn thinking_context_cap_for_model(model: &str) -> Option<u32> {
+    let id = model
+        .rsplit('/')
+        .next()
+        .unwrap_or(model)
+        .to_ascii_lowercase();
+    if id.contains("deepseek-v4") {
+        return Some(131_072);
+    }
+    None
+}
+
 fn infer_context_window_from_id(id: &str) -> Option<u32> {
     if id.starts_with("gpt-4.1") {
         return Some(1_047_576);
     }
     if id.starts_with("gpt-5") {
         return Some(272_000);
+    }
+    if id.contains("deepseek-v4") {
+        return Some(1_000_000);
     }
     if id.contains("gemini-1.5-pro") {
         return Some(2_000_000);

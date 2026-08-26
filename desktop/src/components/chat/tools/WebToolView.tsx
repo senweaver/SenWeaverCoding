@@ -5,6 +5,7 @@
 import type { ToolViewProps } from './ToolViewProps'
 import { CodeViewer } from '../CodeViewer'
 import {
+  extractAction,
   extractQuery,
   extractTextContent,
   extractUrl,
@@ -12,14 +13,17 @@ import {
   urlHost,
 } from '../../../utils/toolFormatters'
 
-export function WebHeader({ input }: ToolViewProps) {
+export function WebHeader({ input, toolName }: ToolViewProps) {
   const url = extractUrl(input)
   const query = extractQuery(input)
-  const label = url ? urlHost(url) || url : query || '(web)'
+  const action = extractAction(input)
+  const host = url ? urlHost(url) : ''
+  const label = host || url || query || action || toolName || 'web'
+  const title = url || query || action || toolName
   return (
     <span
       className="min-w-0 flex-1 truncate font-[var(--font-mono)] text-[12px] text-[var(--color-text-primary)]"
-      title={url || query}
+      title={title}
     >
       {truncate(label, 80)}
     </span>

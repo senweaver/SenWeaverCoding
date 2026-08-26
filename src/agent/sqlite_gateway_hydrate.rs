@@ -36,6 +36,9 @@ fn merge_desktop_assistant_array(blocks: &[Value]) -> Option<ConversationMessage
                 if let Some(ts) = b.get("thinking").and_then(Value::as_str) {
                     reasoning.push_str(ts);
                     reasoning.push('\n');
+                } else if let Some(ts) = b.get("text").and_then(Value::as_str) {
+                    reasoning.push_str(ts);
+                    reasoning.push('\n');
                 }
             }
             "text" => {

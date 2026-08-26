@@ -636,6 +636,12 @@ export function AppShell() {
                 break
               }
               rec.setTask(p.task ?? '')
+              if (typeof p.narrationEnabled === 'boolean') {
+                rec.setNarrationEnabled(p.narrationEnabled)
+              }
+              if (typeof p.narrationLanguage === 'string' && p.narrationLanguage) {
+                rec.setNarrationLanguage(p.narrationLanguage)
+              }
               rec.startRecording()
               break
             }
@@ -651,6 +657,28 @@ export function AppShell() {
             case 'reset':
               rec.reset()
               break
+            case 'toggle-mute':
+              rec.toggleNarrationMuted()
+              break
+          }
+        }),
+      )
+      register(
+        await listen('minimal://recorder-hotkey', () => {
+          const rec = useComputerRecorderStore.getState()
+          const cu = useComputerUseStore.getState()
+          if (
+            cu.status === 'running' ||
+            cu.status === 'thinking' ||
+            cu.status === 'connecting' ||
+            cu.status === 'call_user'
+          ) {
+            return
+          }
+          if (rec.status === 'recording') {
+            rec.stopRecording()
+          } else {
+            rec.startRecording()
           }
         }),
       )

@@ -21,7 +21,7 @@ fn default_enabled() -> bool {
     true
 }
 fn default_threshold_ratio() -> f64 {
-    0.85
+    0.90
 }
 fn default_protect_first_n() -> usize {
     3
@@ -33,10 +33,10 @@ fn default_max_passes() -> u32 {
     3
 }
 fn default_summary_max_chars() -> usize {
-    4_000
+    6_000
 }
 fn default_source_max_chars() -> usize {
-    50_000
+    80_000
 }
 fn default_timeout_secs() -> u64 {
     60
@@ -102,6 +102,112 @@ pub struct CompressionResult {
     pub tokens_before: usize,
     pub tokens_after: usize,
     pub passes_used: u32,
+    pub duration_ms: u64,
+    pub summarized: bool,
+}
+
+pub const REFERENCE_RATIO: f64 = 0.70;
+pub const SUMMARIZE_RATIO: f64 = 0.90;
+pub const EMERGENCY_RATIO: f64 = 0.80;
+pub const COMPACTION_WALL_BUDGET_SECS: u64 = 10;
+
+fn ratio_limit(context_window: usize, ratio: f64) -> usize {
+    let ratio = if ratio.is_finite() && ratio > 0.0 {
+        ratio
+    } else {
+        SUMMARIZE_RATIO
+    };
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        (context_window as f64 * ratio) as usize
+    }
+}
+
+pub fn payload_soft_limit(context_window: usize) -> usize {
+    ratio_limit(context_window, REFERENCE_RATIO)
+}
+
+pub fn payload_hard_limit(context_window: usize) -> usize {
+    payload_hard_limit_for_config(context_window, SUMMARIZE_RATIO)
+}
+
+pub fn payload_hard_limit_for_config(context_window: usize, threshold_ratio: f64) -> usize {
+    let ratio = if threshold_ratio.is_finite() && threshold_ratio > SUMMARIZE_RATIO {
+        threshold_ratio
+    } else {
+        SUMMARIZE_RATIO
+    };
+    ratio_limit(context_window, ratio)
+}
+
+pub fn payload_tokens(history_tokens: usize, tools_overhead_tokens: usize) -> usize {
+    history_tokens.saturating_add(tools_overhead_tokens)
+}
+
+pub fn history_token_threshold(
+    context_window: usize,
+    threshold_ratio: f64,
+    tools_overhead_tokens: usize,
+) -> usize {
+    payload_hard_limit_for_config(context_window, threshold_ratio)
+        .saturating_sub(tools_overhead_tokens)
+}
+
+pub fn estimate_compressible_tokens(
+    history: &[ChatMessage],
+    config: &ContextCompressionConfig,
+    preserved_indices: &[usize],
+    model: &str,
+) -> usize {
+    let n = history.len();
+    if n <= config.protect_first_n + config.protect_last_n {
+        return 0;
+    }
+    let start = align_boundary_forward(history, config.protect_first_n.min(n));
+    let end = align_boundary_backward(history, n.saturating_sub(config.protect_last_n));
+    if start >= end {
+        return 0;
+    }
+    let raw: usize = history[start..end]
+        .iter()
+        .enumerate()
+        .filter(|(offset, _)| !preserved_indices.contains(&(start + offset)))
+        .map(|(_, m)| crate::providers::traits::estimate_message_tokens(m))
+        .sum();
+    let factor = crate::agent::token::budget::calibration_factor_for(model);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+        ((raw as f64 * 1.05) * factor).round() as usize
+    }
+}
+
+static SESSION_COMPRESSION_FLOORS: LazyLock<
+    std::sync::Mutex<std::collections::HashMap<String, usize>>,
+> = LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[must_use]
+pub fn session_compression_floor(session_id: &str) -> Option<usize> {
+    SESSION_COMPRESSION_FLOORS
+        .lock()
+        .ok()
+        .and_then(|floors| floors.get(session_id).copied())
+}
+
+pub fn set_session_compression_floor(session_id: &str, floor: Option<usize>) {
+    let Ok(mut floors) = SESSION_COMPRESSION_FLOORS.lock() else {
+        return;
+    };
+    match floor {
+        Some(value) => {
+            if floors.len() > 512 && !floors.contains_key(session_id) {
+                floors.clear();
+            }
+            floors.insert(session_id.to_string(), value);
+        }
+        None => {
+            floors.remove(session_id);
+        }
+    }
 }
 
 const PROBE_TIERS: &[usize] = &[
@@ -210,6 +316,7 @@ pub struct ContextCompressor {
     config: ContextCompressionConfig,
     context_window: usize,
     tool_overhead_tokens: usize,
+    emergency_mode: bool,
 }
 
 impl ContextCompressor {
@@ -218,6 +325,7 @@ impl ContextCompressor {
             config,
             context_window,
             tool_overhead_tokens: 0,
+            emergency_mode: false,
         }
     }
 
@@ -266,17 +374,18 @@ impl ContextCompressor {
         preserved_fn: Option<&PreservedIndexFn>,
         progress: Option<&CompressionProgressFn>,
     ) -> Result<CompressionResult> {
+        let tokens_before = estimate_tokens_for(history, model);
         if !self.config.enabled {
-            let tokens = estimate_tokens_for(history, model);
             return Ok(CompressionResult {
                 compressed: false,
-                tokens_before: tokens,
-                tokens_after: tokens,
+                tokens_before,
+                tokens_after: tokens_before,
                 passes_used: 0,
+                duration_ms: 0,
+                summarized: false,
             });
         }
 
-        let tokens_before = estimate_tokens_for(history, model);
         let system_tokens = estimate_tokens_filtered(history, true);
         let non_system_tokens = estimate_tokens_filtered(history, false);
         tracing::debug!(
@@ -285,43 +394,68 @@ impl ContextCompressor {
             non_system_tokens,
             "context compression token breakdown"
         );
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let threshold = ((self.context_window as f64 * self.config.threshold_ratio) as usize)
-            .saturating_sub(self.tool_overhead_tokens);
-
-        if tokens_before <= threshold {
+        let soft = payload_soft_limit(self.context_window);
+        let hard = if self.emergency_mode {
+            ratio_limit(self.context_window, EMERGENCY_RATIO)
+        } else {
+            payload_hard_limit_for_config(self.context_window, self.config.threshold_ratio)
+        };
+        let payload_before = payload_tokens(tokens_before, self.tool_overhead_tokens);
+        let skip_under = if self.emergency_mode { hard } else { soft };
+        if payload_before <= skip_under {
             return Ok(CompressionResult {
                 compressed: false,
                 tokens_before,
                 tokens_after: tokens_before,
                 passes_used: 0,
+                duration_ms: 0,
+                summarized: false,
             });
         }
 
         let started_at = std::time::Instant::now();
+        let history_soft = soft.saturating_sub(self.tool_overhead_tokens);
+        let history_hard = hard.saturating_sub(self.tool_overhead_tokens);
 
-        {
-            let preserved: Vec<usize> = preserved_fn.map(|f| f(history)).unwrap_or_default();
-            let evicted = self.microcompact_tool_outputs(history, model, threshold, &preserved);
-            if evicted > 0 {
-                let tokens_now = estimate_tokens_for(history, model);
-                tracing::info!(
-                    target: "agent.context.compress",
-                    evicted,
-                    tokens_before,
-                    tokens_now,
-                    threshold,
-                    "microcompact evicted stale tool outputs before summarization"
-                );
-                if tokens_now <= threshold {
-                    return Ok(CompressionResult {
-                        compressed: true,
-                        tokens_before,
-                        tokens_after: tokens_now,
-                        passes_used: 0,
-                    });
-                }
-            }
+        let stale_preserved: Vec<usize> = if self.emergency_mode {
+            Vec::new()
+        } else {
+            preserved_fn.map(|f| f(history)).unwrap_or_default()
+        };
+        let mut evicted =
+            self.microcompact_tool_outputs(history, model, history_soft, &stale_preserved);
+        let mut tokens_now = estimate_tokens_for(history, model);
+        let mut payload_now = payload_tokens(tokens_now, self.tool_overhead_tokens);
+        if payload_now > hard {
+            evicted += self.microcompact_tool_outputs(history, model, history_hard, &[]);
+            tokens_now = estimate_tokens_for(history, model);
+            payload_now = payload_tokens(tokens_now, self.tool_overhead_tokens);
+        }
+        if evicted > 0 {
+            tracing::info!(
+                target: "agent.context.compress",
+                evicted,
+                tokens_before,
+                tokens_now,
+                payload_now,
+                soft,
+                hard,
+                emergency = self.emergency_mode,
+                context_window = self.context_window,
+                tools_overhead = self.tool_overhead_tokens,
+                duration_ms = started_at.elapsed().as_millis() as u64,
+                "microcompact evicted stale tool outputs"
+            );
+        }
+        if payload_now <= hard {
+            return Ok(CompressionResult {
+                compressed: evicted > 0,
+                tokens_before,
+                tokens_after: tokens_now,
+                passes_used: 0,
+                duration_ms: started_at.elapsed().as_millis() as u64,
+                summarized: false,
+            });
         }
 
         let mut passes_used = 0;
@@ -331,24 +465,35 @@ impl ContextCompressor {
                     pass: (pass + 1) as usize,
                     max_passes: self.config.max_passes as usize,
                     tokens_current: estimate_tokens_for(history, model),
-                    tokens_target: threshold,
+                    tokens_target: history_hard,
                 });
             }
-            let preserved_indices: Vec<usize> =
-                preserved_fn.map(|f| f(history)).unwrap_or_default();
+            let before_pass = estimate_tokens_for(history, model);
+            let preserved_indices: Vec<usize> = if self.emergency_mode {
+                Vec::new()
+            } else {
+                preserved_fn.map(|f| f(history)).unwrap_or_default()
+            };
             let did_compress = self
                 .compress_once_with_preserved(history, provider, model, &preserved_indices)
                 .await?;
+            let after_pass = estimate_tokens_for(history, model);
             if did_compress {
                 passes_used += 1;
+                let reduced = before_pass.saturating_sub(after_pass);
+                if before_pass > 0 && reduced.saturating_mul(20) < before_pass {
+                    break;
+                }
             }
-            if estimate_tokens_for(history, model) <= threshold || !did_compress {
+            let payload_now = payload_tokens(after_pass, self.tool_overhead_tokens);
+            if payload_now <= hard || !did_compress {
                 break;
             }
         }
 
         let tokens_after = estimate_tokens_for(history, model);
         let elapsed_ms = started_at.elapsed().as_millis() as u64;
+        let payload_after = payload_tokens(tokens_after, self.tool_overhead_tokens);
         crate::observability::runtime_trace::record_event(
             "context_compress",
             None,
@@ -360,18 +505,40 @@ impl ContextCompressor {
             serde_json::json!({
                 "tokens_before": tokens_before,
                 "tokens_after": tokens_after,
-                "threshold": threshold,
+                "payload_before": payload_before,
+                "payload_after": payload_after,
+                "soft": soft,
+                "hard": hard,
                 "context_window": self.context_window,
+                "tools_overhead": self.tool_overhead_tokens,
                 "passes_used": passes_used,
                 "duration_ms": elapsed_ms,
                 "message_count": history.len(),
+                "summarized": passes_used > 0,
             }),
         );
+        tracing::info!(
+            target: "agent.context.compress",
+            tokens_before,
+            tokens_after,
+            payload_before,
+            payload_after,
+            soft,
+            hard,
+            context_window = self.context_window,
+            tools_overhead = self.tool_overhead_tokens,
+            passes_used,
+            duration_ms = elapsed_ms,
+            summarized = passes_used > 0,
+            "context compression finished"
+        );
         Ok(CompressionResult {
-            compressed: passes_used > 0,
+            compressed: evicted > 0 || passes_used > 0,
             tokens_before,
             tokens_after,
             passes_used,
+            duration_ms: elapsed_ms,
+            summarized: passes_used > 0,
         })
     }
 
@@ -396,10 +563,12 @@ impl ContextCompressor {
             "Context limit adjusted, re-compressing"
         );
 
+        self.emergency_mode = true;
         let result = self
             .compress_if_needed_with_progress(history, provider, model, preserved_fn, None)
-            .await?;
-        Ok(result.compressed)
+            .await;
+        self.emergency_mode = false;
+        Ok(result?.compressed)
     }
 
     pub async fn summarize_messages(
@@ -440,12 +609,12 @@ impl ContextCompressor {
             );
             return match tokio::time::timeout(
                 timeout,
-                provider.chat_with_system(
+                crate::providers::with_reasoning_suppressed(provider.chat_with_system(
                     Some(SUMMARIZER_SYSTEM),
                     &user_prompt,
                     summary_model,
                     0.1,
-                ),
+                )),
             )
             .await
             {
@@ -494,12 +663,12 @@ impl ContextCompressor {
             async move {
                 match tokio::time::timeout(
                     timeout,
-                    provider.chat_with_system(
+                    crate::providers::with_reasoning_suppressed(provider.chat_with_system(
                         Some(SUMMARIZER_SYSTEM),
                         &prompt,
                         summary_model,
                         0.1,
-                    ),
+                    )),
                 )
                 .await
                 {
@@ -532,12 +701,12 @@ impl ContextCompressor {
         );
         let reduced = match tokio::time::timeout(
             timeout,
-            provider.chat_with_system(
+            crate::providers::with_reasoning_suppressed(provider.chat_with_system(
                 Some(SUMMARIZER_SYSTEM),
                 &reduce_prompt,
                 summary_model,
                 0.1,
-            ),
+            )),
         )
         .await
         {
@@ -559,21 +728,23 @@ impl ContextCompressor {
         preserved_indices: &[usize],
     ) -> usize {
         const MIN_EVICT_BYTES: usize = 2_048;
+        const TAIL_EVICT_BYTES: usize = 8_192;
 
         let n = history.len();
         let start = align_boundary_forward(history, self.config.protect_first_n.min(n));
-        let end = align_boundary_backward(
+        let protected_end = align_boundary_backward(
             history,
             n.saturating_sub(self.config.protect_last_n),
         );
-        if start >= end {
+        if start >= n {
             return 0;
         }
         let mut current = estimate_tokens_for(history, model);
         let calibration =
             crate::agent::token::budget::calibration_factor_for(model) * 1.05;
         let mut evicted = 0usize;
-        for idx in start..end {
+        let last_keep = n.saturating_sub(1);
+        for idx in start..last_keep {
             if current <= threshold {
                 break;
             }
@@ -584,8 +755,13 @@ impl ContextCompressor {
             if msg.role != "tool" || is_compaction_banner(&msg.content) {
                 continue;
             }
+            let min_bytes = if idx >= protected_end {
+                TAIL_EVICT_BYTES
+            } else {
+                MIN_EVICT_BYTES
+            };
             let before = crate::providers::traits::estimate_message_tokens(msg);
-            if !evict_tool_message_content(msg, MIN_EVICT_BYTES) {
+            if !evict_tool_message_content(msg, min_bytes) {
                 continue;
             }
             let after = crate::providers::traits::estimate_message_tokens(msg);
@@ -703,18 +879,31 @@ fn is_compaction_banner(content: &str) -> bool {
 
 const EVICTED_OUTPUT_MARKER: &str = "[tool output evicted";
 
-fn eviction_placeholder(bytes: usize, blob_id: Option<&str>) -> String {
-    match blob_id {
+const EVICT_EXCERPT_CHARS: usize = 512;
+
+fn take_excerpt(s: &str, max_chars: usize) -> String {
+    let excerpt: String = s.chars().take(max_chars).collect();
+    excerpt.replace(['\r', '\n'], " ")
+}
+
+fn eviction_placeholder(bytes: usize, blob_id: Option<&str>, excerpt: &str) -> String {
+    let marker = match blob_id {
         Some(id) => format!(
             "{EVICTED_OUTPUT_MARKER} during context compaction ({bytes} bytes; archived as \
-             blob {id} — call tool_result_expand with this id to retrieve it). Otherwise \
-             re-run the tool or re-read the file if these details are needed again.]"
+             blob {id} — call tool_result_expand with this id to retrieve it). Do NOT \
+             re-execute this tool with the same arguments.]"
         ),
         None => format!(
             "{EVICTED_OUTPUT_MARKER} during context compaction ({bytes} bytes). The result \
-             is no longer in context — re-run the tool or re-read the file if these details \
-             are needed again.]"
+             is no longer in context. For file reads, page into line ranges that are not \
+             yet covered using a new offset/limit. Do NOT re-run the original call with \
+             the same arguments.]"
         ),
+    };
+    if excerpt.is_empty() {
+        marker
+    } else {
+        format!("{excerpt}\n{marker}")
     }
 }
 
@@ -734,11 +923,13 @@ fn evict_tool_message_content(msg: &mut ChatMessage, min_bytes: usize) -> bool {
                     return false;
                 }
                 let blob_id = crate::agent::history::blob_store::put(&payload);
+                let excerpt = take_excerpt(&payload, EVICT_EXCERPT_CHARS);
                 obj.insert(
                     "content".to_string(),
                     serde_json::Value::String(eviction_placeholder(
                         payload.len(),
                         blob_id.as_deref(),
+                        &excerpt,
                     )),
                 );
                 if let Ok(serialized) = serde_json::to_string(&value) {
@@ -754,7 +945,8 @@ fn evict_tool_message_content(msg: &mut ChatMessage, min_bytes: usize) -> bool {
     }
     let bytes = msg.content.len();
     let blob_id = crate::agent::history::blob_store::put(&msg.content);
-    msg.content = eviction_placeholder(bytes, blob_id.as_deref());
+    let excerpt = take_excerpt(&msg.content, EVICT_EXCERPT_CHARS);
+    msg.content = eviction_placeholder(bytes, blob_id.as_deref(), &excerpt);
     true
 }
 

@@ -430,8 +430,8 @@ async fn spawn_background(
         output: format!(
             "[background-shell:{id}] command spawned\n\
              $ {command_text}\n\
-             Poll `background_status` (id: \"{id}\") for liveness/exit code, \
-             read output with `background_logs`, and stop it with `background_kill`."
+             Wait with `background_wait` (id: \"{id}\") instead of tight-looping `background_status`. \
+             Read output with `background_logs`, and stop it with `background_kill`."
         ),
         error: None,
     })
@@ -671,7 +671,7 @@ impl Tool for ShellTool {
                 },
                 "block_until_ms": {
                     "type": "integer",
-                    "description": "Run in the foreground for at most this many ms; if the command has not finished by then it is auto-moved to the background and a 'bg-<id>' handle is returned so you can keep working and poll with background_status / background_logs / background_wait. Use for commands that may be long-running (dev servers, watchers, builds) without committing to background: true up front."
+                    "description": "Run in the foreground for at most this many ms; if the command has not finished by then it is auto-moved to the background and a 'bg-<id>' handle is returned so you can keep working. Wait with background_wait (not a tight background_status loop); use background_logs for output. Use for commands that may be long-running (dev servers, watchers, builds) without committing to background: true up front."
                 },
                 "compact": {
                     "type": "boolean",
@@ -881,8 +881,9 @@ impl Tool for ShellTool {
         {
             let mut msg = format!(
                 "Command still running after {}ms; moved to background as '{mirror_id}'. \
-                 Poll with background_status / background_logs(id=\"{mirror_id}\") / \
-                 background_wait(id=\"{mirror_id}\"), or stop it with background_kill.",
+                 Wait with background_wait(id=\"{mirror_id}\") instead of tight-looping \
+                 background_status. Use background_logs(id=\"{mirror_id}\") for output, \
+                 or stop it with background_kill.",
                 block_until.map(|d| d.as_millis()).unwrap_or(0)
             );
             let preview: String = partial_stdout

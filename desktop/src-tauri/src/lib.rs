@@ -374,6 +374,9 @@ fn disable_window_focus_border(window: &tauri::WebviewWindow) {
 #[cfg(target_os = "windows")]
 fn disable_overlay_window_chrome(window: &tauri::WebviewWindow) {
     disable_window_focus_border_ex(window, true);
+    if let Ok(handle) = window.hwnd() {
+        senweavercoding::computer::capture::register_overlay_hwnd(handle.0 as isize);
+    }
 }
 
 #[cfg(target_os = "windows")]
@@ -948,6 +951,27 @@ fn force_show_foreground_window(raw: windows_sys::Win32::Foundation::HWND) {
     reapply_chrome_styles(raw);
 }
 
+fn pin_overlay_window(window: &tauri::WebviewWindow) {
+    let _ = window.set_always_on_top(true);
+    #[cfg(target_os = "windows")]
+    if let Ok(handle) = window.hwnd() {
+        use windows_sys::Win32::Foundation::HWND;
+        let hwnd = handle.0 as HWND;
+        reapply_overlay_chrome_styles(hwnd);
+        senweavercoding::computer::capture::pin_overlay_hwnd(handle.0 as isize);
+    }
+}
+
+#[tauri::command]
+fn minimal_pin_overlay(app: AppHandle) -> Result<(), String> {
+    if let Some(minimal) = app.get_webview_window("minimal") {
+        if minimal.is_visible().unwrap_or(false) {
+            pin_overlay_window(&minimal);
+        }
+    }
+    Ok(())
+}
+
 fn hide_minimal_window(app: &AppHandle) {
     if let Some(minimal) = app.get_webview_window("minimal") {
         if minimal.is_visible().unwrap_or(false) {
@@ -1059,6 +1083,41 @@ fn show_and_focus_main_window(app: &AppHandle) {
 
 const TRAY_QUIT_EVENT: &str = "tray://quit-requested";
 const TRAY_COMPUTER_STOP_EVENT: &str = "minimal://computer-stop";
+const RECORDER_HOTKEY_EVENT: &str = "minimal://recorder-hotkey";
+
+#[cfg(target_os = "windows")]
+fn spawn_recorder_hotkey_thread(app: AppHandle) {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        RegisterHotKey, MOD_CONTROL, MOD_SHIFT,
+    };
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        DispatchMessageW, GetMessageW, TranslateMessage, MSG, WM_HOTKEY,
+    };
+    const HOTKEY_ID: i32 = 0xB0B0;
+    const VK_R: u32 = 0x52;
+    std::thread::spawn(move || unsafe {
+        if RegisterHotKey(
+            std::ptr::null_mut(),
+            HOTKEY_ID,
+            MOD_CONTROL | MOD_SHIFT,
+            VK_R,
+        ) == 0
+        {
+            tracing::warn!("[sen-desktop] RegisterHotKey Ctrl+Shift+R failed");
+            return;
+        }
+        let mut msg: MSG = std::mem::zeroed();
+        while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            if msg.message == WM_HOTKEY && msg.wParam as i32 == HOTKEY_ID {
+                if let Err(err) = app.emit(RECORDER_HOTKEY_EVENT, ()) {
+                    tracing::warn!("[sen-desktop] emit {RECORDER_HOTKEY_EVENT} failed: {err}");
+                }
+            }
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+    });
+}
 
 struct TrayMenuItems {
     show: tauri::menu::MenuItem<tauri::Wry>,
@@ -1541,11 +1600,41 @@ fn read_local_image_data_url_blocking(path: String) -> Result<LocalImageData, St
 
 const MINIMAL_INPUT_HIDDEN_EVENT: &str = "minimal://input-hidden";
 
+static MINIMAL_INPUT_KEEP_VISIBLE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
 #[cfg(target_os = "windows")]
 static MINIMAL_INPUT_WATCHING: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+#[cfg(target_os = "windows")]
+fn primary_mouse_button_down() -> bool {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
+        GetAsyncKeyState, VK_LBUTTON, VK_RBUTTON,
+    };
+    unsafe {
+        GetAsyncKeyState(VK_LBUTTON as i32) as u16 & 0x8000 != 0
+            || GetAsyncKeyState(VK_RBUTTON as i32) as u16 & 0x8000 != 0
+    }
+}
+
+fn minimal_input_hold_active() -> bool {
+    use std::sync::atomic::Ordering;
+    if MINIMAL_INPUT_KEEP_VISIBLE.load(Ordering::SeqCst) {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        primary_mouse_button_down()
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
+}
+
 fn hide_minimal_input_and_notify(app: &AppHandle) {
+    MINIMAL_INPUT_KEEP_VISIBLE.store(false, std::sync::atomic::Ordering::SeqCst);
     if let Some(input) = app.get_webview_window("minimal-input") {
         if input.is_visible().unwrap_or(false) {
             let _ = input.hide();
@@ -1597,6 +1686,9 @@ fn spawn_minimal_input_foreground_watch(app: &AppHandle) {
             let inside = !fg_root.is_null()
                 && (fg_root == input_hwnd || (!card_hwnd.is_null() && fg_root == card_hwnd));
             if !inside {
+                if minimal_input_hold_active() {
+                    continue;
+                }
                 hide_minimal_input_and_notify(&app);
                 break;
             }
@@ -1666,7 +1758,7 @@ fn minimal_input_prewarm(app: AppHandle) -> Result<(), String> {
         use std::sync::atomic::Ordering;
         use windows_sys::Win32::Foundation::HWND;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER,
+            SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE,
         };
 
         if MINIMAL_INPUT_PREWARMING.swap(true, Ordering::SeqCst) {
@@ -1695,18 +1787,24 @@ fn minimal_input_prewarm(app: AppHandle) -> Result<(), String> {
         unsafe {
             SetWindowPos(
                 raw,
-                HWND_TOP,
+                HWND_TOPMOST,
                 -32000,
                 -32000,
                 404,
                 470,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                SWP_NOACTIVATE,
             );
         }
+        reapply_overlay_chrome_styles(raw);
         input.show().map_err(|e| {
             MINIMAL_INPUT_PREWARMING.store(false, Ordering::SeqCst);
             e.to_string()
         })?;
+        if let Some(minimal) = app.get_webview_window("minimal") {
+            if minimal.is_visible().unwrap_or(false) {
+                pin_overlay_window(&minimal);
+            }
+        }
         let app_hide = app.clone();
         std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(120));
@@ -1726,6 +1824,11 @@ fn minimal_input_prewarm(app: AppHandle) -> Result<(), String> {
                     return;
                 }
                 let _ = win.hide();
+                if let Some(minimal) = app_main.get_webview_window("minimal") {
+                    if minimal.is_visible().unwrap_or(false) {
+                        pin_overlay_window(&minimal);
+                    }
+                }
             });
         });
         Ok(())
@@ -1771,7 +1874,7 @@ fn minimal_input_show(app: AppHandle, width: f64, height: f64) -> Result<(), Str
     {
         use windows_sys::Win32::Foundation::HWND;
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER,
+            SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE,
         };
 
         let hwnd = input.hwnd().map_err(|e| e.to_string())?;
@@ -1784,14 +1887,15 @@ fn minimal_input_show(app: AppHandle, width: f64, height: f64) -> Result<(), Str
         unsafe {
             SetWindowPos(
                 raw,
-                HWND_TOP,
+                HWND_TOPMOST,
                 x,
                 y,
                 new_w,
                 new_h,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                SWP_NOACTIVATE,
             );
         }
+        reapply_overlay_chrome_styles(raw);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1805,6 +1909,8 @@ fn minimal_input_show(app: AppHandle, width: f64, height: f64) -> Result<(), Str
     }
 
     input.show().map_err(|e| e.to_string())?;
+    pin_overlay_window(&card);
+    pin_overlay_window(&input);
 
     let input_focus = input.clone();
     let dispatched = app.run_on_main_thread(move || {
@@ -1830,6 +1936,41 @@ fn minimal_input_hide(app: AppHandle) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn minimal_input_set_keep_visible(keep: bool) -> Result<(), String> {
+    MINIMAL_INPUT_KEEP_VISIBLE.store(keep, std::sync::atomic::Ordering::SeqCst);
+    Ok(())
+}
+
+#[tauri::command]
+fn minimal_input_should_stay_visible() -> Result<bool, String> {
+    Ok(minimal_input_hold_active())
+}
+
+#[tauri::command]
+fn minimal_input_activate(app: AppHandle) -> Result<(), String> {
+    let input = app
+        .get_webview_window("minimal-input")
+        .ok_or_else(|| "minimal-input window missing".to_string())?;
+    if !input.is_visible().unwrap_or(false) {
+        return Ok(());
+    }
+    let input_focus = input.clone();
+    let dispatched = app.run_on_main_thread(move || {
+        let _ = input_focus.set_focus();
+        #[cfg(target_os = "windows")]
+        if let Ok(hwnd) = input_focus.hwnd() {
+            force_activate_window(hwnd.0 as windows_sys::Win32::Foundation::HWND);
+        }
+    });
+    if dispatched.is_err() {
+        let _ = input.set_focus();
+    }
+    #[cfg(target_os = "windows")]
+    spawn_minimal_input_foreground_watch(&app);
+    Ok(())
+}
+
+#[tauri::command]
 fn minimal_resize_anchored(
     window: tauri::WebviewWindow,
     width: f64,
@@ -1846,7 +1987,7 @@ fn minimal_resize_anchored(
     {
         use windows_sys::Win32::Foundation::{HWND, RECT};
         use windows_sys::Win32::UI::WindowsAndMessaging::{
-            GetWindowRect, SetWindowPos, HWND_TOP, SWP_NOACTIVATE, SWP_NOZORDER,
+            GetWindowRect, SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE,
         };
 
         let hwnd = window.hwnd().map_err(|e| e.to_string())?;
@@ -1866,14 +2007,16 @@ fn minimal_resize_anchored(
             }
             SetWindowPos(
                 raw,
-                HWND_TOP,
+                HWND_TOPMOST,
                 rect.right - new_w,
                 rect.bottom - new_h,
                 new_w,
                 new_h,
-                SWP_NOZORDER | SWP_NOACTIVATE,
+                SWP_NOACTIVATE,
             );
         }
+        reapply_overlay_chrome_styles(raw);
+        pin_overlay_window(&window);
         Ok(())
     }
 
@@ -1901,6 +2044,7 @@ pub fn run() {
         "[sen-desktop] starting desktop shell"
     );
 
+    process_lifetime::claim_singleton_or_exit();
     process_lifetime::install_kill_on_close_job();
 
     let builder = tauri::Builder::default()
@@ -1934,6 +2078,10 @@ pub fn run() {
             minimal_input_prewarm,
             minimal_input_show,
             minimal_input_hide,
+            minimal_input_set_keep_visible,
+            minimal_input_should_stay_visible,
+            minimal_input_activate,
+            minimal_pin_overlay,
             curator_render_docx_with_diagrams,
             terminal::terminal_spawn,
             terminal::terminal_write,
@@ -2011,9 +2159,13 @@ pub fn run() {
             browser_dock::install_into(app.handle());
             fetch_worker::install_into(app.handle());
 
+            let _ = app.handle().remove_tray_by_id("sen-main-tray");
             if let Err(err) = setup_system_tray(app.handle()) {
                 tracing::warn!("[sen-desktop] system tray setup failed: {err}");
             }
+
+            #[cfg(target_os = "windows")]
+            spawn_recorder_hotkey_thread(app.handle().clone());
 
             let handle = app.handle().clone();
 

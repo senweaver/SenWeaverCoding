@@ -318,17 +318,17 @@ function CollapsedDot({
   const active =
     summary.active + summary.waiting + summary.waitingResource + summary.error
   if (active === 0) return null
-  const color =
+  const [color, onColor] =
     summary.error > 0
-      ? 'var(--color-error)'
+      ? ['var(--color-error)', 'var(--color-on-error)']
       : summary.waitingResource > 0 || summary.waiting > 0
-      ? 'var(--color-warning)'
-      : 'var(--color-success)'
+      ? ['var(--color-warning)', 'var(--color-on-warning)']
+      : ['var(--color-success)', 'var(--color-on-success)']
   return (
     <div className="flex justify-center pb-1.5" title={title}>
       <span
-        className="inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1 text-[10px] font-bold tabular-nums text-white"
-        style={{ backgroundColor: color }}
+        className="inline-flex h-5 min-w-[20px] items-center justify-center rounded-full px-1 text-[10px] font-bold tabular-nums"
+        style={{ backgroundColor: color, color: onColor }}
       >
         {active}
       </span>

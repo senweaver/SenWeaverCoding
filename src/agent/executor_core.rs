@@ -90,6 +90,8 @@ pub struct PacingGovernor {
     total_generated_tokens: u64,
     no_progress_warned: bool,
     token_soft_warned: bool,
+    absolute_nudge_20: bool,
+    absolute_nudge_50: bool,
     absolute_warned: bool,
     timeout_warned: bool,
 }
@@ -110,6 +112,8 @@ impl PacingGovernor {
             total_generated_tokens: 0,
             no_progress_warned: false,
             token_soft_warned: false,
+            absolute_nudge_20: false,
+            absolute_nudge_50: false,
             absolute_warned: false,
             timeout_warned: false,
         }
@@ -162,12 +166,12 @@ impl PacingGovernor {
         if !self.no_progress_warned && self.no_progress_streak >= nudge_at {
             self.no_progress_warned = true;
             warnings.push(format!(
-                "[Progress Guard] {} consecutive iterations have passed without a single \
-                 successful tool call; the turn will stop safely after {} consecutive \
-                 no-progress iterations. Step back and change strategy: re-read the recent \
-                 errors, try a different tool or different arguments, break the problem into \
-                 smaller verifiable steps, or ask the user for guidance. Any successful tool \
-                 call resets this counter, so keep working toward the user's task.",
+                "[Progress Guard] {} consecutive iterations have passed without new information \
+                 (successful but repeated exploration still accumulates). The turn will stop safely \
+                 after {} consecutive no-progress iterations. Re-reading covered ranges or repeating \
+                 the same search does not reset this counter. Step back and change strategy: page \
+                 into uncovered line ranges, try a different pattern or tool, make a mutation, or \
+                 ask the user for guidance.",
                 self.no_progress_streak, self.budget.no_progress_limit
             ));
         }
@@ -178,18 +182,46 @@ impl PacingGovernor {
             self.token_soft_warned = true;
             warnings.push(format!(
                 "[Token Budget] Roughly {} tokens have been generated since the last \
-                 successful tool call; the turn will stop safely at {}. Stop broad \
-                 exploration, pick the single most promising next action and make it \
-                 succeed, or ask the user for guidance. Any successful tool call resets \
-                 this budget, so keep working toward the user's task.",
+                 new information; the turn will stop safely at {}. Repeated successful \
+                 exploration that adds no coverage still accumulates. Stop broad re-reads \
+                 of the same ranges, pick the single most promising next action, or ask \
+                 the user for guidance.",
                 self.tokens_since_progress, self.budget.token_hard_cap
             ));
         }
+        let absolute_nudge_20_at = (self.budget.absolute_iteration_limit / 5).max(1);
+        let absolute_nudge_50_at = (self.budget.absolute_iteration_limit / 2).max(1);
         let absolute_nudge_at = self
             .budget
             .absolute_iteration_limit
             .saturating_sub(self.budget.absolute_iteration_limit / 10)
             .max(1);
+        if !self.absolute_nudge_20
+            && self.iteration >= absolute_nudge_20_at
+            && absolute_nudge_20_at < absolute_nudge_50_at
+        {
+            self.absolute_nudge_20 = true;
+            warnings.push(format!(
+                "[Iteration Ceiling] This turn has used {} of the {} allowed iterations (20%). \
+                 Start wrapping up: prefer mutations and uncovered reads over re-exploring \
+                 the same files or queries, then summarize remaining work so it can continue \
+                 in the next turn if needed.",
+                self.iteration, self.budget.absolute_iteration_limit
+            ));
+        }
+        if !self.absolute_nudge_50
+            && self.iteration >= absolute_nudge_50_at
+            && absolute_nudge_50_at < absolute_nudge_at
+        {
+            self.absolute_nudge_50 = true;
+            warnings.push(format!(
+                "[Iteration Ceiling] This turn has used {} of the {} allowed iterations (50%). \
+                 Prioritize finishing the user's task: complete the most important remaining \
+                 step, avoid repeating covered exploration, and prepare a concise handoff \
+                 for anything that will not fit in this turn.",
+                self.iteration, self.budget.absolute_iteration_limit
+            ));
+        }
         if !self.absolute_warned && self.iteration >= absolute_nudge_at {
             self.absolute_warned = true;
             warnings.push(format!(

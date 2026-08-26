@@ -33,6 +33,9 @@ impl CapturedScreen {
 pub struct RecorderFrame {
     pub width: u32,
     pub height: u32,
+    pub transport_width: u32,
+    pub transport_height: u32,
+    pub phash: u64,
     pub shot_jpeg_bytes: Arc<Vec<u8>>,
     pub preview_jpeg_base64: Arc<str>,
     pub monitor: MonitorRect,
@@ -197,6 +200,35 @@ fn select_monitor(selector: MonitorSelector) -> Result<xcap::Monitor> {
     Ok(primary.unwrap_or_else(|| monitors[0].clone()))
 }
 
+pub fn register_overlay_hwnd(hwnd: isize) {
+    pin_overlay_hwnd(hwnd);
+}
+
+pub fn pin_overlay_hwnd(hwnd: isize) {
+    if hwnd == 0 {
+        return;
+    }
+    #[cfg(windows)]
+    {
+        use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            SetWindowPos, HWND_TOPMOST, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE,
+        };
+        let handle = hwnd as HWND;
+        unsafe {
+            let _ = SetWindowPos(
+                handle,
+                HWND_TOPMOST,
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE,
+            );
+        }
+    }
+}
+
 fn grab_frame(selector: MonitorSelector) -> Result<(image::RgbaImage, u32, u32, MonitorRect)> {
     let monitor = select_monitor(selector)?;
     let rect = monitor_rect(&monitor);
@@ -302,10 +334,14 @@ fn capture_recorder_frame_blocking(selector: MonitorSelector) -> Result<Recorder
     let (transport, width, height, monitor) = grab_frame(selector)?;
     let shot_jpeg_bytes = encode_display_jpeg_bytes(&transport)?;
     let preview = encode_preview_jpeg_base64(&transport)?;
+    let phash = super::frames::hash::dhash64(&transport);
 
     Ok(RecorderFrame {
         width,
         height,
+        transport_width: transport.width(),
+        transport_height: transport.height(),
+        phash,
         shot_jpeg_bytes: Arc::new(shot_jpeg_bytes),
         preview_jpeg_base64: Arc::from(preview),
         monitor,

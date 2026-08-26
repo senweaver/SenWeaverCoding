@@ -33,6 +33,30 @@ import { useUIStore } from './uiStore'
 import { t } from '../i18n'
 import type { TranslationKey } from '../i18n'
 
+async function measureViewportRect(): Promise<{
+  x: number
+  y: number
+  w: number
+  h: number
+} | null> {
+  if (typeof document === 'undefined') return null
+  for (let attempt = 0; attempt < 10; attempt++) {
+    await new Promise((resolve) => requestAnimationFrame(() => resolve(null)))
+    const el = document.querySelector('[data-browser-viewport="true"]')
+    if (!el) continue
+    const rect = el.getBoundingClientRect()
+    if (rect.width > 1 && rect.height > 1) {
+      return {
+        x: rect.left,
+        y: rect.top,
+        w: Math.max(1, rect.width - 1),
+        h: Math.max(1, rect.height - 1),
+      }
+    }
+  }
+  return null
+}
+
 function notifyDockActionFailed(actionLabelKey: TranslationKey, err: unknown): void {
   console.warn(`[browserDock] ${actionLabelKey} failed`, err)
   useUIStore.getState().addToast({
@@ -648,7 +672,10 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
         }),
       }
     })
-    const rect = get().panels[sessionId]?.anchorRect ?? null
+    let rect = get().panels[sessionId]?.anchorRect ?? null
+    if (!rect) {
+      rect = await measureViewportRect()
+    }
     try {
       if (opts?.presentOnly) {
         if (rect) {
@@ -657,10 +684,9 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
         await dockPresentSession(sessionId)
       } else {
         await dockPresentSession(sessionId)
-        if (rect) {
-          await dockOpen(rect, seedUrl, sessionId)
-        } else {
-          await dockOpen({ x: 0, y: 0, w: 1, h: 1 }, seedUrl, sessionId)
+        await dockOpen(rect ?? { x: 0, y: 0, w: 1, h: 1 }, seedUrl, sessionId)
+        if (typeof document !== 'undefined') {
+          document.dispatchEvent(new CustomEvent('browser-panel-remeasure'))
         }
       }
     } catch (err) {
@@ -1097,10 +1123,11 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       const data = event.data as
         | { session?: string | null; source?: string }
         | null
-      const sessionId = normalizeBrowserSessionId(
-        eventSessionId ??
-          (typeof data?.session === 'string' ? data.session : null),
-      )
+      const sessionId =
+        normalizeBrowserSessionId(
+          eventSessionId ??
+            (typeof data?.session === 'string' ? data.session : null),
+        ) ?? normalizeBrowserSessionId(useTabStore.getState().activeTabId)
       if (!sessionId) {
         console.warn('[browserDock] dropping visible event without sessionId', event)
         return

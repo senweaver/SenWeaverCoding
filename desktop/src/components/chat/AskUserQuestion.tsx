@@ -263,22 +263,31 @@ export function AskUserQuestion({ toolUseId, input, result, sessionId: ownerSess
   const handleSelect = (qIndex: number, opt: QuestionOption) => {
     if (!canInteract) return
     const allowMultiple = questions[qIndex]?.allowMultiple ?? false
-    setSelections((prev) => {
-      const current = prev[qIndex] ?? []
-      if (allowMultiple) {
-        const exists = current.includes(opt.label)
-        const next = exists
-          ? current.filter((x) => x !== opt.label)
-          : [...current, opt.label]
-        return { ...prev, [qIndex]: next }
+    const current = selections[qIndex] ?? []
+    let nextSelections: Record<number, string[]>
+    if (allowMultiple) {
+      const exists = current.includes(opt.label)
+      const next = exists
+        ? current.filter((x) => x !== opt.label)
+        : [...current, opt.label]
+      nextSelections = { ...selections, [qIndex]: next }
+    } else if (current.length === 1 && current[0] === opt.label) {
+      nextSelections = { ...selections }
+      delete nextSelections[qIndex]
+    } else {
+      nextSelections = { ...selections, [qIndex]: [opt.label] }
+    }
+    setSelections(nextSelections)
+
+    if (!allowMultiple && (nextSelections[qIndex]?.length ?? 0) > 0) {
+      for (let step = 1; step < questions.length; step++) {
+        const candidate = (qIndex + step) % questions.length
+        if ((nextSelections[candidate]?.length ?? 0) === 0) {
+          setActiveTab(candidate)
+          break
+        }
       }
-      if (current.length === 1 && current[0] === opt.label) {
-        const next = { ...prev }
-        delete next[qIndex]
-        return next
-      }
-      return { ...prev, [qIndex]: [opt.label] }
-    })
+    }
   }
 
   const safeActiveTab = Math.min(activeTab, questions.length - 1)
@@ -376,7 +385,7 @@ export function AskUserQuestion({ toolUseId, input, result, sessionId: ownerSess
                         : 'border-[var(--color-outline)]'
                     }`}>
                       {isSelected && (
-                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="white" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
+                        <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="var(--color-on-secondary)" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round">
                           <polyline points="20 6 9 17 4 12" />
                         </svg>
                       )}

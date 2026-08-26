@@ -335,12 +335,9 @@ impl<'a> PolicyBundle<'a> {
                         matches!(
                             event,
                             TurnEvent::Chunk { .. }
-                                | TurnEvent::Thinking { .. }
-                                | TurnEvent::StatusUpdate { .. }
                                 | TurnEvent::ProgressTick { .. }
                                 | TurnEvent::SubagentChunk { .. }
                                 | TurnEvent::WorkerProgress { .. }
-                                | TurnEvent::CommandPreview { .. }
                                 | TurnEvent::ToolArgsDelta { .. }
                         )
                     }

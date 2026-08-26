@@ -59,6 +59,27 @@ pub fn classify_turn_error_code(message: &str) -> &'static str {
     if contains_any(
         &lower,
         &[
+            "data_inspection_failed",
+            "content_filter",
+            "content filter",
+            "contentfilter",
+            "inappropriate content",
+            "content management policy",
+            "prohibited_content",
+            "prohibited content",
+            "sensitive content",
+            "content policy violation",
+            "violates our usage policy",
+            "flagged as potentially violating",
+        ],
+    ) || contains_any(message, &["敏感内容", "内容安全", "涉敏"])
+    {
+        return "CONTENT_FILTERED";
+    }
+
+    if contains_any(
+        &lower,
+        &[
             "invalid api key",
             "invalid_api_key",
             "incorrect api key",

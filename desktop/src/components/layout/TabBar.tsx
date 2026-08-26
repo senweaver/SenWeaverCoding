@@ -367,7 +367,7 @@ export function TabBar() {
                   closeTab(closingTabId)
                   setClosingTabId(null)
                 }}
-                className="px-3 py-1.5 text-xs rounded-lg bg-[var(--color-brand)] text-white hover:opacity-90"
+                className="px-3 py-1.5 text-xs rounded-lg bg-[var(--color-brand)] text-[var(--color-on-primary)] hover:opacity-90"
               >
                 {t('tabs.closeConfirmStop')}
               </button>
@@ -418,7 +418,7 @@ export function TabBar() {
                   closeTab(id)
                   setQueueClosingTabId(null)
                 }}
-                className="px-3 py-1.5 text-xs rounded-lg bg-[var(--color-brand)] text-white hover:opacity-90"
+                className="px-3 py-1.5 text-xs rounded-lg bg-[var(--color-brand)] text-[var(--color-on-primary)] hover:opacity-90"
               >
                 {t('tabs.close.queueWarning.keep')}
               </button>

@@ -214,7 +214,7 @@ export function AdapterSettings() {
             />
             <SelectField
               label={t('settings.adapters.fields.sessionBackend')}
-              value={globalState.sessionBackend ?? ''}
+              value={globalState.sessionBackend ?? 'sqlite'}
               options={SESSION_BACKEND_CHOICES.map((o) => ({
                 value: o.value,
                 label: t(o.i18nLabel as TranslationKey),
@@ -644,7 +644,6 @@ function SelectField({
         onChange={(e) => onChange(e.target.value)}
         className="h-8 w-full px-2.5 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-xs text-[var(--color-text-primary)] focus:border-[var(--color-border-focus)] focus:shadow-[var(--shadow-focus-ring)] outline-none cursor-pointer"
       >
-        <option value=""></option>
         {options.map((o) => (
           <option key={o.value} value={o.value}>
             {o.label}

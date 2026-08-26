@@ -2402,7 +2402,7 @@ pub fn default_agent_max_tool_iterations() -> usize {
 }
 
 fn default_agent_max_history_messages() -> usize {
-    50
+    200
 }
 
 fn default_agent_recent_turn_window() -> usize {
@@ -2410,11 +2410,11 @@ fn default_agent_recent_turn_window() -> usize {
 }
 
 fn default_agent_recent_window_max_turns() -> usize {
-    12
+    64
 }
 
 fn default_agent_recent_window_token_ratio() -> f64 {
-    0.25
+    0.70
 }
 
 fn default_agent_recent_window_summary_batch_turns() -> usize {

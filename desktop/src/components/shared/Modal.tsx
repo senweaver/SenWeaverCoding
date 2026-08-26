@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import { useEffect, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 
 import { useDockSuspend } from '../../hooks/useDockSuspend'
 
@@ -13,9 +14,12 @@ type ModalProps = {
   children: ReactNode
   width?: number
   footer?: ReactNode
+  bodyClassName?: string
+  titleClassName?: string
+  compact?: boolean
 }
 
-export function Modal({ open, onClose, title, children, width = 560, footer }: ModalProps) {
+export function Modal({ open, onClose, title, children, width = 560, footer, bodyClassName, titleClassName, compact }: ModalProps) {
   useDockSuspend(open)
 
   useEffect(() => {
@@ -32,45 +36,44 @@ export function Modal({ open, onClose, title, children, width = 560, footer }: M
 
   if (!open) return null
 
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center">
-      {}
+  return createPortal(
+    <div className="fixed inset-0 z-[10000] flex items-center justify-center">
       <div
         className="absolute inset-0 bg-[var(--color-overlay-scrim)] transition-opacity duration-200"
         onClick={onClose}
       />
 
-      {}
       <div
-        className="glass-panel relative rounded-[var(--radius-xl)] max-h-[85vh] flex flex-col"
+        className="glass-panel relative flex max-h-[90vh] min-h-0 flex-col overflow-hidden rounded-[var(--radius-xl)]"
         style={{ width, maxWidth: 'calc(100vw - 48px)' }}
         role="dialog"
         aria-modal="true"
       >
         {title && (
-          <div className="flex items-start justify-between gap-4 px-6 pt-6 pb-0">
-            <h2 className="text-xl font-bold text-[var(--color-text-primary)]">{title}</h2>
+          <div className={`flex shrink-0 justify-between gap-4 px-6 pb-0 ${compact ? 'items-center pt-4' : 'items-start pt-6'}`}>
+            <h2 className={titleClassName ?? 'text-xl font-bold text-[var(--color-text-primary)]'}>{title}</h2>
             <button
               type="button"
               onClick={onClose}
               aria-label="Close dialog"
-              className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]"
+              className={`flex shrink-0 items-center justify-center rounded-full text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] ${compact ? 'h-7 w-7' : 'h-9 w-9'}`}
             >
-              <span className="material-symbols-outlined text-[18px]">close</span>
+              <span className={`material-symbols-outlined ${compact ? 'text-[16px]' : 'text-[18px]'}`}>close</span>
             </button>
           </div>
         )}
 
-        <div className="px-6 py-4 overflow-y-auto flex-1">
+        <div className={`min-h-0 flex-1 overflow-y-auto overflow-x-hidden px-6 py-4 ${bodyClassName ?? ''}`}>
           {children}
         </div>
 
         {footer && (
-          <div className="px-6 pb-6 pt-0 flex justify-end gap-2">
+          <div className={`flex shrink-0 justify-end gap-2 px-6 pt-0 ${compact ? 'pb-4' : 'pb-6'}`}>
             {footer}
           </div>
         )}
       </div>
-    </div>
+    </div>,
+    document.body,
   )
 }

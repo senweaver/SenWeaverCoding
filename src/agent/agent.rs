@@ -2678,6 +2678,18 @@ impl Agent {
         !trimmed.starts_with("[Tool results]") && !trimmed.starts_with("[Recovered")
     }
 
+    fn is_persisted_user_turn(msg: &ConversationMessage) -> bool {
+        match msg {
+            ConversationMessage::Chat(c) if c.role == "user" => {
+                let trimmed = c.content.trim_start();
+                !trimmed.starts_with("[Tool results]")
+                    && !trimmed.starts_with("[Recovered")
+                    && !trimmed.starts_with("[context notice]")
+            }
+            _ => false,
+        }
+    }
+
     fn focus_history_for_new_turn(
         history: &[crate::providers::traits::ChatMessage],
         model: &str,
@@ -2702,8 +2714,11 @@ impl Agent {
 
         let min_turns = min_turns.max(1);
         let max_turns = max_turns.max(min_turns);
-        let window_tokens = crate::constants::api_limits::context_window_for_model(model) as f64;
-        let token_budget = (window_tokens * token_ratio.clamp(0.01, 1.0)).max(1.0) as usize;
+        let window_tokens =
+            crate::constants::api_limits::context_window_for_model(model) as usize;
+        let skip_budget = crate::agent::context::compressor::payload_soft_limit(window_tokens);
+        let configured_budget = ((window_tokens as f64) * token_ratio.clamp(0.01, 1.0)).max(1.0) as usize;
+        let token_budget = skip_budget.max(configured_budget);
         let system_tokens =
             crate::providers::traits::estimate_total_tokens(&history[..leading_system_end]);
 
@@ -2722,11 +2737,11 @@ impl Agent {
             let turn_tokens =
                 crate::providers::traits::estimate_total_tokens(&history[turn_start..turn_end]);
             let next_turns = turns + 1;
-            if next_turns > max_turns {
-                break;
-            }
             let prospective = acc_tokens + turn_tokens;
             let within_budget = prospective <= token_budget;
+            if next_turns > max_turns && !within_budget {
+                break;
+            }
             let within_floor = next_turns <= min_turns && prospective <= floor_cap;
             if !within_budget && !within_floor {
                 break;
@@ -2841,26 +2856,39 @@ impl Agent {
         {
             return (slice.to_vec(), Vec::new());
         }
-        let head = slice[0].clone();
+        let mut kept = slice.to_vec();
+        let last = kept.len().saturating_sub(1);
+        for keep_chars in [2_048usize, 400, 80] {
+            if crate::providers::traits::estimate_total_tokens(&kept) <= token_budget {
+                return (kept, Vec::new());
+            }
+            for msg in kept.iter_mut().take(last).skip(1) {
+                crate::agent::history::pruner::compact_tool_message(msg, keep_chars);
+            }
+        }
+        if crate::providers::traits::estimate_total_tokens(&kept) <= token_budget {
+            return (kept, Vec::new());
+        }
+        let head = kept[0].clone();
         let head_tokens =
             crate::providers::traits::estimate_total_tokens(std::slice::from_ref(&head));
         let tail_budget = token_budget.saturating_sub(head_tokens);
         let mut acc = 0usize;
-        let mut tail_start = slice.len();
-        for i in (1..slice.len()).rev() {
-            let t = crate::providers::traits::estimate_total_tokens(std::slice::from_ref(&slice[i]));
-            if acc + t > tail_budget && tail_start < slice.len() {
+        let mut tail_start = kept.len();
+        for i in (1..kept.len()).rev() {
+            let t = crate::providers::traits::estimate_total_tokens(std::slice::from_ref(&kept[i]));
+            if acc + t > tail_budget && tail_start < kept.len() {
                 break;
             }
             acc += t;
             tail_start = i;
         }
         let dropped: Vec<crate::providers::traits::ChatMessage> =
-            slice[1..tail_start].to_vec();
-        let mut kept = Vec::with_capacity(1 + (slice.len() - tail_start));
-        kept.push(head);
-        kept.extend_from_slice(&slice[tail_start..]);
-        (kept, dropped)
+            kept[1..tail_start].to_vec();
+        let mut out = Vec::with_capacity(1 + (kept.len() - tail_start));
+        out.push(head);
+        out.extend_from_slice(&kept[tail_start..]);
+        (out, dropped)
     }
 
     fn log_window_tail(messages: &[crate::providers::traits::ChatMessage]) {
@@ -3505,10 +3533,17 @@ impl Agent {
     }
 
     fn trim_history(&mut self) {
-        let max_messages = self.config.max_history_messages;
-
-        const MAX_CHARS: usize = 400_000;
         const TRIM_NOTICE_PREFIX: &str = "[context notice]";
+        const HARD_TURN_CAP: usize = 2_000;
+        const PROTECT_RECENT_TURNS: usize = 3;
+        let window =
+            crate::constants::api_limits::context_window_for_model(&self.model_name) as usize;
+        let max_chars = window.saturating_mul(4).clamp(200_000, 8_000_000);
+        let max_turns = self
+            .config
+            .max_history_messages
+            .max(128)
+            .min(HARD_TURN_CAP);
 
         let lead_system_end = self
             .history
@@ -3522,22 +3557,25 @@ impl Agent {
             self.history.drain(0..lead_system_end).collect();
         let mut body: Vec<ConversationMessage> = self.history.drain(..).collect();
 
-        let mut dropped_total = 0usize;
-        let mut dropped_messages: Vec<ConversationMessage> = Vec::new();
-        if body.len() > max_messages {
-            let drop_count = body.len() - max_messages;
-            dropped_messages.extend(body.drain(0..drop_count));
-            dropped_total += drop_count;
-        }
-
         let lead_chars: usize = lead.iter().map(|m| Self::msg_char_len(m)).sum();
+        let over_budget = |body: &[ConversationMessage]| {
+            let chars: usize = body.iter().map(Self::msg_char_len).sum();
+            let turns = body.iter().filter(|m| Self::is_persisted_user_turn(m)).count();
+            lead_chars + chars > max_chars || turns > max_turns
+        };
+
+        if !over_budget(&body) {
+            lead.append(&mut body);
+            self.history = lead;
+            Self::repair_orphan_tool_result_messages(&mut self.history);
+            return;
+        }
 
         {
             const PROTECT_RECENT: usize = 8;
-            const SHRINK_TIERS: &[usize] = &[48_000, 2_000];
+            const SHRINK_TIERS: &[usize] = &[48_000, 2_000, 400];
             for keep_chars in SHRINK_TIERS {
-                let body_chars: usize = body.iter().map(|m| Self::msg_char_len(m)).sum();
-                if lead_chars + body_chars <= MAX_CHARS {
+                if !over_budget(&body) {
                     break;
                 }
                 let protect_from = body.len().saturating_sub(PROTECT_RECENT);
@@ -3547,19 +3585,44 @@ impl Agent {
             }
         }
 
-        let mut acc = lead_chars;
-        let mut keep_from = body.len();
-        for i in (0..body.len()).rev() {
-            let prospective = acc + Self::msg_char_len(&body[i]);
-            if prospective > MAX_CHARS && keep_from < body.len() {
-                break;
+        let mut dropped_total = 0usize;
+        let mut dropped_messages: Vec<ConversationMessage> = Vec::new();
+        while over_budget(&body) && !body.is_empty() {
+            let remaining_turns = body
+                .iter()
+                .filter(|m| Self::is_persisted_user_turn(m))
+                .count();
+            if remaining_turns <= PROTECT_RECENT_TURNS {
+                let Some(non_user) = body.iter().position(|m| {
+                    !Self::is_persisted_user_turn(m)
+                        && !matches!(m, ConversationMessage::Chat(c) if c.role == "system")
+                }) else {
+                    break;
+                };
+                if non_user + 1 >= body.len() {
+                    break;
+                }
+                dropped_messages.push(body.remove(non_user));
+                dropped_total += 1;
+                continue;
             }
-            acc = prospective;
-            keep_from = i;
-        }
-        if keep_from > 0 {
-            dropped_messages.extend(body.drain(0..keep_from));
-            dropped_total += keep_from;
+            let start = body
+                .iter()
+                .position(|m| Self::is_persisted_user_turn(m))
+                .unwrap_or(0);
+            if start > 0 {
+                dropped_messages.extend(body.drain(0..start));
+                dropped_total += start;
+                continue;
+            }
+            let next = body
+                .iter()
+                .enumerate()
+                .skip(1)
+                .find_map(|(i, m)| Self::is_persisted_user_turn(m).then_some(i))
+                .unwrap_or(body.len());
+            dropped_messages.extend(body.drain(0..next));
+            dropped_total += next;
         }
 
         if dropped_total > 0 {
@@ -3573,18 +3636,18 @@ impl Agent {
             tracing::warn!(
                 target: "agent.history",
                 dropped = dropped_total,
-                "trim_history removed earlier messages beyond hard history limits; inserting truncation notice"
+                "trim_history archived earlier messages beyond the window-scaled history budget; inserting truncation notice"
             );
             let notice = match Self::archive_dropped_history(&dropped_messages) {
                 Some(blob_id) => format!(
-                    "{TRIM_NOTICE_PREFIX} {dropped_total} earlier message(s) were removed \
-                     because the conversation exceeded hard history limits; their content was \
+                    "{TRIM_NOTICE_PREFIX} {dropped_total} earlier message(s) were archived \
+                     because the conversation exceeded the history budget; their content was \
                      archived as blob {blob_id}; call tool_result_expand with this id to \
                      retrieve it."
                 ),
                 None => format!(
                     "{TRIM_NOTICE_PREFIX} {dropped_total} earlier message(s) were removed \
-                     because the conversation exceeded hard history limits; their content is \
+                     because the conversation exceeded the history budget; their content is \
                      no longer available."
                 ),
             };

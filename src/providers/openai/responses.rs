@@ -94,11 +94,16 @@ impl OpenAiResponsesProvider {
     }
 
     fn apply_reasoning(&self, body: &mut serde_json::Value, model: &str) {
-        if let Some(effort) = self.reasoning_effort.as_deref() {
-            if Self::is_reasoning_model(model) && !effort.trim().is_empty() {
-                body["reasoning"] = serde_json::json!({ "effort": effort });
-            }
+        if !Self::is_reasoning_model(model) {
+            return;
         }
+        let effort = self
+            .reasoning_effort
+            .as_deref()
+            .map(str::trim)
+            .filter(|v| !v.is_empty())
+            .unwrap_or("medium");
+        body["reasoning"] = serde_json::json!({ "effort": effort });
     }
 
     fn apply_prompt_cache_key(&self, body: &mut serde_json::Value) {

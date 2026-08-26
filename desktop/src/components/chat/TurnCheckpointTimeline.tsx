@@ -155,7 +155,7 @@ export function TurnCheckpointTimeline({ sessionId }: { sessionId: string }) {
                         onClick={() => handleRevertTo(index)}
                         className={`rounded px-1.5 py-0.5 text-[10px] font-semibold transition-colors ${
                           armed
-                            ? 'bg-[var(--color-error)] text-white'
+                            ? 'bg-[var(--color-error)] text-[var(--color-on-error)]'
                             : 'bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)] hover:bg-[var(--color-error)]/15 hover:text-[var(--color-error)]'
                         } disabled:opacity-40`}
                         title={t('checkpoint.revertHint')}

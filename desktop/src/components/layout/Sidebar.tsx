@@ -711,7 +711,7 @@ export function Sidebar() {
             }`
           }
         >
-          <span className="relative inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-brand)] text-[10px] font-semibold text-white">
+          <span className="relative inline-flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-[var(--color-brand)] text-[10px] font-semibold text-[var(--color-on-primary)]">
             {(lanNickname || '?').trim().slice(0, 1).toUpperCase()}
             <span
               className={`absolute -bottom-0.5 -right-0.5 h-2 w-2 rounded-full border border-[var(--color-surface)] ${
@@ -723,7 +723,7 @@ export function Sidebar() {
             {lanNickname || t('lan.title')}
           </span>
           {lanUnread > 0 && (
-            <span className="ml-0.5 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-[var(--color-error)] px-1 text-[10px] font-semibold text-white">
+            <span className="ml-0.5 inline-flex h-4 min-w-4 shrink-0 items-center justify-center rounded-full bg-[var(--color-error)] px-1 text-[10px] font-semibold text-[var(--color-on-error)]">
               {lanUnread > 99 ? '99+' : lanUnread}
             </span>
           )}

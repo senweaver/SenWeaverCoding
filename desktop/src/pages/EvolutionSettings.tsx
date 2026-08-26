@@ -1279,7 +1279,7 @@ function SegmentedRow<T extends string>({
             onClick={() => onChange(opt.value)}
             className={`text-xs px-3 py-1 rounded transition-all ${
               value === opt.value
-                ? 'bg-[var(--color-brand)] text-white shadow-sm'
+                ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)] shadow-sm'
                 : 'text-[var(--color-text-secondary)] hover:text-[var(--color-text-primary)]'
             }`}
           >

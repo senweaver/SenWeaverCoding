@@ -164,6 +164,10 @@ export function extractUrl(input: unknown): string {
   return readString(input, ['url', 'href', 'link']) ?? ''
 }
 
+export function extractAction(input: unknown): string {
+  return readString(input, ['action', 'op', 'method']) ?? ''
+}
+
 export function extractCommand(input: unknown): string {
   return readString(input, ['command', 'cmd', 'script']) ?? ''
 }

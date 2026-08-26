@@ -1141,6 +1141,22 @@ impl ProviderError {
     }
 }
 
+tokio::task_local! {
+    pub static REASONING_SUPPRESSION: bool;
+}
+
+#[must_use]
+pub fn reasoning_suppressed() -> bool {
+    REASONING_SUPPRESSION.try_with(|v| *v).unwrap_or(false)
+}
+
+pub async fn with_reasoning_suppressed<F>(fut: F) -> F::Output
+where
+    F: std::future::Future,
+{
+    REASONING_SUPPRESSION.scope(true, fut).await
+}
+
 #[must_use]
 pub fn current_session_cancel_token() -> Option<tokio_util::sync::CancellationToken> {
     crate::session::current_session_context()

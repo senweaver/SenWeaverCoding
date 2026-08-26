@@ -133,7 +133,7 @@ export function getCachedMarkdown(content: string): ParsedMarkdown | undefined {
   return cacheGet(contentKey(content))
 }
 
-const SYNC_PARSE_MAX_CHARS = 64 * 1024
+const SYNC_PARSE_MAX_CHARS = 3072
 
 export function getMarkdownForImmediateRender(
   content: string,

@@ -45,7 +45,7 @@ export class MonacoEditorBoundary extends Component<Props, State> {
         <button
           type="button"
           onClick={this.handleReload}
-          className="rounded bg-[var(--color-accent)] px-3 py-1 text-xs font-medium text-white hover:opacity-90"
+          className="rounded bg-[var(--color-accent)] px-3 py-1 text-xs font-medium text-[var(--color-on-accent)] hover:opacity-90"
         >
           {t('files.editorReload')}
         </button>

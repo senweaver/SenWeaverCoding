@@ -267,7 +267,7 @@ export function StepEditor({ name, onClose, onSaved }: StepEditorProps) {
               type="button"
               onClick={() => void handleSave()}
               disabled={saving || loading || steps.length === 0}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+              className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-[12px] font-semibold text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
             >
               {saving && (
                 <span className="material-symbols-outlined animate-spin text-[14px]">

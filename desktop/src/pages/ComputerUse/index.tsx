@@ -462,7 +462,7 @@ export function ComputerUsePage() {
                       setReply('')
                     }}
                     disabled={!reply.trim()}
-                    className="flex-1 rounded-lg bg-[var(--color-brand)] px-3 py-2 text-[12px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                    className="flex-1 rounded-lg bg-[var(--color-brand)] px-3 py-2 text-[12px] font-medium text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
                   >
                     {t('computerUse.send')}
                   </button>
@@ -586,7 +586,7 @@ export function ComputerUsePage() {
                         type="button"
                         onClick={handleSend}
                         disabled={!task.trim() && attachments.length === 0}
-                        className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                        className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 text-[12px] font-semibold text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
                       >
                         <span className="material-symbols-outlined text-[16px]">send</span>
                         {t('computerUse.sendSteer')}
@@ -605,7 +605,7 @@ export function ComputerUsePage() {
                       type="button"
                       onClick={handleSend}
                       disabled={!task.trim() || !provider || !model || recorderRecording}
-                      className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                      className="flex h-8 min-w-0 flex-1 items-center justify-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 text-[12px] font-semibold text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
                     >
                       <span className="material-symbols-outlined text-[16px]">play_arrow</span>
                       {t('computerUse.run')}

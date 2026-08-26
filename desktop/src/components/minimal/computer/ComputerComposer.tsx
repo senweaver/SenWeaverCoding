@@ -253,7 +253,7 @@ export function ComputerComposer({ onHeightChange, onSubmitted }: ComputerCompos
           type="button"
           onClick={submit}
           disabled={!canSubmit}
-          className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-[12px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+          className="inline-flex shrink-0 items-center gap-1 rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-[12px] font-medium text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
         >
           <span className="material-symbols-outlined text-[15px]">
             {replyMode || computerBusy ? 'send' : 'play_arrow'}

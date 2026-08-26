@@ -18,6 +18,13 @@ pub struct OllamaProvider {
     extra_headers: HashMap<String, String>,
 }
 
+fn think_unsupported_models()
+-> &'static std::sync::Mutex<std::collections::HashSet<String>> {
+    static STORE: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+        std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+    &STORE
+}
+
 #[derive(Debug, Serialize)]
 struct ChatRequest {
     model: String,
@@ -149,6 +156,29 @@ impl OllamaProvider {
             reasoning_enabled,
             timeout_secs: 300,
             extra_headers: HashMap::new(),
+        }
+    }
+
+    fn think_flag(&self, model: &str) -> Option<bool> {
+        if crate::providers::reasoning_suppressed() || Self::think_marked_unsupported(model) {
+            return None;
+        }
+        match self.reasoning_enabled {
+            Some(false) => None,
+            _ => Some(true),
+        }
+    }
+
+    fn think_marked_unsupported(model: &str) -> bool {
+        think_unsupported_models()
+            .lock()
+            .map(|set| set.contains(model))
+            .unwrap_or(false)
+    }
+
+    fn mark_think_unsupported(model: &str) {
+        if let Ok(mut set) = think_unsupported_models().lock() {
+            set.insert(model.to_string());
         }
     }
 
@@ -561,32 +591,41 @@ impl OllamaProvider {
                 temperature,
                 should_auth,
                 tools,
-                self.reasoning_enabled,
+                self.think_flag(model),
             )
             .await;
 
         match result {
             Ok(resp) => Ok(resp),
-            Err(first_err) if self.reasoning_enabled == Some(true) => {
+            Err(first_err) if self.think_flag(model) == Some(true) => {
                 tracing::warn!(
                     model = model,
                     error = %first_err,
                     "Ollama request failed with think=true; retrying without reasoning \
                      (model may not support it)"
                 );
+                let think_related = first_err.to_string().to_lowercase().contains("think");
 
-                self.send_request_inner(&messages, model, temperature, should_auth, tools, None)
+                match self
+                    .send_request_inner(&messages, model, temperature, should_auth, tools, None)
                     .await
-                    .map_err(|retry_err| {
-
+                {
+                    Ok(resp) => {
+                        if think_related {
+                            Self::mark_think_unsupported(model);
+                        }
+                        Ok(resp)
+                    }
+                    Err(retry_err) => {
                         tracing::error!(
                             model = model,
                             original_error = %first_err,
                             retry_error = %retry_err,
                             "Ollama request also failed without think; returning original error"
                         );
-                        first_err
-                    })
+                        Err(first_err)
+                    }
+                }
             }
             Err(e) => Err(e),
         }
@@ -971,7 +1010,7 @@ impl Provider for OllamaProvider {
             &normalized_model,
             temperature,
             tools_json.as_deref(),
-            self.reasoning_enabled,
+            self.think_flag(&normalized_model),
         );
         body.stream = true;
 
@@ -986,29 +1025,47 @@ impl Provider for OllamaProvider {
 
         let cancel_token = crate::providers::current_session_cancel_token();
         crate::runtime::spawn_supervised("providers.ollama.stream", async move {
-            let mut req = client.post(&url).json(&body);
-            for (name, value) in &extra_headers {
-                req = req.header(name, value);
-            }
-            if should_auth {
-                if let Some(key) = api_key.as_ref() {
-                    req = req.header("Authorization", format!("Bearer {key}"));
+            let mut think = body.think;
+            let response = loop {
+                let mut req = client.post(&url).json(&body);
+                for (name, value) in &extra_headers {
+                    req = req.header(name, value);
                 }
-            }
-            let response = match req.send().await {
-                Ok(r) => r,
-                Err(e) => {
-                    let _ = tx
-                        .send(Err(StreamError::Provider(format!(
-                            "Ollama stream request failed: {e}"
-                        ))))
-                        .await;
-                    return;
+                if should_auth {
+                    if let Some(key) = api_key.as_ref() {
+                        req = req.header("Authorization", format!("Bearer {key}"));
+                    }
                 }
-            };
-            if !response.status().is_success() {
+                let response = match req.send().await {
+                    Ok(r) => r,
+                    Err(e) => {
+                        let _ = tx
+                            .send(Err(StreamError::Provider(format!(
+                                "Ollama stream request failed: {e}"
+                            ))))
+                            .await;
+                        return;
+                    }
+                };
+                if response.status().is_success() {
+                    break response;
+                }
                 let (status, text) =
                     crate::providers::stream_error_body_with_retry_after(response).await;
+                if think == Some(true)
+                    && matches!(
+                        status,
+                        reqwest::StatusCode::BAD_REQUEST
+                            | reqwest::StatusCode::UNPROCESSABLE_ENTITY
+                    )
+                {
+                    if text.to_lowercase().contains("think") {
+                        Self::mark_think_unsupported(&body.model);
+                    }
+                    think = None;
+                    body.think = None;
+                    continue;
+                }
                 let sanitized = crate::providers::sanitize_api_error(&text);
                 let _ = tx
                     .send(Err(crate::providers::stream_upstream_error(
@@ -1019,7 +1076,7 @@ impl Provider for OllamaProvider {
                     )))
                     .await;
                 return;
-            }
+            };
 
             const MAX_NDJSON_LINE_BYTES: usize = 64 * 1024 * 1024;
             let mut byte_stream = response.bytes_stream();
@@ -1075,6 +1132,20 @@ impl Provider for OllamaProvider {
                     {
                         if tx
                             .send(Ok(StreamEvent::TextDelta(StreamChunk::delta(delta))))
+                            .await
+                            .is_err()
+                        {
+                            return;
+                        }
+                    }
+                    if let Some(delta) = value
+                        .get("message")
+                        .and_then(|m| m.get("thinking"))
+                        .and_then(|c| c.as_str())
+                        .filter(|s| !s.trim().is_empty())
+                    {
+                        if tx
+                            .send(Ok(StreamEvent::TextDelta(StreamChunk::reasoning(delta))))
                             .await
                             .is_err()
                         {

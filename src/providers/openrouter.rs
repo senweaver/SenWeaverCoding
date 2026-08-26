@@ -321,12 +321,15 @@ impl OpenRouterProvider {
     }
 
     fn reasoning_param_for_model(&self, model: &str) -> Option<serde_json::Value> {
+        if crate::providers::reasoning_suppressed() {
+            return None;
+        }
         if Self::is_reasoning_blacklisted(model) {
             return None;
         }
         let enabled = match self.reasoning_enabled {
             Some(v) => v,
-            None => self.reasoning_effort.is_some(),
+            None => true,
         };
         if !enabled {
             return None;

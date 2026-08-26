@@ -71,7 +71,7 @@ export function AttachmentGallery({ attachments, variant = 'message', onRemove }
                   <button
                     type="button"
                     onClick={() => onRemove(attachment.id!)}
-                    className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--color-error)] text-[10px] text-white opacity-0 transition-opacity group-hover:opacity-100"
+                    className="absolute -right-1 -top-1 flex h-5 w-5 items-center justify-center rounded-full bg-[var(--color-error)] text-[10px] text-[var(--color-on-error)] opacity-0 transition-opacity group-hover:opacity-100"
                     aria-label={`Remove ${attachment.name}`}
                   >
                     ×

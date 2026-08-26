@@ -48,17 +48,6 @@ function allTodosTerminal(card: PlanCardMsg): boolean {
   )
 }
 
-function hasUserTurnAfterIndex(
-  messages: UIMessage[],
-  fromIdx: number,
-): boolean {
-  for (let j = fromIdx + 1; j < messages.length; j++) {
-    const m = messages[j]
-    if (m && m.type === 'user_text') return true
-  }
-  return false
-}
-
 export function selectPlanCardExecutionState(
   messages: UIMessage[],
   planCardId: string,
@@ -70,25 +59,12 @@ export function selectPlanCardExecutionState(
   if (idx < 0) return 'idle'
   const card = messages[idx] as PlanCardMsg
 
-  if (hasUserTurnAfterIndex(messages, idx)) {
-    return 'completed_run'
-  }
-
-  if (card.wasExecuted && allTodosTerminal(card)) {
-    return 'completed_run'
-  }
-
   const switchCard = findFollowingSwitchCard(messages, idx, card)
-  if (!switchCard) {
-    if (card.wasExecuted) {
-      return chatState === undefined || chatState === 'idle'
-        ? 'completed_run'
-        : 'executing'
-    }
+  if (!switchCard || switchCard.status === 'dismissed') {
     return 'idle'
   }
   if (switchCard.status === 'pending') return 'pending_switch'
-  if (switchCard.status === 'dismissed') return 'idle'
+  if (switchCard.status !== 'switched') return 'idle'
 
   if (allTodosTerminal(card)) return 'completed_run'
 

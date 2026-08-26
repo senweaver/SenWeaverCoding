@@ -72,7 +72,7 @@ export function ModeSwitchCard({
     : t('plan.modeSwitchBody')
 
   const switchBtnCls = isCurator
-    ? 'flex items-center gap-1 rounded-[var(--radius-md)] px-3 py-1 text-[11px] font-semibold bg-[var(--color-curator-accent)] text-white hover:bg-[var(--color-curator-accent-hover)] transition-all'
+    ? 'flex items-center gap-1 rounded-[var(--radius-md)] px-3 py-1 text-[11px] font-semibold bg-[var(--color-curator-accent)] text-[var(--color-on-curator-accent)] hover:bg-[var(--color-curator-accent-hover)] transition-all'
     : 'flex items-center gap-1 rounded-[var(--radius-md)] px-3 py-1 text-[11px] font-semibold bg-[var(--color-text-primary)] text-[var(--color-surface)] hover:brightness-110 transition-all'
 
   return (

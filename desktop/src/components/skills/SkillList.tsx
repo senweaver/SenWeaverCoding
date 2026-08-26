@@ -253,7 +253,7 @@ export function SkillList() {
           <button
             onClick={() => setCreateOpen(true)}
             disabled={!userSkillsDir}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-brand)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-brand)] text-[var(--color-on-primary)] hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
           >
             <span className="material-symbols-outlined text-[14px]">add</span>
             {t('settings.skills.newButton')}
@@ -339,7 +339,7 @@ export function SkillList() {
                 <button
                   onClick={() => setCreateOpen(true)}
                   disabled={!userSkillsDir}
-                  className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-brand)] text-white hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-brand)] text-[var(--color-on-primary)] hover:opacity-90 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <span className="material-symbols-outlined text-[14px]">add</span>
                   {t('settings.skills.newButton')}
@@ -557,7 +557,7 @@ export function SkillList() {
               </button>
               <button
                 onClick={() => void handleConfirmDeleteSkill()}
-                className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-error)] text-white hover:opacity-90"
+                className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-error)] text-[var(--color-on-error)] hover:opacity-90"
               >
                 {t('common.delete')}
               </button>
@@ -701,7 +701,7 @@ function ConflictDialog({
           </button>
           <button
             onClick={onOverwrite}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-error)] text-white hover:opacity-90"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-error)] text-[var(--color-on-error)] hover:opacity-90"
           >
             {overwriteLabel}
           </button>

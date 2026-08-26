@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useMemo, useCallback, useState, useEffect, lazy, Suspense } from 'react'
+import { memo, useMemo, useCallback, useState, useEffect, useRef, lazy, Suspense } from 'react'
 import DOMPurify from 'dompurify'
 import { CodeViewer } from '../chat/CodeViewer'
 import { isMermaidBlock } from '../../lib/mermaidDetect'
@@ -12,6 +12,7 @@ import {
   getMarkdownForImmediateRender,
   parseMarkdownAsync,
 } from '../../lib/markdownWorkerClient'
+import { useTranslation } from '../../i18n'
 
 const MermaidRenderer = lazy(() =>
   import('../chat/MermaidRenderer').then((m) => ({ default: m.MermaidRenderer })),
@@ -165,30 +166,59 @@ function getProseClasses(
   return chunks.filter(Boolean).join(' ')
 }
 
-export function MarkdownRenderer({ content, variant = 'default', className, scale = 'default', streaming = false }: Props) {
-  const [parsed, setParsed] = useState<{ source: string; result: ParsedMarkdown } | null>(() => {
-    const eager = getMarkdownForImmediateRender(content)
-    return eager ? { source: content, result: eager } : null
-  })
+const MARKDOWN_RENDER_CHAR_CAP = 20_000
+
+function MarkdownRendererInner({ content, variant = 'default', className, scale = 'default', streaming = false }: Props) {
+  const t = useTranslation()
+  const hostRef = useRef<HTMLDivElement>(null)
+  const [inView, setInView] = useState(streaming)
+  const [expanded, setExpanded] = useState(false)
+  const overCap = content.length > MARKDOWN_RENDER_CHAR_CAP
+  const visibleContent = !expanded && overCap ? content.slice(0, MARKDOWN_RENDER_CHAR_CAP) : content
 
   useEffect(() => {
-    const cached = getCachedMarkdown(content)
+    if (streaming) {
+      setInView(true)
+      return
+    }
+    if (inView) return
+    const el = hostRef.current
+    if (!el) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) setInView(true)
+      },
+      { rootMargin: '280px 0px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [streaming, inView])
+
+  const [parsed, setParsed] = useState<{ source: string; result: ParsedMarkdown } | null>(null)
+
+  useEffect(() => {
+    if (!inView) return
+    const cached = getCachedMarkdown(visibleContent)
     if (cached) {
       setParsed((prev) =>
-        prev && prev.source === content ? prev : { source: content, result: cached },
+        prev && prev.source === visibleContent ? prev : { source: visibleContent, result: cached },
       )
       return
     }
+    const eager = getMarkdownForImmediateRender(visibleContent)
+    if (eager) {
+      setParsed({ source: visibleContent, result: eager })
+    }
     let stale = false
-    void parseMarkdownAsync(content, { cacheWrite: !streaming }).then((result) => {
-      if (!stale) setParsed({ source: content, result })
+    void parseMarkdownAsync(visibleContent, { cacheWrite: !streaming }).then((result) => {
+      if (!stale) setParsed({ source: visibleContent, result })
     })
     return () => {
       stale = true
     }
-  }, [content, streaming])
+  }, [inView, visibleContent, streaming])
 
-  const active = parsed ? parsed.result : null
+  const active = parsed && parsed.source === visibleContent ? parsed.result : null
   const html = active?.html ?? ''
   const codeBlocks = useMemo(() => active?.codeBlocks ?? [], [active])
   const proseClasses = useMemo(
@@ -253,10 +283,35 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
     }
   }, [])
 
+  const expandControl =
+    overCap && !expanded ? (
+      <button
+        type="button"
+        className="mt-2 text-[12px] text-[var(--color-text-secondary)]"
+        onClick={() => setExpanded(true)}
+      >
+        {t('common.expand')}
+      </button>
+    ) : null
+
+  if (!inView) {
+    const est = Math.min(480, Math.max(64, Math.round(content.length / 12)))
+    return (
+      <div
+        ref={hostRef}
+        className={proseClasses}
+        style={{ contentVisibility: 'auto', containIntrinsicSize: `auto ${est}px` }}
+      >
+        <p style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{content.slice(0, 320)}</p>
+      </div>
+    )
+  }
+
   if (!active) {
     return (
-      <div className={proseClasses}>
-        <p style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{content}</p>
+      <div ref={hostRef} className={proseClasses}>
+        <p style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{visibleContent}</p>
+        {expandControl}
       </div>
     )
   }
@@ -264,16 +319,19 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
   if (codeBlocks.length === 0) {
     const cleanHtml = enhanceMarkdownHtml(html, !streaming)
     return (
-      <div
-        className={proseClasses}
-        dangerouslySetInnerHTML={{ __html: cleanHtml }}
-        onClick={handleClick}
-      />
+      <div ref={hostRef}>
+        <div
+          className={proseClasses}
+          dangerouslySetInnerHTML={{ __html: cleanHtml }}
+          onClick={handleClick}
+        />
+        {expandControl}
+      </div>
     )
   }
 
   return (
-    <div className={proseClasses} onClick={handleClick}>
+    <div ref={hostRef} className={proseClasses} onClick={handleClick}>
       {parts.map(({ part, key }) =>
         part.type === 'html' ? (
           <div key={key} dangerouslySetInnerHTML={{ __html: enhanceMarkdownHtml(part.content, !streaming) }} />
@@ -281,7 +339,7 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
           <Suspense
             key={key}
             fallback={
-              <pre className="my-4 overflow-x-auto rounded bg-[var(--color-surface-2,rgba(0,0,0,0.04))] p-3 text-xs">
+              <pre className="my-4 overflow-x-auto rounded bg-[var(--color-surface-container-low)] p-3 text-xs text-[var(--color-text-secondary)]">
                 {part.block.code}
               </pre>
             }
@@ -297,6 +355,9 @@ export function MarkdownRenderer({ content, variant = 'default', className, scal
           </div>
         )
       )}
+      {expandControl}
     </div>
   )
 }
+
+export const MarkdownRenderer = memo(MarkdownRendererInner)

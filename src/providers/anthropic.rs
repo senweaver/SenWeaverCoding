@@ -234,7 +234,7 @@ impl AnthropicProvider {
     }
 
     pub fn with_reasoning(mut self, enabled: Option<bool>, effort: Option<String>) -> Self {
-        self.reasoning_enabled = enabled.unwrap_or(false);
+        self.reasoning_enabled = enabled.unwrap_or(true);
         self.reasoning_effort = effort;
         self
     }
@@ -277,7 +277,7 @@ impl AnthropicProvider {
     }
 
     fn thinking_param(&self) -> Option<ThinkingParam> {
-        if !self.reasoning_enabled {
+        if !self.reasoning_enabled || crate::providers::reasoning_suppressed() {
             return None;
         }
         Some(ThinkingParam::for_effort(

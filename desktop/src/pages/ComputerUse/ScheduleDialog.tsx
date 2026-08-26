@@ -132,7 +132,7 @@ export function ScheduleDialog({ name, onClose }: ScheduleDialogProps) {
               onClick={() => setTrigger(opt.id)}
               className={`flex flex-1 items-center justify-center gap-1 rounded-md px-2 py-1 text-[11px] font-medium transition-colors ${
                 trigger === opt.id
-                  ? 'bg-[var(--color-brand)] text-white'
+                  ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)]'
                   : 'text-[var(--color-text-secondary)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]'
               }`}
             >
@@ -249,7 +249,7 @@ export function ScheduleDialog({ name, onClose }: ScheduleDialogProps) {
             type="button"
             onClick={() => void handleCreate()}
             disabled={saving}
-            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-[12px] font-semibold text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             {saving && (
               <span className="material-symbols-outlined animate-spin text-[14px]">

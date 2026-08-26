@@ -58,11 +58,18 @@ pub struct PruneStats {
 
 const PRUNE_NOTICE_PREFIX: &str = "[context notice]";
 
-fn prune_notice_message(removed: usize) -> ChatMessage {
-    ChatMessage::user(&format!(
-        "{PRUNE_NOTICE_PREFIX} {removed} earlier message(s) were removed because the \
-         conversation exceeded the context budget; their content is no longer available."
-    ))
+fn prune_notice_message(removed: usize, blob_id: Option<&str>) -> ChatMessage {
+    let body = match blob_id {
+        Some(id) => format!(
+            "{PRUNE_NOTICE_PREFIX} {removed} earlier message(s) were archived because the \
+             conversation exceeded the context budget; retrieve with tool_result_expand id {id}."
+        ),
+        None => format!(
+            "{PRUNE_NOTICE_PREFIX} {removed} earlier message(s) were removed because the \
+             conversation exceeded the context budget; their content is no longer available."
+        ),
+    };
+    ChatMessage::user(&body)
 }
 
 fn calibrated_message_tokens(message: &ChatMessage, factor: f64) -> usize {
@@ -97,7 +104,8 @@ fn truncation_marker(kept: usize, total: usize, blob_id: Option<&str>) -> String
         ),
         None => format!(
             "{TRUNCATION_MARKER_PREFIX} kept {kept} of {total} chars; the remainder is no \
-             longer available — re-run the tool if needed]"
+             longer available. Do NOT re-run the original call with the same arguments; \
+             page into uncovered ranges or change arguments if you need more]"
         ),
     }
 }
@@ -146,6 +154,22 @@ fn truncate_native_tool_result(message: &mut ChatMessage, keep_chars: usize) -> 
     );
     message.content = envelope.to_string();
     true
+}
+
+pub(crate) fn compact_tool_message(message: &mut ChatMessage, keep_chars: usize) -> bool {
+    if message.role != "tool" {
+        return false;
+    }
+    if truncate_native_tool_result(message, keep_chars) {
+        return true;
+    }
+    match shrink_text_layered(&message.content, keep_chars) {
+        Some(shrunk) => {
+            message.content = shrunk;
+            true
+        }
+        None => false,
+    }
 }
 
 fn group_is_protected(messages: &[ChatMessage], start: usize, end: usize, keep_recent: usize) -> bool {
@@ -257,7 +281,8 @@ pub fn prune_history(
         let generous_keep_chars =
             crate::agent::token::budget::default_max_tool_result_tokens().saturating_mul(4);
         const AGGRESSIVE_KEEP_CHARS: usize = 400;
-        for keep_chars in [generous_keep_chars, AGGRESSIVE_KEEP_CHARS] {
+        const PLACEHOLDER_KEEP_CHARS: usize = 80;
+        for keep_chars in [generous_keep_chars, AGGRESSIVE_KEEP_CHARS, PLACEHOLDER_KEEP_CHARS] {
             if total_tokens <= config.max_tokens {
                 break;
             }
@@ -276,6 +301,10 @@ pub fn prune_history(
         let mut drop_flags = vec![false; messages.len()];
         let mut i = 0;
         while i < messages.len() && total_tokens > config.max_tokens {
+            if messages[i].role == "system" || messages[i].role == "user" {
+                i += 1;
+                continue;
+            }
             let mut end = i + 1;
             if messages[i].role == "assistant" || messages[i].role == "tool" {
                 while end < messages.len() && messages[end].role == "tool" {
@@ -299,25 +328,36 @@ pub fn prune_history(
         if dropped_messages > 0 {
             let mut rebuilt: Vec<ChatMessage> = Vec::with_capacity(messages.len());
             let mut run = 0usize;
+            let mut archived = String::new();
             for (message, dropped) in messages.drain(..).zip(drop_flags.into_iter()) {
                 if dropped {
                     run += 1;
+                    if archived.len() < 6 * 1024 * 1024 {
+                        archived.push('[');
+                        archived.push_str(&message.role);
+                        archived.push_str("]\n");
+                        archived.push_str(&message.content);
+                        archived.push_str("\n\n");
+                    }
                     continue;
                 }
                 if run > 0 {
-                    rebuilt.push(prune_notice_message(run));
+                    let blob_id = super::blob_store::put(&archived);
+                    rebuilt.push(prune_notice_message(run, blob_id.as_deref()));
                     run = 0;
+                    archived.clear();
                 }
                 rebuilt.push(message);
             }
             if run > 0 {
-                rebuilt.push(prune_notice_message(run));
+                let blob_id = super::blob_store::put(&archived);
+                rebuilt.push(prune_notice_message(run, blob_id.as_deref()));
             }
             *messages = rebuilt;
             tracing::warn!(
                 target: "agent.history.pruner",
                 dropped = dropped_messages,
-                "history pruner removed earlier messages over the context budget; placeholder notices inserted"
+                "history pruner archived earlier assistant/tool messages over the context budget; placeholder notices inserted"
             );
         }
     }

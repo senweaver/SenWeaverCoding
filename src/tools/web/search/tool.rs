@@ -541,9 +541,10 @@ impl Tool for WebSearchTool {
         output.push_str(&render_results_markdown(&diag.query, &merged));
         if merged.is_empty() {
             output.push_str(
-                "\n\nNo usable results returned for this query. Try rephrasing, dropping date qualifiers, \
-                 setting category=`cn` or `news` explicitly, or splitting into 2-3 simpler sub-queries and \
-                 calling web_search again. This is NOT a hard tool failure.",
+                "\n\nNo usable results returned for this query. If you still need search results, \
+                 rewrite the query (different keywords, drop date constraints, or simplify). \
+                 Calling web_search again with the same query will be deduplicated and will not run. \
+                 This is NOT a hard tool failure.",
             );
         }
         if let Some(envelope) = render_web_search_envelope(&diag, &merged) {

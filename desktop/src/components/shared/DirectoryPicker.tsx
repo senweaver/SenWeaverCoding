@@ -2,11 +2,17 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState, useEffect, useRef, useCallback } from 'react'
+import { useState, useEffect } from 'react'
 import { createPortal } from 'react-dom'
 import { sessionsApi, type RecentProject } from '../../api/sessions'
 import { filesystemApi } from '../../api/filesystem'
 import { useTranslation } from '../../i18n'
+import { useAnchoredDropdown } from '../../hooks/useAnchoredDropdown'
+import {
+  activateMinimalInputWindow,
+  isMinimalInputWindow,
+  setMinimalInputKeepVisible,
+} from '../../lib/minimalMode'
 
 type Props = {
   value: string
@@ -36,48 +42,11 @@ export function DirectoryPicker({ value, onChange }: Props) {
   const [browsePath, setBrowsePath] = useState('')
   const [browseParent, setBrowseParent] = useState('')
   const [loading, setLoading] = useState(false)
-  const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number; direction: 'up' | 'down' } | null>(null)
-  const ref = useRef<HTMLDivElement>(null)
-  const triggerRef = useRef<HTMLButtonElement>(null)
-
-  const dropdownRef = useRef<HTMLDivElement>(null)
-
-  const updateDropdownPos = useCallback(() => {
-    if (!triggerRef.current) return
-    const rect = triggerRef.current.getBoundingClientRect()
-    const DROPDOWN_HEIGHT = 380
-    const spaceAbove = rect.top
-    const spaceBelow = window.innerHeight - rect.bottom
-    const direction = spaceBelow >= DROPDOWN_HEIGHT || spaceBelow >= spaceAbove ? 'down' : 'up'
-    setDropdownPos({
-      top: direction === 'down' ? rect.bottom + 4 : rect.top - 4,
-      left: rect.left,
-      direction,
-    })
-  }, [])
-
-  useEffect(() => {
-    if (!isOpen) return
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as Node
-      if (ref.current?.contains(target)) return
-      if (dropdownRef.current?.contains(target)) return
-      setIsOpen(false)
-    }
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [isOpen])
-
-  useEffect(() => {
-    if (!isOpen) return
-    updateDropdownPos()
-    window.addEventListener('scroll', updateDropdownPos, true)
-    window.addEventListener('resize', updateDropdownPos)
-    return () => {
-      window.removeEventListener('scroll', updateDropdownPos, true)
-      window.removeEventListener('resize', updateDropdownPos)
-    }
-  }, [isOpen, updateDropdownPos])
+  const { triggerRef, menuRef, style, portalTarget } = useAnchoredDropdown<HTMLButtonElement>(
+    isOpen,
+    () => setIsOpen(false),
+    { estimatedHeight: 380, overflow: 'hidden' },
+  )
 
   useEffect(() => {
     if (!isOpen || mode !== 'recent') return
@@ -150,7 +119,9 @@ export function DirectoryPicker({ value, onChange }: Props) {
     if (isTauriRuntime()) {
 
       setIsOpen(false)
+      const holdInput = isMinimalInputWindow()
       try {
+        if (holdInput) await setMinimalInputKeepVisible(true)
         const { open } = await import('@tauri-apps/plugin-dialog')
         const selected = await open({
           directory: true,
@@ -161,6 +132,11 @@ export function DirectoryPicker({ value, onChange }: Props) {
         if (path && typeof path === 'string') onChange(path)
       } catch (err) {
         console.error('[DirectoryPicker] Failed to open folder dialog:', err)
+      } finally {
+        if (holdInput) {
+          await activateMinimalInputWindow()
+          await setMinimalInputKeepVisible(false)
+        }
       }
     } else {
 
@@ -172,13 +148,12 @@ export function DirectoryPicker({ value, onChange }: Props) {
   const selectedProject = projects.find((p) => p.realPath === value)
 
   return (
-    <div ref={ref} className="relative">
-      {}
+    <div className="relative">
       {value ? (
         <button
           ref={triggerRef}
           onClick={() => { setIsOpen(!isOpen); setMode('recent') }}
-          className="flex items-center gap-1.5 rounded-full border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-2.5 py-0.5 text-[11px] transition-colors hover:bg-[var(--color-surface-hover)]"
+          className="flex items-center gap-1.5 rounded-full bg-[var(--color-surface-container-low)] px-2.5 py-0.5 text-xs transition-colors hover:bg-[var(--color-surface-hover)]"
         >
           {selectedProject?.isGit ? (
             <svg width="13" height="13" viewBox="0 0 16 16" fill="currentColor" className="text-[var(--color-text-secondary)]">
@@ -199,39 +174,31 @@ export function DirectoryPicker({ value, onChange }: Props) {
               <span className="text-[var(--color-text-tertiary)]">{selectedProject.branch}</span>
             </>
           )}
-          <span className="material-symbols-outlined text-[11px] text-[var(--color-text-tertiary)]">expand_more</span>
+          <span className="material-symbols-outlined text-[12px] text-[var(--color-text-tertiary)]">expand_more</span>
         </button>
       ) : (
         <button
           ref={triggerRef}
           onClick={() => { setIsOpen(!isOpen); setMode('recent') }}
-          className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-secondary)]"
+          className="flex items-center gap-1.5 text-xs text-[var(--color-text-tertiary)] transition-colors hover:text-[var(--color-text-secondary)]"
         >
           <span className="material-symbols-outlined text-[12px]">folder_open</span>
           {t('dirPicker.selectProject')}
         </button>
       )}
 
-      {}
-      {isOpen && dropdownPos && createPortal(
+      {isOpen && style && createPortal(
         <div
-          ref={dropdownRef}
-          className="w-[400px] bg-[var(--color-surface-container-lowest)] border border-[var(--color-border)] rounded-xl shadow-[var(--shadow-dropdown)] overflow-hidden"
-          style={{
-            position: 'fixed',
-            left: dropdownPos.left,
-            ...(dropdownPos.direction === 'down'
-              ? { top: dropdownPos.top }
-              : { bottom: window.innerHeight - dropdownPos.top }),
-            zIndex: 9999,
-          }}
+          ref={menuRef}
+          className="flex w-[400px] flex-col bg-[var(--color-surface-container-lowest)] border border-[var(--color-border)] rounded-xl shadow-[var(--shadow-dropdown)] overflow-hidden"
+          style={style}
         >
           {mode === 'recent' ? (
             <>
               <div className="px-4 py-2 text-[10px] font-bold uppercase tracking-widest text-[var(--color-outline)]">
                 {t('dirPicker.recent')}
               </div>
-              <div className="max-h-[300px] overflow-y-auto">
+              <div className="min-h-0 flex-1 overflow-y-auto">
                 {loading ? (
                   <div className="px-4 py-6 text-center text-xs text-[var(--color-text-tertiary)]">{t('common.loading')}</div>
                 ) : projects.length === 0 ? (
@@ -243,7 +210,7 @@ export function DirectoryPicker({ value, onChange }: Props) {
                       <button
                         key={project.projectPath}
                         onClick={() => handleSelect(project.realPath)}
-                        className={`w-full flex items-center gap-3 px-4 py-3 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
+                        className={`w-full flex items-center gap-3 px-4 py-2 text-left transition-colors hover:bg-[var(--color-surface-hover)] ${
                           isSelected ? 'bg-[var(--color-surface-selected)]' : ''
                         }`}
                       >
@@ -256,15 +223,15 @@ export function DirectoryPicker({ value, onChange }: Props) {
                           <span className="material-symbols-outlined text-[20px] text-[var(--color-text-secondary)] flex-shrink-0">folder</span>
                         )}
                         <div className="flex-1 min-w-0">
-                          <div className="text-sm font-semibold text-[var(--color-text-primary)] truncate">
+                          <div className="truncate text-xs font-semibold text-[var(--color-text-primary)]">
                             {project.repoName || project.projectName}
                           </div>
-                          <div className="text-[11px] text-[var(--color-text-tertiary)] truncate font-[var(--font-mono)]">
+                          <div className="truncate font-[var(--font-mono)] text-xs text-[var(--color-text-tertiary)]">
                             {project.realPath}
                           </div>
                         </div>
                         {isSelected && (
-                          <span className="material-symbols-outlined text-[18px] text-[var(--color-brand)] flex-shrink-0" style={{ fontVariationSettings: "'FILL' 1" }}>
+                          <span className="material-symbols-outlined flex-shrink-0 text-[16px] text-[var(--color-brand)]" style={{ fontVariationSettings: "'FILL' 1" }}>
                             check
                           </span>
                         )}
@@ -283,14 +250,13 @@ export function DirectoryPicker({ value, onChange }: Props) {
                 )}
               </div>
 
-              {}
               <div className="border-t border-[var(--color-border)]">
                 <button
                   onClick={handleChooseFolder}
-                  className="w-full flex items-center gap-3 px-4 py-3 text-left hover:bg-[var(--color-surface-hover)] transition-colors"
+                  className="w-full flex items-center gap-3 px-4 py-2 text-left hover:bg-[var(--color-surface-hover)] transition-colors"
                 >
                   <span className="material-symbols-outlined text-[20px] text-[var(--color-text-tertiary)]">create_new_folder</span>
-                  <span className="text-sm text-[var(--color-text-secondary)]">{t('dirPicker.chooseFolder')}</span>
+                  <span className="text-xs text-[var(--color-text-tertiary)]">{t('dirPicker.chooseFolder')}</span>
                 </button>
               </div>
             </>
@@ -301,19 +267,19 @@ export function DirectoryPicker({ value, onChange }: Props) {
                 <button onClick={() => setMode('recent')} className="text-xs text-[var(--color-text-accent)] hover:underline mr-2">
                   {'← ' + t('dirPicker.recent')}
                 </button>
-                <button onClick={() => loadBrowseDir('/')} className="text-[10px] text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">/</button>
+                <button onClick={() => loadBrowseDir('/')} className="text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)]">/</button>
                 {browsePath.split('/').filter(Boolean).map((seg, i, arr) => (
                   <span key={i} className="flex items-center gap-1">
-                    <span className="text-[10px] text-[var(--color-text-tertiary)]">/</span>
+                    <span className="text-xs text-[var(--color-text-tertiary)]">/</span>
                     <button
                       onClick={() => loadBrowseDir('/' + arr.slice(0, i + 1).join('/'))}
-                      className="text-[10px] text-[var(--color-text-accent)] hover:underline"
+                      className="text-xs text-[var(--color-text-accent)] hover:underline"
                     >{seg}</button>
                   </span>
                 ))}
               </div>
 
-              <div className="max-h-[240px] overflow-y-auto">
+              <div className="min-h-0 flex-1 overflow-y-auto">
                 {loading ? (
                   <div className="px-3 py-4 text-center text-xs text-[var(--color-text-tertiary)]">{t('common.loading')}</div>
                 ) : (
@@ -333,7 +299,7 @@ export function DirectoryPicker({ value, onChange }: Props) {
                       >
                         <span className="material-symbols-outlined text-[16px] text-[var(--color-text-tertiary)]" onClick={() => loadBrowseDir(entry.path)}>folder</span>
                         <span className="text-xs text-[var(--color-text-primary)] flex-1" onClick={() => loadBrowseDir(entry.path)}>{entry.name}</span>
-                        <button onClick={() => handleSelect(entry.path)} className="px-2 py-0.5 text-[10px] font-semibold text-[var(--color-brand)] hover:bg-[var(--color-primary-fixed)] rounded transition-colors">
+                        <button onClick={() => handleSelect(entry.path)} className="h-7 rounded-lg px-2.5 text-xs font-semibold text-[var(--color-brand)] transition-colors hover:bg-[var(--color-surface-hover)]">
                           {t('common.select')}
                         </button>
                       </button>
@@ -342,17 +308,16 @@ export function DirectoryPicker({ value, onChange }: Props) {
                 )}
               </div>
 
-              {}
               <div className="px-3 py-2 border-t border-[var(--color-border)] flex justify-between items-center">
-                <span className="text-[10px] text-[var(--color-text-tertiary)] font-[var(--font-mono)] truncate">{browsePath}</span>
-                <button onClick={() => handleSelect(browsePath)} className="px-3 py-1.5 bg-[var(--color-brand)] text-white text-xs font-semibold rounded-lg hover:opacity-90">
+                <span className="truncate font-[var(--font-mono)] text-xs text-[var(--color-text-tertiary)]">{browsePath}</span>
+                <button onClick={() => handleSelect(browsePath)} className="h-7 rounded-lg bg-[var(--color-brand)] px-3 text-xs font-semibold text-[var(--color-on-primary)] hover:opacity-90">
                   {t('dirPicker.useThisFolder')}
                 </button>
               </div>
             </>
           )}
         </div>,
-        document.body
+        portalTarget,
       )}
     </div>
   )

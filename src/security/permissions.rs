@@ -180,6 +180,10 @@ pub const PLAN_MODE_ALLOWED_TOOLS: &[&str] = &[
     "ask_question",
     "ask_user",
 
+    "sessions_history",
+    "sessions_search",
+    "sessions_outline",
+
     "read_skill",
     "cloud_patterns",
     "send_user_message",
@@ -234,6 +238,9 @@ pub const CURATOR_MODE_ALLOWED_TOOLS: &[&str] = &[
     "todo_write",
     "ask_question",
     "ask_user",
+    "sessions_history",
+    "sessions_search",
+    "sessions_outline",
     "read_skill",
     "cloud_patterns",
     "send_user_message",

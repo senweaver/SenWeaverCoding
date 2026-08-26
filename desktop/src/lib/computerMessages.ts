@@ -39,6 +39,8 @@ const CODE_TO_KEY: Record<string, TranslationKey> = {
   recorder_own_filter: 'computerUse.msg.recorderOwnFilter',
   recorder_step_limit: 'computerUse.msg.recorderStepLimit',
   recorder_stopped_count: 'computerUse.msg.recorderStoppedCount',
+  recorder_activity_count: 'computerUse.msg.recorderActivityCount',
+  recorder_marker_failed: 'computerUse.msg.recorderMarkerFailed',
   recorder_start_failed: 'computerUse.msg.recorderStartFailed',
   recorder_stop_failed: 'computerUse.msg.recorderStopFailed',
   no_saved_recording: 'computerUse.msg.noSavedRecording',

@@ -25,3 +25,13 @@
 **/.senweavercoding-state/**
 .senweavercoding-cache/**
 **/.senweavercoding-cache/**
+
+node_modules/**
+**/node_modules/**
+**/.vite-temp/**
+**/.vite/**
+**/dist/**
+**/target/**
+**/*.log
+desktop/node_modules/**
+desktop/dist/**

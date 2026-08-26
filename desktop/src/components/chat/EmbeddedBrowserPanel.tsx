@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MIT
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 
+import { useAnchoredDropdown } from '../../hooks/useAnchoredDropdown'
 import { useTabStore } from '../../stores/tabStore'
 import { useChatStore } from '../../stores/chatStore'
 import {
@@ -605,17 +607,10 @@ export function EmbeddedBrowserPanel() {
   }, [url])
 
   const [menuOpen, setMenuOpen] = useState(false)
-  const menuRef = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!menuOpen) return
-    const close = (e: MouseEvent) => {
-      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
-        setMenuOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', close)
-    return () => document.removeEventListener('mousedown', close)
-  }, [menuOpen])
+  const moreMenu = useAnchoredDropdown<HTMLDivElement>(menuOpen, () => setMenuOpen(false), {
+    align: 'right',
+    estimatedHeight: 320,
+  })
 
   useEffect(() => {
     if (!sessionId) return
@@ -1009,17 +1004,19 @@ export function EmbeddedBrowserPanel() {
                   active={driverOpen}
                   onClick={() => sessionId && toggleDriver(sessionId)}
                 />
-                <div className="relative" ref={menuRef}>
+                <div className="relative" ref={moreMenu.triggerRef}>
                   <ToolbarToggleBtn
                     icon="more_vert"
                     title={t('browser.panel.more')}
                     active={menuOpen}
                     onClick={() => setMenuOpen((v) => !v)}
                   />
-                  {menuOpen && (
+                  {menuOpen && moreMenu.style && createPortal(
                     <div
+                      ref={moreMenu.menuRef}
                       role="menu"
-                      className="absolute right-0 top-full z-30 mt-1 w-[224px] overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
+                      style={moreMenu.style}
+                      className="w-[224px] overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
                     >
                       <MenuItem
                         icon="photo_camera"
@@ -1100,7 +1097,8 @@ export function EmbeddedBrowserPanel() {
                           setMenuOpen(false)
                         }}
                       />
-                    </div>
+                    </div>,
+                    moreMenu.portalTarget,
                   )}
                 </div>
               </div>
@@ -1161,7 +1159,7 @@ export function EmbeddedBrowserPanel() {
                     {agentBubbles.map((b) => (
                       <span
                         key={b.id}
-                        className="animate-browser-dock-bubble rounded-full bg-[var(--color-brand)]/95 px-2 py-0.5 text-[10px] font-medium text-white shadow"
+                        className="animate-browser-dock-bubble rounded-full bg-[var(--color-brand)]/95 px-2 py-0.5 text-[10px] font-medium text-[var(--color-on-primary)] shadow"
                       >
                         {t('browser.panel.cooperate.agentBubble', { kind: b.kind })}
                       </span>

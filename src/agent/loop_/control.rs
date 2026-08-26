@@ -2,12 +2,18 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use std::collections::HashSet;
+use std::collections::hash_map::Entry;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
 
 pub type LoopDetectionCallback = Box<dyn Fn(&str) + Send + Sync>;
 
 pub const DEFAULT_IDENTICAL_OUTPUT_THRESHOLD: u32 = 5;
+
+enum SeenSignature {
+    Pending,
+    Completed(Option<String>),
+}
 
 pub struct LoopControlState {
 
@@ -17,7 +23,9 @@ pub struct LoopControlState {
 
     consecutive_identical_outputs: u32,
 
-    seen_tool_signatures: HashSet<(String, String)>,
+    seen_tool_signatures: HashMap<(String, String), SeenSignature>,
+
+    pub coverage: crate::agent::loop_::coverage::CoverageLedger,
 
     identical_output_threshold: u32,
 
@@ -48,7 +56,8 @@ impl LoopControlState {
             loop_detector: crate::agent::loop_::detector::LoopDetector::new(config),
             last_tool_output_hash: None,
             consecutive_identical_outputs: 0,
-            seen_tool_signatures: HashSet::new(),
+            seen_tool_signatures: HashMap::new(),
+            coverage: crate::agent::loop_::coverage::CoverageLedger::new(),
             identical_output_threshold: threshold,
             notification_callback: None,
         }
@@ -65,10 +74,72 @@ impl LoopControlState {
         }
     }
 
-    pub fn record_tool_signature(&mut self, name: &str, arguments: &str) -> bool {
-        !self
+    pub fn has_completed_signature(&self, name: &str, arguments: &str) -> bool {
+        matches!(
+            self.seen_tool_signatures
+                .get(&(name.to_string(), arguments.to_string())),
+            Some(SeenSignature::Completed(_))
+        )
+    }
+
+    pub fn completed_signature_blob(&self, name: &str, arguments: &str) -> Option<&str> {
+        match self
             .seen_tool_signatures
-            .insert((name.to_string(), arguments.to_string()))
+            .get(&(name.to_string(), arguments.to_string()))?
+        {
+            SeenSignature::Completed(blob) => blob.as_deref(),
+            SeenSignature::Pending => None,
+        }
+    }
+
+    pub fn claim_signature(&mut self, name: &str, arguments: &str) -> bool {
+        match self
+            .seen_tool_signatures
+            .entry((name.to_string(), arguments.to_string()))
+        {
+            Entry::Occupied(_) => true,
+            Entry::Vacant(slot) => {
+                slot.insert(SeenSignature::Pending);
+                false
+            }
+        }
+    }
+
+    pub fn complete_signature(&mut self, name: &str, arguments: &str, blob_id: Option<String>) {
+        self.seen_tool_signatures.insert(
+            (name.to_string(), arguments.to_string()),
+            SeenSignature::Completed(blob_id),
+        );
+    }
+
+    pub fn release_pending_signature(&mut self, name: &str, arguments: &str) {
+        let key = (name.to_string(), arguments.to_string());
+        if matches!(
+            self.seen_tool_signatures.get(&key),
+            Some(SeenSignature::Pending)
+        ) {
+            self.seen_tool_signatures.remove(&key);
+        }
+    }
+
+    pub fn invalidate_read_signatures(&mut self) {
+        self.seen_tool_signatures
+            .retain(|(name, _), _| name != "file_read" && name != "content_search");
+    }
+
+    pub fn peek_window_repeat_count(&self, name: &str, canonical_args: &str) -> usize {
+        self.loop_detector.peek_window_count_hashed(
+            name,
+            crate::agent::loop_::detector::hash_canonical_str(canonical_args),
+        )
+    }
+
+    pub fn loop_block_threshold(&self) -> usize {
+        self.loop_detector.max_repeats()
+    }
+
+    pub fn loop_detection_enabled(&self) -> bool {
+        self.loop_detector.is_enabled()
     }
 
     pub fn record_tool_results_with_args(
@@ -189,6 +260,8 @@ impl LoopControlState {
         self.last_tool_output_hash = None;
         self.consecutive_identical_outputs = 0;
         self.seen_tool_signatures.clear();
+        self.coverage.reset();
+        self.loop_detector.reset();
     }
 
     pub fn record_per_tool(

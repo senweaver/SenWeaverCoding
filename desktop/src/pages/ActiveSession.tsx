@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useTabStore } from '../stores/tabStore'
 import { useSessionStore } from '../stores/sessionStore'
@@ -22,7 +22,6 @@ import { ActivePlanStickyBar } from '../components/chat/ActivePlanStickyBar'
 import { ResourceWaitBanner } from '../components/chat/ResourceWaitBanner'
 const TASK_POLL_INTERVAL_MS = 10_000
 const EMPTY_TOKEN_USAGE = { input_tokens: 0, output_tokens: 0 }
-const KEEP_ALIVE_SESSION_LIMIT = 3
 
 export function ActiveSession() {
   const activeTabId = useTabStore((s) => s.activeTabId)
@@ -60,26 +59,6 @@ export function ActiveSession() {
       connectToSession(activeTabId)
     }
   }, [activeTabId, isMemberSession, connectToSession])
-
-  const [aliveSessions, setAliveSessions] = useState<string[]>([])
-  const openTabIds = useTabStore(
-    useShallow((s) => s.tabs.filter((t) => t.type === 'session').map((t) => t.sessionId)),
-  )
-  useEffect(() => {
-    if (!activeTabId || isMemberSession) return
-    setAliveSessions((prev) => {
-      const next = [activeTabId, ...prev.filter((id) => id !== activeTabId)]
-      return next.length > KEEP_ALIVE_SESSION_LIMIT
-        ? next.slice(0, KEEP_ALIVE_SESSION_LIMIT)
-        : next
-    })
-  }, [activeTabId, isMemberSession])
-  useEffect(() => {
-    setAliveSessions((prev) => {
-      const next = prev.filter((id) => openTabIds.includes(id))
-      return next.length === prev.length ? prev : next
-    })
-  }, [openTabIds])
 
   useEffect(() => {
     if (!activeTabId || isMemberSession) return
@@ -254,28 +233,16 @@ export function ActiveSession() {
           )}
 
           {isMemberSession ? (
-            <SectionErrorBoundary label="MessageList" resetKeys={[activeTabId]}>
-              <MessageList />
-            </SectionErrorBoundary>
+            <div className="relative flex flex-1 min-h-0 flex-col">
+              <SectionErrorBoundary label="MessageList" resetKeys={[activeTabId]}>
+                <MessageList />
+              </SectionErrorBoundary>
+            </div>
           ) : (
-            <div className="relative flex-1 min-h-0">
-              {(aliveSessions.includes(activeTabId)
-                ? aliveSessions
-                : [activeTabId, ...aliveSessions]
-              ).map((id) => (
-                <div
-                  key={id}
-                  className={
-                    id === activeTabId
-                      ? 'absolute inset-0 flex flex-col'
-                      : 'absolute inset-0 flex flex-col invisible pointer-events-none'
-                  }
-                >
-                  <SectionErrorBoundary label="MessageList" resetKeys={[id]}>
-                    <MessageList sessionId={id} />
-                  </SectionErrorBoundary>
-                </div>
-              ))}
+            <div className="relative flex flex-1 min-h-0 flex-col">
+              <SectionErrorBoundary label="MessageList" resetKeys={[activeTabId]}>
+                <MessageList sessionId={activeTabId} />
+              </SectionErrorBoundary>
             </div>
           )}
         </>

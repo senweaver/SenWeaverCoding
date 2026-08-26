@@ -82,6 +82,9 @@ export function ThinkingBlock({
     isActive ? (startedAt != null ? elapsedSec : null) : completedSeconds
 
   const hasContent = content.trim().length > 0
+  if (isActive && !hasContent) {
+    return null
+  }
   const canExpand = hasContent
   const showInlinePreview = (compact || isActive) && !expanded
   const contentSizeClass = isActive
@@ -99,7 +102,6 @@ export function ThinkingBlock({
 
   return (
     <div className={compact ? 'mb-1' : 'mb-1.5'}>
-      <style>{thinkingStyles}</style>
       <button
         type="button"
         onClick={() => {
@@ -174,6 +176,9 @@ export function ActiveThinkingBlock({
   useEffect(() => {
     onContentGrow?.()
   }, [content, onContentGrow])
+  if (!content.trim()) {
+    return null
+  }
   return (
     <ThinkingBlock
       content={content}
@@ -196,3 +201,13 @@ const thinkingStyles = `
   animation: thinking-dots 1.4s steps(1, end) infinite;
 }
 `
+
+if (typeof document !== 'undefined') {
+  const existing = document.getElementById('sen-thinking-block-styles')
+  if (!existing) {
+    const el = document.createElement('style')
+    el.id = 'sen-thinking-block-styles'
+    el.textContent = thinkingStyles
+    document.head.appendChild(el)
+  }
+}

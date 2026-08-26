@@ -155,7 +155,7 @@ export function SharePanel() {
           <button
             type="button"
             onClick={() => void setDiscovery(true)}
-            className="rounded-md bg-[var(--color-brand)] px-2.5 py-1 text-xs font-semibold text-white hover:opacity-90"
+            className="rounded-md bg-[var(--color-brand)] px-2.5 py-1 text-xs font-semibold text-[var(--color-on-primary)] hover:opacity-90"
           >
             {t('lan.enableDiscovery')}
           </button>
@@ -194,7 +194,7 @@ export function SharePanel() {
               type="button"
               disabled={busy}
               onClick={() => void pickAndShare(false)}
-              className="inline-flex items-center gap-1 rounded-md bg-[var(--color-brand)] px-2.5 py-1 text-xs font-semibold text-white hover:opacity-90 disabled:opacity-40"
+              className="inline-flex items-center gap-1 rounded-md bg-[var(--color-brand)] px-2.5 py-1 text-xs font-semibold text-[var(--color-on-primary)] hover:opacity-90 disabled:opacity-40"
             >
               <span className="material-symbols-outlined text-[15px]">attach_file</span>
               {t('lanShare.shareFile')}
@@ -282,7 +282,7 @@ export function SharePanel() {
                         disabled={isDownloading}
                         title={t('lanShare.download')}
                         onClick={() => void handleDownload(item)}
-                        className="inline-flex items-center gap-1 rounded-md bg-[var(--color-brand)] px-2 py-1 text-[11px] font-semibold text-white hover:opacity-90 disabled:opacity-50"
+                        className="inline-flex items-center gap-1 rounded-md bg-[var(--color-brand)] px-2 py-1 text-[11px] font-semibold text-[var(--color-on-primary)] hover:opacity-90 disabled:opacity-50"
                       >
                         <span className="material-symbols-outlined text-[14px]">
                           {isDownloading ? 'hourglass_top' : 'download'}

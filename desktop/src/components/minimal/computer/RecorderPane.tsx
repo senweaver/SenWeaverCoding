@@ -45,6 +45,8 @@ export function RecorderPane() {
 
   const [task, setTask] = useState('')
   const [now, setNow] = useState(() => Date.now())
+  const [narrate, setNarrate] = useState(false)
+  const [muted, setMuted] = useState(false)
 
   useEffect(() => {
     void loadModels()
@@ -93,9 +95,22 @@ export function RecorderPane() {
             placeholder={t('computerUse.record.taskPlaceholder')}
             className="max-h-[96px] min-h-[44px] w-full resize-none rounded-xl border border-[var(--color-border)] bg-[var(--color-background)] px-3 py-2 text-[12px] text-[var(--color-text-primary)] outline-none placeholder:text-[var(--color-text-tertiary)] disabled:opacity-60"
           />
+          <label className="flex items-center gap-1.5 text-[11px] text-[var(--color-text-secondary)]">
+            <input
+              type="checkbox"
+              checked={narrate}
+              onChange={(e) => setNarrate(e.target.checked)}
+              className="h-3 w-3 accent-[var(--color-brand)]"
+            />
+            <span className="material-symbols-outlined text-[13px] text-[var(--color-brand)]">mic</span>
+            {t('computerUse.narration.enable')}
+          </label>
           <button
             type="button"
-            onClick={() => send({ action: 'start', task: task.trim() })}
+            onClick={() => {
+              setMuted(false)
+              send({ action: 'start', task: task.trim(), narrationEnabled: narrate })
+            }}
             disabled={computerBusy}
             title={computerBusy ? t('minimal.computer.record.busy') : undefined}
             className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-red-500 px-3 py-1.5 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
@@ -137,6 +152,21 @@ export function RecorderPane() {
               <span className="material-symbols-outlined text-[15px]">stop</span>
               {t('computerUse.record.stop')}
             </button>
+            {narrate && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMuted((m) => !m)
+                  send({ action: 'toggle-mute' })
+                }}
+                title={muted ? t('computerUse.narration.unmute') : t('computerUse.narration.mute')}
+                className="inline-flex items-center justify-center rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+              >
+                <span className="material-symbols-outlined text-[15px]">
+                  {muted ? 'mic_off' : 'mic'}
+                </span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => send({ action: 'discard' })}
@@ -166,7 +196,7 @@ export function RecorderPane() {
                 ? t('computerUse.record.executeNowSmartHint')
                 : t('computerUse.skills.exactReplayHint')
             }
-            className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+            className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-[var(--color-brand)] px-3 py-1.5 text-[12px] font-semibold text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
           >
             <span className="material-symbols-outlined text-[15px]">
               {hasModel ? 'auto_awesome' : 'play_arrow'}

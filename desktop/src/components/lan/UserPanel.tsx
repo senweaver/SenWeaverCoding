@@ -203,7 +203,7 @@ export function UserPanel() {
       style={{ height: '78vh', maxHeight: '640px' }}
     >
         <div className="flex items-center gap-3 border-b border-[var(--color-border)] p-3">
-          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--color-brand)] text-sm font-semibold text-white">
+          <div className="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-[var(--color-brand)] text-sm font-semibold text-[var(--color-on-primary)]">
             {initials(identity?.nickname ?? identity?.userId ?? '?')}
           </div>
           <div className="min-w-0 flex-1">
@@ -247,7 +247,7 @@ export function UserPanel() {
             <button
               type="button"
               onClick={() => void setDiscovery(true)}
-              className="rounded-md bg-[var(--color-brand)] px-2.5 py-1 text-xs font-semibold text-white hover:opacity-90"
+              className="rounded-md bg-[var(--color-brand)] px-2.5 py-1 text-xs font-semibold text-[var(--color-on-primary)] hover:opacity-90"
             >
               {t('lan.enableDiscovery')}
             </button>
@@ -283,7 +283,7 @@ export function UserPanel() {
                     </div>
                   </div>
                   {unreadByPeer(peer.userId) > 0 && (
-                    <span className="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--color-brand)] px-1.5 text-[10px] font-semibold text-white">
+                    <span className="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--color-brand)] px-1.5 text-[10px] font-semibold text-[var(--color-on-primary)]">
                       {unreadByPeer(peer.userId)}
                     </span>
                   )}
@@ -314,7 +314,7 @@ export function UserPanel() {
                       </div>
                     </div>
                     {chat.unread > 0 && (
-                      <span className="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--color-brand)] px-1.5 text-[10px] font-semibold text-white">
+                      <span className="ml-auto inline-flex h-5 min-w-5 items-center justify-center rounded-full bg-[var(--color-brand)] px-1.5 text-[10px] font-semibold text-[var(--color-on-primary)]">
                         {chat.unread}
                       </span>
                     )}
@@ -477,7 +477,7 @@ export function UserPanel() {
                   type="button"
                   onClick={() => void handleSend()}
                   disabled={!activePeer || !draft.trim()}
-                  className="inline-flex h-9 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-brand)] px-3 text-sm font-semibold text-white transition-colors hover:opacity-90 disabled:opacity-40"
+                  className="inline-flex h-9 items-center justify-center rounded-[var(--radius-md)] bg-[var(--color-brand)] px-3 text-sm font-semibold text-[var(--color-on-primary)] transition-colors hover:opacity-90 disabled:opacity-40"
                 >
                   {t('lan.send')}
                 </button>
@@ -550,7 +550,7 @@ function MessageBubble({
       <div
         className={`max-w-[78%] rounded-2xl px-3 py-1.5 text-sm ${
           isOut
-            ? 'bg-[var(--color-brand)] text-white'
+            ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)]'
             : 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)]'
         }`}
       >

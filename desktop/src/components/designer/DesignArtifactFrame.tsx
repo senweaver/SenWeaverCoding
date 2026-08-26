@@ -5,6 +5,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
 import { useTranslation } from '../../i18n'
+import { useAnchoredDropdown } from '../../hooks/useAnchoredDropdown'
 import { workspaceFilesApi } from '../../api/workspaceFiles'
 import type { FileContent } from '../../types/workspaceFile'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
@@ -371,20 +372,12 @@ export function DesignArtifactFrame({
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const [deviceOpen, setDeviceOpen] = useState(false)
-  const deviceMenuRef = useRef<HTMLDivElement | null>(null)
+  const deviceMenu = useAnchoredDropdown<HTMLDivElement>(deviceOpen, () => setDeviceOpen(false), {
+    align: 'right',
+    estimatedHeight: 180,
+  })
   const [fullscreen, setFullscreen] = useState(false)
   const fullscreenIframeRef = useRef<HTMLIFrameElement | null>(null)
-
-  useEffect(() => {
-    if (!deviceOpen) return
-    const onDoc = (e: PointerEvent) => {
-      if (deviceMenuRef.current && !deviceMenuRef.current.contains(e.target as Node)) {
-        setDeviceOpen(false)
-      }
-    }
-    document.addEventListener('pointerdown', onDoc, true)
-    return () => document.removeEventListener('pointerdown', onDoc, true)
-  }, [deviceOpen])
   const rawId = useRawId(root)
   const addToast = useUIStore((s) => s.addToast)
 
@@ -828,7 +821,7 @@ export function DesignArtifactFrame({
             </button>
           )}
           {isHtml && (
-            <div className="relative" ref={deviceMenuRef}>
+            <div className="relative" ref={deviceMenu.triggerRef}>
               <button
                 type="button"
                 onPointerDown={(e) => e.stopPropagation()}
@@ -843,9 +836,11 @@ export function DesignArtifactFrame({
                   {DEVICE_ICON[unit.device ?? 'auto']}
                 </span>
               </button>
-              {deviceOpen && (
+              {deviceOpen && deviceMenu.style && createPortal(
                 <div
-                  className="absolute right-0 top-full z-[9999] mt-1 w-[120px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 shadow-[var(--shadow-dropdown)]"
+                  ref={deviceMenu.menuRef}
+                  style={deviceMenu.style}
+                  className="w-[120px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 shadow-[var(--shadow-dropdown)]"
                   onPointerDown={(e) => e.stopPropagation()}
                 >
                   {DEVICE_ORDER.map((d) => (
@@ -873,7 +868,8 @@ export function DesignArtifactFrame({
                       </span>
                     </button>
                   ))}
-                </div>
+                </div>,
+                deviceMenu.portalTarget,
               )}
             </div>
           )}

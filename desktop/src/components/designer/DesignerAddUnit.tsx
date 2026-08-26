@@ -3,7 +3,9 @@
 // Licensed under the MIT License.
 
 import { useEffect, useMemo, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from '../../i18n'
+import { useAnchoredDropdown } from '../../hooks/useAnchoredDropdown'
 import { useUIStore } from '../../stores/uiStore'
 import { useDesignerStore } from '../../stores/designerStore'
 import { designerApi } from '../../api/designer'
@@ -87,6 +89,14 @@ export function DesignerAddUnitButton({
   const [busy, setBusy] = useState(false)
   const [query, setQuery] = useState('')
   const rootRef = useRef<HTMLDivElement | null>(null)
+  const { menuRef, style, portalTarget } = useAnchoredDropdown(
+    menuOpen || templateOpen,
+    () => {
+      setMenuOpen(false)
+      setTemplateOpen(false)
+    },
+    { anchorRef: rootRef, align: 'right', estimatedHeight: 360, overflow: 'hidden' },
+  )
 
   const htmlTemplates = useDesignerStore((s) => s.htmlTemplates)
   const storeLoaded = useDesignerStore((s) => s.loaded)
@@ -96,18 +106,6 @@ export function DesignerAddUnitButton({
       void useDesignerStore.getState().load()
     }
   }, [menuOpen, templateOpen, storeLoaded])
-
-  useEffect(() => {
-    if (!menuOpen && !templateOpen) return
-    const onDoc = (e: MouseEvent) => {
-      if (rootRef.current && !rootRef.current.contains(e.target as Node)) {
-        setMenuOpen(false)
-        setTemplateOpen(false)
-      }
-    }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
-  }, [menuOpen, templateOpen])
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase()
@@ -171,8 +169,12 @@ export function DesignerAddUnitButton({
         <span className="material-symbols-outlined text-[16px]">add_box</span>
       </button>
 
-      {menuOpen && !templateOpen && (
-        <div className="absolute right-0 top-full z-[9999] mt-1 w-[176px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 shadow-[var(--shadow-dropdown)]">
+      {menuOpen && !templateOpen && style && createPortal(
+        <div
+          ref={menuRef}
+          style={style}
+          className="w-[176px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 shadow-[var(--shadow-dropdown)]"
+        >
           <button
             type="button"
             onClick={() => setTemplateOpen(true)}
@@ -196,11 +198,16 @@ export function DesignerAddUnitButton({
             </span>
             <span>{t('designer.canvas.addSketch')}</span>
           </button>
-        </div>
+        </div>,
+        portalTarget,
       )}
 
-      {templateOpen && (
-        <div className="absolute right-0 top-full z-[9999] mt-1 flex max-h-[360px] w-[280px] flex-col rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]">
+      {templateOpen && style && createPortal(
+        <div
+          ref={menuRef}
+          style={style}
+          className="flex min-h-0 w-[280px] flex-col rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
+        >
           <div className="border-b border-[var(--color-border)] p-2">
             <input
               autoFocus
@@ -233,7 +240,8 @@ export function DesignerAddUnitButton({
               </button>
             ))}
           </div>
-        </div>
+        </div>,
+        portalTarget,
       )}
 
       {sketchOpen && (

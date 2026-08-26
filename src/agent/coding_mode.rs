@@ -1510,6 +1510,9 @@ impl CodingMode {
             "cloud_patterns",
             "now",
             "update_plan",
+            "sessions_history",
+            "sessions_search",
+            "sessions_outline",
         ]
         .into_iter()
         .collect()

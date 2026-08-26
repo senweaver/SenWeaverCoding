@@ -36,7 +36,7 @@ import { useDesignerCanvasStore, unitDisplayName } from '../../stores/designerCa
 import { DESIGN_UNIT_DND_MIME } from '../designer/DesignArtifactFrame'
 import { FileSearchMenu, type FileSearchMenuHandle } from './FileSearchMenu'
 import { RichComposer, type RichComposerHandle } from './RichComposer'
-import { isSessionRef, makeCredToken, parseRefSegments, sessionIdFromRef, toRelativeRefPath } from './composerRefs'
+import { SESSION_REF_PREFIX, isSessionRef, makeCredToken, parseRefSegments, sessionIdFromRef, toRelativeRefPath } from './composerRefs'
 import { isImageFileName } from '../../lib/clipboardImage'
 import { useFileDragStore } from '../../stores/fileDragStore'
 import { LocalSlashCommandPanel, type LocalSlashCommandName } from './LocalSlashCommandPanel'
@@ -73,6 +73,7 @@ type Attachment = {
 
 type ChatInputProps = {
   variant?: 'default' | 'hero'
+  embedded?: boolean
   onSubmit?: ReturnType<typeof useChatStore.getState>['sendMessage']
   draftWorkDir?: string
 }
@@ -80,7 +81,7 @@ type ChatInputProps = {
 const EMPTY_DOCK_TABS: BrowserDockTabInfo[] = []
 const EMPTY_SLASH_COMMANDS: Array<{ name: string; description: string }> = []
 
-export function ChatInput({ variant = 'default', onSubmit, draftWorkDir }: ChatInputProps) {
+export function ChatInput({ variant = 'default', embedded = false, onSubmit, draftWorkDir }: ChatInputProps) {
   const t = useTranslation()
   const [input, setInput] = useState('')
   const [attachments, setAttachments] = useState<Attachment[]>([])
@@ -1114,7 +1115,16 @@ export function ChatInput({ variant = 'default', onSubmit, draftWorkDir }: ChatI
 
   const handleKeyDown = (event: React.KeyboardEvent) => {
 
-    if (composingRef.current || event.nativeEvent.isComposing || event.keyCode === 229) return
+    if (event.nativeEvent.isComposing || event.keyCode === 229) return
+    if (composingRef.current) {
+      composingRef.current = false
+    }
+
+    if (localSlashPanel && event.key === 'Escape') {
+      event.preventDefault()
+      setLocalSlashPanel(null)
+      return
+    }
 
     if (fileSearchOpen) {
       const key = event.key
@@ -1362,7 +1372,13 @@ export function ChatInput({ variant = 'default', onSubmit, draftWorkDir }: ChatI
   return (
     <div
       ref={composerRootRef}
-      className={isHeroComposer ? 'bg-[var(--color-surface)] px-8 pb-4' : 'bg-[var(--color-surface)] px-4 py-3'}
+      className={
+        isHeroComposer
+          ? 'bg-[var(--color-surface)] px-8 pb-4'
+          : embedded
+            ? 'bg-transparent px-3 py-2.5'
+            : 'bg-[var(--color-surface)] px-4 py-3'
+      }
     >
       <div className={isHeroComposer ? 'mx-auto flex w-full max-w-3xl flex-col gap-1.5' : 'mx-auto max-w-[860px]'}>
         {!isMemberSession && isDebugMode && (
@@ -1415,6 +1431,7 @@ export function ChatInput({ variant = 'default', onSubmit, draftWorkDir }: ChatI
               ref={fileSearchRef}
               cwd={resolvedWorkDir || ''}
               filter={atFilter}
+              currentSessionId={activeTabId}
               onSelect={(path, name, _isDir) => {
                 const start = atStartPos >= 0 ? atStartPos : atCursorPos
                 const end = atCursorPos >= 0 ? atCursorPos : start
@@ -1426,6 +1443,32 @@ export function ChatInput({ variant = 'default', onSubmit, draftWorkDir }: ChatI
                   setAtCursorPos(-1)
                   setAtStartPos(-1)
                 }
+              }}
+              onSelectSession={(sessionId, title) => {
+                const start = atStartPos >= 0 ? atStartPos : atCursorPos
+                const end = atCursorPos >= 0 ? atCursorPos : start
+                if (start < 0) return
+                const current = composerRef.current?.getValue() ?? ''
+                const alreadyReferenced = parseRefSegments(current).some(
+                  (seg) =>
+                    seg.type === 'ref' &&
+                    isSessionRef(seg.relPath) &&
+                    sessionIdFromRef(seg.relPath) === sessionId,
+                )
+                if (alreadyReferenced) {
+                  composerRef.current?.replaceRange(start, end, '')
+                } else {
+                  composerRef.current?.insertRef(
+                    start,
+                    end,
+                    title,
+                    `${SESSION_REF_PREFIX}${sessionId}`,
+                  )
+                }
+                setFileSearchOpen(false)
+                setAtFilter('')
+                setAtCursorPos(-1)
+                setAtStartPos(-1)
               }}
             />
           )}
@@ -1875,6 +1918,7 @@ export function ChatInput({ variant = 'default', onSubmit, draftWorkDir }: ChatI
                 onKeyDown={handleKeyDown}
                 onCompositionStart={() => { composingRef.current = true }}
                 onCompositionEnd={() => { composingRef.current = false }}
+                onBlur={() => { composingRef.current = false }}
                 onPaste={handlePaste}
                 className="min-h-[84px] max-h-[220px] w-full flex-1 overflow-y-auto py-1 text-[12px] leading-relaxed text-[var(--color-text-primary)]"
               />
@@ -1892,6 +1936,7 @@ export function ChatInput({ variant = 'default', onSubmit, draftWorkDir }: ChatI
               onKeyDown={handleKeyDown}
               onCompositionStart={() => { composingRef.current = true }}
               onCompositionEnd={() => { composingRef.current = false }}
+              onBlur={() => { composingRef.current = false }}
               onPaste={handlePaste}
               className={`w-full max-h-[220px] overflow-y-auto py-1 ${codingMode === 'designer' ? 'min-h-[44px] pb-1' : 'min-h-[48px]'} text-[12px] leading-relaxed text-[var(--color-text-primary)]`}
             />

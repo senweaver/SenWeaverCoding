@@ -207,6 +207,28 @@ impl LoopDetector {
             .count()
     }
 
+    pub fn peek_window_count_hashed(&self, name: &str, args_hash: u64) -> usize {
+        if !self.config.enabled || self.window.is_empty() {
+            return 0;
+        }
+        self.window
+            .iter()
+            .filter(|r| r.name == name && r.args_hash == args_hash)
+            .count()
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        self.config.enabled
+    }
+
+    pub fn max_repeats(&self) -> usize {
+        self.config.max_repeats.max(1)
+    }
+
+    pub fn reset(&mut self) {
+        self.window.clear();
+    }
+
     fn detect_exact_repeat(&self) -> Option<LoopDetectionResult> {
         let max = self.config.max_repeats;
         if self.window.len() < max {
@@ -214,52 +236,46 @@ impl LoopDetector {
         }
 
         let last = self.window.back()?;
-        let consecutive_records: Vec<&ToolCallRecord> = self
+        let matching: Vec<&ToolCallRecord> = self
             .window
             .iter()
-            .rev()
-            .take_while(|r| r.name == last.name && r.args_hash == last.args_hash)
+            .filter(|r| r.name == last.name && r.args_hash == last.args_hash)
             .collect();
-        let consecutive = consecutive_records.len();
+        let count = matching.len();
+        if count < max {
+            return None;
+        }
 
-        let unique_results: std::collections::HashSet<u64> = consecutive_records
-            .iter()
-            .map(|r| r.result_hash)
-            .collect();
+        let unique_results: std::collections::HashSet<u64> =
+            matching.iter().map(|r| r.result_hash).collect();
         let result_is_evolving = unique_results.len() > 1;
 
-        if consecutive >= max + 2 {
+        if count >= max + 2 {
             if result_is_evolving {
                 Some(LoopDetectionResult::Warning(format!(
-                    "Warning: tool '{}' called {} times consecutively with identical arguments, \
+                    "Warning: tool '{}' called {} times in the recent window with identical arguments, \
                      but the result is still changing  - likely polling for state. Continuing.",
-                    last.name, consecutive
+                    last.name, count
                 )))
             } else {
                 Some(LoopDetectionResult::Break(format!(
-                    "Circuit breaker: tool '{}' called {} times consecutively with identical arguments and identical results",
-                    last.name, consecutive
+                    "Circuit breaker: tool '{}' called {} times in the recent window with identical arguments and identical results",
+                    last.name, count
                 )))
             }
-        } else if consecutive > max {
+        } else if count >= max {
             if result_is_evolving {
                 Some(LoopDetectionResult::Warning(format!(
-                    "Warning: tool '{}' called {} times consecutively with identical arguments \
+                    "Warning: tool '{}' called {} times in the recent window with identical arguments \
                      (result still changing).",
-                    last.name, consecutive
+                    last.name, count
                 )))
             } else {
                 Some(LoopDetectionResult::Block(format!(
-                    "Blocked: tool '{}' called {} times consecutively with identical arguments and identical results",
-                    last.name, consecutive
+                    "Blocked: tool '{}' called {} times in the recent window with identical arguments and identical results",
+                    last.name, count
                 )))
             }
-        } else if consecutive >= max {
-            Some(LoopDetectionResult::Warning(format!(
-                "Warning: tool '{}' has been called {} times consecutively with identical arguments. \
-                 Try a different approach.",
-                last.name, consecutive
-            )))
         } else {
             None
         }

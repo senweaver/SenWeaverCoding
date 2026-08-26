@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState, useEffect } from 'react'
+import { useState, useEffect, type ReactNode, type SelectHTMLAttributes } from 'react'
 import { useTaskStore } from '../../stores/taskStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTabStore } from '../../stores/tabStore'
@@ -10,6 +10,7 @@ import { useAdapterStore } from '../../stores/adapterStore'
 import { Modal } from '../shared/Modal'
 import { Input } from '../shared/Input'
 import { Button } from '../shared/Button'
+import { SettingsSection } from '../settings/SettingsSection'
 import { PromptEditor } from './PromptEditor'
 import { DayOfWeekPicker } from './DayOfWeekPicker'
 import { useTranslation } from '../../i18n'
@@ -30,6 +31,9 @@ type TriggerKind = 'schedule' | 'idle' | 'sessionEnd'
 const MINUTE_INTERVALS = [5, 10, 15, 20, 30]
 const HOUR_INTERVALS = [1, 2, 3, 4, 6, 8, 12]
 const MINUTE_OFFSETS = [0, 15, 30, 45]
+
+const SELECT_CLASS = 'w-full h-7 px-2.5 pr-8 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] appearance-none cursor-pointer'
+const FIELD_CLASS = 'w-auto h-7 px-2.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] text-xs text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]'
 
 function buildCron(
   freq: FrequencyKey,
@@ -62,19 +66,61 @@ function buildCron(
   }
 }
 
+function Field({
+  label,
+  hint,
+  required,
+  children,
+}: {
+  label?: string
+  hint?: string
+  required?: boolean
+  children: ReactNode
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      {label && (
+        <label className="text-xs font-medium text-[var(--color-text-primary)]">
+          {label}
+          {required && <span className="ml-0.5 text-[var(--color-error)]">*</span>}
+        </label>
+      )}
+      {children}
+      {hint && <span className="text-xs text-[var(--color-text-tertiary)]">{hint}</span>}
+    </div>
+  )
+}
+
+function NativeSelect({
+  className = '',
+  children,
+  ...props
+}: SelectHTMLAttributes<HTMLSelectElement>) {
+  return (
+    <div className={`relative ${className}`}>
+      <select {...props} className={SELECT_CLASS}>
+        {children}
+      </select>
+      <span className="pointer-events-none absolute right-2 top-1/2 -translate-y-1/2 material-symbols-outlined text-[16px] text-[var(--color-text-tertiary)]">
+        expand_more
+      </span>
+    </div>
+  )
+}
+
 export function NewTaskModal({ open, onClose, editTask }: Props) {
   const t = useTranslation()
   const createTask = useTaskStore((s) => s.createTask)
   const updateTask = useTaskStore((s) => s.updateTask)
   const sessions = useSessionStore((s) => s.sessions)
-  const activeSessionId = useTabStore((s) => s.activeTabId)
-  const activeSession = sessions.find((s) => s.id === activeSessionId)
+  const activeTabId = useTabStore((s) => s.activeTabId)
+  const activeSession = sessions.find((s) => s.id === activeTabId)
   const defaultWorkDir = activeSession?.workDir || ''
   const adapterConfig = useAdapterStore((s) => s.config)
-  const fetchAdapterConfig = useAdapterStore((s) => s.fetchConfig)
+  const fetchConfig = useAdapterStore((s) => s.fetchConfig)
 
   useEffect(() => {
-    if (open) fetchAdapterConfig()
+    if (open) fetchConfig()
   }, [open])
 
   const isFeishuConfigured = !!(adapterConfig.feishu?.appId && adapterConfig.feishu?.appSecret
@@ -87,12 +133,12 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
 
   const FREQUENCY_OPTIONS: Array<{ value: FrequencyKey; label: string }> = [
     { value: 'everyNMinutes', label: t('newTask.everyNMinutes') },
-    { value: 'everyNHours',   label: t('newTask.everyNHours') },
-    { value: 'daily',         label: t('newTask.daily') },
-    { value: 'weekdays',      label: t('newTask.weekdays') },
-    { value: 'specificDays',  label: t('newTask.specificDays') },
-    { value: 'monthly',       label: t('newTask.monthly') },
-    { value: 'customCron',    label: t('newTask.customCron') },
+    { value: 'everyNHours', label: t('newTask.everyNHours') },
+    { value: 'daily', label: t('newTask.daily') },
+    { value: 'weekdays', label: t('newTask.weekdays') },
+    { value: 'specificDays', label: t('newTask.specificDays') },
+    { value: 'monthly', label: t('newTask.monthly') },
+    { value: 'customCron', label: t('newTask.customCron') },
   ]
 
   const [name, setName] = useState(editTask?.name || '')
@@ -165,7 +211,7 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
         folderPath: folderPath.trim() || undefined,
         useWorktree: useWorktree || undefined,
         notification: notifyEnabled && notifyChannels.length > 0
-          ? { enabled: true, channels: notifyChannels }
+          ? { enabled: true as const, channels: notifyChannels }
           : undefined,
         priority,
         maxDurationMs: maxDurationMinutes > 0 ? maxDurationMinutes * 60000 : undefined,
@@ -200,369 +246,363 @@ export function NewTaskModal({ open, onClose, editTask }: Props) {
     }
   }
 
-  const selectClass = 'w-full h-10 px-3 pr-8 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)] appearance-none cursor-pointer'
-
   return (
     <Modal
       open={open}
       onClose={onClose}
       title={isEdit ? t('tasks.editTitle') : t('newTask.title')}
+      titleClassName="text-xs font-semibold text-[var(--color-text-primary)]"
+      compact
       footer={
         <>
-          <Button variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
-          <Button onClick={handleSubmit} disabled={!canSubmit} loading={isSubmitting}>
+          <Button size="sm" variant="secondary" onClick={onClose}>{t('common.cancel')}</Button>
+          <Button size="sm" onClick={handleSubmit} disabled={!canSubmit} loading={isSubmitting}>
             {isEdit ? t('tasks.saveChanges') : t('newTask.create')}
           </Button>
         </>
       }
     >
-      {}
-      <div className="flex items-center gap-2.5 px-3.5 py-2.5 rounded-[var(--radius-md)] bg-[var(--color-surface-container)] mb-5">
-        <span className="material-symbols-outlined text-[18px] text-[var(--color-text-secondary)]">info</span>
-        <span className="text-xs text-[var(--color-text-secondary)]">
-          {t('newTask.localWarning')}
-        </span>
-      </div>
+      <div className="flex flex-col gap-3">
+        <SettingsSection title={t('newTask.sectionContent')} description={t('newTask.localWarning')}>
+          <Input
+            size="sm"
+            label={t('newTask.name')}
+            required
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            placeholder={t('newTask.namePlaceholder')}
+          />
 
-      <div className="flex flex-col gap-4">
-        <Input
-          label={t('newTask.name')}
-          required
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder={t('newTask.namePlaceholder')}
-        />
+          <Input
+            size="sm"
+            label={t('newTask.description')}
+            required
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            placeholder={t('newTask.descPlaceholder')}
+          />
 
-        <Input
-          label={t('newTask.description')}
-          required
-          value={description}
-          onChange={(e) => setDescription(e.target.value)}
-          placeholder={t('newTask.descPlaceholder')}
-        />
+          <Field label={t('newTask.prompt')} required>
+            <PromptEditor
+              value={prompt}
+              onChange={setPrompt}
+              placeholder={t('newTask.promptPlaceholder')}
+              codingMode={codingMode}
+              onCodingModeChange={setCodingMode}
+              permissionMode={permissionMode}
+              onPermissionModeChange={setPermissionMode}
+              modelId={model}
+              onModelChange={setModel}
+              folderPath={folderPath}
+              onFolderPathChange={setFolderPath}
+              useWorktree={useWorktree}
+              onUseWorktreeChange={setUseWorktree}
+            />
+          </Field>
+        </SettingsSection>
 
-        {}
-        <PromptEditor
-          value={prompt}
-          onChange={setPrompt}
-          placeholder={t('newTask.promptPlaceholder')}
-          codingMode={codingMode}
-          onCodingModeChange={setCodingMode}
-          permissionMode={permissionMode}
-          onPermissionModeChange={setPermissionMode}
-          modelId={model}
-          onModelChange={setModel}
-          folderPath={folderPath}
-          onFolderPathChange={setFolderPath}
-          useWorktree={useWorktree}
-          onUseWorktreeChange={setUseWorktree}
-        />
-
-        {}
-        <div className="flex flex-col gap-1">
-          <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('automations.trigger.label')}</label>
-          <div className="relative">
-            <select
+        <SettingsSection title={t('newTask.sectionTrigger')}>
+          <Field label={t('automations.trigger.label')}>
+            <SegmentedOption
               value={triggerKind}
-              onChange={(e) => setTriggerKind(e.target.value as TriggerKind)}
-              className={selectClass}
-            >
-              <option value="schedule">{t('automations.trigger.schedule')}</option>
-              <option value="idle">{t('automations.trigger.idle')}</option>
-              <option value="sessionEnd">{t('automations.trigger.sessionEnd')}</option>
-            </select>
-            <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-              expand_more
-            </span>
-          </div>
-        </div>
-
-        {triggerKind === 'idle' && (
-          <div className="flex flex-col gap-1">
-            <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('automations.trigger.afterIdle')}</label>
-            <input
-              type="number"
-              min={1}
-              value={afterIdleMinutes}
-              onChange={(e) => setAfterIdleMinutes(Math.max(1, Number(e.target.value) || 1))}
-              className="w-auto h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
-              style={{ maxWidth: 160 }}
+              onChange={setTriggerKind}
+              options={[
+                { value: 'schedule', label: t('automations.trigger.schedule') },
+                { value: 'idle', label: t('automations.trigger.idle') },
+                { value: 'sessionEnd', label: t('automations.trigger.sessionEnd') },
+              ]}
             />
-            <span className="text-xs text-[var(--color-text-tertiary)]">{t('automations.trigger.idleHint')}</span>
-          </div>
-        )}
+          </Field>
 
-        {triggerKind === 'sessionEnd' && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container)] text-xs text-[var(--color-text-secondary)]">
-            <span className="material-symbols-outlined text-[16px]">bedtime</span>
-            <span>{t('automations.trigger.sessionEndHint')}</span>
-          </div>
-        )}
-
-        {triggerKind === 'schedule' && (
-        <>
-        <div className="flex flex-col gap-1">
-          <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('newTask.frequency')}</label>
-          <div className="relative">
-            <select
-              value={frequency}
-              onChange={(e) => setFrequency(e.target.value as FrequencyKey)}
-              className={selectClass}
-            >
-              {FREQUENCY_OPTIONS.map((opt) => (
-                <option key={opt.value} value={opt.value}>{opt.label}</option>
-              ))}
-            </select>
-            <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-              expand_more
-            </span>
-          </div>
-        </div>
-
-        {}
-        {frequency === 'everyNMinutes' && (
-          <div className="relative">
-            <select
-              value={minuteInterval}
-              onChange={(e) => setMinuteInterval(Number(e.target.value))}
-              className={selectClass}
-            >
-              {MINUTE_INTERVALS.map((n) => (
-                <option key={n} value={n}>{t('newTask.intervalMinutes', { n })}</option>
-              ))}
-            </select>
-            <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-              expand_more
-            </span>
-          </div>
-        )}
-
-        {frequency === 'everyNHours' && (
-          <div className="flex gap-2">
-            <div className="relative flex-1">
-              <select
-                value={hourInterval}
-                onChange={(e) => setHourInterval(Number(e.target.value))}
-                className={selectClass}
-              >
-                {HOUR_INTERVALS.map((n) => (
-                  <option key={n} value={n}>{t('newTask.intervalHours', { n })}</option>
-                ))}
-              </select>
-              <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-                expand_more
-              </span>
-            </div>
-            <div className="relative flex-1">
-              <select
-                value={minuteOffset}
-                onChange={(e) => setMinuteOffset(Number(e.target.value))}
-                className={selectClass}
-              >
-                {MINUTE_OFFSETS.map((m) => (
-                  <option key={m} value={m}>{t('newTask.atMinute', { m: m.toString().padStart(2, '0') })}</option>
-                ))}
-              </select>
-              <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-                expand_more
-              </span>
-            </div>
-          </div>
-        )}
-
-        {frequency === 'specificDays' && (
-          <DayOfWeekPicker selected={selectedDays} onChange={setSelectedDays} />
-        )}
-
-        {frequency === 'monthly' && (
-          <div className="relative">
-            <select
-              value={monthDay}
-              onChange={(e) => setMonthDay(Number(e.target.value))}
-              className={selectClass}
-            >
-              {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
-                <option key={d} value={d}>{t('newTask.onMonthDay', { d })}</option>
-              ))}
-            </select>
-            <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-              expand_more
-            </span>
-          </div>
-        )}
-
-        {frequency === 'customCron' && (
-          <div className="flex flex-col gap-1">
-            <input
-              type="text"
-              value={customCron}
-              onChange={(e) => setCustomCron(e.target.value)}
-              placeholder={t('newTask.cronFormatHint')}
-              className="w-full h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] font-[var(--font-mono)] outline-none focus:border-[var(--color-border-focus)]"
-            />
-            <span className="text-xs text-[var(--color-text-tertiary)]">{t('newTask.cronFormatHint')}</span>
-            {customCron.trim() && !isValidCron(customCron) && (
-              <span className="text-xs text-[var(--color-error)]">{t('newTask.invalidCron')}</span>
-            )}
-          </div>
-        )}
-
-        {}
-        {showTime && (
-          <div className="flex flex-col gap-1">
-            <input
-              type="time"
-              value={time}
-              onChange={(e) => setTime(e.target.value)}
-              className="w-auto h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
-              style={{ maxWidth: 120 }}
-            />
-          </div>
-        )}
-
-        {}
-        <div className="flex flex-col gap-2 rounded-[var(--radius-md)] border border-[var(--color-border)] p-3">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={requireIdle}
-              onChange={(e) => setRequireIdle(e.target.checked)}
-              className="w-4 h-4 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
-            />
-            <div>
-              <span className="text-sm font-medium text-[var(--color-text-primary)]">{t('automations.requireIdle')}</span>
-              <p className="text-xs text-[var(--color-text-tertiary)]">{t('automations.requireIdleHint')}</p>
-            </div>
-          </label>
-          {requireIdle && (
-            <div className="pl-7">
+          {triggerKind === 'idle' && (
+            <Field label={t('automations.trigger.afterIdle')} hint={t('automations.trigger.idleHint')}>
               <input
                 type="number"
                 min={1}
-                value={requireIdleMinutes}
-                onChange={(e) => setRequireIdleMinutes(Math.max(1, Number(e.target.value) || 1))}
-                className="w-auto h-9 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
-                style={{ maxWidth: 140 }}
+                value={afterIdleMinutes}
+                onChange={(e) => setAfterIdleMinutes(Math.max(1, Number(e.target.value) || 1))}
+                className={FIELD_CLASS}
+                style={{ maxWidth: 160 }}
               />
-              <span className="ml-2 text-xs text-[var(--color-text-tertiary)]">{t('automations.minutesUnit')}</span>
+            </Field>
+          )}
+
+          {triggerKind === 'sessionEnd' && (
+            <div className="flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-2 text-xs text-[var(--color-text-tertiary)]">
+              <span className="material-symbols-outlined text-[16px]">bedtime</span>
+              <span>{t('automations.trigger.sessionEndHint')}</span>
             </div>
           )}
-        </div>
-        </>
-        )}
 
-        {}
-        <div className="flex flex-col gap-1">
-          <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('automations.priority.label')}</label>
-          <div className="relative">
-            <select
-              value={priority}
-              onChange={(e) => setPriority(e.target.value as TaskPriority)}
-              className={selectClass}
-            >
-              <option value="high">{t('automations.priority.high')}</option>
-              <option value="normal">{t('automations.priority.normal')}</option>
-              <option value="low">{t('automations.priority.low')}</option>
-            </select>
-            <span className="material-symbols-outlined text-[18px] text-[var(--color-text-tertiary)] absolute right-2.5 top-1/2 -translate-y-1/2 pointer-events-none">
-              expand_more
-            </span>
-          </div>
-        </div>
+          {triggerKind === 'schedule' && (
+            <>
+              <Field label={t('newTask.frequency')}>
+                <NativeSelect
+                  value={frequency}
+                  onChange={(e) => setFrequency(e.target.value as FrequencyKey)}
+                >
+                  {FREQUENCY_OPTIONS.map((opt) => (
+                    <option key={opt.value} value={opt.value}>{opt.label}</option>
+                  ))}
+                </NativeSelect>
+              </Field>
 
-        {}
-        <div className="flex flex-col gap-1">
-          <label className="text-sm font-medium text-[var(--color-text-primary)]">{t('automations.maxDuration')}</label>
-          <input
-            type="number"
-            min={0}
-            value={maxDurationMinutes}
-            onChange={(e) => setMaxDurationMinutes(Math.max(0, Number(e.target.value) || 0))}
-            className="w-auto h-10 px-3 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface)] text-sm text-[var(--color-text-primary)] outline-none focus:border-[var(--color-border-focus)]"
-            style={{ maxWidth: 160 }}
-          />
-          <span className="text-xs text-[var(--color-text-tertiary)]">{t('automations.maxDurationHint')}</span>
-        </div>
-
-        {}
-        <div className="flex flex-col gap-3 rounded-[var(--radius-md)] border border-[var(--color-border)] p-3">
-          <label className="flex items-center gap-3 cursor-pointer">
-            <input
-              type="checkbox"
-              checked={notifyEnabled}
-              onChange={(e) => setNotifyEnabled(e.target.checked)}
-              className="w-4 h-4 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
-            />
-            <div>
-              <span className="text-sm font-medium text-[var(--color-text-primary)]">{t('newTask.notifyOnComplete')}</span>
-              <p className="text-xs text-[var(--color-text-tertiary)]">{t('newTask.notifyHint')}</p>
-            </div>
-          </label>
-          {notifyEnabled && (
-            <div className="flex flex-col gap-2 pl-7">
-              <div className="flex items-center gap-4">
-                <label className={`flex items-center gap-2 ${isFeishuConfigured ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'}`}>
-                  <input
-                    type="checkbox"
-                    checked={notifyChannels.includes('feishu')}
-                    disabled={!isFeishuConfigured}
-                    onChange={(e) => {
-                      setNotifyChannels((prev) =>
-                        e.target.checked ? [...prev, 'feishu'] : prev.filter((c) => c !== 'feishu'),
-                      )
-                    }}
-                    className="w-3.5 h-3.5 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
-                  />
-                  <span className="text-sm text-[var(--color-text-primary)]">{t('settings.adapters.feishu')}</span>
-                  {!isFeishuConfigured && (
-                    <span className="text-[10px] text-[var(--color-warning)]">{t('newTask.notConfigured')}</span>
-                  )}
-                </label>
-                <label className={`flex items-center gap-2 ${isTelegramConfigured ? 'cursor-pointer' : 'opacity-50 cursor-not-allowed'}`}>
-                  <input
-                    type="checkbox"
-                    checked={notifyChannels.includes('telegram')}
-                    disabled={!isTelegramConfigured}
-                    onChange={(e) => {
-                      setNotifyChannels((prev) =>
-                        e.target.checked ? [...prev, 'telegram'] : prev.filter((c) => c !== 'telegram'),
-                      )
-                    }}
-                    className="w-3.5 h-3.5 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
-                  />
-                  <span className="text-sm text-[var(--color-text-primary)]">{t('settings.adapters.telegram')}</span>
-                  {!isTelegramConfigured && (
-                    <span className="text-[10px] text-[var(--color-warning)]">{t('newTask.notConfigured')}</span>
-                  )}
-                </label>
-              </div>
-              {!isFeishuConfigured && !isTelegramConfigured && (
-                <p className="text-xs text-[var(--color-warning)]">
-                  <span className="material-symbols-outlined text-[12px] align-middle mr-1">warning</span>
-                  {t('newTask.noChannelConfigured')}
-                </p>
+              {frequency === 'everyNMinutes' && (
+                <NativeSelect
+                  value={minuteInterval}
+                  onChange={(e) => setMinuteInterval(Number(e.target.value))}
+                >
+                  {MINUTE_INTERVALS.map((n) => (
+                    <option key={n} value={n}>{t('newTask.intervalMinutes', { n })}</option>
+                  ))}
+                </NativeSelect>
               )}
-            </div>
+
+              {frequency === 'everyNHours' && (
+                <div className="flex gap-2">
+                  <NativeSelect
+                    className="flex-1"
+                    value={hourInterval}
+                    onChange={(e) => setHourInterval(Number(e.target.value))}
+                  >
+                    {HOUR_INTERVALS.map((n) => (
+                      <option key={n} value={n}>{t('newTask.intervalHours', { n })}</option>
+                    ))}
+                  </NativeSelect>
+                  <NativeSelect
+                    className="flex-1"
+                    value={minuteOffset}
+                    onChange={(e) => setMinuteOffset(Number(e.target.value))}
+                  >
+                    {MINUTE_OFFSETS.map((m) => (
+                      <option key={m} value={m}>{t('newTask.atMinute', { m: m.toString().padStart(2, '0') })}</option>
+                    ))}
+                  </NativeSelect>
+                </div>
+              )}
+
+              {frequency === 'specificDays' && (
+                <Field label={t('newTask.specificDays')}>
+                  <DayOfWeekPicker selected={selectedDays} onChange={setSelectedDays} />
+                </Field>
+              )}
+
+              {frequency === 'monthly' && (
+                <NativeSelect
+                  value={monthDay}
+                  onChange={(e) => setMonthDay(Number(e.target.value))}
+                >
+                  {Array.from({ length: 28 }, (_, i) => i + 1).map((d) => (
+                    <option key={d} value={d}>{t('newTask.onMonthDay', { d })}</option>
+                  ))}
+                </NativeSelect>
+              )}
+
+              {frequency === 'customCron' && (
+                <Field hint={t('newTask.cronFormatHint')}>
+                  <input
+                    type="text"
+                    value={customCron}
+                    onChange={(e) => setCustomCron(e.target.value)}
+                    placeholder={t('newTask.cronFormatHint')}
+                    className={`${FIELD_CLASS} w-full font-[var(--font-mono)]`}
+                  />
+                  {customCron.trim() && !isValidCron(customCron) && (
+                    <span className="text-xs text-[var(--color-error)]">{t('newTask.invalidCron')}</span>
+                  )}
+                </Field>
+              )}
+
+              {showTime && (
+                <Field label={t('newTask.time')}>
+                  <input
+                    type="time"
+                    value={time}
+                    onChange={(e) => setTime(e.target.value)}
+                    className={FIELD_CLASS}
+                    style={{ maxWidth: 120 }}
+                  />
+                </Field>
+              )}
+
+              <div className="flex flex-col gap-2">
+                <ToggleRow
+                  label={t('automations.requireIdle')}
+                  hint={t('automations.requireIdleHint')}
+                  checked={requireIdle}
+                  onChange={setRequireIdle}
+                />
+                {requireIdle && (
+                  <div className="flex items-center gap-2 pl-1">
+                    <input
+                      type="number"
+                      min={1}
+                      value={requireIdleMinutes}
+                      onChange={(e) => setRequireIdleMinutes(Math.max(1, Number(e.target.value) || 1))}
+                      className={FIELD_CLASS}
+                      style={{ maxWidth: 140 }}
+                    />
+                    <span className="text-xs text-[var(--color-text-tertiary)]">{t('automations.minutesUnit')}</span>
+                  </div>
+                )}
+              </div>
+
+              <p className="text-xs text-[var(--color-text-tertiary)]">
+                {frequency === 'customCron' && customCron.trim() && !isValidCron(customCron)
+                  ? t('newTask.invalidCron')
+                  : describeCron(cronValue, t)}
+              </p>
+            </>
           )}
-        </div>
+        </SettingsSection>
 
-        {}
-        {triggerKind === 'schedule' && (
-          <div className="flex items-center gap-2 px-3 py-2 rounded-[var(--radius-md)] bg-[var(--color-surface-container)] text-xs text-[var(--color-text-secondary)]">
-            <span className="material-symbols-outlined text-[16px]">schedule</span>
-            <span>
-              {frequency === 'customCron' && customCron.trim() && !isValidCron(customCron)
-                ? t('newTask.invalidCron')
-                : describeCron(cronValue, t)
-              }
-            </span>
+        <SettingsSection title={t('newTask.sectionRun')} description={t('newTask.delayNote')}>
+          <Field label={t('automations.priority.label')}>
+            <SegmentedOption
+              value={priority}
+              onChange={setPriority}
+              options={[
+                { value: 'high', label: t('automations.priority.high') },
+                { value: 'normal', label: t('automations.priority.normal') },
+                { value: 'low', label: t('automations.priority.low') },
+              ]}
+            />
+          </Field>
+
+          <Field label={t('automations.maxDuration')} hint={t('automations.maxDurationHint')}>
+            <input
+              type="number"
+              min={0}
+              value={maxDurationMinutes}
+              onChange={(e) => setMaxDurationMinutes(Math.max(0, Number(e.target.value) || 0))}
+              className={FIELD_CLASS}
+              style={{ maxWidth: 160 }}
+            />
+          </Field>
+
+          <div className="flex flex-col gap-2">
+            <ToggleRow
+              label={t('newTask.notifyOnComplete')}
+              hint={t('newTask.notifyHint')}
+              checked={notifyEnabled}
+              onChange={setNotifyEnabled}
+            />
+            {notifyEnabled && (
+              <div className="flex flex-col gap-2">
+                <div className="flex flex-wrap items-center gap-2">
+                  <label className={`flex items-center justify-between gap-2 rounded-lg border border-[var(--color-border)] px-2.5 py-1.5 ${isFeishuConfigured ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
+                    <span className="text-xs text-[var(--color-text-primary)]">{t('settings.adapters.feishu')}</span>
+                    <input
+                      type="checkbox"
+                      checked={notifyChannels.includes('feishu')}
+                      disabled={!isFeishuConfigured}
+                      onChange={(e) => {
+                        setNotifyChannels((prev) =>
+                          e.target.checked ? [...prev, 'feishu'] : prev.filter((c) => c !== 'feishu'),
+                        )
+                      }}
+                      className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
+                    />
+                  </label>
+                  {!isFeishuConfigured && (
+                    <span className="text-xs text-[var(--color-warning)]">{t('newTask.notConfigured')}</span>
+                  )}
+                  <label className={`flex items-center justify-between gap-2 rounded-lg border border-[var(--color-border)] px-2.5 py-1.5 ${isTelegramConfigured ? 'cursor-pointer' : 'cursor-not-allowed opacity-60'}`}>
+                    <span className="text-xs text-[var(--color-text-primary)]">{t('settings.adapters.telegram')}</span>
+                    <input
+                      type="checkbox"
+                      checked={notifyChannels.includes('telegram')}
+                      disabled={!isTelegramConfigured}
+                      onChange={(e) => {
+                        setNotifyChannels((prev) =>
+                          e.target.checked ? [...prev, 'telegram'] : prev.filter((c) => c !== 'telegram'),
+                        )
+                      }}
+                      className="h-4 w-4 rounded border-[var(--color-border)] accent-[var(--color-brand)]"
+                    />
+                  </label>
+                  {!isTelegramConfigured && (
+                    <span className="text-xs text-[var(--color-warning)]">{t('newTask.notConfigured')}</span>
+                  )}
+                </div>
+                {!isFeishuConfigured && !isTelegramConfigured && (
+                  <p className="text-xs text-[var(--color-warning)]">
+                    <span className="material-symbols-outlined mr-1 align-middle text-[12px]">warning</span>
+                    {t('newTask.noChannelConfigured')}
+                  </p>
+                )}
+              </div>
+            )}
           </div>
-        )}
-
-        <p className="text-xs text-[var(--color-text-tertiary)]">
-          {t('newTask.delayNote')}
-        </p>
+        </SettingsSection>
       </div>
     </Modal>
+  )
+}
+
+function SegmentedOption<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T
+  options: Array<{ value: T; label: string }>
+  onChange: (value: T) => void
+}) {
+  return (
+    <div className="flex flex-wrap gap-2">
+      {options.map((opt) => (
+        <button
+          key={opt.value}
+          type="button"
+          onClick={() => onChange(opt.value)}
+          className={`h-7 min-w-[88px] rounded-lg border px-3 text-xs font-semibold transition-all ${
+            value === opt.value
+              ? 'border-[var(--color-brand)] bg-[var(--color-brand)] text-[var(--color-on-primary)]'
+              : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
+          }`}
+        >
+          {opt.label}
+        </button>
+      ))}
+    </div>
+  )
+}
+
+function ToggleRow({
+  label,
+  hint,
+  checked,
+  onChange,
+}: {
+  label: string
+  hint?: string
+  checked: boolean
+  onChange: (next: boolean) => void
+}) {
+  return (
+    <div className="flex items-center justify-between gap-3 rounded-lg border border-[var(--color-border)] px-3 py-2.5">
+      <div className="min-w-0 flex-1">
+        <div className="text-xs font-medium text-[var(--color-text-primary)]">{label}</div>
+        {hint && (
+          <div className="mt-0.5 text-xs text-[var(--color-text-tertiary)]">{hint}</div>
+        )}
+      </div>
+      <button
+        type="button"
+        role="switch"
+        aria-checked={checked}
+        onClick={() => onChange(!checked)}
+        className={`relative inline-flex h-6 w-11 shrink-0 items-center rounded-full transition-colors ${
+          checked ? 'bg-[var(--color-brand)]' : 'bg-[var(--color-surface-hover)]'
+        }`}
+      >
+        <span
+          className={`inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${
+            checked ? 'translate-x-5' : 'translate-x-0.5'
+          }`}
+        />
+      </button>
+    </div>
   )
 }

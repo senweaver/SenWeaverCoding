@@ -73,7 +73,7 @@ export function CloseChoiceModal() {
           <button
             type="button"
             onClick={confirm}
-            className="rounded-lg bg-[var(--color-brand)] px-4 py-2 text-xs font-medium text-white transition-opacity hover:opacity-90 border border-[var(--color-brand)]"
+            className="rounded-lg bg-[var(--color-brand)] px-4 py-2 text-xs font-medium text-[var(--color-on-primary)] transition-opacity hover:opacity-90 border border-[var(--color-brand)]"
           >
             {t('close.prompt.confirm')}
           </button>

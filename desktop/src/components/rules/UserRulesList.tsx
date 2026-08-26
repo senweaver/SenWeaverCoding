@@ -393,7 +393,7 @@ function DeleteConfirmModal({
           </button>
           <button
             onClick={onConfirm}
-            className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-error)] text-white hover:opacity-90"
+            className="inline-flex items-center gap-1.5 whitespace-nowrap h-7 px-2.5 text-xs rounded-[var(--radius-md)] bg-[var(--color-error)] text-[var(--color-on-error)] hover:opacity-90"
           >
             {t('common.delete')}
           </button>

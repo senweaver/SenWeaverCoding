@@ -202,10 +202,10 @@ pub fn build_context_budget_message(
     }
     let used = crate::providers::traits::estimate_total_tokens(history);
     let ratio = used as f64 / max_context_tokens as f64;
-    let tier = if ratio >= 0.85 {
-        "over 85% full — automatic compaction is imminent"
-    } else if ratio >= 0.75 {
-        "over 75% full"
+    let tier = if ratio >= 0.90 {
+        "over 90% full — automatic summarization is imminent"
+    } else if ratio >= 0.70 {
+        "over 70% full — stale tool outputs may be archived"
     } else if ratio >= 0.60 {
         "over 60% full"
     } else {
@@ -214,8 +214,9 @@ pub fn build_context_budget_message(
     Some(format!(
         "{CONTEXT_BUDGET_MARKER} Context window is {tier} ({} mode). Be economical: \
          avoid re-reading files you have already seen, prefer targeted searches over \
-         whole-file reads, and keep tool outputs small. Around 85% the runtime first \
-         evicts stale tool outputs, then summarizes older turns.",
+         whole-file reads, and keep tool outputs small. Around 70% the runtime archives \
+         stale tool outputs (retrieve with tool_result_expand); around 90% it summarizes \
+         older turns. The current turn stays intact until the window is nearly full.",
         mode.label()
     ))
 }

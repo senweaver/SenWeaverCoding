@@ -108,7 +108,15 @@ type ConversationHistoryMap = Arc<Mutex<HashMap<String, Vec<ChatMessage>>>>;
 
 type PendingNewSessionSet = Arc<Mutex<HashSet<String>>>;
 
-const MAX_CHANNEL_HISTORY: usize = 50;
+const MAX_CHANNEL_HISTORY: usize = 200;
+
+fn channel_history_cap(configured: usize) -> usize {
+    if configured > 0 {
+        configured.max(MAX_CHANNEL_HISTORY)
+    } else {
+        MAX_CHANNEL_HISTORY
+    }
+}
 
 const BOOTSTRAP_MAX_CHARS: usize = 20_000;
 
@@ -436,7 +444,7 @@ struct ChannelRuntimeContext {
     query_classification: crate::config::QueryClassificationConfig,
     ack_reactions: bool,
     show_tool_calls: bool,
-    session_store: Option<Arc<session::store::SessionStore>>,
+    session_store: Option<Arc<dyn session::backend::SessionBackend>>,
 
     approval_manager: Arc<ApprovalManager>,
     activated_tools: Option<std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
@@ -1121,14 +1129,7 @@ async fn append_sender_turn(ctx: &ChannelRuntimeContext, sender_key: &str, turn:
         }
     }
 
-    let max_history = {
-        let configured = ctx.prompt_config.agent.max_history_messages;
-        if configured > 0 {
-            configured
-        } else {
-            MAX_CHANNEL_HISTORY
-        }
-    };
+    let max_history = channel_history_cap(ctx.prompt_config.agent.max_history_messages);
 
     let mut histories = ctx
         .conversation_histories
@@ -2337,16 +2338,60 @@ pub async fn start_channels(config: Config) -> anyhow::Result<()> {
         return Ok(());
     }
 
-    let session_store: Option<Arc<session::store::SessionStore>> =
+    let session_store: Option<Arc<dyn session::backend::SessionBackend>> =
         if config.channels_config.session_persistence {
-            let store_workspace = workspace_dir.clone();
-            let store = tokio::task::spawn_blocking(move || {
-                session::store::SessionStore::new(&store_workspace)
-            })
-            .await
-            .context("Failed to join session store init task")?
-            .context("Failed to open session store")?;
-            Some(Arc::new(store))
+            let backend_kind = config
+                .channels_config
+                .session_backend
+                .trim()
+                .to_ascii_lowercase();
+            if backend_kind == "jsonl" {
+                let store_workspace = workspace_dir.clone();
+                let store = tokio::task::spawn_blocking(move || {
+                    session::store::SessionStore::new(&store_workspace)
+                })
+                .await
+                .context("Failed to join session store init task")?
+                .context("Failed to open session store")?;
+                tracing::info!("Channel session persistence enabled (JSONL)");
+                Some(Arc::new(store) as Arc<dyn session::backend::SessionBackend>)
+            } else if let Some(global) = session::global_session_backend() {
+                tracing::info!("Channel session persistence reusing global backend (SQLite)");
+                Some(global)
+            } else {
+                let store_workspace = workspace_dir.clone();
+                let init = tokio::task::spawn_blocking(move || {
+                    session::sqlite::SqliteSessionBackend::new(&store_workspace).map(|backend| {
+                        match backend.migrate_from_jsonl(&store_workspace) {
+                            Ok(migrated) if migrated > 0 => {
+                                tracing::info!(
+                                    "Migrated {migrated} JSONL channel sessions into SQLite backend"
+                                );
+                            }
+                            Ok(_) => {}
+                            Err(e) => {
+                                tracing::warn!("JSONL to SQLite session migration failed: {e}");
+                            }
+                        }
+                        backend
+                    })
+                })
+                .await
+                .context("Failed to join session store init task")?;
+                match init {
+                    Ok(backend) => {
+                        tracing::info!("Channel session persistence enabled (SQLite)");
+                        let backend =
+                            Arc::new(backend) as Arc<dyn session::backend::SessionBackend>;
+                        session::set_global_session_backend(Arc::clone(&backend));
+                        Some(backend)
+                    }
+                    Err(e) => {
+                        tracing::warn!("Channel session persistence disabled: {e}");
+                        None
+                    }
+                }
+            }
         } else {
             None
         };
@@ -2630,6 +2675,35 @@ async fn dispatch_channel_turn(
                     map.get(&sender_key_clone).cloned().unwrap_or_default()
                 };
 
+                if history.is_empty() && !new_session {
+                    if let Some(store) = ctx_clone.session_store.as_ref().map(Arc::clone) {
+                        let key = sender_key_clone.clone();
+                        let max_history = channel_history_cap(
+                            ctx_clone.prompt_config.agent.max_history_messages,
+                        );
+                        let restored = tokio::task::spawn_blocking(move || {
+                            store.load_tail(&key, max_history)
+                        })
+                        .await
+                        .unwrap_or_default();
+                        if !restored.is_empty() {
+                            let restored = normalize_cached_channel_turns(restored);
+                            if !restored.is_empty() {
+                                let mut map = ctx_clone
+                                    .conversation_histories
+                                    .lock()
+                                    .unwrap_or_else(|e| e.into_inner());
+                                let turns =
+                                    map.entry(sender_key_clone.clone()).or_default();
+                                if turns.is_empty() {
+                                    *turns = restored;
+                                }
+                                history = turns.clone();
+                            }
+                        }
+                    }
+                }
+
                 if history.is_empty() || new_session {
                     if new_session {
                         history.clear();
@@ -2754,7 +2828,10 @@ async fn dispatch_channel_turn(
                                     .entry(sender_key_clone.clone())
                                     .or_default();
                                 turns.push(assistant_turn.clone());
-                                while turns.len() > MAX_CHANNEL_HISTORY {
+                                let cap = channel_history_cap(
+                                    ctx_clone.prompt_config.agent.max_history_messages,
+                                );
+                                while turns.len() > cap {
                                     turns.remove(0);
                                 }
                             }

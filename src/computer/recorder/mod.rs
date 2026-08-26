@@ -13,7 +13,7 @@ pub mod types;
 pub use replay::{replay_recording, replay_recording_smart, ReplayRepeat};
 pub use session::{
     delete_recording, discard_recording, generate_skill, is_recording, last_saved_recording,
-    list_recordings, load_recording, load_skill_instructions, rename_recording,
+    list_recordings, load_recording, load_skill_instructions, record_marker, rename_recording,
     save_recording_manifest, start_recording, stop_recording,
 };
 pub use types::{

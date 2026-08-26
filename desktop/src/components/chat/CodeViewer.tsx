@@ -93,32 +93,52 @@ const shikiEngine = createJavaScriptRegexEngine({ forgiving: true })
 
 function CodeArea({ code, language, showLineNumbers }: { code: string; language?: string; showLineNumbers: boolean }) {
   const containerRef = useRef<HTMLDivElement>(null)
+  const [inView, setInView] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [renderShiki, setRenderShiki] = useState(false)
 
   useEffect(() => {
+    const el = containerRef.current
+    if (!el) return
+    const io = new IntersectionObserver(
+      (entries) => {
+        if (entries.some((entry) => entry.isIntersecting)) {
+          setInView(true)
+          io.disconnect()
+        }
+      },
+      { rootMargin: '200px 0px' },
+    )
+    io.observe(el)
+    return () => io.disconnect()
+  }, [])
+
+  useEffect(() => {
+    if (!inView) return
     setRenderShiki(false)
     setLoaded(false)
     const cancel = scheduleIdleCallback(() => setRenderShiki(true))
     return cancel
-  }, [code, language])
+  }, [code, language, inView])
 
   useEffect(() => {
     if (!renderShiki) return
-
-    const el = containerRef.current
-    if (!el) return
-    const check = () => {
-      const shikiContainer = el.querySelector('[data-testid="shiki-container"]')
-
-      if (shikiContainer?.querySelector('code')) {
+    let cancelled = false
+    let raf = 0
+    const tick = () => {
+      if (cancelled) return
+      const el = containerRef.current
+      if (el?.querySelector('[data-testid="shiki-container"] code')) {
         setLoaded(true)
+        return
       }
+      raf = requestAnimationFrame(tick)
     }
-    check()
-    const observer = new MutationObserver(check)
-    observer.observe(el, { childList: true, subtree: true })
-    return () => observer.disconnect()
+    raf = requestAnimationFrame(tick)
+    return () => {
+      cancelled = true
+      cancelAnimationFrame(raf)
+    }
   }, [code, language, renderShiki])
 
   return (

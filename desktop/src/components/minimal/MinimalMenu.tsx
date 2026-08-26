@@ -52,7 +52,7 @@ export function MinimalMenu({ onClose, onHeightChange }: MinimalMenuProps) {
     <div
       ref={panelRef}
       role="menu"
-      className="w-[188px] self-end rounded-xl border border-black/10 bg-white/95 py-1.5 shadow-[0_10px_40px_rgba(30,58,95,0.25)] backdrop-blur-md"
+      className="w-[188px] self-end rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-glass)] py-1.5 shadow-[var(--shadow-dropdown)] backdrop-blur-md"
       onContextMenu={(e) => e.preventDefault()}
       onMouseDown={(e) => e.stopPropagation()}
     >
@@ -66,7 +66,7 @@ export function MinimalMenu({ onClose, onHeightChange }: MinimalMenuProps) {
       />
 
       <div className="px-3 py-2">
-        <div className="mb-1 flex items-center justify-between text-[11px] text-[#4a5a72]">
+        <div className="mb-1 flex items-center justify-between text-[11px] text-[var(--color-text-secondary)]">
           <span className="inline-flex items-center gap-1.5">
             <span className="material-symbols-outlined text-[15px]">opacity</span>
             {t('minimal.menu.opacity')}
@@ -80,11 +80,11 @@ export function MinimalMenu({ onClose, onHeightChange }: MinimalMenuProps) {
           step={5}
           value={opacityPct}
           onChange={(e) => setOpacityPct(Number.parseInt(e.target.value, 10))}
-          className="h-1 w-full cursor-pointer accent-[#3b82f6]"
+          className="h-1 w-full cursor-pointer accent-[var(--color-brand)]"
         />
       </div>
 
-      <div className="my-1 h-px bg-black/8" />
+      <div className="my-1 h-px bg-[var(--color-border-separator)]" />
 
       <MinimalMenuRow
         icon="settings"
@@ -103,7 +103,7 @@ export function MinimalMenu({ onClose, onHeightChange }: MinimalMenuProps) {
         }}
       />
 
-      <div className="my-1 h-px bg-black/8" />
+      <div className="my-1 h-px bg-[var(--color-border-separator)]" />
 
       <MinimalMenuRow
         icon="power_settings_new"
@@ -134,8 +134,8 @@ function MinimalMenuRow({
       type="button"
       role="menuitem"
       onClick={onClick}
-      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-black/5 ${
-        danger ? 'text-[#c0392b]' : 'text-[#22364f]'
+      className={`flex w-full items-center gap-2 px-3 py-1.5 text-left text-[12px] transition-colors hover:bg-[var(--color-surface-hover)] ${
+        danger ? 'text-[var(--color-error)]' : 'text-[var(--color-text-primary)]'
       }`}
     >
       <span className="material-symbols-outlined text-[16px]">{icon}</span>

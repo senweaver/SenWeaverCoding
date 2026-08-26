@@ -239,8 +239,11 @@ function DebugPrivacySettings() {
       <h3 className="text-xs font-semibold text-[var(--color-text-primary)] mb-1">
         {t('settings.debugPrivacy.title')}
       </h3>
-      <p className="text-xs text-[var(--color-text-tertiary)] mb-4">
+      <p className="text-xs text-[var(--color-text-tertiary)] mb-1">
         {t('settings.debugPrivacy.description')}
+      </p>
+      <p className="text-xs text-[var(--color-text-tertiary)] mb-4">
+        {t('settings.debugPrivacy.scopeHint')}
       </p>
 
       <label className="flex items-center justify-between gap-3 mb-3 px-3 py-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">

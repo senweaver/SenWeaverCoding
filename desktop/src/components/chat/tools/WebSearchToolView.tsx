@@ -6,6 +6,7 @@ import { useMemo, useState, type MouseEvent } from 'react'
 import type { ToolViewProps } from './ToolViewProps'
 import { useTranslation } from '../../../i18n'
 import {
+  extractAction,
   extractQuery,
   extractTextContent,
   parseWebSearchResults,
@@ -281,6 +282,7 @@ export function WebSearchHeader(props: ToolViewProps) {
   const t = useTranslation()
   const summary = useMemo(() => readSummary(props), [props])
   const query = summary.query || fallbackQuery(props)
+  const chip = query || extractAction(props.input) || props.toolName
   const engineIds = useMemo(() => collectEngineIds(summary), [summary])
   const hostChips = uniqueHosts(summary.hits, 5)
   const isError = result?.isError === true || summary.looksLikeError
@@ -311,12 +313,12 @@ export function WebSearchHeader(props: ToolViewProps) {
       >
         {label}
       </span>
-      {query && (
+      {chip && (
         <span
           className="min-w-0 flex-1 truncate rounded bg-[var(--color-surface-container-high)]/60 px-1.5 py-0.5 font-[var(--font-mono)] text-[11px] text-[var(--color-text-secondary)]"
-          title={query}
+          title={chip}
         >
-          {truncate(query, 80)}
+          {truncate(chip, 80)}
         </span>
       )}
       {showEngineIcons ? (

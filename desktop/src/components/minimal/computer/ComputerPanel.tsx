@@ -71,7 +71,7 @@ export function ComputerPanel({ onHeightChange, onSubmitted }: ComputerPanelProp
               onClick={() => setTab(key)}
               className={`inline-flex items-center gap-1 rounded-full px-2.5 py-1 text-[10.5px] font-medium transition-colors ${
                 active
-                  ? 'bg-[var(--color-brand)] text-white'
+                  ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)]'
                   : 'text-[var(--color-text-secondary)] hover:bg-black/[0.05] dark:hover:bg-white/[0.08]'
               }`}
             >

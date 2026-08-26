@@ -224,7 +224,7 @@ function UpdateCheckerInner() {
           <div className="mt-3 flex gap-2">
             <button
               onClick={() => void installUpdate()}
-              className="px-3 py-1 text-xs font-medium rounded-[var(--radius-md)] bg-[var(--color-text-accent)] text-white hover:opacity-90 transition-opacity"
+              className="px-3 py-1 text-xs font-medium rounded-[var(--radius-md)] bg-[var(--color-brand)] text-[var(--color-on-primary)] hover:opacity-90 transition-opacity"
             >
               {t('update.now')}
             </button>

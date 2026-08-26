@@ -26,7 +26,6 @@ export function DayOfWeekPicker({ selected, onChange }: Props) {
 
   const toggle = (day: number) => {
     if (selected.includes(day)) {
-
       if (selected.length <= 1) return
       onChange(selected.filter((d) => d !== day))
     } else {
@@ -44,10 +43,10 @@ export function DayOfWeekPicker({ selected, onChange }: Props) {
             type="button"
             onClick={() => toggle(day)}
             className={`
-              w-8 h-8 rounded-full text-xs font-medium transition-colors
+              w-7 h-7 rounded-lg text-xs font-semibold transition-colors
               ${isActive
-                ? 'bg-[var(--color-surface-selected)] text-[var(--color-text-primary)] border border-[var(--color-border-focus)]'
-                : 'bg-[var(--color-surface)] text-[var(--color-text-tertiary)] border border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]'
+                ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)] border border-[var(--color-brand)]'
+                : 'bg-[var(--color-surface)] text-[var(--color-text-secondary)] border border-[var(--color-border)] hover:bg-[var(--color-surface-hover)]'
               }
             `}
           >

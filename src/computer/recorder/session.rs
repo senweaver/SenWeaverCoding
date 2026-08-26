@@ -46,6 +46,7 @@ struct RecordingSession {
     stop_tx: Option<oneshot::Sender<()>>,
     join: Option<JoinHandle<RecordingManifest>>,
     input_lease: Option<crate::computer::input::lock::InputLease>,
+    activity: Option<crate::computer::activity::ActivityCapture>,
 }
 
 static SESSION: Lazy<Mutex<Option<RecordingSession>>> = Lazy::new(|| Mutex::new(None));
@@ -147,7 +148,7 @@ pub async fn start_recording(
 
     let manifest = RecordingManifest {
         rec_id: name.clone(),
-        task,
+        task: task.clone(),
         created_at: chrono::Utc::now().to_rfc3339(),
         display_w: dw,
         display_h: dh,
@@ -156,7 +157,11 @@ pub async fn start_recording(
         run_config: None,
     };
 
-    let consumer = Consumer::new(dir.clone(), event_tx, dw, dh, monitors, manifest);
+    let activity =
+        crate::computer::activity::ActivityCapture::start(&dir, event_tx.clone(), &task);
+    let activity_hub = std::sync::Arc::clone(&activity.hub);
+
+    let consumer = Consumer::new(dir.clone(), event_tx, dw, dh, monitors, manifest, activity_hub);
     let join = tokio::spawn(consumer.run(raw_rx, stop_rx, hook_handle));
 
     let generation = NEXT_GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -169,8 +174,22 @@ pub async fn start_recording(
         stop_tx: Some(stop_tx),
         join: Some(join),
         input_lease: Some(input_lease),
+        activity: Some(activity),
     });
     Ok(generation)
+}
+
+pub fn record_marker(note: &str) -> Result<()> {
+    let guard = SESSION.lock();
+    let session = guard
+        .as_ref()
+        .filter(|s| matches!(s.phase, Phase::Recording))
+        .ok_or_else(|| anyhow!("no active recording"))?;
+    let Some(activity) = session.activity.as_ref() else {
+        bail!("activity capture unavailable");
+    };
+    activity.marker(note);
+    Ok(())
 }
 
 fn clear_session(generation: u64) -> Option<PathBuf> {
@@ -182,7 +201,7 @@ fn clear_session(generation: u64) -> Option<PathBuf> {
 }
 
 pub async fn stop_recording(generation: u64) -> Result<RecordingSummary> {
-    let (stop_tx, join, dir, name) = {
+    let (stop_tx, join, dir, name, activity) = {
         let mut guard = SESSION.lock();
         let session = guard
             .as_mut()
@@ -195,6 +214,7 @@ pub async fn stop_recording(generation: u64) -> Result<RecordingSummary> {
             session.join.take(),
             session.dir.clone(),
             session.name.clone(),
+            session.activity.take(),
         )
     };
 
@@ -205,6 +225,9 @@ pub async fn stop_recording(generation: u64) -> Result<RecordingSummary> {
         Some(handle) => match handle.await {
             Ok(manifest) => manifest,
             Err(e) => {
+                if let Some(activity) = activity {
+                    activity.stop().await;
+                }
                 if let Some(dir) = clear_session(generation) {
                     let _ = tokio::fs::remove_dir_all(&dir).await;
                 }
@@ -212,10 +235,17 @@ pub async fn stop_recording(generation: u64) -> Result<RecordingSummary> {
             }
         },
         None => {
+            if let Some(activity) = activity {
+                activity.stop().await;
+            }
             clear_session(generation);
             bail!("recording task missing");
         }
     };
+
+    if let Some(activity) = activity {
+        activity.stop().await;
+    }
 
     if manifest.steps.is_empty() {
         clear_session(generation);
@@ -227,6 +257,7 @@ pub async fn stop_recording(generation: u64) -> Result<RecordingSummary> {
             step_count: 0,
             has_skill: false,
             has_trace: false,
+            ..RecordingSummary::default()
         });
     }
 
@@ -249,13 +280,28 @@ pub async fn stop_recording(generation: u64) -> Result<RecordingSummary> {
         step_count: manifest.steps.len(),
         has_skill: false,
         has_trace: true,
+        ..RecordingSummary::default()
     };
 
-    let mut guard = SESSION.lock();
-    if let Some(session) = guard.as_mut().filter(|s| s.generation == generation) {
-        session.phase = Phase::Stopped;
-        session.input_lease = None;
+    {
+        let mut guard = SESSION.lock();
+        if let Some(session) = guard.as_mut().filter(|s| s.generation == generation) {
+            session.phase = Phase::Stopped;
+            session.input_lease = None;
+        }
     }
+
+    let post_dir = dir.clone();
+    let post_name = name.clone();
+    let post_task = manifest.task.clone();
+    tokio::spawn(async move {
+        if let Err(e) =
+            crate::computer::timeline::process_recording(&post_dir, &post_name, &post_task).await
+        {
+            tracing::warn!("recording post-processing failed for '{post_name}': {e}");
+        }
+    });
+
     Ok(summary)
 }
 
@@ -278,7 +324,7 @@ pub async fn generate_skill(
 }
 
 pub async fn discard_recording(generation: u64) -> Result<()> {
-    let (stop_tx, join, dir, phase) = {
+    let (stop_tx, join, dir, phase, activity) = {
         let mut guard = SESSION.lock();
         match guard.as_mut().filter(|s| s.generation == generation) {
             Some(session) => (
@@ -286,6 +332,7 @@ pub async fn discard_recording(generation: u64) -> Result<()> {
                 session.join.take(),
                 session.dir.clone(),
                 session.phase,
+                session.activity.take(),
             ),
             None => return Ok(()),
         }
@@ -298,7 +345,12 @@ pub async fn discard_recording(generation: u64) -> Result<()> {
         if let Some(handle) = join {
             let _ = handle.await;
         }
+        if let Some(activity) = activity {
+            activity.stop().await;
+        }
         let _ = tokio::fs::remove_dir_all(&dir).await;
+    } else if let Some(activity) = activity {
+        activity.stop().await;
     }
     let mut guard = SESSION.lock();
     if guard.as_ref().is_some_and(|s| s.generation == generation) {
@@ -327,6 +379,15 @@ pub fn list_recordings(workspace_dir: &Path) -> Vec<RecordingSummary> {
                 .map(|m| (m.task, m.created_at, m.steps.len()))
                 .unwrap_or_default();
             let has_skill = path.join("SKILL.md").exists() || path.join("SKILL.toml").exists();
+
+            let processed = path.join("bundle.json").exists();
+            let has_narration = path.join("narration.json").exists();
+            let has_audio = path.join("audio.json").exists();
+            let has_automation = path.join("built-automation.json").exists();
+            let analysis = read_analysis_summary(&path);
+            let (duration_ms, event_count) = read_bundle_stats(&path);
+            let size_bytes = directory_size(&path, 3);
+
             out.push(RecordingSummary {
                 name,
                 task,
@@ -334,11 +395,84 @@ pub fn list_recordings(workspace_dir: &Path) -> Vec<RecordingSummary> {
                 step_count,
                 has_skill,
                 has_trace: true,
+                processed,
+                has_narration,
+                has_audio,
+                has_analysis: analysis.is_some(),
+                has_automation,
+                duration_ms,
+                event_count,
+                size_bytes,
+                analysis,
             });
         }
     }
     out.sort_by(|a, b| b.created_at.cmp(&a.created_at));
     out
+}
+
+fn read_analysis_summary(dir: &Path) -> Option<serde_json::Value> {
+    let content = std::fs::read_to_string(dir.join("analysis.json")).ok()?;
+    let value: serde_json::Value = serde_json::from_str(&content).ok()?;
+    Some(serde_json::json!({
+        "revision": value.get("revision").cloned().unwrap_or(serde_json::json!(1)),
+        "createdAt": value.get("createdAt").cloned().unwrap_or(serde_json::Value::Null),
+        "title": value.get("title").cloned().unwrap_or(serde_json::json!("")),
+        "intent": value.get("intent").cloned().unwrap_or(serde_json::json!("")),
+        "intentConfidence": value
+            .get("intentConfidence")
+            .cloned()
+            .unwrap_or(serde_json::json!("medium")),
+        "stepCount": value
+            .get("steps")
+            .and_then(|s| s.as_array())
+            .map(|s| s.len())
+            .unwrap_or(0),
+        "approved": value.get("approved").cloned().unwrap_or(serde_json::json!(false)),
+        "narrationSourceUpdatedAt": value
+            .get("narrationSourceUpdatedAt")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null),
+    }))
+}
+
+fn read_bundle_stats(dir: &Path) -> (Option<i64>, Option<u64>) {
+    let Some(content) = std::fs::read_to_string(dir.join("bundle.json")).ok() else {
+        return (None, None);
+    };
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(&content) else {
+        return (None, None);
+    };
+    let duration = value
+        .get("session")
+        .and_then(|s| s.get("durationMs"))
+        .and_then(|v| v.as_i64());
+    let events = value
+        .get("stats")
+        .and_then(|s| s.get("meaningfulEventCount"))
+        .and_then(|v| v.as_u64());
+    (duration, events)
+}
+
+fn directory_size(dir: &Path, max_depth: u32) -> Option<u64> {
+    fn walk(dir: &Path, depth: u32, total: &mut u64) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            let Ok(meta) = entry.metadata() else {
+                continue;
+            };
+            if meta.is_file() {
+                *total += meta.len();
+            } else if meta.is_dir() && depth > 0 {
+                walk(&entry.path(), depth - 1, total);
+            }
+        }
+    }
+    let mut total = 0u64;
+    walk(dir, max_depth, &mut total);
+    Some(total)
 }
 
 pub async fn delete_recording(workspace_dir: &Path, name: &str) -> Result<()> {
@@ -512,6 +646,7 @@ struct Consumer {
     display_h: i32,
     monitors: Vec<crate::computer::coordinates::MonitorRect>,
     manifest: RecordingManifest,
+    activity: std::sync::Arc<crate::computer::activity::events::ActivityHub>,
     frame_rx: Option<tokio::sync::watch::Receiver<Option<RecorderFrame>>>,
     shot_writes: tokio::task::JoinSet<()>,
     waited_first_frame: bool,
@@ -533,6 +668,7 @@ impl Consumer {
         display_h: i32,
         monitors: Vec<crate::computer::coordinates::MonitorRect>,
         manifest: RecordingManifest,
+        activity: std::sync::Arc<crate::computer::activity::events::ActivityHub>,
     ) -> Self {
         Self {
             dir,
@@ -541,6 +677,7 @@ impl Consumer {
             display_h,
             monitors,
             manifest,
+            activity,
             frame_rx: None,
             shot_writes: tokio::task::JoinSet::new(),
             waited_first_frame: false,
@@ -564,21 +701,38 @@ impl Consumer {
         let (frame_tx, frame_rx) =
             tokio::sync::watch::channel::<Option<RecorderFrame>>(None);
         self.frame_rx = Some(frame_rx);
+        let capture_cancel = tokio_util::sync::CancellationToken::new();
+        let capture_stop = capture_cancel.clone();
+        let frame_log_dir = self.dir.clone();
+        let started_epoch_ms = self.activity.started_epoch_ms();
         let capture_task = tokio::spawn(async move {
+            let _ = tokio::fs::create_dir_all(frame_log_dir.join("frames")).await;
+            let mut frame_log =
+                crate::computer::frames::FrameLog::new(frame_log_dir, started_epoch_ms);
             let mut interval =
                 tokio::time::interval(Duration::from_millis(SCREENSHOT_INTERVAL_MS));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             loop {
-                interval.tick().await;
+                tokio::select! {
+                    _ = capture_stop.cancelled() => break,
+                    _ = interval.tick() => {}
+                }
                 if frame_tx.is_closed() {
                     break;
                 }
                 if let Ok(frame) = capture_recorder_frame().await {
+                    frame_log.offer(
+                        frame.phash,
+                        frame.transport_width,
+                        frame.transport_height,
+                        std::sync::Arc::clone(&frame.shot_jpeg_bytes),
+                    );
                     if frame_tx.send(Some(frame)).is_err() {
                         break;
                     }
                 }
             }
+            frame_log.finish().await;
         });
         self.last_commit = Instant::now();
 
@@ -617,7 +771,7 @@ impl Consumer {
 
         while self.shot_writes.join_next().await.is_some() {}
         self.frame_rx = None;
-        capture_task.abort();
+        capture_cancel.cancel();
         let _ = capture_task.await;
 
         let _ = tokio::task::spawn_blocking(move || hook_handle.stop()).await;
@@ -1053,6 +1207,31 @@ impl Consumer {
             monitor,
         };
         self.manifest.steps.push(step);
+
+        let mut activity_payload = serde_json::json!({
+            "action": input.action_type,
+            "stepIndex": index,
+        });
+        if let Some(map) = activity_payload.as_object_mut() {
+            if let Some(value) = input.value.as_deref() {
+                map.insert("value".to_string(), serde_json::json!(value));
+            }
+            if let Some(amount) = input.amount {
+                map.insert("amount".to_string(), serde_json::json!(amount));
+            }
+            if let (Some(x), Some(y)) = (x_norm, y_norm) {
+                map.insert("xNorm".to_string(), serde_json::json!(x));
+                map.insert("yNorm".to_string(), serde_json::json!(y));
+            }
+            if let Some(rect) = monitor {
+                map.insert("monitor".to_string(), serde_json::json!(rect.id));
+            }
+        }
+        self.activity.publish(
+            &format!("input.{}", input.action_type),
+            "input",
+            activity_payload,
+        );
 
         let _ = self.event_tx.send(RecorderEvent::Step {
             step: RecorderStepEvent {

@@ -2,9 +2,11 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from '../../i18n'
 import { copyTextToClipboard } from './clipboard'
+import { useAnchoredDropdown } from '../../hooks/useAnchoredDropdown'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
@@ -20,24 +22,11 @@ export function AssistantMessageActions({ copyText, sessionId, workDir, disableF
   const t = useTranslation()
   const addToast = useUIStore((s) => s.addToast)
   const [open, setOpen] = useState(false)
-  const wrapRef = useRef<HTMLDivElement>(null)
-
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (e: MouseEvent) => {
-      if (wrapRef.current?.contains(e.target as Node)) return
-      setOpen(false)
-    }
-    const onKey = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    document.addEventListener('keydown', onKey)
-    return () => {
-      document.removeEventListener('mousedown', onDoc)
-      document.removeEventListener('keydown', onKey)
-    }
-  }, [open])
+  const { triggerRef, menuRef, style, portalTarget } = useAnchoredDropdown<HTMLButtonElement>(
+    open,
+    () => setOpen(false),
+    { align: 'right', estimatedHeight: 110 },
+  )
 
   const copyMessage = useCallback(async () => {
     const ok = await copyTextToClipboard(copyText)
@@ -64,8 +53,9 @@ export function AssistantMessageActions({ copyText, sessionId, workDir, disableF
     'flex w-full px-3 py-2.5 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-45'
 
   return (
-    <div ref={wrapRef} className="relative flex w-full justify-end">
+    <div className="relative flex w-full justify-end">
       <button
+        ref={triggerRef}
         type="button"
         className="inline-flex h-5 w-5 items-center justify-center rounded-full text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35"
         aria-label={t('chat.messageMoreActions')}
@@ -82,10 +72,12 @@ export function AssistantMessageActions({ copyText, sessionId, workDir, disableF
           more_horiz
         </span>
       </button>
-      {open && (
+      {open && style && createPortal(
         <div
+          ref={menuRef}
           role="menu"
-          className="absolute right-0 top-full z-20 mt-1 min-w-[160px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-[0_18px_40px_-18px_rgba(0,0,0,0.45)]"
+          style={style}
+          className="min-w-[160px] rounded-lg border border-[var(--color-border)] bg-[var(--color-surface)] py-1 shadow-[0_18px_40px_-18px_rgba(0,0,0,0.45)]"
         >
           <button type="button" role="menuitem" className={itemClass} disabled={forkDisabled} onClick={() => void forkChat()}>
             {t('chat.forkChat')}
@@ -93,7 +85,8 @@ export function AssistantMessageActions({ copyText, sessionId, workDir, disableF
           <button type="button" role="menuitem" className={itemClass} onClick={() => void copyMessage()}>
             {t('chat.copyMessage')}
           </button>
-        </div>
+        </div>,
+        portalTarget,
       )}
     </div>
   )

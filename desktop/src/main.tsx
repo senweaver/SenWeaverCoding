@@ -215,6 +215,9 @@ async function boot() {
       paintBootError('missing-root', '#root element missing in index.html')
       return
     }
+    if (minimalKind === 'minimal-input') {
+      document.documentElement.classList.add('minimal-input-shell')
+    }
     const RootComponent =
       minimalKind === 'minimal-input'
         ? (rootModule as typeof import('./MinimalInputWindow')).MinimalInputWindow

@@ -45,6 +45,7 @@ type Props = {
   onPaste?: (event: React.ClipboardEvent) => void
   onCompositionStart?: () => void
   onCompositionEnd?: () => void
+  onBlur?: () => void
 }
 
 const CHIP_CLASS_BASE =
@@ -285,6 +286,7 @@ export const RichComposer = forwardRef<RichComposerHandle, Props>(function RichC
     onPaste,
     onCompositionStart,
     onCompositionEnd,
+    onBlur,
   },
   ref,
 ) {
@@ -444,7 +446,10 @@ export const RichComposer = forwardRef<RichComposerHandle, Props>(function RichC
         onKeyDown={onKeyDown}
         onKeyUp={syncCaret}
         onMouseUp={syncCaret}
-        onBlur={syncCaret}
+        onBlur={() => {
+          syncCaret()
+          onBlur?.()
+        }}
         onPaste={onPaste}
         onCompositionStart={onCompositionStart}
         onCompositionEnd={onCompositionEnd}

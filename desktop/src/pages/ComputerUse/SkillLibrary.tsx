@@ -9,6 +9,8 @@ import { useComputerRecorderStore } from '../../stores/computerRecorderStore'
 import { useComputerUseStore } from '../../stores/computerUseStore'
 import { StepEditor } from './StepEditor'
 import { ScheduleDialog } from './ScheduleDialog'
+import { AnalysisView } from './AnalysisView'
+import { DoctorPanel } from './DoctorPanel'
 
 export function SkillLibrary({ onClose }: { onClose: () => void }) {
   const t = useTranslation()
@@ -34,6 +36,8 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
   const [renameValue, setRenameValue] = useState('')
   const [editingSteps, setEditingSteps] = useState<string | null>(null)
   const [scheduling, setScheduling] = useState<string | null>(null)
+  const [analyzing, setAnalyzing] = useState<string | null>(null)
+  const [showDoctor, setShowDoctor] = useState(false)
 
   const submitRename = (name: string) => {
     const next = renameValue.trim()
@@ -93,6 +97,15 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
           <div className="ml-auto flex items-center gap-1">
             <button
               type="button"
+              onClick={() => setShowDoctor(true)}
+              className="inline-flex items-center justify-center rounded-md border border-[var(--color-border)] px-2 py-1 text-[var(--color-text-secondary)] transition-colors hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
+              aria-label={t('computerUse.doctor.title')}
+              title={t('computerUse.doctor.title')}
+            >
+              <span className="material-symbols-outlined text-[16px]">health_and_safety</span>
+            </button>
+            <button
+              type="button"
               onClick={() => void loadRecordings()}
               className="inline-flex items-center justify-center rounded-md border border-[var(--color-border)] px-2 py-1 text-[var(--color-text-secondary)] transition-colors hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
               aria-label={t('computerUse.skills.refresh')}
@@ -144,7 +157,7 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
                             <button
                               type="button"
                               onClick={() => submitRename(rec.name)}
-                              className="inline-flex items-center justify-center rounded-md bg-[var(--color-brand)] px-2 py-1 text-[10px] font-medium text-white transition-opacity hover:opacity-90"
+                              className="inline-flex items-center justify-center rounded-md bg-[var(--color-brand)] px-2 py-1 text-[10px] font-medium text-[var(--color-on-primary)] transition-opacity hover:opacity-90"
                             >
                               {t('common.save')}
                             </button>
@@ -181,8 +194,23 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
                             {rec.task}
                           </div>
                         )}
-                        <div className="mt-1 flex flex-wrap items-center gap-2 text-[10px] text-[var(--color-text-tertiary)]">
+                        <div className="mt-1 flex flex-wrap items-center gap-1.5 text-[10px] text-[var(--color-text-tertiary)]">
                           <span>{t('computerUse.skills.steps', { count: rec.step_count })}</span>
+                          {rec.has_narration && (
+                            <span className="rounded bg-[var(--color-brand)]/12 px-1.5 py-0.5 text-[var(--color-brand)]">
+                              {t('computerUse.sessions.badgeNarration')}
+                            </span>
+                          )}
+                          {rec.has_analysis && (
+                            <span className="rounded bg-[var(--color-success)]/15 px-1.5 py-0.5 text-[var(--color-success)]">
+                              {t('computerUse.sessions.badgeAnalyzed')}
+                            </span>
+                          )}
+                          {rec.has_automation && (
+                            <span className="rounded bg-[var(--color-secondary)]/15 px-1.5 py-0.5 text-[var(--color-secondary)]">
+                              {t('computerUse.sessions.badgeAutomation')}
+                            </span>
+                          )}
                           {!rec.has_skill && (
                             <span className="rounded bg-amber-500/15 px-1.5 py-0.5 text-amber-600 dark:text-amber-400">
                               {t('computerUse.skills.notGenerated')}
@@ -229,7 +257,7 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
                         onClick={() => smartReplay(rec.name)}
                         disabled={!hasModel || rec.step_count === 0 || recorderBusy}
                         title={t('computerUse.skills.smartReplayHint')}
-                        className="inline-flex items-center gap-1 rounded-md bg-[var(--color-brand)] px-2.5 py-1.5 text-[11px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                        className="inline-flex items-center gap-1 rounded-md bg-[var(--color-brand)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
                       >
                         <span className="material-symbols-outlined text-[14px]">
                           auto_awesome
@@ -245,6 +273,16 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
                       >
                         <span className="material-symbols-outlined text-[14px]">replay</span>
                         {t('computerUse.skills.exactReplay')}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAnalyzing(rec.name)}
+                        disabled={rec.step_count === 0 || recorderBusy}
+                        title={t('computerUse.analyze.cta')}
+                        className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:bg-black/[0.06] disabled:opacity-50 dark:hover:bg-white/[0.08]"
+                      >
+                        <span className="material-symbols-outlined text-[14px]">insights</span>
+                        {t('computerUse.sessions.analyze')}
                       </button>
                       <button
                         type="button"
@@ -317,7 +355,7 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
                           type="button"
                           onClick={() => skillReplay(rec.name)}
                           disabled={!hasModel || recorderBusy}
-                          className="inline-flex items-center justify-center gap-1 rounded-md bg-[var(--color-brand)] px-2.5 py-1.5 text-[11px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
+                          className="inline-flex items-center justify-center gap-1 rounded-md bg-[var(--color-brand)] px-2.5 py-1.5 text-[11px] font-semibold text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
                         >
                           <span className="material-symbols-outlined text-[14px]">play_arrow</span>
                           {t('computerUse.skills.replayStart')}
@@ -339,6 +377,16 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
         />
       )}
       {scheduling && <ScheduleDialog name={scheduling} onClose={() => setScheduling(null)} />}
+      {analyzing && (
+        <AnalysisView
+          name={analyzing}
+          onClose={() => {
+            setAnalyzing(null)
+            void loadRecordings()
+          }}
+        />
+      )}
+      {showDoctor && <DoctorPanel onClose={() => setShowDoctor(false)} />}
     </div>
   )
 }

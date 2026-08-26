@@ -184,7 +184,7 @@ export function ReviewPanel() {
               <button
                 type="button"
                 onClick={onKeepAll}
-                className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90"
+                className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-on-accent)] transition-opacity hover:opacity-90"
               >
                 {t('review.keepAll')}
               </button>
@@ -426,7 +426,7 @@ function ReviewFileRow({
                             disabled={hunkApplying}
                             className={`ml-auto rounded-md px-2 py-0.5 text-[10px] font-semibold transition-colors disabled:opacity-40 ${
                               rejected
-                                ? 'bg-[var(--color-error)] text-white'
+                                ? 'bg-[var(--color-error)] text-[var(--color-on-error)]'
                                 : 'border border-[var(--color-border)]/60 text-[var(--color-text-secondary)] hover:bg-[var(--color-error)]/10 hover:text-[var(--color-error)]'
                             }`}
                           >
@@ -449,7 +449,7 @@ function ReviewFileRow({
                       type="button"
                       onClick={() => void applyHunkDecisions(file.path)}
                       disabled={rejectedCount === 0 || hunkApplying}
-                      className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-[11px] font-medium text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+                      className="rounded-md bg-[var(--color-accent)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-on-accent)] transition-opacity hover:opacity-90 disabled:opacity-40"
                     >
                       {hunkApplying ? t('review.loading') : t('review.applyHunks')}
                     </button>

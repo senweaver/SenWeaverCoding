@@ -416,7 +416,7 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
             <span
               aria-hidden="true"
               style={{ opacity: aiOpacity, transition: 'opacity 250ms linear' }}
-              className="flex h-3.5 min-w-[14px] items-center justify-center rounded-sm bg-[var(--color-warning)]/85 px-1 text-[9px] font-bold leading-none text-white"
+              className="flex h-3.5 min-w-[14px] items-center justify-center rounded-sm bg-[var(--color-warning)]/85 px-1 text-[9px] font-bold leading-none text-[var(--color-on-warning)]"
             >
               M
             </span>

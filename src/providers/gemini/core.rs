@@ -254,8 +254,15 @@ struct ThinkingConfig {
 }
 
 fn thinking_config_for_model(model: &str) -> Option<ThinkingConfig> {
+    if crate::providers::reasoning_suppressed() {
+        return None;
+    }
     let m = model.to_ascii_lowercase();
-    let supported = m.contains("2.5") || m.contains("flash-thinking") || m.contains("-thinking");
+    let supported = m.contains("2.5")
+        || m.contains("gemini-3")
+        || m.contains("flash-thinking")
+        || m.contains("-thinking")
+        || m.contains("gemini-exp");
     if supported {
         Some(ThinkingConfig {
             include_thoughts: true,
@@ -343,7 +350,7 @@ impl CandidateContent {
 
     fn into_candidate(self) -> GeminiCandidate {
         let mut answer_parts: Vec<String> = Vec::new();
-        let mut first_thinking: Option<String> = None;
+        let mut thinking_parts: Vec<String> = Vec::new();
         let mut tool_calls: Vec<ProviderToolCall> = Vec::new();
 
         for part in self.parts {
@@ -367,10 +374,10 @@ impl CandidateContent {
                 if text.is_empty() {
                     continue;
                 }
-                if !part.thought {
+                if part.thought {
+                    thinking_parts.push(text);
+                } else {
                     answer_parts.push(text);
-                } else if first_thinking.is_none() {
-                    first_thinking = Some(text);
                 }
             }
         }
@@ -380,10 +387,15 @@ impl CandidateContent {
         } else {
             Some(answer_parts.join(""))
         };
+        let reasoning = if thinking_parts.is_empty() {
+            None
+        } else {
+            Some(thinking_parts.join(""))
+        };
 
         GeminiCandidate {
             text,
-            reasoning: first_thinking,
+            reasoning,
             tool_calls,
         }
     }

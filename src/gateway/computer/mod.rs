@@ -16,6 +16,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tokio::sync::mpsc::{self, UnboundedSender};
 
+pub mod analyze;
+pub mod build_ws;
+pub mod misc;
 pub mod record;
 
 use crate::computer::briefing;

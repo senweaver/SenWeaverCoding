@@ -1111,6 +1111,16 @@ async fn run_role_agentic(ctx: RoleAgenticCtx<'_>) -> Result<String, String> {
                             kind: SubagentChunkKind::Status,
                             delta: text,
                         }),
+                        DraftEvent::Phase { action, detail } => Some(DraftEvent::Subagent {
+                            task_id: task_id_for_bridge.clone(),
+                            agent_id: agent_id_for_bridge.clone(),
+                            kind: SubagentChunkKind::Status,
+                            delta: if detail.is_empty() {
+                                action
+                            } else {
+                                format!("{action}: {detail}")
+                            },
+                        }),
 
                         _ => None,
                     };

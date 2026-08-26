@@ -2,17 +2,12 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState, useRef, useEffect, useMemo, useCallback } from 'react'
+import { useState, useEffect, useMemo } from 'react'
 import { createPortal } from 'react-dom'
 import { sessionsApi, type RecentProject } from '../../api/sessions'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTranslation } from '../../i18n'
-
-type DropdownPos = {
-  top: number
-  left: number
-  direction: 'up' | 'down'
-}
+import { useAnchoredDropdown } from '../../hooks/useAnchoredDropdown'
 
 type ProjectOption = {
   projectPath: string
@@ -35,50 +30,11 @@ export function ProjectFilter({ variant = 'default' }: { variant?: 'default' | '
   const [open, setOpen] = useState(false)
   const [projects, setProjects] = useState<RecentProject[]>([])
   const [loading, setLoading] = useState(false)
-  const [dropdownPos, setDropdownPos] = useState<DropdownPos | null>(null)
-  const ref = useRef<HTMLDivElement>(null)
-  const triggerRef = useRef<HTMLButtonElement>(null)
-  const dropdownRef = useRef<HTMLDivElement>(null)
-
-  const updateDropdownPos = useCallback(() => {
-    if (!triggerRef.current) return
-    const rect = triggerRef.current.getBoundingClientRect()
-    const dropdownHeight = 420
-    const spaceAbove = rect.top
-    const spaceBelow = window.innerHeight - rect.bottom
-    const direction = spaceBelow >= dropdownHeight || spaceBelow >= spaceAbove ? 'down' : 'up'
-
-    setDropdownPos({
-      top: direction === 'down' ? rect.bottom + 8 : rect.top - 8,
-      left: rect.left,
-      direction,
-    })
-  }, [])
-
-  useEffect(() => {
-    if (!open) return
-
-    const handleClick = (e: MouseEvent) => {
-      const target = e.target as Node
-      if (ref.current?.contains(target)) return
-      if (dropdownRef.current?.contains(target)) return
-      setOpen(false)
-    }
-
-    document.addEventListener('mousedown', handleClick)
-    return () => document.removeEventListener('mousedown', handleClick)
-  }, [open])
-
-  useEffect(() => {
-    if (!open) return
-    updateDropdownPos()
-    window.addEventListener('scroll', updateDropdownPos, true)
-    window.addEventListener('resize', updateDropdownPos)
-    return () => {
-      window.removeEventListener('scroll', updateDropdownPos, true)
-      window.removeEventListener('resize', updateDropdownPos)
-    }
-  }, [open, updateDropdownPos])
+  const { triggerRef, menuRef, style, portalTarget } = useAnchoredDropdown<HTMLButtonElement>(
+    open,
+    () => setOpen(false),
+    { estimatedHeight: 420, gap: 8, overflow: 'hidden' },
+  )
 
   useEffect(() => {
     if (!open) return
@@ -161,7 +117,7 @@ export function ProjectFilter({ variant = 'default' }: { variant?: 'default' | '
   const selectAll = () => setSelectedProjects([])
 
   return (
-    <div ref={ref} className="relative">
+    <div className="relative">
       <button
         ref={triggerRef}
         type="button"
@@ -199,21 +155,13 @@ export function ProjectFilter({ variant = 'default' }: { variant?: 'default' | '
         )}
       </button>
 
-      {open && dropdownPos && createPortal(
+      {open && style && createPortal(
         <div
-          ref={dropdownRef}
-          className="w-[360px] max-w-[calc(100vw-32px)] overflow-hidden rounded-[18px] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)]"
-          style={{
-            position: 'fixed',
-            left: Math.min(dropdownPos.left, window.innerWidth - Math.min(360, window.innerWidth - 32) - 16),
-            ...(dropdownPos.direction === 'down'
-              ? { top: dropdownPos.top }
-              : { bottom: window.innerHeight - dropdownPos.top }),
-            boxShadow: 'var(--shadow-dropdown)',
-            zIndex: 9999,
-          }}
+          ref={menuRef}
+          className="flex w-[360px] max-w-[calc(100vw-32px)] flex-col overflow-hidden rounded-[18px] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
+          style={style}
         >
-          <div className="max-h-[360px] overflow-y-auto p-2">
+          <div className="min-h-0 flex-1 overflow-y-auto p-2">
             <button
               type="button"
               onClick={selectAll}
@@ -273,7 +221,7 @@ export function ProjectFilter({ variant = 'default' }: { variant?: 'default' | '
             )}
           </div>
         </div>,
-        document.body,
+        portalTarget,
       )}
     </div>
   )

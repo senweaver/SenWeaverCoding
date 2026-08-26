@@ -285,10 +285,11 @@ impl WorkerWireTracker {
             TurnEvent::StreamReset => vec![json!({
                 "type": "content_reset",
             })],
-            TurnEvent::Thinking { delta } => vec![json!({
+            TurnEvent::Thinking { delta } if !delta.trim().is_empty() => vec![json!({
                 "type": "thinking",
                 "text": delta,
             })],
+            TurnEvent::Thinking { .. } => Vec::new(),
             TurnEvent::ToolCall {
                 name,
                 args,
@@ -334,10 +335,19 @@ impl WorkerWireTracker {
                 })]
             }
             TurnEvent::StatusUpdate { action, detail } => {
+                let state = match action.as_str() {
+                    "thinking"
+                    | "compressing"
+                    | "preparing"
+                    | "waiting_model"
+                    | "model_override" => "thinking",
+                    _ => "tool_executing",
+                };
                 let mut frames = vec![json!({
                     "type": "status",
-                    "state": "tool_executing",
+                    "state": state,
                     "verb": action,
+                    "detail": detail,
                     "tokens": null,
                 })];
                 if !detail.is_empty() {

@@ -370,7 +370,7 @@ export function CuratorCard({
             <button
               onClick={handleResume}
               disabled={!sessionId}
-              className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-md bg-[var(--color-curator-accent)] text-white hover:bg-[var(--color-curator-accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-md bg-[var(--color-curator-accent)] text-[var(--color-on-curator-accent)] hover:bg-[var(--color-curator-accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <span className="material-symbols-outlined text-[14px]">play_arrow</span>
               {t('plan.resume')}
@@ -399,7 +399,7 @@ export function CuratorCard({
             <button
               onClick={handleContinueWriting}
               disabled={!sessionId || sessionIsLive}
-              className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-md bg-[var(--color-curator-accent)] text-white hover:bg-[var(--color-curator-accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+              className="flex items-center gap-1 text-[11px] font-semibold px-2.5 py-1 rounded-md bg-[var(--color-curator-accent)] text-[var(--color-on-curator-accent)] hover:bg-[var(--color-curator-accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               <span className="material-symbols-outlined text-[14px]">edit_note</span>
               {t('curator.continueWriting') || 'Continue writing'}
@@ -408,7 +408,7 @@ export function CuratorCard({
             <button
               onClick={handleBuild}
               disabled={buildDisabled}
-              className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-[var(--color-curator-accent)] text-white hover:bg-[var(--color-curator-accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
+              className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-[var(--color-curator-accent)] text-[var(--color-on-curator-accent)] hover:bg-[var(--color-curator-accent-hover)] disabled:opacity-50 disabled:cursor-not-allowed"
             >
               {t('curator.actions.buildSwitch') || 'Build → Agent'}
             </button>

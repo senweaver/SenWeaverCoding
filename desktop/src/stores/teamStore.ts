@@ -36,6 +36,8 @@ function createMemberSessionState() {
     cumulativeCostUsd: 0,
     elapsedSeconds: 0,
     statusVerb: '',
+    planningPhaseAction: '',
+    planningPhaseDetail: '',
     slashCommands: [],
     agentTaskNotifications: {},
     pendingRewind: null,

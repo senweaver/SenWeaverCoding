@@ -12,6 +12,11 @@ import {
   type RecordingSummary,
 } from '../api/computer'
 import { localizeComputerMessage } from '../lib/computerMessages'
+import {
+  listMicrophones,
+  NarrationCapture,
+  type MicrophoneDevice,
+} from '../lib/computerNarration'
 import { useComputerUseStore } from './computerUseStore'
 
 export type RecorderStatus =
@@ -48,8 +53,20 @@ type ComputerRecorderStore = {
   recordings: RecordingSummary[]
   recordingsLoaded: boolean
 
+  narrationEnabled: boolean
+  narrationLanguage: string
+  micDeviceId: string | null
+  micDevices: MicrophoneDevice[]
+  narrationMuted: boolean
+  narrationError: string | null
+
   setTask: (task: string) => void
   selectStep: (index: number | null) => void
+  setNarrationEnabled: (enabled: boolean) => void
+  setNarrationLanguage: (language: string) => void
+  setMicDevice: (deviceId: string | null) => void
+  loadMicrophones: () => Promise<void>
+  toggleNarrationMuted: () => void
   startRecording: () => void
   stopRecording: () => void
   discardRecording: () => void
@@ -62,6 +79,30 @@ type ComputerRecorderStore = {
 }
 
 let socket: WebSocket | null = null
+let narration: NarrationCapture | null = null
+let pendingNarration: NarrationCapture | null = null
+
+async function stopNarration(): Promise<void> {
+  const capture = narration
+  narration = null
+  if (capture) {
+    try {
+      await capture.stop()
+    } catch {
+    }
+    pendingNarration = capture
+  }
+}
+
+const NARRATION_LANGUAGE_KEY = 'sen-computer-narration-lang'
+
+function loadNarrationLanguage(): string {
+  try {
+    return localStorage.getItem(NARRATION_LANGUAGE_KEY) || 'en'
+  } catch {
+    return 'en'
+  }
+}
 
 function closeSocket() {
   if (socket) {
@@ -101,8 +142,34 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
   recordings: [],
   recordingsLoaded: false,
 
+  narrationEnabled: false,
+  narrationLanguage: loadNarrationLanguage(),
+  micDeviceId: null,
+  micDevices: [],
+  narrationMuted: false,
+  narrationError: null,
+
   setTask: (task) => set({ task }),
   selectStep: (index) => set({ selectedStepIndex: index }),
+
+  setNarrationEnabled: (enabled) => set({ narrationEnabled: enabled }),
+  setNarrationLanguage: (language) => {
+    try {
+      localStorage.setItem(NARRATION_LANGUAGE_KEY, language)
+    } catch {
+    }
+    set({ narrationLanguage: language })
+  },
+  setMicDevice: (deviceId) => set({ micDeviceId: deviceId }),
+  loadMicrophones: async () => {
+    const devices = await listMicrophones()
+    set({ micDevices: devices })
+  },
+  toggleNarrationMuted: () => {
+    const next = !get().narrationMuted
+    narration?.setMuted(next)
+    set({ narrationMuted: next })
+  },
 
   startRecording: () => {
     const { status } = get()
@@ -143,6 +210,23 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
     ws.onopen = () => {
       if (socket !== ws) return
       ws.send(JSON.stringify({ type: 'start', task: get().task.trim() }))
+      const { narrationEnabled, narrationLanguage, micDeviceId } = get()
+      if (narrationEnabled) {
+        set({ narrationMuted: false, narrationError: null })
+        const capture = new NarrationCapture({
+          language: narrationLanguage,
+          deviceId: micDeviceId ?? undefined,
+          onError: (message) => set({ narrationError: message }),
+        })
+        narration = capture
+        void capture.start().catch((err) => {
+          if (narration !== capture) return
+          narration = null
+          set({
+            narrationError: err instanceof Error ? err.message : 'microphone unavailable',
+          })
+        })
+      }
     }
 
     ws.onmessage = (event) => {
@@ -189,6 +273,7 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
   },
 
   stopRecording: () => {
+    void stopNarration()
     try {
       socket?.send(JSON.stringify({ type: 'stop' }))
     } catch {
@@ -196,6 +281,10 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
   },
 
   discardRecording: () => {
+    if (narration) {
+      narration.discard()
+      void stopNarration()
+    }
     try {
       socket?.send(JSON.stringify({ type: 'discard' }))
     } catch {
@@ -210,6 +299,7 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
       startedAt: null,
       savedRecordingName: null,
       savedSkillName: null,
+      narrationMuted: false,
     })
   },
 
@@ -397,6 +487,15 @@ function handleEvent(
     case 'recording_saved': {
       const name = typeof payload.name === 'string' ? payload.name : null
       set({ savedRecordingName: name })
+      const capture = pendingNarration
+      pendingNarration = null
+      if (capture && name) {
+        void capture.flush(name).finally(() => {
+          void get().loadRecordings()
+        })
+      } else if (capture) {
+        capture.discard()
+      }
       void get().loadRecordings()
       break
     }

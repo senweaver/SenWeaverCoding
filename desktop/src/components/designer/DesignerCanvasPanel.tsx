@@ -3,7 +3,9 @@
 // Licensed under the MIT License.
 
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { createPortal } from 'react-dom'
 import { useTranslation } from '../../i18n'
+import { useAnchoredDropdown } from '../../hooks/useAnchoredDropdown'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 import { useWorkspaceFilesStore } from '../../stores/workspaceFilesStore'
@@ -671,18 +673,13 @@ function TweaksPopover({
 }) {
   const t = useTranslation()
   const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement | null>(null)
   const setTweaks = useDesignerCanvasStore((s) => s.setTweaks)
   const resetTweaks = useDesignerCanvasStore((s) => s.resetTweaks)
-
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
-  }, [open])
+  const { triggerRef, menuRef, style, portalTarget } = useAnchoredDropdown<HTMLButtonElement>(
+    open,
+    () => setOpen(false),
+    { align: 'right', estimatedHeight: 340 },
+  )
 
   const active =
     tweaks.accent !== null ||
@@ -692,8 +689,9 @@ function TweaksPopover({
     tweaks.mode !== 'auto'
 
   return (
-    <div ref={ref} className="relative">
+    <div className="relative">
       <button
+        ref={triggerRef}
         type="button"
         onClick={() => setOpen((v) => !v)}
         title={t('designer.canvas.tweaks')}
@@ -705,8 +703,12 @@ function TweaksPopover({
       >
         <span className="material-symbols-outlined text-[16px]">tune</span>
       </button>
-      {open && (
-        <div className="absolute right-0 top-full z-[9999] mt-1 w-[248px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-3 shadow-[var(--shadow-dropdown)]">
+      {open && style && createPortal(
+        <div
+          ref={menuRef}
+          style={style}
+          className="w-[248px] rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] p-3 shadow-[var(--shadow-dropdown)]"
+        >
           <div className="mb-2 flex items-center justify-between">
             <span className="text-[11px] font-medium uppercase tracking-wide text-[var(--color-text-secondary)]">
               {t('designer.canvas.tweaks')}
@@ -785,7 +787,8 @@ function TweaksPopover({
               ))}
             </div>
           </div>
-        </div>
+        </div>,
+        portalTarget,
       )}
     </div>
   )

@@ -1036,11 +1036,47 @@ pub fn enforce_context_budget_native_with_window(
         groups.push(current_group);
     }
 
-    let last_group = groups.pop();
-    let last_group_tokens = last_group
-        .as_ref()
-        .map(|g| g.iter().map(estimate_message_tokens).sum::<usize>())
-        .unwrap_or(0);
+    let total_groups = groups.len();
+    let mut pinned: Vec<bool> = vec![false; total_groups];
+    if total_groups > 0 {
+        pinned[total_groups - 1] = true;
+    }
+    let latest_user_anchor = groups
+        .iter()
+        .rposition(|g| {
+            g.first()
+                .is_some_and(|m| m.role == "user" && m.has_current_request_marker())
+        })
+        .or_else(|| {
+            groups
+                .iter()
+                .rposition(|g| g.first().is_some_and(|m| m.role == "user"))
+        });
+    if let Some(anchor) = latest_user_anchor {
+        pinned[anchor] = true;
+        for idx in (anchor + 1)..total_groups {
+            let head_role = groups[idx].first().map_or("", |m| m.role.as_str());
+            if head_role == "user" || head_role == "system" {
+                pinned[idx] = true;
+            } else {
+                break;
+            }
+        }
+        for idx in (0..anchor).rev() {
+            let head_role = groups[idx].first().map_or("", |m| m.role.as_str());
+            if head_role == "user" || head_role == "system" {
+                pinned[idx] = true;
+            } else {
+                break;
+            }
+        }
+    }
+    let pinned_tokens: usize = groups
+        .iter()
+        .enumerate()
+        .filter(|(idx, _)| pinned[*idx])
+        .map(|(_, g)| g.iter().map(estimate_message_tokens).sum::<usize>())
+        .sum();
 
     let mut system_tokens: usize = leading_system
         .iter()
@@ -1049,25 +1085,32 @@ pub fn enforce_context_budget_native_with_window(
 
     let mut available = max_input
         .saturating_sub(system_tokens)
-        .saturating_sub(last_group_tokens);
+        .saturating_sub(pinned_tokens);
 
-    let total_groups = groups.len();
-    let mut kept_groups: Vec<Vec<ChatMessage>> = Vec::new();
+    let mut kept_indexed: Vec<(usize, Vec<ChatMessage>)> = Vec::new();
     let mut used: usize = 0;
-    for group in groups.into_iter().rev() {
+    let mut budget_exhausted = false;
+    for (idx, group) in groups.into_iter().enumerate().rev() {
+        if pinned[idx] {
+            kept_indexed.push((idx, group));
+            continue;
+        }
+        if budget_exhausted {
+            continue;
+        }
         let cost: usize = group.iter().map(estimate_message_tokens).sum();
         if used.saturating_add(cost) > available {
-            break;
+            budget_exhausted = true;
+            continue;
         }
         used = used.saturating_add(cost);
-        kept_groups.push(group);
+        kept_indexed.push((idx, group));
     }
-    kept_groups.reverse();
-    let dropped_groups = total_groups.saturating_sub(kept_groups.len());
+    kept_indexed.sort_by_key(|(idx, _)| *idx);
 
-    if system_tokens.saturating_add(last_group_tokens) > max_input {
+    if system_tokens.saturating_add(pinned_tokens) > max_input {
         let target_for_system = max_input
-            .saturating_sub(last_group_tokens)
+            .saturating_sub(pinned_tokens)
             .saturating_sub(64)
             .max(256);
         truncate_system_messages(&mut leading_system, target_for_system);
@@ -1077,24 +1120,24 @@ pub fn enforce_context_budget_native_with_window(
             .sum::<usize>();
         available = max_input
             .saturating_sub(system_tokens)
-            .saturating_sub(last_group_tokens);
+            .saturating_sub(pinned_tokens);
         if used > available {
-            kept_groups.clear();
+            kept_indexed.retain(|(idx, _)| pinned[*idx]);
         }
     }
+
+    let dropped_groups = total_groups.saturating_sub(kept_indexed.len());
 
     let mut out: Vec<ChatMessage> = leading_system;
     if dropped_groups > 0 {
         out.push(ChatMessage::system(format!(
             "[Context trimmed: {dropped_groups} older conversation turn(s) were dropped to fit \
              the model context window. Earlier history is incomplete; ask the user to restate \
-             anything you need rather than assuming it was never said.]"
+             anything you need rather than assuming it was never said. The latest user message \
+             below is intact and is the authoritative request to act on.]"
         )));
     }
-    for group in kept_groups {
-        out.extend(group);
-    }
-    if let Some(group) = last_group {
+    for (_, group) in kept_indexed {
         out.extend(group);
     }
     out

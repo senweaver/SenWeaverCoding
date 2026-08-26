@@ -569,7 +569,7 @@ function AutoRunSection() {
                     setConfirmBypass(false)
                     void applyMode('bypassPermissions')
                   }}
-                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-[var(--radius-md)] bg-[var(--color-error)] h-7 px-2.5 text-xs font-semibold text-white transition-colors hover:opacity-90"
+                  className="inline-flex items-center gap-1.5 whitespace-nowrap rounded-[var(--radius-md)] bg-[var(--color-error)] h-7 px-2.5 text-xs font-semibold text-[var(--color-on-error)] transition-colors hover:opacity-90"
                 >
                   {t('permMode.enableBypassBtn')}
                 </button>

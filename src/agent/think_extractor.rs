@@ -8,8 +8,18 @@ pub struct ThinkTagSplitter {
     pending: String,
 }
 
-const OPENING_TAGS: &[&str] = &["<think>", "<thinking>", "<reasoning>"];
-const CLOSING_TAGS: &[&str] = &["</think>", "</thinking>", "</reasoning>"];
+const OPENING_TAGS: &[&str] = &[
+    "<think>",
+    "<thinking>",
+    "<reasoning>",
+    "◁think▷",
+];
+const CLOSING_TAGS: &[&str] = &[
+    "</think>",
+    "</thinking>",
+    "</reasoning>",
+    "◁/think▷",
+];
 
 impl ThinkTagSplitter {
     pub fn new() -> Self {

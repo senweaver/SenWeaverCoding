@@ -432,6 +432,22 @@ async fn handle_socket_record(socket: WebSocket, state: AppState) {
                         let _ = recorder::discard_recording(generation).await;
                         let _ = event_tx.send(RecorderEvent::status(RecorderStatus::Idle, None));
                     }
+                    "marker" => {
+                        let note = parsed
+                            .get("note")
+                            .and_then(|v| v.as_str())
+                            .map(str::trim)
+                            .unwrap_or("");
+                        if note.is_empty() {
+                            continue;
+                        }
+                        if let Err(e) = recorder::record_marker(note) {
+                            let _ = event_tx.send(RecorderEvent::error_code(
+                                "recorder_marker_failed",
+                                e.to_string(),
+                            ));
+                        }
+                    }
                     "generate" | "generate_saved" => {
                         let name = parsed
                             .get("name")

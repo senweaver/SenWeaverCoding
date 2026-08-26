@@ -66,7 +66,10 @@ function PanelShell({
   onClose: () => void
 }) {
   return (
-    <div className="absolute bottom-full left-0 right-0 z-50 mb-3 overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]">
+    <div
+      id="local-slash-command-panel"
+      className="absolute bottom-full left-0 right-0 z-50 mb-3 overflow-hidden rounded-2xl border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] shadow-[var(--shadow-dropdown)]"
+    >
       <div className="flex items-start justify-between gap-4 border-b border-[var(--color-border)] px-5 py-4">
         <div>
           <h3 className="text-lg font-semibold text-[var(--color-text-primary)]">{title}</h3>

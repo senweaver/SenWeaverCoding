@@ -3,6 +3,8 @@
 // Licensed under the MIT License.
 
 import { useState, useEffect, useMemo, useRef, lazy, Suspense } from 'react'
+import { createPortal } from 'react-dom'
+import { useAnchoredDropdown } from '../hooks/useAnchoredDropdown'
 import { useSettingsStore } from '../stores/settingsStore'
 import { useAutonomyStore } from '../stores/autonomyStore'
 import { useProviderStore } from '../stores/providerStore'
@@ -606,22 +608,19 @@ function ModelTypeSelect({
   t: ReturnType<typeof useTranslation>
 }) {
   const [open, setOpen] = useState(false)
-  const ref = useRef<HTMLDivElement>(null)
-  useEffect(() => {
-    if (!open) return
-    const onDoc = (e: MouseEvent) => {
-      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false)
-    }
-    document.addEventListener('mousedown', onDoc)
-    return () => document.removeEventListener('mousedown', onDoc)
-  }, [open])
+  const { triggerRef, menuRef, style, portalTarget } = useAnchoredDropdown<HTMLButtonElement>(
+    open,
+    () => setOpen(false),
+    { align: 'right', estimatedHeight: 220 },
+  )
   const eff = effectiveModelTypes(selected)
   const summary = eff
     .map((tpe) => t(modelTypeLabelKey(tpe) as TranslationKey))
     .join('、')
   return (
-    <div ref={ref} className="relative flex-shrink-0">
+    <div className="relative flex-shrink-0">
       <button
+        ref={triggerRef}
         type="button"
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
@@ -636,8 +635,12 @@ function ModelTypeSelect({
           expand_more
         </span>
       </button>
-      {open && (
-        <div className="absolute right-0 top-full z-[9999] mt-1 w-56 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 shadow-[var(--shadow-dropdown)]">
+      {open && style && createPortal(
+        <div
+          ref={menuRef}
+          style={style}
+          className="w-56 rounded-[var(--radius-md)] border border-[var(--color-border)] bg-[var(--color-surface-container-lowest)] py-1 shadow-[var(--shadow-dropdown)]"
+        >
           <div className="px-3 pb-1 pt-0.5 text-[10px] font-semibold uppercase tracking-wide text-[var(--color-text-tertiary)]">
             {t('settings.providers.modelTypeLabel')}
           </div>
@@ -659,7 +662,8 @@ function ModelTypeSelect({
               </button>
             )
           })}
-        </div>
+        </div>,
+        portalTarget,
       )}
     </div>
   )
@@ -1690,7 +1694,7 @@ function GeneralSettings() {
               onClick={() => void setCloseBehavior(value)}
               className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
                 closeBehavior === value
-                  ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
+                  ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)] border-[var(--color-brand)]'
                   : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
               }`}
             >
@@ -1711,7 +1715,7 @@ function GeneralSettings() {
               onClick={() => setLocale(value)}
               className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
                 locale === value
-                  ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
+                  ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)] border-[var(--color-brand)]'
                   : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
               }`}
             >
@@ -1732,7 +1736,7 @@ function GeneralSettings() {
               onClick={() => setEffort(level)}
               className={`h-7 px-4 min-w-[72px] text-xs font-semibold rounded-lg border transition-all ${
                 effortLevel === level
-                  ? 'bg-[var(--color-brand)] text-white border-[var(--color-brand)]'
+                  ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)] border-[var(--color-brand)]'
                   : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
               }`}
             >
