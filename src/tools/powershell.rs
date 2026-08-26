@@ -97,6 +97,17 @@ impl Tool for PowerShellTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' parameter"))?;
 
+        if command.trim().is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "The 'command' parameter is empty. Provide the exact PowerShell command to run."
+                        .to_string(),
+                ),
+            });
+        }
+
         let working_dir = args.get("working_directory").and_then(|v| v.as_str());
         let timeout = args
             .get("timeout_secs")

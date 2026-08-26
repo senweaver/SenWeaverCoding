@@ -3831,6 +3831,11 @@ pub(crate) async fn run_unified_loop_impl(
                 compression_retry_floor.is_some_and(|floor| estimated_tokens <= floor);
             let mut compressible_sufficient = true;
             if compression_cfg.enabled && payload > soft && !retry_blocked {
+                let leading_system_tokens: usize = history
+                    .iter()
+                    .take_while(|m| m.role == "system")
+                    .map(crate::providers::traits::estimate_message_tokens)
+                    .sum();
                 let preserved_now = current_turn_preserved_indices(history);
                 let compressible =
                     crate::agent::context::compressor::estimate_compressible_tokens(
@@ -3842,6 +3847,19 @@ pub(crate) async fn run_unified_loop_impl(
                 let needed = payload.saturating_sub(soft);
                 compressible_sufficient =
                     compressible.saturating_mul(4) >= needed.saturating_mul(5);
+                tracing::debug!(
+                    target: "agent.context.compress",
+                    payload,
+                    soft,
+                    hard,
+                    leading_system_tokens,
+                    tools_overhead = tools_overhead_tokens,
+                    history_tokens = estimated_tokens,
+                    compressible,
+                    needed,
+                    sufficient = compressible_sufficient,
+                    "compaction gate evaluated: payload composition and compressible headroom"
+                );
                 if !compressible_sufficient {
                     tracing::debug!(
                         target: "agent.context.compress",

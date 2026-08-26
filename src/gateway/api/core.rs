@@ -2468,7 +2468,10 @@ pub async fn handle_api_session_delete(
             .unwrap_or_else(|e| Err(std::io::Error::other(e.to_string())))
     };
     match result {
-        Ok(true) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(true) => {
+            crate::agent::context::compressor::set_session_compression_floor(&id, None);
+            Json(serde_json::json!({ "ok": true })).into_response()
+        }
         Ok(false) => (
             StatusCode::NOT_FOUND,
             Json(serde_json::json!({"error": "Session not found"})),
@@ -2527,7 +2530,17 @@ pub async fn handle_api_sessions_delete_batch(
     };
 
     match result {
-        Ok(deleted) => Json(serde_json::json!({ "ok": true, "deleted": deleted })).into_response(),
+        Ok(deleted) => {
+            for id in &body.ids {
+                let trimmed = id.trim();
+                if !trimmed.is_empty() {
+                    crate::agent::context::compressor::set_session_compression_floor(
+                        trimmed, None,
+                    );
+                }
+            }
+            Json(serde_json::json!({ "ok": true, "deleted": deleted })).into_response()
+        }
         Err(e) => {
             tracing::error!("Failed to batch-delete sessions: {e}");
             (
@@ -3185,6 +3198,8 @@ pub async fn handle_api_session_rewind(
         )
             .into_response();
     }
+
+    crate::agent::context::compressor::set_session_compression_floor(&id, None);
 
     crate::gateway::ws::desktop::broadcast_session_event(
         &id,

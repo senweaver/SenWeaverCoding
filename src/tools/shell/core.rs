@@ -699,6 +699,17 @@ impl Tool for ShellTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'command' parameter"))?;
 
+        if command.trim().is_empty() {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(
+                    "The 'command' parameter is empty. Provide the exact shell command to run."
+                        .to_string(),
+                ),
+            });
+        }
+
         let preflight = match crate::tools::shell::preflight::acquire_shell_execution_clearance(
             &self.security,
             command,
