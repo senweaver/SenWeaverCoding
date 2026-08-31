@@ -34,13 +34,16 @@ export const evolutionApi = {
     api.put<EvolutionLesson>(`/api/evolution/lessons/${encodeURIComponent(id)}`, patch),
   deleteLesson: (id: string) => api.delete<{ ok: boolean }>(`/api/evolution/lessons/${encodeURIComponent(id)}`),
 
-  recordThumb: (sessionId: string, turnId: string, score: 1 | 0 | -1, comment?: string) =>
-    api.post<{ ok: boolean; voteId: string; rewardDelta: number }>('/api/evolution/thumbs', {
-      session_id: sessionId,
-      turn_id: turnId,
-      score,
-      comment,
-    }),
+  recordThumb: (sessionId: string, score: 1 | 0 | -1, turnId?: string, comment?: string) =>
+    api.post<{ ok: boolean; voteId: string; finalReward: number; auditOnly: boolean }>(
+      '/api/evolution/thumbs',
+      {
+        session_id: sessionId,
+        turn_id: turnId,
+        score,
+        comment,
+      },
+    ),
 
   distillTurn: (turnId: string) =>
     api.post<{ ok: boolean; queued: boolean; turnId: string }>('/api/evolution/distill', {

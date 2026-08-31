@@ -4,12 +4,13 @@
 
 use crate::evolution::types::{ChatMessageView, EvolutionExportConfig, TurnRecord};
 
-use super::super::{ExportOptions, redact_text};
+use super::super::{ExportContext, ExportOptions, redact_text};
 
 pub fn project(
     turn: &TurnRecord,
     options: &ExportOptions,
     cfg: &EvolutionExportConfig,
+    _ctx: &ExportContext,
 ) -> Option<serde_json::Value> {
     let assistant_text = turn.response.content.as_deref()?;
     if assistant_text.trim().is_empty() {

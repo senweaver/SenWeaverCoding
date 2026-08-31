@@ -5,5 +5,6 @@
 pub mod core;
 pub mod format;
 pub mod rename;
+pub mod text_edit;
 
 pub use core::*;

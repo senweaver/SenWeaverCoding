@@ -6,25 +6,53 @@ use crate::evolution::types::{
     AnthropicBlockView, AnthropicMessageView, EvolutionExportConfig, TurnRecord,
 };
 
-use super::{ExportOptions, redact_text};
+use super::{ExportContext, ExportOptions, redact_text};
 
 pub fn project(
     turn: &TurnRecord,
     options: &ExportOptions,
     cfg: &EvolutionExportConfig,
+    _ctx: &ExportContext,
 ) -> Option<serde_json::Value> {
     let assistant_text = turn.response.content.as_deref()?;
     if assistant_text.trim().is_empty() {
         return None;
     }
-    if turn.anthropic_messages.is_empty() {
-        return None;
-    }
-    let mut messages: Vec<serde_json::Value> = turn
-        .anthropic_messages
-        .iter()
-        .map(|m| project_message(m, options, cfg))
-        .collect();
+    let mut system_from_openai: Option<String> = None;
+    let mut messages: Vec<serde_json::Value> = if turn.anthropic_messages.is_empty() {
+        if turn.openai_messages.is_empty() {
+            return None;
+        }
+        turn.openai_messages
+            .iter()
+            .filter_map(|m| {
+                let content = m.content.clone()?;
+                if m.role == "system" {
+                    if system_from_openai.is_none() {
+                        system_from_openai = Some(content);
+                    }
+                    return None;
+                }
+                let role = if m.role == "assistant" {
+                    "assistant"
+                } else {
+                    "user"
+                };
+                Some(serde_json::json!({
+                    "role": role,
+                    "content": [{
+                        "type": "text",
+                        "text": redact_text(&content, options, cfg),
+                    }],
+                }))
+            })
+            .collect()
+    } else {
+        turn.anthropic_messages
+            .iter()
+            .map(|m| project_message(m, options, cfg))
+            .collect()
+    };
     messages.push(serde_json::json!({
         "role": "assistant",
         "content": [{
@@ -33,7 +61,11 @@ pub fn project(
         }],
     }));
     let mut payload = serde_json::Map::new();
-    if let Some(ref system) = turn.anthropic_system {
+    let system_text = turn
+        .anthropic_system
+        .clone()
+        .or(system_from_openai);
+    if let Some(ref system) = system_text {
         payload.insert(
             "system".into(),
             serde_json::Value::String(redact_text(system, options, cfg)),

@@ -866,10 +866,12 @@ export const zh: Record<TranslationKey, string> = {
   'settings.evolution.title': '自我进化',
   'settings.evolution.description': '自我强化编程学习能力。助手在对话中收集 turn 数据、提炼 lessons，并可导出标准数据集供外部训练或云端 RL 使用。',
   'settings.evolution.persistence.title': '训练数据本地持久化',
-  'settings.evolution.persistence.description': '关闭后助手仅做 in-context 学习，不会向磁盘写入原始 turn 数据；lessons / playbooks 等"知识"始终保留。',
+  'settings.evolution.persistence.description': '关闭后助手仅做 in-context 学习，不会向磁盘写入原始 turn 数据；lessons 等"知识"始终保留。',
   'settings.evolution.persistence.toggleOn': '已开启',
   'settings.evolution.persistence.toggleOff': '已关闭',
   'settings.evolution.persistence.usage': '占用统计',
+  'settings.evolution.persistence.jsonlLines': '磁盘原始 turn 数',
+  'settings.evolution.persistence.exportsBytes': '导出体积',
   'settings.evolution.persistence.purgeTitle': '清空本地训练数据',
   'settings.evolution.persistence.purgeWarning': '此操作不可逆，请输入 I_UNDERSTAND 确认。',
   'settings.evolution.persistence.purgeAll': '全部清空',
@@ -884,10 +886,6 @@ export const zh: Record<TranslationKey, string> = {
   'settings.evolution.metrics.lessonHits': '累计注入次数',
   'settings.evolution.metrics.exports': '导出数',
   'settings.evolution.metrics.pushes': '推送回执',
-  'settings.evolution.metrics.toolSearch': 'tool_search 调用 / 激活 / 拒绝',
-  'settings.evolution.metrics.toolSearchTooltip':
-    'tool_search 调用次数 · 累计激活工具数 · 安全拦截次数 · 平均激活耗时。',
-  'settings.evolution.metrics.deferredBuiltin': '{count} 个内建延迟桩',
   'settings.evolution.maintenance.title': '维护操作',
   'settings.evolution.maintenance.description': '手动触发课程蒸馏与全部 turn 的奖励重打分。',
   'settings.evolution.maintenance.persistRequired': '需要先开启训练数据本地持久化，否则后端没有原始 turn 可供操作。',
@@ -903,6 +901,7 @@ export const zh: Record<TranslationKey, string> = {
   'settings.evolution.lessons.empty': '暂无 lessons，助手成功完成 turn 后会自动生成。',
   'settings.evolution.config.title': '引擎设置',
   'settings.evolution.config.judgeEnabled': '异步 next-state PRM 评审',
+  'settings.evolution.config.distillEnabled': '高分 turn 自动蒸馏',
   'settings.evolution.config.autoDistill': 'session 结束时自动 distill',
   'settings.evolution.config.maxLessons': 'prompt 中最多注入 lessons',
   'settings.evolution.config.tokenBudget': 'lesson token 预算',
@@ -1056,17 +1055,24 @@ export const zh: Record<TranslationKey, string> = {
   'settings.evolution.recycling.persistRequired.body':
     '经验回收会把采样的回合写入 SQLite,请先开启『持久化训练数据』。',
   'settings.evolution.recycling.persistRequired.enable': '立即启用',
-  'settings.evolution.recycling.runtime.todayHarvested': '今日 {count}',
+  'settings.evolution.recycling.runtime.todayHarvested': '24小时内 {count}',
   'settings.evolution.recycling.runtime.totalHarvested': '累计 {count}',
   'settings.evolution.recycling.runtime.lastHarvestAt': '最近采样 {ts}',
+  'settings.evolution.recycling.purgeConfirmTitle': '清空全部回收经验？',
+  'settings.evolution.recycling.purgeConfirmBody':
+    '将永久删除 {count} 条回收经验，此操作不可撤销。',
 
   'settings.evolution.overview.judgeWorker.running': '裁判: 运行中',
   'settings.evolution.overview.judgeWorker.idle': '裁判: 空闲',
   'settings.evolution.overview.judgeWorker.error': '裁判: 异常',
+  'settings.evolution.overview.judgeWorker.processed': '已处理 {done}/{total}',
   'settings.evolution.overview.reflectionScheduler.label': '反思调度',
   'settings.evolution.overview.reflectionScheduler.never': '尚未运行',
   'settings.evolution.overview.reflectionScheduler.intervalMinutes':
     '每 {minutes} 分钟',
+  'settings.evolution.overview.reflectionScheduler.nextRun': '下次运行 {time}',
+  'settings.evolution.overview.reflectionScheduler.modeAuto': '会话结束自动',
+  'settings.evolution.overview.reflectionScheduler.modeManual': '手动触发',
 
   'settings.evolution.modelEmpty.gotoProviders': '前往提供商设置',
 
@@ -1996,6 +2002,9 @@ export const zh: Record<TranslationKey, string> = {
   'chat.forkChat': '分叉会话',
   'chat.copyMessage': '复制消息',
   'chat.copyMessageToast': '已复制消息',
+  'chat.thumbUp': '有帮助',
+  'chat.thumbDown': '不满意',
+  'chat.thumbRecordedToast': '已记录反馈，感谢帮助助手进化',
   'chat.copyFailedToast': '复制失败',
   'chat.forkChatToast': '已用相同工作区新建智能体',
 

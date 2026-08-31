@@ -423,15 +423,29 @@ impl Tool for FileEditTool {
                 let old_string = old_string.ok_or_else(|| {
                     anyhow::anyhow!("'old_string' is required for mode 'insert_after'")
                 })?;
-                self.execute_insert_after(old_string, new_string, &resolved_target, path)
-                    .await?
+                let near_line = args.get("near_line").and_then(|v| v.as_u64());
+                self.execute_insert_after(
+                    old_string,
+                    new_string,
+                    near_line,
+                    &resolved_target,
+                    path,
+                )
+                .await?
             }
             EditMode::InsertBefore => {
                 let old_string = old_string.ok_or_else(|| {
                     anyhow::anyhow!("'old_string' is required for mode 'insert_before'")
                 })?;
-                self.execute_insert_before(old_string, new_string, &resolved_target, path)
-                    .await?
+                let near_line = args.get("near_line").and_then(|v| v.as_u64());
+                self.execute_insert_before(
+                    old_string,
+                    new_string,
+                    near_line,
+                    &resolved_target,
+                    path,
+                )
+                .await?
             }
         };
         if result.success {
@@ -1067,6 +1081,7 @@ impl FileEditTool {
         &self,
         pattern: &str,
         new_string: &str,
+        near_line: Option<u64>,
         resolved_target: &std::path::Path,
         display_path: &str,
     ) -> anyhow::Result<ToolResult> {
@@ -1081,66 +1096,33 @@ impl FileEditTool {
             }
         };
 
-        let finder = Finder::new(pattern.as_bytes());
-        let bytes = content.as_bytes();
-        let mut hits: Vec<usize> = Vec::new();
-        for pos in finder.find_iter(bytes) {
-            hits.push(pos);
-            if hits.len() >= 2 {
-                break;
+        let (insert_pos, recovery_note) = match locate_insert_anchor(
+            &content,
+            pattern,
+            near_line,
+            resolved_target,
+            display_path,
+            InsertSide::After,
+        ) {
+            Ok(located) => located,
+            Err(error) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(error),
+                });
             }
-        }
+        };
 
-        let mut insert_pos: Option<usize> = None;
-        if hits.is_empty() {
-            let eol_spans = find_eol_insensitive_spans(&content, pattern, usize::MAX);
-            match eol_spans.len() {
-                0 => {
-                    let had_read =
-                        crate::session::has_read_in_current_session(resolved_target);
-                    let error = super::match_diagnostics::failure_message(
-                        &content,
-                        pattern,
-                        display_path,
-                        had_read,
-                    );
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(error),
-                    });
-                }
-                1 => {
-                    insert_pos = Some(eol_spans[0].end);
-                }
-                n => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!(
-                            "Pattern matches {n} times after line-ending normalization; must match exactly once. Include more surrounding lines to disambiguate."
-                        )),
-                    });
-                }
-            }
-        }
-
-        if hits.len() > 1 {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "Pattern matches {} times; must match exactly once",
-                    finder.find_iter(bytes).count()
-                )),
-            });
-        }
-
-        let insert_pos = insert_pos.unwrap_or_else(|| hits[0] + pattern.len());
         let new_string =
             adapt_replacement_eol(pattern, new_string, dominant_eol(&content));
         let new_string = new_string.as_str();
-        let new_content = format!("{}{}{}", &content[..insert_pos], new_string, &content[insert_pos..]);
+        let new_content = format!(
+            "{}{}{}",
+            &content[..insert_pos],
+            new_string,
+            &content[insert_pos..]
+        );
 
         match self
             .dispatch_full_file_rewrite_encoded(
@@ -1154,7 +1136,7 @@ impl FileEditTool {
             Ok(()) => Ok(ToolResult {
                 success: true,
                 output: format!(
-                    "Inserted after pattern in {display_path}:\n```\n{}\n```",
+                    "Inserted after pattern in {display_path}{recovery_note}:\n```\n{}\n```",
                     new_string
                 ),
                 error: None,
@@ -1171,6 +1153,7 @@ impl FileEditTool {
         &self,
         pattern: &str,
         new_string: &str,
+        near_line: Option<u64>,
         resolved_target: &std::path::Path,
         display_path: &str,
     ) -> anyhow::Result<ToolResult> {
@@ -1185,66 +1168,33 @@ impl FileEditTool {
             }
         };
 
-        let finder = Finder::new(pattern.as_bytes());
-        let bytes = content.as_bytes();
-        let mut hits: Vec<usize> = Vec::new();
-        for pos in finder.find_iter(bytes) {
-            hits.push(pos);
-            if hits.len() >= 2 {
-                break;
+        let (insert_pos, recovery_note) = match locate_insert_anchor(
+            &content,
+            pattern,
+            near_line,
+            resolved_target,
+            display_path,
+            InsertSide::Before,
+        ) {
+            Ok(located) => located,
+            Err(error) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(error),
+                });
             }
-        }
+        };
 
-        let mut insert_pos: Option<usize> = None;
-        if hits.is_empty() {
-            let eol_spans = find_eol_insensitive_spans(&content, pattern, usize::MAX);
-            match eol_spans.len() {
-                0 => {
-                    let had_read =
-                        crate::session::has_read_in_current_session(resolved_target);
-                    let error = super::match_diagnostics::failure_message(
-                        &content,
-                        pattern,
-                        display_path,
-                        had_read,
-                    );
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(error),
-                    });
-                }
-                1 => {
-                    insert_pos = Some(eol_spans[0].start);
-                }
-                n => {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!(
-                            "Pattern matches {n} times after line-ending normalization; must match exactly once. Include more surrounding lines to disambiguate."
-                        )),
-                    });
-                }
-            }
-        }
-
-        if hits.len() > 1 {
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(format!(
-                    "Pattern matches {} times; must match exactly once",
-                    finder.find_iter(bytes).count()
-                )),
-            });
-        }
-
-        let pos = insert_pos.unwrap_or_else(|| hits[0]);
         let new_string =
             adapt_replacement_eol(pattern, new_string, dominant_eol(&content));
         let new_string = new_string.as_str();
-        let new_content = format!("{}{}{}", &content[..pos], new_string, &content[pos..]);
+        let new_content = format!(
+            "{}{}{}",
+            &content[..insert_pos],
+            new_string,
+            &content[insert_pos..]
+        );
 
         match self
             .dispatch_full_file_rewrite_encoded(
@@ -1258,7 +1208,7 @@ impl FileEditTool {
             Ok(()) => Ok(ToolResult {
                 success: true,
                 output: format!(
-                    "Inserted before pattern in {display_path}:\n```\n{}\n```",
+                    "Inserted before pattern in {display_path}{recovery_note}:\n```\n{}\n```",
                     new_string
                 ),
                 error: None,
@@ -1321,6 +1271,118 @@ impl FileEditTool {
         }
         out
     }
+}
+
+#[derive(Clone, Copy)]
+enum InsertSide {
+    After,
+    Before,
+}
+
+fn locate_insert_anchor(
+    content: &str,
+    pattern: &str,
+    near_line: Option<u64>,
+    resolved_target: &std::path::Path,
+    display_path: &str,
+    side: InsertSide,
+) -> Result<(usize, &'static str), String> {
+    const MAX_ANCHOR_HITS: usize = 5000;
+    let finder = Finder::new(pattern.as_bytes());
+    let hits: Vec<usize> = finder
+        .find_iter(content.as_bytes())
+        .take(MAX_ANCHOR_HITS)
+        .collect();
+    if hits.len() >= MAX_ANCHOR_HITS {
+        return Err(format!(
+            "Pattern matches {MAX_ANCHOR_HITS}+ times; it is too generic to anchor an insert \
+             reliably. Include more surrounding lines in old_string to make it unique."
+        ));
+    }
+
+    let pick = |start: usize, end: usize| match side {
+        InsertSide::After => end,
+        InsertSide::Before => start,
+    };
+
+    if hits.len() == 1 {
+        return Ok((pick(hits[0], hits[0] + pattern.len()), ""));
+    }
+    if hits.len() > 1 {
+        if let Some(anchor_line) = near_line {
+            if let Some(best) = hits.iter().copied().min_by_key(|pos| {
+                let (line_no, _) = locate_line(content, *pos);
+                (line_no as i64 - anchor_line as i64).unsigned_abs()
+            }) {
+                return Ok((
+                    pick(best, best + pattern.len()),
+                    " [disambiguated by near_line: nearest match selected]",
+                ));
+            }
+        }
+        let mut msg = format!(
+            "Pattern matches {} times; must match exactly once. Showing first 3 hit locations:\n",
+            hits.len()
+        );
+        for hit in hits.iter().take(3) {
+            let (line_no, line) = locate_line(content, *hit);
+            msg.push_str(&format!("  - line {line_no} : {line}\n"));
+        }
+        msg.push_str(
+            "Include more surrounding lines in old_string to disambiguate, or pass \
+             near_line=<line number> to anchor the intended match.",
+        );
+        return Err(msg);
+    }
+
+    let eol_spans = find_eol_insensitive_spans(content, pattern, usize::MAX);
+    if eol_spans.len() == 1 {
+        return Ok((pick(eol_spans[0].start, eol_spans[0].end), ""));
+    }
+    if eol_spans.len() > 1 {
+        if let Some(anchor_line) = near_line {
+            if let Some(span) = eol_spans.iter().copied().min_by_key(|span| {
+                let (line_no, _) = locate_line(content, span.start);
+                (line_no as i64 - anchor_line as i64).unsigned_abs()
+            }) {
+                return Ok((
+                    pick(span.start, span.end),
+                    " [disambiguated by near_line: nearest match selected]",
+                ));
+            }
+        }
+        let mut msg = format!(
+            "Pattern matches {} times after line-ending normalization; must match exactly \
+             once. Showing first 3 hit locations:\n",
+            eol_spans.len()
+        );
+        for span in eol_spans.iter().take(3) {
+            let (line_no, line) = locate_line(content, span.start);
+            msg.push_str(&format!("  - line {line_no} : {line}\n"));
+        }
+        msg.push_str(
+            "Include more surrounding lines in old_string to disambiguate, or pass \
+             near_line=<line number> to anchor the intended match.",
+        );
+        return Err(msg);
+    }
+
+    if let Some((ws_start, ws_end, _)) =
+        super::match_diagnostics::find_whitespace_insensitive_unique(content, pattern, pattern)
+    {
+        return Ok((
+            pick(ws_start, ws_end),
+            " [auto-recovered a whitespace/indentation mismatch in the anchor pattern]",
+        ));
+    }
+
+    let had_read = crate::session::has_read_in_current_session(resolved_target);
+    Err(super::match_diagnostics::failure_message(
+        content,
+        pattern,
+        display_path,
+        had_read,
+    ))
 }
 
 fn locate_line(content: &str, byte_offset: usize) -> (usize, &str) {

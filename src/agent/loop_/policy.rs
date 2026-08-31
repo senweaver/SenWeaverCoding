@@ -10,8 +10,8 @@ use tokio_util::sync::CancellationToken;
 use crate::agent::event_sink::EventSink;
 use crate::agent::loop_::{DraftEvent, ModelSwitchCallback};
 use crate::agent::loop_::traits::{
-    ExperienceRecorderHook, GuiModelSwitchHook, IterationContextBudgetHook, MemorySessionHook,
-    PlanModeNudgeHook, ResponseCacheHook, TurnPreambleHook,
+    GuiModelSwitchHook, IterationContextBudgetHook, MemorySessionHook, PlanModeNudgeHook,
+    ResponseCacheHook, TurnPreambleHook,
 };
 use crate::approval::ApprovalManager;
 use crate::config::PacingConfig;
@@ -73,7 +73,6 @@ pub struct PolicyBundle<'a> {
     pub turn_preamble_hook: Option<Arc<dyn TurnPreambleHook>>,
     pub gui_model_switch_hook: Option<Arc<dyn GuiModelSwitchHook>>,
     pub iteration_context_budget_hook: Option<Arc<dyn IterationContextBudgetHook>>,
-    pub experience_recorder_hook: Option<Arc<dyn ExperienceRecorderHook>>,
     pub plan_mode_nudge_hook: Option<Arc<dyn PlanModeNudgeHook>>,
 
     pub tool_descriptions: Option<&'a ToolDescriptions>,
@@ -130,7 +129,6 @@ impl<'a> PolicyBundle<'a> {
             turn_preamble_hook: None,
             gui_model_switch_hook: None,
             iteration_context_budget_hook: None,
-            experience_recorder_hook: None,
             plan_mode_nudge_hook: None,
             tool_descriptions: None,
         }
@@ -544,14 +542,6 @@ impl<'a> PolicyBundle<'a> {
         hook: Option<Arc<dyn IterationContextBudgetHook>>,
     ) -> Self {
         self.iteration_context_budget_hook = hook;
-        self
-    }
-
-    pub fn with_experience_recorder_hook(
-        mut self,
-        hook: Option<Arc<dyn ExperienceRecorderHook>>,
-    ) -> Self {
-        self.experience_recorder_hook = hook;
         self
     }
 

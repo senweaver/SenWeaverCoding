@@ -888,10 +888,12 @@ export const en = {
   'settings.evolution.title': 'Self-Evolution',
   'settings.evolution.description': 'Self-reinforcing programming learning. The assistant collects turn data, distils lessons and can export datasets for external/cloud RL.',
   'settings.evolution.persistence.title': 'Local Training Data Persistence',
-  'settings.evolution.persistence.description': 'When OFF the assistant only learns in-context: no raw turn data is written to disk. Lessons and playbooks are still persisted because they are the distilled knowledge.',
+  'settings.evolution.persistence.description': 'When OFF the assistant only learns in-context: no raw turn data is written to disk. Lessons are still persisted because they are the distilled knowledge.',
   'settings.evolution.persistence.toggleOn': 'Enabled',
   'settings.evolution.persistence.toggleOff': 'Disabled',
   'settings.evolution.persistence.usage': 'Disk usage',
+  'settings.evolution.persistence.jsonlLines': 'Raw turns on disk',
+  'settings.evolution.persistence.exportsBytes': 'Exports size',
   'settings.evolution.persistence.purgeTitle': 'Purge local training data',
   'settings.evolution.persistence.purgeWarning': 'This is irreversible. Type I_UNDERSTAND to confirm.',
   'settings.evolution.persistence.purgeAll': 'Purge all',
@@ -906,10 +908,6 @@ export const en = {
   'settings.evolution.metrics.lessonHits': 'Total injections',
   'settings.evolution.metrics.exports': 'Exports',
   'settings.evolution.metrics.pushes': 'Push receipts',
-  'settings.evolution.metrics.toolSearch': 'tool_search calls / activations / blocked',
-  'settings.evolution.metrics.toolSearchTooltip':
-    'tool_search invocations · tools activated · activations rejected for safety · average activation latency.',
-  'settings.evolution.metrics.deferredBuiltin': '{count} stubs deferred',
   'settings.evolution.maintenance.title': 'Maintenance',
   'settings.evolution.maintenance.description':
     'Manually distill lessons or rescore reward signals for stored turns.',
@@ -930,6 +928,7 @@ export const en = {
   'settings.evolution.lessons.empty': 'No lessons yet — they will appear after the assistant solves successful turns.',
   'settings.evolution.config.title': 'Engine Settings',
   'settings.evolution.config.judgeEnabled': 'Async next-state PRM judge',
+  'settings.evolution.config.distillEnabled': 'Auto-distill high-reward turns',
   'settings.evolution.config.autoDistill': 'Auto-distill on session end',
   'settings.evolution.config.maxLessons': 'Max lessons in prompt',
   'settings.evolution.config.tokenBudget': 'Lesson token budget',
@@ -1085,17 +1084,24 @@ export const en = {
   'settings.evolution.recycling.persistRequired.body':
     'Experience recycling stores harvested turns; enable persistence so the SQLite store is reachable.',
   'settings.evolution.recycling.persistRequired.enable': 'Enable now',
-  'settings.evolution.recycling.runtime.todayHarvested': 'Today {count}',
+  'settings.evolution.recycling.runtime.todayHarvested': 'Last 24h {count}',
   'settings.evolution.recycling.runtime.totalHarvested': 'Total {count}',
   'settings.evolution.recycling.runtime.lastHarvestAt': 'Last harvest {ts}',
+  'settings.evolution.recycling.purgeConfirmTitle': 'Clear all recycled experiences?',
+  'settings.evolution.recycling.purgeConfirmBody':
+    'This permanently deletes {count} recycled experiences and cannot be undone.',
 
   'settings.evolution.overview.judgeWorker.running': 'Judge: running',
   'settings.evolution.overview.judgeWorker.idle': 'Judge: idle',
   'settings.evolution.overview.judgeWorker.error': 'Judge: error',
+  'settings.evolution.overview.judgeWorker.processed': 'processed {done}/{total}',
   'settings.evolution.overview.reflectionScheduler.label': 'Reflection scheduler',
   'settings.evolution.overview.reflectionScheduler.never': 'never',
   'settings.evolution.overview.reflectionScheduler.intervalMinutes':
     'every {minutes} min',
+  'settings.evolution.overview.reflectionScheduler.nextRun': 'next run {time}',
+  'settings.evolution.overview.reflectionScheduler.modeAuto': 'auto (session end)',
+  'settings.evolution.overview.reflectionScheduler.modeManual': 'manual trigger',
 
   'settings.evolution.modelEmpty.gotoProviders': 'Go to provider settings',
 
@@ -2026,6 +2032,9 @@ export const en = {
   'chat.forkChat': 'Fork Chat',
   'chat.copyMessage': 'Copy Message',
   'chat.copyMessageToast': 'Message copied',
+  'chat.thumbUp': 'Helpful',
+  'chat.thumbDown': 'Not helpful',
+  'chat.thumbRecordedToast': 'Feedback recorded — thanks for helping the assistant evolve',
   'chat.copyFailedToast': 'Copy failed',
   'chat.forkChatToast': 'New agent opened with the same workspace',
 

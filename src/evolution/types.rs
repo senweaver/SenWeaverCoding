@@ -197,6 +197,8 @@ pub struct TurnRecord {
     pub next_state: Option<NextStateView>,
     #[serde(default)]
     pub cost: CostView,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub injected_lesson_ids: Vec<String>,
     pub ts: DateTime<Utc>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub completed_ts: Option<DateTime<Utc>>,
@@ -222,6 +224,7 @@ impl TurnRecord {
             reward: Reward::default(),
             next_state: None,
             cost: CostView::default(),
+            injected_lesson_ids: Vec::new(),
             ts: Utc::now(),
             completed_ts: None,
             aborted: None,
@@ -242,24 +245,12 @@ pub struct Lesson {
     pub source_turn_ids: Vec<String>,
     #[serde(default)]
     pub hits: u64,
+    #[serde(default)]
+    pub negative_hits: u64,
     #[serde(default = "default_true")]
     pub enabled: bool,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Playbook {
-    pub id: String,
-    pub title: String,
-    pub body: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub coding_mode: Option<String>,
-    #[serde(default)]
-    pub hits: u64,
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    pub created_at: DateTime<Utc>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -280,7 +271,8 @@ pub struct ExportRecord {
     pub path: String,
     pub sample_count: u64,
     pub size_bytes: u64,
-    pub md5: String,
+    #[serde(alias = "md5")]
+    pub sha256: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub time_window_start: Option<DateTime<Utc>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -381,6 +373,7 @@ pub struct PersistenceStatus {
     pub turns_file_size: u64,
     pub turns_count: u64,
     pub events_file_size: u64,
+    pub db_file_size: u64,
     pub exports_total_bytes: u64,
     pub exports_count: u64,
     pub push_receipts_count: u64,

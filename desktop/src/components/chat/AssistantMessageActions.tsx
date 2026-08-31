@@ -7,25 +7,56 @@ import { createPortal } from 'react-dom'
 import { useTranslation } from '../../i18n'
 import { copyTextToClipboard } from './clipboard'
 import { useAnchoredDropdown } from '../../hooks/useAnchoredDropdown'
+import { evolutionApi } from '../../api/evolution'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useUIStore } from '../../stores/uiStore'
 
 type Props = {
   copyText: string
+  showThumbs?: boolean
   sessionId?: string | null
   workDir?: string | null
   disableFork?: boolean
 }
 
-export function AssistantMessageActions({ copyText, sessionId, workDir, disableFork }: Props) {
+export function AssistantMessageActions({
+  copyText,
+  showThumbs,
+  sessionId,
+  workDir,
+  disableFork,
+}: Props) {
   const t = useTranslation()
   const addToast = useUIStore((s) => s.addToast)
   const [open, setOpen] = useState(false)
+  const [votedScore, setVotedScore] = useState<1 | -1 | null>(null)
+  const [voting, setVoting] = useState(false)
   const { triggerRef, menuRef, style, portalTarget } = useAnchoredDropdown<HTMLButtonElement>(
     open,
     () => setOpen(false),
     { align: 'right', estimatedHeight: 110 },
+  )
+
+  const submitThumb = useCallback(
+    async (score: 1 | -1) => {
+      const sid = sessionId?.trim()
+      if (!sid || voting || votedScore === score) return
+      setVoting(true)
+      try {
+        await evolutionApi.recordThumb(sid, score)
+        setVotedScore(score)
+        addToast({ type: 'success', message: t('chat.thumbRecordedToast') })
+      } catch (e) {
+        addToast({
+          type: 'error',
+          message: e instanceof Error ? e.message : String(e),
+        })
+      } finally {
+        setVoting(false)
+      }
+    },
+    [addToast, sessionId, t, votedScore, voting],
   )
 
   const copyMessage = useCallback(async () => {
@@ -52,8 +83,55 @@ export function AssistantMessageActions({ copyText, sessionId, workDir, disableF
   const itemClass =
     'flex w-full px-3 py-2.5 text-left text-[13px] text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:cursor-not-allowed disabled:opacity-45'
 
+  const thumbClass = (active: boolean) =>
+    `inline-flex h-5 w-5 items-center justify-center rounded-full transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35 ${
+      active
+        ? 'text-[var(--color-brand)]'
+        : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-surface-hover)] hover:text-[var(--color-text-primary)]'
+    }`
+
   return (
-    <div className="relative flex w-full justify-end">
+    <div className="relative flex w-full items-center justify-end gap-0.5">
+      {Boolean(showThumbs) && Boolean(sessionId?.trim()) && (
+        <>
+          <button
+            type="button"
+            className={thumbClass(votedScore === 1)}
+            aria-label={t('chat.thumbUp')}
+            title={t('chat.thumbUp')}
+            disabled={voting}
+            onClick={() => void submitThumb(1)}
+          >
+            <span
+              className="material-symbols-outlined text-[12px] leading-none"
+              style={{
+                fontVariationSettings: `'wght' 300, 'opsz' 20, 'GRAD' 0, 'FILL' ${votedScore === 1 ? 1 : 0}`,
+              }}
+              aria-hidden="true"
+            >
+              thumb_up
+            </span>
+          </button>
+          <button
+            type="button"
+            className={thumbClass(votedScore === -1)}
+            aria-label={t('chat.thumbDown')}
+            title={t('chat.thumbDown')}
+            disabled={voting}
+            onClick={() => void submitThumb(-1)}
+          >
+            <span
+              className="material-symbols-outlined text-[12px] leading-none"
+              style={{
+                fontVariationSettings: `'wght' 300, 'opsz' 20, 'GRAD' 0, 'FILL' ${votedScore === -1 ? 1 : 0}`,
+              }}
+              aria-hidden="true"
+            >
+              thumb_down
+            </span>
+          </button>
+        </>
+      )}
       <button
         ref={triggerRef}
         type="button"

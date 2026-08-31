@@ -157,11 +157,15 @@ where
 
 fn drain_stream(handle: StreamReaderHandle) -> impl std::future::Future<Output = String> {
     async move {
-        match tokio::time::timeout(Duration::from_millis(500), handle.rx).await {
+        match tokio::time::timeout(Duration::from_millis(2000), handle.rx).await {
             Ok(Ok(text)) => text,
             _ => {
                 let raw_all = handle.buf.lock();
-                crate::util::decode_subprocess_bytes(&raw_all)
+                let mut text = crate::util::decode_subprocess_bytes(&raw_all);
+                if !text.is_empty() {
+                    text.push_str("\n[output may be incomplete: stream reader did not settle before the drain deadline]");
+                }
+                text
             }
         }
     }

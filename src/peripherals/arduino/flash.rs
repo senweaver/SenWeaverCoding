@@ -3,12 +3,38 @@
 // Licensed under the MIT License.
 
 use anyhow::{Context, Result};
-use std::process::Command;
-
-const FIRMWARE_INO: &str = include_str!("../../firmware/arduino/arduino.ino");
 
 const FQBN: &str = "arduino:avr:uno";
 const SKETCH_NAME: &str = "arduino";
+
+fn load_firmware_ino() -> Result<String> {
+    let mut candidates: Vec<std::path::PathBuf> = vec![
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("firmware")
+            .join("arduino")
+            .join("arduino.ino"),
+    ];
+    if let Some(dirs) = directories::BaseDirs::new() {
+        candidates.push(
+            dirs.home_dir()
+                .join(".senweavercoding")
+                .join("firmware")
+                .join("arduino")
+                .join("arduino.ino"),
+        );
+    }
+    for path in &candidates {
+        if let Ok(content) = std::fs::read_to_string(path) {
+            if !content.trim().is_empty() {
+                return Ok(content);
+            }
+        }
+    }
+    anyhow::bail!(
+        "Arduino firmware sketch not found. Place arduino.ino at <repo>/firmware/arduino/ \
+         or ~/.senweavercoding/firmware/arduino/ and retry."
+    )
+}
 
 pub fn arduino_cli_available() -> bool {
     crate::util::hidden_sync_command("arduino-cli")
@@ -85,6 +111,7 @@ fn ensure_avr_core() -> Result<()> {
 }
 
 pub fn flash_arduino_firmware(port: &str) -> Result<()> {
+    let firmware_ino = load_firmware_ino()?;
     ensure_arduino_cli()?;
     ensure_avr_core()?;
 
@@ -93,7 +120,7 @@ pub fn flash_arduino_firmware(port: &str) -> Result<()> {
     let ino_path = sketch_dir.join(format!("{}.ino", SKETCH_NAME));
 
     std::fs::create_dir_all(&sketch_dir).context("Failed to create sketch dir")?;
-    std::fs::write(&ino_path, FIRMWARE_INO).context("Failed to write firmware")?;
+    std::fs::write(&ino_path, firmware_ino).context("Failed to write firmware")?;
 
     let sketch_path = sketch_dir.to_string_lossy();
 

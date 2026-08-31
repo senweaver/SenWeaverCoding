@@ -345,9 +345,17 @@ impl Tool for DiffApplyTool {
             crate::session::record_write_for_current_session(path);
         }
         let mut output = format!(
-            "Applied {} file(s) atomically via diff session.",
-            report.files_touched.len()
+            "Applied {} file(s) atomically via diff session ({} hunk(s) exact, {} fuzzy).",
+            report.files_touched.len(),
+            report.total_hunks_exact,
+            report.total_hunks_fuzzy
         );
+        if report.total_hunks_fuzzy > 0 {
+            output.push_str(
+                "\n[Note: fuzzy hunks were anchored away from their stated line numbers; \
+                 re-read the affected regions to confirm placement.]",
+            );
+        }
         if let Some(feedback) = crate::code_intel::post_edit_diagnostics::new_error_feedback(
             &resolved_paths,
             &diag_baseline,

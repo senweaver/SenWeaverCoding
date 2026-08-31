@@ -116,7 +116,13 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
         ("diff_apply", MODERATE, "Atomically apply unified diffs across multiple files"),
         ("lsp", SAFE, "LSP language service for code intelligence"),
         ("lsp_rename", MODERATE, "Rename a symbol across the workspace via LSP"),
+        ("lsp_format", MODERATE, "Format a source file via the language server"),
         ("diagnostics", SAFE, "Fetch workspace diagnostics from LSPs"),
+        ("tool_result_expand", SAFE, "Expand a previously truncated tool result"),
+        ("background_status", SAFE, "Check the status of a background shell job"),
+        ("background_logs", SAFE, "Read buffered output from a background shell job"),
+        ("background_kill", MODERATE, "Terminate a background shell job"),
+        ("background_wait", SAFE, "Wait for a background shell job to finish"),
         ("git_operations", MODERATE, "Run common git operations"),
         ("code_to_spec", SAFE, "Generate or fetch code specifications"),
         ("code_graph_query", SAFE, "Query the code graph"),
@@ -284,6 +290,20 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
         #[cfg(feature = "tool-image")]
         ("view_image", SAFE, "View an image file"),
         ("send_message", SAFE, "Send a message to another channel"),
+        ("read_messages", SAFE, "Read recent messages from a channel"),
+        ("design_system_read", SAFE, "Read the workspace design-system definition"),
+        ("designer_skill_read", SAFE, "Read a designer skill definition"),
+        ("designer_template_read", SAFE, "Read a bundled designer template"),
+        ("designer_lint", SAFE, "Lint a design artifact against design-system rules"),
+        ("designer_scaffold", MODERATE, "Scaffold design artifact files in the workspace"),
+        ("deck_compile", MODERATE, "Compile a slide deck from design sources"),
+        ("figma_fetch", SAFE, "Fetch design data from the Figma API"),
+        #[cfg(feature = "tool-curator")]
+        (
+            "curator_deep_collect",
+            MODERATE,
+            "Deep multi-source research collection for the active Curator session",
+        ),
     ];
     for (name, risk, desc) in enhanced_entries {
         m.insert(name, ToolTierEntry::new(ENHANCED, SURFACE_BOTH, *risk, desc));
@@ -358,6 +378,12 @@ pub static TOOL_TIERS: LazyLock<HashMap<&'static str, ToolTierEntry>> = LazyLock
         ("image_info", SAFE, "Inspect image metadata"),
         ("reaction", HIGH_RISK, "Send a reaction in a channel"),
         ("poll", HIGH_RISK, "Run a poll in a channel"),
+        #[cfg(feature = "hardware")]
+        ("hardware_board_info", SAFE, "Identify a connected hardware board"),
+        #[cfg(feature = "hardware")]
+        ("hardware_memory_map", SAFE, "Read the memory map of a connected board"),
+        #[cfg(feature = "hardware")]
+        ("hardware_memory_read", MODERATE, "Read raw memory from a connected board"),
     ];
     for (name, risk, desc) in on_demand_entries {
         m.insert(name, ToolTierEntry::new(ON_DEMAND, SURFACE_BOTH, *risk, desc));

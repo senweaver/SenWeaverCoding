@@ -179,6 +179,12 @@ const SAFE_ENV_VARS: &[&str] = &[
     "TERM",
     "LANG",
     "USERNAME",
+    "APPDATA",
+    "LOCALAPPDATA",
+    "PROGRAMDATA",
+    "PROGRAMFILES",
+    "PROCESSOR_ARCHITECTURE",
+    "NUMBER_OF_PROCESSORS",
 ];
 
 pub struct ShellTool {
@@ -687,6 +693,10 @@ impl Tool for ShellTool {
                     "type": "boolean",
                     "description": "Run the command inside a pseudo-terminal (ConPTY on Windows). Use for programs that need a TTY (interactive CLIs, progress bars, programs that hang with piped stdio). Foreground only; combined stdout/stderr is returned with ANSI codes stripped.",
                     "default": false
+                },
+                "working_dir": {
+                    "type": "string",
+                    "description": "Run the command in this directory instead of the workspace root (absolute, or relative to the workspace). Prefer this over chaining 'cd <dir> && <command>'."
                 }
             },
             "required": ["command"]
@@ -720,10 +730,40 @@ impl Tool for ShellTool {
             Err(result) => return Ok(result),
         };
 
-        let mut cmd = match self
-            .runtime
-            .build_shell_command(command, &self.security.workspace_dir())
-        {
+        let working_dir: std::path::PathBuf =
+            match args.get("working_dir").and_then(|v| v.as_str()) {
+                Some(raw) if !raw.trim().is_empty() => {
+                    let full_dir = self.security.resolve_tool_path(raw);
+                    let resolved = match tokio::fs::canonicalize(&full_dir).await {
+                        Ok(p) => p,
+                        Err(e) => {
+                            return Ok(ToolResult {
+                                success: false,
+                                output: String::new(),
+                                error: Some(format!("Invalid working_dir '{raw}': {e}")),
+                            });
+                        }
+                    };
+                    if !self.security.is_resolved_path_allowed(&resolved) {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(self.security.resolved_path_violation_message(&resolved)),
+                        });
+                    }
+                    if !resolved.is_dir() {
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("working_dir is not a directory: {raw}")),
+                        });
+                    }
+                    crate::util::strip_verbatim_prefix(resolved)
+                }
+                _ => self.security.workspace_dir(),
+            };
+
+        let mut cmd = match self.runtime.build_shell_command(command, &working_dir) {
             Ok(cmd) => cmd,
             Err(e) => {
                 return Ok(ToolResult {
@@ -768,7 +808,7 @@ impl Tool for ShellTool {
                 let env = collect_isolated_shell_env(&self.security);
                 let outcome = super::pty::run_command_in_pty(
                     command.to_string(),
-                    self.security.workspace_dir(),
+                    working_dir.clone(),
                     env,
                     timeout_duration,
                 )

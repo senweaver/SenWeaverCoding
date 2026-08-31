@@ -39,8 +39,8 @@ impl CloudPushTarget for RlDatasetServerTarget {
             .part("file", part)
             .text("format", export.format.as_str())
             .text("sample_count", export.sample_count.to_string())
-            .text("content_digest", export.md5.clone())
-            .text("digest_algorithm", "md5");
+            .text("content_digest", export.sha256.clone())
+            .text("digest_algorithm", "sha256");
         let client = crate::services::proxy::runtime::ProxyRuntime::global()
             .build_client_with_timeouts("evolution.rl_dataset_server", 180, 10);
         let mut req = client.post(&target.endpoint).multipart(form);

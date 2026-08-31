@@ -248,6 +248,14 @@ todos = [{id:1, status:\"completed\"}, {id:2, status:\"completed\"}, \
                     "type": "boolean",
                     "description": "If true, merge with existing todos by id; if false, replace the entire list",
                     "default": false
+                },
+                "session_id": {
+                    "type": "string",
+                    "description": "Optional: target a specific session's todo list instead of the current session"
+                },
+                "list_id": {
+                    "type": "string",
+                    "description": "Optional alias for session_id; targets a specific todo list"
                 }
             },
             "required": ["todos"]

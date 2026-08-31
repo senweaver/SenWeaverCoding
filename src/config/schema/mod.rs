@@ -667,9 +667,6 @@ pub struct Config {
     pub hooks: HooksConfig,
 
     #[serde(default)]
-    pub hardware: HardwareConfig,
-
-    #[serde(default)]
     pub transcription: TranscriptionConfig,
 
     #[serde(default)]
@@ -758,9 +755,6 @@ pub struct Config {
 
     #[serde(default)]
     pub feedback: crate::agent::reward::feedback::FeedbackConfig,
-
-    #[serde(default)]
-    pub experience: crate::agent::reward::experience::ExperienceConfig,
 
     #[serde(default)]
     pub prompt_optimizer: crate::agent::prompt::optimizer::PromptOptimizerConfig,
@@ -1480,7 +1474,6 @@ where
         .transpose()
 }
 
-pub use crate::config::domain::hardware::{HardwareConfig, HardwareTransport};
 
 fn default_transcription_api_url() -> String {
     "https://api.groq.com/openai/v1/audio/transcriptions".into()
@@ -4354,8 +4347,8 @@ pub use lsp::{LspConfig, LspInstallState, LspServerEntry};
 mod storage;
 pub use storage::{StorageConfig, StorageProviderConfig, StorageProviderSection};
 
-mod hardware;
-pub use hardware::{PeripheralBoardConfig, PeripheralsConfig};
+mod peripherals;
+pub use peripherals::{PeripheralBoardConfig, PeripheralsConfig};
 
 mod runtime;
 pub use runtime::{ReliabilityConfig, SchedulerConfig};
@@ -5972,7 +5965,6 @@ impl Default for Config {
             swarms: HashMap::new(),
             teams: TeamsConfig::default(),
             hooks: HooksConfig::default(),
-            hardware: HardwareConfig::default(),
             query_classification: QueryClassificationConfig::default(),
             transcription: TranscriptionConfig::default(),
             tts: TtsConfig::default(),
@@ -6004,7 +5996,6 @@ impl Default for Config {
             user_profile: crate::agent::user::profile::UserProfileConfig::default(),
             self_eval: crate::agent::self_assess::eval::SelfEvalConfig::default(),
             feedback: crate::agent::reward::feedback::FeedbackConfig::default(),
-            experience: crate::agent::reward::experience::ExperienceConfig::default(),
             prompt_optimizer: crate::agent::prompt::optimizer::PromptOptimizerConfig::default(),
             skill_evolution: crate::agent::skill_evolution::SkillEvolutionConfig::default(),
             reinforcement: crate::agent::reward::reinforcement::ReinforcementConfig::default(),

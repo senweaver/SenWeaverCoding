@@ -1511,7 +1511,11 @@ impl DelegateTool {
             Duration::from_secs(agentic_timeout_secs),
             crate::agent::coding_mode::scope_coding_mode(
                 sub_agent_mode,
-                crate::agent::loop_::unified::UnifiedLoop::new(delegated_policy).run(&mut history),
+                crate::evolution::scope_evolution_ctx(
+                    None,
+                    crate::agent::loop_::unified::UnifiedLoop::new(delegated_policy)
+                        .run(&mut history),
+                ),
             ),
         )
         .await;

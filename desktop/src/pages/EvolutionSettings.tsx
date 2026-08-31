@@ -379,9 +379,16 @@ function PersistenceCard({
       }
     >
       <div className="grid grid-cols-3 gap-3 text-xs mb-4">
-        <Stat label={t('settings.evolution.metrics.totalTurns')} value={formatNumber(persistence?.turnsCount)} />
-        <Stat label={t('settings.evolution.persistence.usage')} value={formatBytes((persistence?.turnsFileSize ?? 0) + (persistence?.eventsFileSize ?? 0))} />
-        <Stat label={t('settings.evolution.metrics.exports')} value={formatBytes(persistence?.exportsTotalBytes ?? 0)} />
+        <Stat label={t('settings.evolution.persistence.jsonlLines')} value={formatNumber(persistence?.turnsJsonlLines)} />
+        <Stat
+          label={t('settings.evolution.persistence.usage')}
+          value={formatBytes(
+            (persistence?.turnsFileSize ?? 0) +
+              (persistence?.eventsFileSize ?? 0) +
+              (persistence?.dbFileSize ?? 0),
+          )}
+        />
+        <Stat label={t('settings.evolution.persistence.exportsBytes')} value={formatBytes(persistence?.exportsTotalBytes ?? 0)} />
       </div>
       <div className="flex flex-wrap gap-2">
         <Button variant="secondary" size="sm" onClick={() => setPurgeOpen('turns')}>
@@ -458,7 +465,6 @@ function MetricsCard({
   const judge = overview?.judgeWorker
   const scheduler = overview?.reflectionScheduler
   const recycling = overview?.recycling
-  const tools = overview?.tools
   const judgeState: 'running' | 'idle' | 'error' = judge?.lastErrorAt
     ? 'error'
     : judge?.running
@@ -486,7 +492,7 @@ function MetricsCard({
         <Stat label={t('settings.evolution.metrics.exports')} value={formatNumber(overview?.exportsCount)} />
         <Stat label={t('settings.evolution.metrics.pushes')} value={formatNumber(overview?.pushReceiptsCount)} />
       </div>
-      {(judge || scheduler || recycling || tools) && (
+      {(judge || scheduler || recycling) && (
         <div className="flex flex-wrap gap-2 mt-3">
           {judge && (
             <span
@@ -495,20 +501,33 @@ function MetricsCard({
             >
               {t(judgeKey as TranslationKey)}
               {' · '}
-              {formatNumber(judge.processed)}/{formatNumber(judge.enqueuedTotal)}
+              {t('settings.evolution.overview.judgeWorker.processed', {
+                done: formatNumber(judge.processed),
+                total: formatNumber(judge.enqueuedTotal),
+              })}
             </span>
           )}
           {scheduler && (
             <span className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]">
               {t('settings.evolution.overview.reflectionScheduler.label')}
               {' · '}
-              {t('settings.evolution.overview.reflectionScheduler.intervalMinutes', {
-                minutes: String(scheduler.intervalMinutes),
-              })}
-              {' · '}
-              {scheduler.lastTickAt
-                ? formatRelativeTime(scheduler.lastTickAt)
-                : t('settings.evolution.overview.reflectionScheduler.never')}
+              {scheduler.triggerMode === 'manual' ? (
+                t('settings.evolution.overview.reflectionScheduler.modeManual')
+              ) : scheduler.triggerMode === 'auto' ? (
+                t('settings.evolution.overview.reflectionScheduler.modeAuto')
+              ) : (
+                <>
+                  {t('settings.evolution.overview.reflectionScheduler.intervalMinutes', {
+                    minutes: String(scheduler.intervalMinutes),
+                  })}
+                  {' · '}
+                  {scheduler.nextTickAtEstimate
+                    ? t('settings.evolution.overview.reflectionScheduler.nextRun', {
+                        time: formatRelativeTime(scheduler.nextTickAtEstimate),
+                      })
+                    : t('settings.evolution.overview.reflectionScheduler.never')}
+                </>
+              )}
             </span>
           )}
           {recycling && (
@@ -520,26 +539,6 @@ function MetricsCard({
               {t('settings.evolution.recycling.runtime.totalHarvested', {
                 count: String(recycling.totalHarvested),
               })}
-            </span>
-          )}
-          {tools && (
-            <span
-              className="text-[10px] uppercase tracking-wider px-2 py-0.5 rounded bg-[var(--color-surface-hover)] text-[var(--color-text-secondary)]"
-              title={t('settings.evolution.metrics.toolSearchTooltip')}
-            >
-              {t('settings.evolution.metrics.toolSearch')}
-              {' · '}
-              {formatNumber(tools.invocations)} / {formatNumber(tools.activations)} / {formatNumber(tools.highRiskBlocked)}
-              {' · '}
-              {tools.avgLatencyMs.toFixed(1)} ms
-              {typeof tools.deferredBuiltinCount === 'number' && tools.deferredBuiltinCount > 0 && (
-                <>
-                  {' · '}
-                  {t('settings.evolution.metrics.deferredBuiltin', {
-                    count: String(tools.deferredBuiltinCount),
-                  })}
-                </>
-              )}
             </span>
           )}
         </div>
@@ -669,6 +668,11 @@ function EngineConfigCard({
           label={t('settings.evolution.config.judgeEnabled')}
           value={config.nextStateJudgeEnabled}
           onChange={(next) => void updateConfig({ nextStateJudgeEnabled: next })}
+        />
+        <ToggleRow
+          label={t('settings.evolution.config.distillEnabled')}
+          value={config.distillEnabled}
+          onChange={(next) => void updateConfig({ distillEnabled: next })}
         />
         <ToggleRow
           label={t('settings.evolution.config.autoDistill')}
@@ -1134,6 +1138,7 @@ function CloudTargetEditor({
     setSubmitting(true)
     try {
       await onSubmit({
+        ...(initial ?? {}),
         id: initial?.id,
         name,
         kind,
@@ -1236,12 +1241,47 @@ function SliderRow({
   format?: (v: number) => string
   onChange: (next: number) => void
 }) {
+  const [local, setLocal] = useState(value)
+  const dirtyRef = useRef(false)
+  const pendingRef = useRef<{ value: number; commit: (next: number) => void } | null>(null)
+  const commitTimer = useRef<number | null>(null)
+  useEffect(() => {
+    if (!dirtyRef.current) {
+      setLocal(value)
+    }
+  }, [value])
+  useEffect(
+    () => () => {
+      if (commitTimer.current !== null) {
+        window.clearTimeout(commitTimer.current)
+        commitTimer.current = null
+      }
+      if (pendingRef.current) {
+        const pending = pendingRef.current
+        pendingRef.current = null
+        pending.commit(pending.value)
+      }
+    },
+    [],
+  )
+  const handleChange = (next: number) => {
+    setLocal(next)
+    dirtyRef.current = true
+    pendingRef.current = { value: next, commit: onChange }
+    if (commitTimer.current !== null) window.clearTimeout(commitTimer.current)
+    commitTimer.current = window.setTimeout(() => {
+      commitTimer.current = null
+      pendingRef.current = null
+      dirtyRef.current = false
+      onChange(next)
+    }, 400)
+  }
   return (
     <div className="flex flex-col gap-1">
       <div className="flex items-center justify-between text-xs">
         <span className="text-[var(--color-text-primary)]">{label}</span>
         <span className="text-[var(--color-text-tertiary)] tabular-nums">
-          {format ? format(value) : value}
+          {format ? format(local) : local}
         </span>
       </div>
       <input
@@ -1249,8 +1289,8 @@ function SliderRow({
         min={min}
         max={max}
         step={step}
-        value={value}
-        onChange={(e) => onChange(Number(e.target.value))}
+        value={local}
+        onChange={(e) => handleChange(Number(e.target.value))}
         className="w-full accent-[var(--color-brand)]"
       />
       {hint && <span className="text-xs text-[var(--color-text-tertiary)]">{hint}</span>}
@@ -1309,6 +1349,7 @@ function RecyclingCard({
   const purgeRecycling = useEvolutionStore((s) => s.purgeRecycling)
   const setPersistence = useEvolutionStore((s) => s.setPersistence)
   const [busy, setBusy] = useState(false)
+  const [confirmPurge, setConfirmPurge] = useState(false)
   const enabled = config?.enabled ?? false
   const needsPersist = enabled && !persistEnabled
   const recycling = overview?.recycling
@@ -1338,6 +1379,7 @@ function RecyclingCard({
       await purgeRecycling()
     } finally {
       setBusy(false)
+      setConfirmPurge(false)
     }
   }
 
@@ -1514,7 +1556,7 @@ function RecyclingCard({
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => void handlePurge()}
+            onClick={() => setConfirmPurge(true)}
             disabled={busy || total === 0}
             loading={busy}
             className="text-[var(--color-error)]"
@@ -1522,6 +1564,19 @@ function RecyclingCard({
             {t('settings.evolution.recycling.purge')}
           </Button>
         </div>
+        <ConfirmDialog
+          open={confirmPurge}
+          onClose={() => setConfirmPurge(false)}
+          onConfirm={() => void handlePurge()}
+          title={t('settings.evolution.recycling.purgeConfirmTitle')}
+          body={t('settings.evolution.recycling.purgeConfirmBody', {
+            count: String(total),
+          })}
+          confirmLabel={t('common.confirm')}
+          cancelLabel={t('common.cancel')}
+          confirmVariant="danger"
+          loading={busy}
+        />
         {items.length === 0 ? (
           <div className="text-xs text-[var(--color-text-tertiary)]">
             {t('settings.evolution.recycling.empty')}

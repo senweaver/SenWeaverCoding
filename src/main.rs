@@ -34,7 +34,6 @@ mod cron { pub use senweavercoding::cron::*; }
 mod daemon { pub use senweavercoding::daemon::*; }
 mod doctor { pub use senweavercoding::doctor::*; }
 mod gateway { pub use senweavercoding::gateway::*; }
-mod hardware { pub use senweavercoding::hardware::*; }
 mod integrations { pub use senweavercoding::integrations::*; }
 mod memory { pub use senweavercoding::memory::*; }
 mod migration { pub use senweavercoding::migration::*; }
@@ -59,7 +58,7 @@ mod util { pub use senweavercoding::util::*; }
 use config::Config;
 
 pub use senweavercoding::{
-    ChannelCommands, CronCommands, GatewayCommands, HardwareCommands, IntegrationCommands,
+    ChannelCommands, CronCommands, GatewayCommands, IntegrationCommands,
     MemoryCommands, MigrateCommands, PeripheralCommands, ServiceCommands, SkillCommands,
     SopCommands,
 };
@@ -425,22 +424,6 @@ Examples:
     Auth {
         #[command(subcommand)]
         auth_command: AuthCommands,
-    },
-
-    #[command(long_about = "\
-Discover and introspect USB hardware.
-
-Enumerate connected USB devices, identify known development boards \
-(STM32 Nucleo, Arduino, ESP32), and retrieve chip information via \
-probe-rs / ST-Link.
-
-Examples:
-  sen hardware discover
-  sen hardware introspect /dev/ttyACM0
-  sen hardware info --chip STM32F401RETx")]
-    Hardware {
-        #[command(subcommand)]
-        hardware_command: senweavercoding::HardwareCommands,
     },
 
     #[command(long_about = "\
@@ -2304,10 +2287,6 @@ async fn async_main() -> Result<()> {
         }
 
         Commands::Auth { auth_command } => handle_auth_command(auth_command, &config).await,
-
-        Commands::Hardware { hardware_command } => {
-            hardware::handle_command(hardware_command.clone(), &config)
-        }
 
         Commands::Peripheral { peripheral_command } => {
             Box::pin(peripherals::handle_command(

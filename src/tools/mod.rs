@@ -510,7 +510,10 @@ pub fn default_tools_with_runtime(
         Box::new(
             LspRenameTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
         ),
-        Box::new(lsp::format::LspFormatTool::new(security.clone())),
+        Box::new(
+            lsp::format::LspFormatTool::new(security.clone())
+                .with_ops_applier(shared_ops.clone()),
+        ),
         Box::new(
             PatchApplyTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
         ),
@@ -1028,7 +1031,9 @@ pub fn all_tools_with_runtime(
     tool_arcs.push(Arc::new(
         LspRenameTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
     ));
-    tool_arcs.push(Arc::new(lsp::format::LspFormatTool::new(security.clone())));
+    tool_arcs.push(Arc::new(
+        lsp::format::LspFormatTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
+    ));
     tool_arcs.push(Arc::new(
         PatchApplyTool::new(security.clone()).with_ops_applier(shared_ops.clone()),
     ));
@@ -1121,17 +1126,12 @@ pub fn all_tools_with_runtime(
         }
     }
 
-    if matches!(
-        root_config.skills.prompt_injection_mode,
-        crate::config::SkillsPromptInjectionMode::Compact
-    ) {
-        tool_arcs.push(Arc::new(ReadSkillTool::new(
-            workspace_dir.to_path_buf(),
-            root_config.skills.open_skills_enabled,
-            root_config.skills.open_skills_dir.clone(),
-            root_config.skills.disabled_skills.clone(),
-        )));
-    }
+    tool_arcs.push(Arc::new(ReadSkillTool::new(
+        workspace_dir.to_path_buf(),
+        root_config.skills.open_skills_enabled,
+        root_config.skills.open_skills_dir.clone(),
+        root_config.skills.disabled_skills.clone(),
+    )));
 
     tool_arcs.push(Arc::new(debug_test_report::DebugTestReportTool::new()));
 
@@ -1722,22 +1722,27 @@ pub fn all_tools_with_runtime(
                     let tool_specs = host.tool_plugin_specs();
                     let count = tool_specs.len();
                     for (plugin_name, description, wasm_path) in tool_specs {
-                        tool_arcs.push(Arc::new(crate::plugins::wasm::tool::WasmTool::new(
-                            plugin_name,
-                            description.unwrap_or_default(),
-                            wasm_path.to_string_lossy().into_owned(),
-                            "call".to_string(),
-                            serde_json::json!({
-                                "type": "object",
-                                "properties": {
-                                    "input": {
-                                        "type": "string",
-                                        "description": "Input for the plugin"
-                                    }
-                                },
-                                "required": ["input"]
-                            }),
-                        )));
+                        let wasm_arc: Arc<dyn Tool> =
+                            Arc::new(crate::plugins::wasm::tool::WasmTool::new(
+                                plugin_name,
+                                description.unwrap_or_default(),
+                                wasm_path.to_string_lossy().into_owned(),
+                                "call".to_string(),
+                                serde_json::json!({
+                                    "type": "object",
+                                    "properties": {
+                                        "input": {
+                                            "type": "string",
+                                            "description": "Input for the plugin"
+                                        }
+                                    },
+                                    "required": ["input"]
+                                }),
+                            ));
+                        if let Some(ref handle) = delegate_handle {
+                            handle.write().push(Arc::clone(&wasm_arc));
+                        }
+                        tool_arcs.push(wasm_arc);
                     }
                     tracing::info!("Loaded {count} WASM plugin tools");
                 }
@@ -1748,19 +1753,12 @@ pub fn all_tools_with_runtime(
         }
     }
 
-    if root_config.pipeline.enabled {
-        let pipeline_tools: Vec<Arc<dyn Tool>> = tool_arcs.clone();
-        tool_arcs.push(Arc::new(pipeline::PipelineTool::new(
-            root_config.pipeline.clone(),
-            pipeline_tools,
-        )));
-    }
-
     {
         let mut seen: HashSet<String> = HashSet::new();
         for tool in tool_arcs.iter() {
             seen.insert(tool.name().to_string());
         }
+        let mut custom_arcs: Vec<Arc<dyn Tool>> = Vec::new();
         for def in &root_config.custom_tools.tools {
             if !def.enabled {
                 continue;
@@ -1782,15 +1780,31 @@ pub fn all_tools_with_runtime(
                 );
                 continue;
             }
-            tool_arcs.push(Arc::new(custom_tool::CustomTool::from_def(
+            let custom_arc: Arc<dyn Tool> = Arc::new(custom_tool::CustomTool::from_def(
                 def,
                 security.workspace_root_handle(),
-            )));
+            ));
+            custom_arcs.push(Arc::clone(&custom_arc));
+            tool_arcs.push(custom_arc);
+        }
+        if !custom_arcs.is_empty() {
+            if let Some(ref handle) = delegate_handle {
+                let mut parent_tools = handle.write();
+                for tool in custom_arcs {
+                    parent_tools.push(tool);
+                }
+            }
         }
     }
 
-    if !root_config.tool_groups.groups.is_empty() {
-        let group_registry = handler::groups::ToolGroupRegistry::from_config(&root_config.tool_groups);
+    let group_registry = if root_config.tool_groups.groups.is_empty() {
+        None
+    } else {
+        Some(handler::groups::ToolGroupRegistry::from_config(
+            &root_config.tool_groups,
+        ))
+    };
+    if let Some(ref group_registry) = group_registry {
         let active_names = group_registry.active_tools();
         if !active_names.is_empty() {
             let before = tool_arcs.len();
@@ -1807,6 +1821,22 @@ pub fn all_tools_with_runtime(
                     group_registry.active_group_names()
                 );
             }
+        }
+    }
+
+    if root_config.pipeline.enabled {
+        let pipeline_active = group_registry
+            .as_ref()
+            .map(|registry| {
+                registry.active_tools().is_empty() || registry.is_tool_active("execute_pipeline")
+            })
+            .unwrap_or(true);
+        if pipeline_active {
+            let pipeline_tools: Vec<Arc<dyn Tool>> = tool_arcs.clone();
+            tool_arcs.push(Arc::new(pipeline::PipelineTool::new(
+                root_config.pipeline.clone(),
+                pipeline_tools,
+            )));
         }
     }
 

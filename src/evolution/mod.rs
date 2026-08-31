@@ -13,6 +13,7 @@ pub mod recycling;
 pub mod reflection;
 pub mod reward;
 pub mod store;
+pub mod text_match;
 pub mod types;
 
 use anyhow::Result;
@@ -26,9 +27,9 @@ use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 pub use collector::{
-    EVOLUTION_CTX, EvolutionCtx, finalize_turn, observe_tool_outcome, record_cost,
+    EVOLUTION_CTX, EvolutionCtx, collecting, finalize_turn, observe_tool_outcome, record_cost,
     record_provider_model, record_tool_outcome, scope_evolution_ctx, set_response_text,
-    set_thinking_text, try_ctx,
+    set_thinking_text, snapshot_prompt_messages, try_ctx,
 };
 
 pub use distiller::DistillRequest;
@@ -62,7 +63,7 @@ pub use types::{
     AnthropicBlockView, AnthropicMessageView, AuditEvent, ChatMessageView, CloudTarget,
     CloudTargetKind, CostView, EvolutionConfig, EvolutionExportConfig, EvolutionExportFormat,
     EvolutionSignalWeights, ExperienceRecyclingConfig, ExportRecord, Lesson, NextStateView,
-    PersistenceStatus, Playbook, PurgeReport, PurgeScope, PushReceipt, ReflectionDepth,
+    PersistenceStatus, PurgeReport, PurgeScope, PushReceipt, ReflectionDepth,
     ReflectionTriggerMode, ReflectionWritebackTarget, ResponseView, Reward,
     SelfReflectionConfig, SignalScore, SignalSource, ThumbVote, ToolCallView, ToolOutcome,
     TurnClass, TurnRecord,
@@ -407,10 +408,54 @@ impl EvolutionEngine {
         let merged = self
             .store
             .merge_turn_signal(&vote.turn_id, &signal, &weights)?;
+        self.sync_recycled_reward(&vote.turn_id, &merged);
         if vote.score < 0 {
+            self.apply_lesson_feedback(&vote.turn_id, merged.final_score);
             self.record_thumbs_down(&vote.session_id, coding_mode);
         }
         Ok(merged)
+    }
+
+    pub fn sync_recycled_reward(&self, turn_id: &str, reward: &types::Reward) {
+        let Some(store) = self.recycling_store() else {
+            return;
+        };
+        let outcome = recycling::outcome_from_reward(reward.final_score);
+        if let Err(error) =
+            store.update_reward_for_turn(turn_id, reward.final_score, outcome)
+        {
+            tracing::debug!(error = %error, "evolution: recycled reward sync failed");
+        }
+    }
+
+    pub fn apply_lesson_feedback(&self, turn_id: &str, final_score: f32) {
+        let lesson_ids = match self.store.injected_lessons_for_turn(turn_id) {
+            Ok(ids) if !ids.is_empty() => ids,
+            _ => return,
+        };
+        match self.store.record_lesson_negative_feedback(&lesson_ids) {
+            Ok(disabled) => {
+                if !disabled.is_empty() {
+                    injector::invalidate_lesson_cache();
+                    let audit = types::AuditEvent {
+                        id: format!("ev_{}", uuid::Uuid::new_v4().simple()),
+                        kind: "lesson_auto_disabled".into(),
+                        turn_id: Some(turn_id.to_string()),
+                        session_id: None,
+                        payload: serde_json::json!({
+                            "lessonIds": disabled,
+                            "reason": "negative feedback ratio exceeded threshold",
+                            "finalReward": final_score,
+                        }),
+                        ts: chrono::Utc::now(),
+                    };
+                    let _ = self.store.append_audit(&audit);
+                }
+            }
+            Err(error) => {
+                tracing::debug!(error = %error, "evolution: lesson feedback update failed");
+            }
+        }
     }
 
     pub fn ensure_judge_worker(self: &Arc<Self>) {
@@ -670,6 +715,7 @@ impl EvolutionEngine {
 
     pub fn note_judge_processed(&self) {
         self.judge_processed_total.fetch_add(1, Ordering::Relaxed);
+        self.store.bump_counter("judge_processed_total");
     }
 
     pub fn note_judge_error(&self, message: &str) {
@@ -693,14 +739,17 @@ impl EvolutionEngine {
 
     pub fn note_recycling_harvested(&self) {
         self.recycling_total_harvested.fetch_add(1, Ordering::Relaxed);
+        self.store.bump_counter("recycling_harvested_total");
         *self.recycling_last_harvest_at.write() = Some(Utc::now());
     }
 
     pub fn judge_worker_metrics(&self) -> JudgeWorkerMetrics {
+        let in_memory = self.judge_processed_total.load(Ordering::Relaxed);
+        let persisted = self.store.counter("judge_processed_total");
         JudgeWorkerMetrics {
             running: self.judge_worker_running.load(Ordering::Relaxed),
             enqueued_total: self.judge_enqueued_total.load(Ordering::Relaxed),
-            processed_total: self.judge_processed_total.load(Ordering::Relaxed),
+            processed_total: in_memory.max(persisted),
             last_error_at: *self.judge_last_error_at.read(),
             last_error_message: self.judge_last_error_message.read().clone(),
         }
@@ -739,7 +788,8 @@ impl EvolutionEngine {
             .and_then(|s| s.last_harvest_at())
             .or(*self.recycling_last_harvest_at.read());
         let total_in_memory = self.recycling_total_harvested.load(Ordering::Relaxed);
-        let total_harvested = total_persisted.max(total_in_memory);
+        let monotonic = self.store.counter("recycling_harvested_total");
+        let total_harvested = total_persisted.max(total_in_memory).max(monotonic);
         RecyclingMetrics {
             total_harvested,
             recent_24h_harvested: recent_24h,
@@ -758,7 +808,7 @@ impl EvolutionEngine {
     fn dispatch_distill(&self, request: DistillRequest, force: bool) -> Result<()> {
         if !force {
             let snapshot = self.config_snapshot();
-            if !snapshot.auto_distill_on_session_end {
+            if !snapshot.distill_enabled {
                 return Ok(());
             }
         }

@@ -247,7 +247,6 @@ pub struct Agent {
 
     rbac_engine: Option<std::sync::Arc<crate::security::rbac::RbacEngine>>,
     rbac_identity: Option<crate::security::rbac::CallerIdentity>,
-    experience_replay: Option<crate::agent::reward::experience::ExperienceReplay>,
     plan_mode_config: crate::agent::plan_mode::PlanModeConfig,
     intent_analysis_config: crate::agent::intent::IntentAnalysisConfig,
 
@@ -346,7 +345,6 @@ pub struct AgentBuilder {
     prompt_optimizer_config: Option<crate::agent::prompt::optimizer::PromptOptimizerConfig>,
     rbac_engine: Option<std::sync::Arc<crate::security::rbac::RbacEngine>>,
     rbac_identity: Option<crate::security::rbac::CallerIdentity>,
-    experience_replay: Option<crate::agent::reward::experience::ExperienceReplay>,
     plan_mode_config: Option<crate::agent::plan_mode::PlanModeConfig>,
     intent_analysis_config: Option<crate::agent::intent::IntentAnalysisConfig>,
     shared_config: Option<crate::config::live::LiveConfig>,
@@ -394,7 +392,6 @@ impl AgentBuilder {
             prompt_optimizer_config: None,
             rbac_engine: None,
             rbac_identity: None,
-            experience_replay: None,
             plan_mode_config: None,
             intent_analysis_config: None,
             shared_config: None,
@@ -668,7 +665,6 @@ impl AgentBuilder {
             prompt_optimizer_config: self.prompt_optimizer_config.unwrap_or_default(),
             rbac_engine: self.rbac_engine,
             rbac_identity: self.rbac_identity,
-            experience_replay: self.experience_replay,
             plan_mode_config: self.plan_mode_config.unwrap_or_default(),
             intent_analysis_config: self.intent_analysis_config.unwrap_or_default(),
             mode_tool_filter: None,
@@ -716,14 +712,6 @@ impl AgentBuilder {
     ) -> Self {
         self.rbac_engine = engine;
         self.rbac_identity = identity;
-        self
-    }
-
-    pub fn experience_replay(
-        mut self,
-        replay: Option<crate::agent::reward::experience::ExperienceReplay>,
-    ) -> Self {
-        self.experience_replay = replay;
         self
     }
 
@@ -1051,7 +1039,6 @@ impl Agent {
                 .with_turn_preamble_hook(Some(gui_hooks.clone()))
                 .with_gui_model_switch_hook(Some(gui_hooks.clone()))
                 .with_iteration_context_budget_hook(Some(gui_hooks.clone()))
-                .with_experience_recorder_hook(Some(gui_hooks.clone()))
                 .with_plan_mode_nudge_hook(Some(gui_hooks.clone()))
                 .with_plan_mode_flag(Some(&self.plan_mode_flag))
                 .with_plan_execution_path(armed_plan_path.as_deref());
@@ -3486,14 +3473,6 @@ impl Agent {
         crate::token_saver::set_global(config.token_saver.to_runtime_ctx());
         crate::guardrails::ensure_global_guardrails(config.guardrails.clone());
 
-        let experience_replay = if config.experience.enabled {
-            Some(crate::agent::reward::experience::ExperienceReplay::new(
-                &config.experience,
-            ))
-        } else {
-            None
-        };
-
         if let Some(ref deny_list) = denied_tools {
             let deny_set: std::collections::HashSet<_> = deny_list.iter().cloned().collect();
             tools.retain(|t| !deny_set.contains(t.name()));
@@ -3542,7 +3521,6 @@ impl Agent {
             .user_profile_config(config.user_profile.clone())
             .skill_evolution_config(config.skill_evolution.clone())
             .prompt_optimizer_config(config.prompt_optimizer.clone())
-            .experience_replay(experience_replay)
             .plan_mode_config(config.plan_mode.clone())
             .intent_analysis_config(config.intent_analysis.clone())
             .shared_config(shared_config.unwrap_or_else(crate::config::live::LiveConfig::default))
@@ -4012,12 +3990,6 @@ impl Agent {
             crate::agent::prompt::optimizer::ensure_global_optimizer(&self.prompt_optimizer_config);
         if let Some(po_text) = prompt_optimizer.prompt_injection() {
             prompt.push_str(&po_text);
-        }
-
-        if let Some(ref replay) = self.experience_replay {
-            if let Some(exp_text) = replay.prompt_injection(None) {
-                prompt.push_str(&exp_text);
-            }
         }
 
         if self.plan_mode_config.enabled {
@@ -4504,6 +4476,48 @@ impl Agent {
             }
         }
 
+        async fn run_tool_with_timeout(
+            tool: &dyn Tool,
+            call: &ParsedToolCall,
+            observer: &Arc<dyn Observer>,
+        ) -> (String, bool) {
+            let tool_timeout = crate::services::try_get_services()
+                .and_then(|svc| svc.config().pacing.tool_timeout_secs)
+                .filter(|s| *s > 0)
+                .map(std::time::Duration::from_secs);
+            match tool_timeout {
+                Some(limit) => match tokio::time::timeout(limit, run_tool(tool, call, observer))
+                    .await
+                {
+                    Ok(res) => res,
+                    Err(_) => {
+                        tracing::warn!(
+                            target: "agent.tool",
+                            tool = %call.name,
+                            timeout_secs = limit.as_secs(),
+                            "tool execution timed out on the direct execution path; dropping the in-flight tool future"
+                        );
+                        observer.record_event(&ObserverEvent::ToolCall {
+                            tool: call.name.clone(),
+                            duration: limit,
+                            success: false,
+                        });
+                        (
+                            format!(
+                                "Tool '{}' timed out after {}s (pacing.tool_timeout_secs). \
+                                 The operation was aborted and may be partially complete. \
+                                 Retry with a smaller/faster scope, or split it into steps.",
+                                call.name,
+                                limit.as_secs()
+                            ),
+                            false,
+                        )
+                    }
+                },
+                None => run_tool(tool, call, observer).await,
+            }
+        }
+
         async fn run_tool(
             tool: &dyn Tool,
             call: &ParsedToolCall,
@@ -4523,6 +4537,15 @@ impl Agent {
                         duration: start.elapsed(),
                         success: r.success,
                     });
+                    crate::evolution::record_tool_outcome(
+                        &call.name,
+                        r.success,
+                        Some(start.elapsed().as_millis() as u64),
+                        None,
+                        Some(&call.arguments),
+                        Some(&r.output),
+                        r.error.as_deref(),
+                    );
                     if r.success {
                         let scrubbed = crate::agent::profile::pii_sanitize::scrub_tool_output(&call.name, &r.output);
                         let fallback = scrubbed.clone();
@@ -4579,7 +4602,7 @@ impl Agent {
                 _ = cancel_handle.cancelled() => {
                     ("[Cancelled by user]".to_string(), false)
                 }
-                res = run_tool(tool.as_ref(), dispatch_call, &self.observer) => res,
+                res = run_tool_with_timeout(tool.as_ref(), dispatch_call, &self.observer) => res,
             }
         } else if let Some(activated_arc) = self.activated_tools.as_ref() {
             let activated_opt = activated_arc.lock().get_resolved(&dispatch_call.name);
@@ -4589,7 +4612,7 @@ impl Agent {
                     _ = cancel_handle.cancelled() => {
                         ("[Cancelled by user]".to_string(), false)
                     }
-                    res = run_tool(tool.as_ref(), dispatch_call, &self.observer) => res,
+                    res = run_tool_with_timeout(tool.as_ref(), dispatch_call, &self.observer) => res,
                 }
             } else {
                 (format!("Unknown tool: {}", dispatch_call.name), false)
@@ -5313,10 +5336,8 @@ pub(crate) struct GuiHooksFromAgent {
     memory: Arc<dyn Memory>,
     memory_session_id: Option<String>,
     auto_save: bool,
-    classification_config: crate::config::QueryClassificationConfig,
     default_model: String,
     temperature: f64,
-    experience_replay: Option<crate::agent::reward::experience::ExperienceReplay>,
     observer: Arc<dyn Observer>,
     cached_provider: String,
 }
@@ -5328,10 +5349,8 @@ impl GuiHooksFromAgent {
             memory: agent.memory.clone(),
             memory_session_id: agent.memory_session_id.clone(),
             auto_save: agent.auto_save,
-            classification_config: agent.classification_config.clone(),
             default_model: agent.model_name.clone(),
             temperature: agent.temperature,
-            experience_replay: agent.experience_replay.clone(),
             observer: agent.observer.clone(),
             cached_provider: agent.cached_provider.clone(),
         }
@@ -5456,45 +5475,6 @@ impl crate::agent::loop_::traits::IterationContextBudgetHook for GuiHooksFromAge
         _iteration: usize,
         _event_tx: &tokio::sync::mpsc::Sender<TurnEvent>,
     ) {
-    }
-}
-
-#[async_trait::async_trait]
-impl crate::agent::loop_::traits::ExperienceRecorderHook for GuiHooksFromAgent {
-    async fn record(&self, summary: &crate::agent::loop_::traits::TurnExperienceSummary) {
-        let Some(ref replay) = self.experience_replay else {
-            return;
-        };
-        if !replay.collection_enabled() {
-            return;
-        }
-        let refs: Vec<(&str, bool)> = summary
-            .tool_results
-            .iter()
-            .map(|(n, s)| (n.as_str(), *s))
-            .collect();
-        let dims = crate::agent::self_assess::eval::heuristic_eval(
-            &summary.user_query,
-            &summary.assistant_response,
-            &refs,
-        );
-        let reward = (dims.aggregate() * 2.0) - 1.0;
-        let query_category =
-            crate::agent::classifier::classify(&self.classification_config, &summary.user_query)
-                .unwrap_or_else(|| "general".to_string());
-        let experience = crate::agent::reward::experience::Experience {
-            id: uuid::Uuid::new_v4().to_string(),
-            session_id: self.memory_session_id.clone().unwrap_or_default(),
-            timestamp: chrono::Utc::now(),
-            user_query: summary.user_query.clone(),
-            assistant_response: summary.assistant_response.clone(),
-            tools_used: summary.tools_used.clone(),
-            model: self.default_model.clone(),
-            reward,
-            query_category,
-            replay_count: 0,
-        };
-        replay.store(experience);
     }
 }
 

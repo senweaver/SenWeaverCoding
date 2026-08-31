@@ -14,6 +14,7 @@ type Props = {
   isStreaming?: boolean
 
   assistantTurnCopyText?: string
+  showThumbs?: boolean
   sessionId?: string | null
   workDir?: string | null
   disableFork?: boolean
@@ -94,6 +95,7 @@ export const AssistantMessage = memo(function AssistantMessage({
   content,
   isStreaming,
   assistantTurnCopyText,
+  showThumbs,
   sessionId,
   workDir,
   disableFork,
@@ -155,6 +157,7 @@ export const AssistantMessage = memo(function AssistantMessage({
         <div className="mt-0.5 flex w-full justify-end pr-5">
           <AssistantMessageActions
             copyText={assistantTurnCopyText ?? ''}
+            showThumbs={showThumbs}
             sessionId={sessionId}
             workDir={workDir}
             disableFork={disableFork}

@@ -137,6 +137,20 @@ impl RecyclingStore {
         Ok(rows)
     }
 
+    pub fn update_reward_for_turn(
+        &self,
+        turn_id: &str,
+        reward: f32,
+        outcome: RecycledExperienceOutcome,
+    ) -> Result<()> {
+        let conn = self.db.lock();
+        conn.execute(
+            "UPDATE recycled_experiences SET reward = ?1, outcome = ?2 WHERE turn_id = ?3",
+            params![f64::from(reward), outcome.as_str(), turn_id],
+        )?;
+        Ok(())
+    }
+
     pub fn bump_hits(&self, ids: &[String]) -> Result<()> {
         if ids.is_empty() {
             return Ok(());

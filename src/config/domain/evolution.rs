@@ -101,21 +101,6 @@ pub struct EvolutionExportConfig {
     #[serde(default)]
     pub export_dir: Option<PathBuf>,
 
-    #[serde(default)]
-    pub default_format: EvolutionExportFormat,
-
-    #[serde(default)]
-    pub auto_push: bool,
-
-    #[serde(default)]
-    pub auto_push_target_id: Option<String>,
-
-    #[serde(default = "default_auto_push_min_samples")]
-    pub auto_push_min_samples: usize,
-
-    #[serde(default = "default_auto_push_min_interval_hours")]
-    pub auto_push_min_interval_hours: u32,
-
     #[serde(default = "default_redact_workspace_paths")]
     pub redact_workspace_paths: bool,
 
@@ -123,12 +108,6 @@ pub struct EvolutionExportConfig {
     pub redact_secrets: bool,
 }
 
-fn default_auto_push_min_samples() -> usize {
-    100
-}
-fn default_auto_push_min_interval_hours() -> u32 {
-    24
-}
 fn default_redact_workspace_paths() -> bool {
     true
 }
@@ -140,11 +119,6 @@ impl Default for EvolutionExportConfig {
     fn default() -> Self {
         Self {
             export_dir: None,
-            default_format: EvolutionExportFormat::default(),
-            auto_push: false,
-            auto_push_target_id: None,
-            auto_push_min_samples: default_auto_push_min_samples(),
-            auto_push_min_interval_hours: default_auto_push_min_interval_hours(),
             redact_workspace_paths: default_redact_workspace_paths(),
             redact_secrets: default_redact_secrets(),
         }
@@ -458,6 +432,9 @@ pub struct EvolutionConfig {
     pub lesson_token_budget: usize,
 
     #[serde(default = "default_enabled")]
+    pub distill_enabled: bool,
+
+    #[serde(default = "default_enabled")]
     pub auto_distill_on_session_end: bool,
 
     #[serde(default)]
@@ -490,6 +467,7 @@ impl Default for EvolutionConfig {
             signal_weights: EvolutionSignalWeights::default(),
             max_lessons_in_prompt: default_max_lessons_in_prompt(),
             lesson_token_budget: default_lesson_token_budget(),
+            distill_enabled: default_enabled(),
             auto_distill_on_session_end: default_enabled(),
             export: EvolutionExportConfig::default(),
             recycling: ExperienceRecyclingConfig::default(),

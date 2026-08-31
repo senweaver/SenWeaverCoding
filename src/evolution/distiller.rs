@@ -61,8 +61,24 @@ async fn process_request(engine: Arc<EvolutionEngine>, req: DistillRequest) -> R
     let store = engine.store();
     let mut produced = 0_u32;
     let mut skipped_dup = 0_u32;
+    let mut skipped_budget = 0_u32;
+    let max_total = engine
+        .config_snapshot()
+        .reflection
+        .max_total_lessons
+        .max(1);
+    let existing_total = store.list_lessons(false).map(|l| l.len()).unwrap_or(0);
+    let day_ago_ms = (Utc::now() - chrono::Duration::hours(24)).timestamp_millis();
+    let daily_intake = store.lessons_created_since(day_ago_ms).unwrap_or(0);
     for mut lesson in lessons {
-        match store.lesson_exists_by_title(lesson.coding_mode.as_deref(), &lesson.title) {
+        if existing_total + produced as usize >= max_total
+            || daily_intake + u64::from(produced)
+                >= crate::evolution::store::DAILY_LESSON_INTAKE_CAP
+        {
+            skipped_budget += 1;
+            continue;
+        }
+        match store.lesson_duplicate_exists(&lesson.title, &lesson.body) {
             Ok(true) => {
                 skipped_dup += 1;
                 continue;
@@ -90,6 +106,7 @@ async fn process_request(engine: Arc<EvolutionEngine>, req: DistillRequest) -> R
             "model": model,
             "produced": produced,
             "skippedDuplicates": skipped_dup,
+            "skippedBudget": skipped_budget,
             "raw_excerpt": answer.trim().chars().take(240).collect::<String>(),
         }),
         ts: Utc::now(),
@@ -174,6 +191,7 @@ fn parse_lessons(raw: &str, coding_mode: Option<&str>, source_turn_id: &str) -> 
             coding_mode: coding_mode.map(str::to_string),
             source_turn_ids: vec![source_turn_id.to_string()],
             hits: 0,
+            negative_hits: 0,
             enabled: true,
             created_at: Utc::now(),
             updated_at: Utc::now(),

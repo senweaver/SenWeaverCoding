@@ -287,15 +287,24 @@ impl DiffSession {
 
         let result = applier.apply_batch(batch).await;
         match result {
-            Ok(_) => {
+            Ok(outcome) => {
                 self.applied = true;
                 self.last_batch_id = Some(batch_id);
                 session_write_mode_metrics::incr_diff_session_applied();
+                let total_hunks_exact: usize = outcome
+                    .per_op
+                    .iter()
+                    .filter_map(|op| op.hunks_exact)
+                    .sum();
+                let total_hunks_fuzzy: usize = outcome
+                    .per_op
+                    .iter()
+                    .filter_map(|op| op.hunks_fuzzy)
+                    .sum();
                 Ok(ApplyReport {
                     files_touched: touched_paths,
-
-                    total_hunks_exact: 0,
-                    total_hunks_fuzzy: 0,
+                    total_hunks_exact,
+                    total_hunks_fuzzy,
                 })
             }
             Err(e) => {

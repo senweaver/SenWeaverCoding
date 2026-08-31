@@ -65,7 +65,6 @@ dependencies = [
  "nostr-sdk",
  "notify",
  "num_cpus",
- "nusb",
  "once_cell",
  "opentelemetry",
  "opentelemetry-otlp",

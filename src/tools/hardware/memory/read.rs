@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use super::traits::{Tool, ToolResult};
+use super::super::super::traits::{Tool, ToolResult};
 use async_trait::async_trait;
 use serde_json::json;
 

@@ -138,13 +138,6 @@ pub async fn handle_overview(
     let judge_metrics = engine.judge_worker_metrics();
     let scheduler_metrics = engine.reflection_scheduler_metrics();
     let recycling_metrics = engine.recycling_metrics();
-    let services_opt = crate::services::try_get_services();
-    let tools_metrics = services_opt
-        .map(|svc| svc.tool_search_metrics_snapshot())
-        .unwrap_or_default();
-    let deferred_builtin_count = services_opt
-        .map(|svc| svc.deferred_builtin_total() as u64)
-        .unwrap_or(0);
     Json(serde_json::json!({
         "enabled": snapshot.enabled,
         "persistTrainingData": snapshot.persist_training_data,
@@ -158,6 +151,7 @@ pub async fn handle_overview(
         "exportsBytes": persistence.exports_total_bytes,
         "turnsFileSize": persistence.turns_file_size,
         "eventsFileSize": persistence.events_file_size,
+        "dbFileSize": persistence.db_file_size,
         "pushReceiptsCount": persistence.push_receipts_count,
         "exports": exports.iter().take(5).map(|e| serde_json::json!({
             "id": e.id,
@@ -175,6 +169,11 @@ pub async fn handle_overview(
         },
         "reflectionScheduler": {
             "running": scheduler_metrics.running,
+            "triggerMode": match snapshot.reflection.trigger_mode {
+                crate::evolution::ReflectionTriggerMode::Manual => "manual",
+                crate::evolution::ReflectionTriggerMode::Auto => "auto",
+                crate::evolution::ReflectionTriggerMode::Scheduled => "scheduled",
+            },
             "intervalMinutes": scheduler_metrics.interval_minutes,
             "lastTickAt": scheduler_metrics.last_tick_at,
             "nextTickAtEstimate": scheduler_metrics.next_tick_at_estimate,
@@ -183,13 +182,6 @@ pub async fn handle_overview(
             "totalHarvested": recycling_metrics.total_harvested,
             "recent24hHarvested": recycling_metrics.recent_24h_harvested,
             "lastHarvestAt": recycling_metrics.last_harvest_at,
-        },
-        "tools": {
-            "invocations": tools_metrics.invocations,
-            "activations": tools_metrics.activations,
-            "highRiskBlocked": tools_metrics.high_risk_blocked,
-            "avgLatencyMs": tools_metrics.avg_latency_ms,
-            "deferredBuiltinCount": deferred_builtin_count,
         },
     }))
     .into_response()
@@ -329,8 +321,8 @@ pub async fn handle_lesson_delete(
 pub struct ThumbBody {
     #[serde(alias = "session_id")]
     pub session_id: String,
-    #[serde(alias = "turn_id")]
-    pub turn_id: String,
+    #[serde(default, alias = "turn_id")]
+    pub turn_id: Option<String>,
     pub score: i8,
     #[serde(default)]
     pub comment: Option<String>,
@@ -348,10 +340,32 @@ pub async fn handle_thumbs(
         Ok(e) => e,
         Err(resp) => return resp.into_response(),
     };
+    let turn_id = match body.turn_id {
+        Some(id) if !id.trim().is_empty() => id,
+        _ => {
+            match engine
+                .store()
+                .latest_turn_id_for_session(&body.session_id)
+            {
+                Ok(Some(id)) => id,
+                Ok(None) => {
+                    return json_error(
+                        StatusCode::NOT_FOUND,
+                        "no recorded turn for this session yet",
+                    )
+                    .into_response();
+                }
+                Err(error) => {
+                    return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
+                        .into_response();
+                }
+            }
+        }
+    };
     let vote = ThumbVote {
         id: format!("thumb_{}", uuid::Uuid::new_v4().simple()),
         session_id: body.session_id,
-        turn_id: body.turn_id.clone(),
+        turn_id,
         score: body.score.clamp(-1, 1),
         comment: body.comment,
         ts: Utc::now(),
@@ -506,13 +520,9 @@ pub async fn handle_config_get(
         },
         "maxLessonsInPrompt": snapshot.max_lessons_in_prompt,
         "lessonTokenBudget": snapshot.lesson_token_budget,
+        "distillEnabled": snapshot.distill_enabled,
         "autoDistillOnSessionEnd": snapshot.auto_distill_on_session_end,
         "export": {
-            "defaultFormat": snapshot.export.default_format.as_str(),
-            "autoPush": snapshot.export.auto_push,
-            "autoPushTargetId": snapshot.export.auto_push_target_id,
-            "autoPushMinSamples": snapshot.export.auto_push_min_samples,
-            "autoPushMinIntervalHours": snapshot.export.auto_push_min_interval_hours,
             "redactWorkspacePaths": snapshot.export.redact_workspace_paths,
             "redactSecrets": snapshot.export.redact_secrets,
         },
@@ -535,6 +545,8 @@ pub struct ConfigPutBody {
     pub max_lessons_in_prompt: Option<usize>,
     #[serde(default, alias = "lesson_token_budget")]
     pub lesson_token_budget: Option<usize>,
+    #[serde(default, alias = "distill_enabled")]
+    pub distill_enabled: Option<bool>,
     #[serde(default, alias = "auto_distill_on_session_end")]
     pub auto_distill_on_session_end: Option<bool>,
     #[serde(default)]
@@ -559,16 +571,6 @@ pub struct SignalWeightsBody {
 #[derive(Debug, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct ExportConfigBody {
-    #[serde(default, alias = "default_format")]
-    pub default_format: Option<String>,
-    #[serde(default, alias = "auto_push")]
-    pub auto_push: Option<bool>,
-    #[serde(default, alias = "auto_push_target_id")]
-    pub auto_push_target_id: Option<String>,
-    #[serde(default, alias = "auto_push_min_samples")]
-    pub auto_push_min_samples: Option<usize>,
-    #[serde(default, alias = "auto_push_min_interval_hours")]
-    pub auto_push_min_interval_hours: Option<u32>,
     #[serde(default, alias = "redact_workspace_paths")]
     pub redact_workspace_paths: Option<bool>,
     #[serde(default, alias = "redact_secrets")]
@@ -633,29 +635,13 @@ pub async fn handle_config_put(
     if let Some(v) = body.lesson_token_budget {
         snapshot.lesson_token_budget = v.clamp(64, 16_000);
     }
+    if let Some(v) = body.distill_enabled {
+        snapshot.distill_enabled = v;
+    }
     if let Some(v) = body.auto_distill_on_session_end {
         snapshot.auto_distill_on_session_end = v;
     }
     if let Some(export) = body.export {
-        if let Some(fmt) = export.default_format {
-            if let Some(parsed) =
-                crate::evolution::types::EvolutionExportFormat::parse(&fmt)
-            {
-                snapshot.export.default_format = parsed;
-            }
-        }
-        if let Some(v) = export.auto_push {
-            snapshot.export.auto_push = v;
-        }
-        if let Some(v) = export.auto_push_target_id {
-            snapshot.export.auto_push_target_id = if v.is_empty() { None } else { Some(v) };
-        }
-        if let Some(v) = export.auto_push_min_samples {
-            snapshot.export.auto_push_min_samples = v.clamp(1, 1_000_000);
-        }
-        if let Some(v) = export.auto_push_min_interval_hours {
-            snapshot.export.auto_push_min_interval_hours = v.clamp(0, 24 * 365);
-        }
         if let Some(v) = export.redact_workspace_paths {
             snapshot.export.redact_workspace_paths = v;
         }
@@ -699,8 +685,10 @@ pub async fn handle_persistence_get(
     Json(serde_json::json!({
         "persistTrainingData": snapshot.persist_training_data,
         "turnsCount": status.turns_count,
+        "turnsJsonlLines": engine.store().count_turns_jsonl_lines(),
         "turnsFileSize": status.turns_file_size,
         "eventsFileSize": status.events_file_size,
+        "dbFileSize": status.db_file_size,
         "exportsCount": status.exports_count,
         "exportsTotalBytes": status.exports_total_bytes,
         "pushReceiptsCount": status.push_receipts_count,
@@ -727,6 +715,20 @@ pub async fn handle_persistence_put(
         Ok(e) => e,
         Err(resp) => return resp.into_response(),
     };
+    if !body.persist_training_data {
+        let snapshot = engine.config_snapshot();
+        if snapshot.reflection.enabled || snapshot.recycling.enabled {
+            return (
+                StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": "persistence_required",
+                    "detail": "reflection or experience recycling is enabled and requires \
+                               persisted training data; disable them first",
+                })),
+            )
+                .into_response();
+        }
+    }
     let snapshot_full: crate::config::Config = {
         let mut cfg = state.config.lock();
         cfg.evolution.persist_training_data = body.persist_training_data;
@@ -961,8 +963,8 @@ fn export_record_to_json(record: crate::evolution::types::ExportRecord) -> serde
         "path": record.path,
         "sampleCount": record.sample_count,
         "sizeBytes": record.size_bytes,
-        "contentDigest": record.md5,
-        "digestAlgorithm": "md5",
+        "contentDigest": record.sha256,
+        "digestAlgorithm": "sha256",
         "timeWindowStart": record.time_window_start,
         "timeWindowEnd": record.time_window_end,
         "createdAt": record.created_at,
@@ -1056,6 +1058,16 @@ pub async fn handle_cloud_targets_upsert(
         .id
         .clone()
         .unwrap_or_else(|| format!("target_{}", uuid::Uuid::new_v4().simple()));
+    let existing = body.id.as_deref().and_then(|edit_id| {
+        engine
+            .store()
+            .list_cloud_targets()
+            .ok()
+            .and_then(|targets| targets.into_iter().find(|t| t.id == edit_id))
+    });
+    let (preserved_last_pushed_at, preserved_created_at) = existing
+        .map(|t| (t.last_pushed_at, t.created_at))
+        .unwrap_or((None, Utc::now()));
     let target = crate::evolution::types::CloudTarget {
         id: id.clone(),
         name: body.name,
@@ -1068,8 +1080,8 @@ pub async fn handle_cloud_targets_upsert(
         auto_push: body.auto_push,
         auto_push_min_samples: body.auto_push_min_samples,
         auto_push_min_interval_hours: body.auto_push_min_interval_hours,
-        last_pushed_at: None,
-        created_at: Utc::now(),
+        last_pushed_at: preserved_last_pushed_at,
+        created_at: preserved_created_at,
     };
     if let Err(error) = engine.store().upsert_cloud_target(&target) {
         return json_error(StatusCode::INTERNAL_SERVER_ERROR, &error.to_string()).into_response();

@@ -22,7 +22,6 @@ pub fn global_feedback_collector() -> &'static crate::agent::reward::feedback::F
 pub struct LearningHooks {
     pub self_eval_enabled: bool,
     pub feedback_enabled: bool,
-    pub experience_enabled: bool,
 }
 
 impl LearningHooks {
@@ -30,7 +29,6 @@ impl LearningHooks {
         Self {
             self_eval_enabled: config.self_eval.enabled,
             feedback_enabled: config.feedback.enabled,
-            experience_enabled: config.experience.enabled,
         }
     }
 

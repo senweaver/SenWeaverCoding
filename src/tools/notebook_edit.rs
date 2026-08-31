@@ -101,6 +101,10 @@ pub(crate) fn reset_code_execution_state(cell: &mut Value) {
     }
 }
 
+fn new_cell_id() -> String {
+    uuid::Uuid::new_v4().simple().to_string()[..8].to_string()
+}
+
 pub(crate) fn apply_notebook_cell_op(
     nb: &mut Value,
     op: &crate::apply_model::NotebookCellOp,
@@ -134,6 +138,7 @@ pub(crate) fn apply_notebook_cell_op(
             cell_index,
             new_source,
             cell_type,
+            insert_before,
         } => {
             if *cell_index > cells.len() {
                 anyhow::bail!(
@@ -141,16 +146,20 @@ pub(crate) fn apply_notebook_cell_op(
                     cells.len()
                 );
             }
-            let insert_pos = if *cell_index == cells.len() {
+            let insert_pos = if *insert_before {
+                (*cell_index).min(cells.len())
+            } else if *cell_index == cells.len() {
                 cells.len()
             } else {
                 *cell_index + 1
             };
 
             let source_arr = string_to_source_array(new_source);
+            let cell_id = new_cell_id();
             let new_cell = match cell_type.as_str() {
                 "code" => json!({
                     "cell_type": "code",
+                    "id": cell_id,
                     "execution_count": null,
                     "metadata": {},
                     "outputs": [],
@@ -158,11 +167,13 @@ pub(crate) fn apply_notebook_cell_op(
                 }),
                 "markdown" => json!({
                     "cell_type": "markdown",
+                    "id": cell_id,
                     "metadata": {},
                     "source": source_arr,
                 }),
                 "raw" => json!({
                     "cell_type": "raw",
+                    "id": cell_id,
                     "metadata": {},
                     "source": source_arr,
                 }),
@@ -206,7 +217,7 @@ impl Tool for NotebookEditTool {
                 },
                 "cell_index": {
                     "type": "integer",
-                    "description": "0-based cell index to edit (for insert: position after which to insert; use index equal to cells.len() to append at end; on an empty notebook use 0)"
+                    "description": "0-based cell index to edit (for insert with default position=after: the cell after which to insert; use index equal to cells.len() to append at end; on an empty notebook use 0)"
                 },
                 "new_source": {
                     "type": "string",
@@ -222,6 +233,12 @@ impl Tool for NotebookEditTool {
                     "enum": ["replace", "insert", "delete"],
                     "default": "replace",
                     "description": "Edit operation (default: replace)"
+                },
+                "position": {
+                    "type": "string",
+                    "enum": ["after", "before"],
+                    "default": "after",
+                    "description": "For insert mode: whether the new cell goes after (default) or before cell_index. Use position=before with cell_index=0 to insert at the very top."
                 }
             },
             "required": ["notebook_path", "cell_index"]
@@ -485,6 +502,10 @@ impl Tool for NotebookEditTool {
                     cell_index,
                     new_source: new_source_owned,
                     cell_type: ct,
+                    insert_before: args
+                        .get("position")
+                        .and_then(|v| v.as_str())
+                        .is_some_and(|p| p.eq_ignore_ascii_case("before")),
                 }
             }
             EditMode::Delete => {

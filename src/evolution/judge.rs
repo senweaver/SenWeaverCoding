@@ -110,6 +110,10 @@ async fn process_request(engine: Arc<EvolutionEngine>, req: JudgeRequest) -> Res
         };
         let merged = store.merge_turn_signal(&req.turn_id, &score, &snapshot.signal_weights)?;
         merged_final = Some(merged.final_score);
+        engine.sync_recycled_reward(&req.turn_id, &merged);
+        if verdict < 0 {
+            engine.apply_lesson_feedback(&req.turn_id, merged.final_score);
+        }
     }
     let audit = AuditEvent {
         id: format!("ev_{}", uuid::Uuid::new_v4().simple()),

@@ -483,14 +483,22 @@ impl Tool for DeletePathTool {
 
         const MAX_DELETE_SNAPSHOTS: usize = 200;
         let workspace = self.security.workspace_dir();
-        let history = crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
-        let to_snapshot: Vec<std::path::PathBuf> = if full.is_dir() {
-            collect_files_bounded(&full, MAX_DELETE_SNAPSHOTS)
-        } else {
-            vec![full.clone()]
-        };
-        for file in &to_snapshot {
-            let _ = history.snapshot_before_write(file, "delete_path", "pre-delete snapshot");
+        {
+            let target = full.clone();
+            let _ = tokio::task::spawn_blocking(move || {
+                let history =
+                    crate::tools::edit_history::EditHistory::shared_for_workspace(&workspace);
+                let to_snapshot: Vec<std::path::PathBuf> = if target.is_dir() {
+                    collect_files_bounded(&target, MAX_DELETE_SNAPSHOTS)
+                } else {
+                    vec![target.clone()]
+                };
+                for file in &to_snapshot {
+                    let _ =
+                        history.snapshot_before_write(file, "delete_path", "pre-delete snapshot");
+                }
+            })
+            .await;
         }
 
         if full.is_dir() {

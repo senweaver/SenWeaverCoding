@@ -37,20 +37,16 @@ function readNumber(input: unknown, keys: string[]): number | undefined {
 
 function hwLabel(toolName: string): string {
   switch (toolName) {
-    case 'device_read_code':
-      return 'Read code'
-    case 'device_write_code':
-      return 'Write code'
-    case 'device_exec':
-      return 'Run'
     case 'gpio_read':
       return 'GPIO read'
     case 'gpio_write':
       return 'GPIO write'
-    case 'pico_flash':
-      return 'Flash'
+    case 'hardware_board_info':
+      return 'Board info'
     case 'hardware_memory_map':
       return 'Memory map'
+    case 'hardware_memory_read':
+      return 'Memory read'
     default:
       return toolName
   }

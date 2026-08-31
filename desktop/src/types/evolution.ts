@@ -31,6 +31,7 @@ export type EvolutionOverview = {
   exportsBytes: number
   turnsFileSize: number
   eventsFileSize: number
+  dbFileSize: number
   pushReceiptsCount: number
   exports: Array<{
     id: string
@@ -48,6 +49,7 @@ export type EvolutionOverview = {
   }
   reflectionScheduler?: {
     running: boolean
+    triggerMode: ReflectionTriggerModeId
     intervalMinutes: number
     lastTickAt: string | null
     nextTickAtEstimate: string | null
@@ -56,13 +58,6 @@ export type EvolutionOverview = {
     totalHarvested: number
     recent24hHarvested: number
     lastHarvestAt: string | null
-  }
-  tools?: {
-    invocations: number
-    activations: number
-    highRiskBlocked: number
-    avgLatencyMs: number
-    deferredBuiltinCount?: number
   }
 }
 
@@ -95,13 +90,9 @@ export type EvolutionConfigState = {
   signalWeights: SignalWeights
   maxLessonsInPrompt: number
   lessonTokenBudget: number
+  distillEnabled: boolean
   autoDistillOnSessionEnd: boolean
   export: {
-    defaultFormat: EvolutionExportFormatId
-    autoPush: boolean
-    autoPushTargetId: string | null
-    autoPushMinSamples: number
-    autoPushMinIntervalHours: number
     redactWorkspacePaths: boolean
     redactSecrets: boolean
   }
@@ -110,8 +101,10 @@ export type EvolutionConfigState = {
 export type EvolutionPersistenceStatus = {
   persistTrainingData: boolean
   turnsCount: number
+  turnsJsonlLines: number
   turnsFileSize: number
   eventsFileSize: number
+  dbFileSize: number
   exportsCount: number
   exportsTotalBytes: number
   pushReceiptsCount: number

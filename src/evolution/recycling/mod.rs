@@ -13,3 +13,13 @@ pub use pipeline::{rank_experiences, ExperienceRank};
 pub use replay::build_recycled_block;
 pub use store::RecyclingStore;
 pub use types::{RecycledExperience, RecycledExperienceOutcome};
+
+pub fn outcome_from_reward(final_score: f32) -> RecycledExperienceOutcome {
+    if final_score >= 0.5 {
+        RecycledExperienceOutcome::Success
+    } else if final_score <= -0.5 {
+        RecycledExperienceOutcome::Failure
+    } else {
+        RecycledExperienceOutcome::Neutral
+    }
+}

@@ -222,13 +222,11 @@ const STATIC_CATEGORY_MAP: Record<string, ToolCategory> = {
   canvas: 'ops',
   report_template: 'ops',
 
-  device_read_code: 'hardware',
-  device_write_code: 'hardware',
-  device_exec: 'hardware',
   gpio_read: 'hardware',
   gpio_write: 'hardware',
-  pico_flash: 'hardware',
+  hardware_board_info: 'hardware',
   hardware_memory_map: 'hardware',
+  hardware_memory_read: 'hardware',
 }
 
 export function getToolCategory(name: string | undefined | null): ToolCategory {

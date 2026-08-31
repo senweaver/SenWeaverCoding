@@ -113,6 +113,10 @@ pub struct OpOutcome {
     pub success: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hunks_exact: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hunks_fuzzy: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -582,7 +586,7 @@ impl OpsApplier {
         for (idx, op) in batch.ops.iter().enumerate() {
             let touched = op.primary_path().to_path_buf();
             match self.apply_one(idx, op, Arc::clone(&op_serial)).await {
-                Ok((before, after, post_sha)) => {
+                Ok((before, after, post_sha, hunk_stats)) => {
                     if let Some(sha) = post_sha {
                         post_images.push((idx, sha));
                     }
@@ -593,6 +597,8 @@ impl OpsApplier {
                         bytes_after: after,
                         success: true,
                         error: None,
+                        hunks_exact: hunk_stats.map(|(exact, _)| exact),
+                        hunks_fuzzy: hunk_stats.map(|(_, fuzzy)| fuzzy),
                     });
                     applied_paths.push(touched);
                 }
@@ -605,6 +611,8 @@ impl OpsApplier {
                         bytes_after: None,
                         success: false,
                         error: Some(msg.clone()),
+                        hunks_exact: None,
+                        hunks_fuzzy: None,
                     });
                     if batch.atomic {
                         torn_guard.disarm();
@@ -659,6 +667,8 @@ impl OpsApplier {
             degraded = true;
         }
 
+        let mut post_text_cache: std::collections::HashMap<PathBuf, String> =
+            std::collections::HashMap::new();
         if self.apply_opts.validate {
             for path in &applied_paths {
                 let path_for_read = path.clone();
@@ -730,6 +740,7 @@ impl OpsApplier {
                             "post-write validation produced advisory warnings; not rolling back"
                         );
                     }
+                    post_text_cache.insert(path.clone(), text);
                 }
             }
         }
@@ -779,10 +790,19 @@ impl OpsApplier {
             let applied_dedup: std::collections::HashSet<PathBuf> =
                 applied_paths.iter().cloned().collect();
             for p in applied_dedup {
-                let p_for_read = p.clone();
-                let read = tokio::task::spawn_blocking(move || std::fs::read_to_string(&p_for_read))
-                    .await;
-                if let Ok(Ok(contents)) = read {
+                let contents = match post_text_cache.remove(&p) {
+                    Some(text) => Some(text),
+                    None => {
+                        let p_for_read = p.clone();
+                        tokio::task::spawn_blocking(move || {
+                            std::fs::read_to_string(&p_for_read)
+                        })
+                        .await
+                        .ok()
+                        .and_then(Result::ok)
+                    }
+                };
+                if let Some(contents) = contents {
                     if notifier.notify_changed(&p, &contents).await.is_ok() {
                         crate::observability::code_intel_metrics::incr_lsp_did_change_sent();
                     }
@@ -969,7 +989,15 @@ impl OpsApplier {
         op_index: usize,
         op: &EditOp,
         op_serial: Arc<std::sync::Mutex<()>>,
-    ) -> Result<(Option<usize>, Option<usize>, Option<String>), ApplyBatchError> {
+    ) -> Result<
+        (
+            Option<usize>,
+            Option<usize>,
+            Option<String>,
+            Option<(usize, usize)>,
+        ),
+        ApplyBatchError,
+    > {
         let op = op.clone();
         let apply_opts = self.apply_opts.clone();
         #[cfg(feature = "crdt-coordination")]
@@ -1049,7 +1077,7 @@ impl OpsApplier {
                     }
                 }
                 let post = sha256_hex(&out);
-                Ok((Some(before), Some(out.len()), Some(post)))
+                Ok((Some(before), Some(out.len()), Some(post), None))
             }
             EditOp::Insert { path, at_byte, text, .. } => {
                 #[cfg(feature = "crdt-coordination")]
@@ -1093,7 +1121,7 @@ impl OpsApplier {
                     }
                 }
                 let post = sha256_hex(&out);
-                Ok((Some(before), Some(out.len()), Some(post)))
+                Ok((Some(before), Some(out.len()), Some(post), None))
             }
             EditOp::Delete {
                 path,
@@ -1154,7 +1182,7 @@ impl OpsApplier {
                     }
                 }
                 let post = sha256_hex(&out);
-                Ok((Some(before), Some(out.len()), Some(post)))
+                Ok((Some(before), Some(out.len()), Some(post), None))
             }
             EditOp::CreateFile {
                 path,
@@ -1207,18 +1235,18 @@ impl OpsApplier {
                 #[cfg(feature = "crdt-coordination")]
                 crate::crdt::invalidate(path);
                 let post = sha256_hex(&out_bytes);
-                Ok((None, Some(out_bytes.len()), Some(post)))
+                Ok((None, Some(out_bytes.len()), Some(post), None))
             }
             EditOp::DeleteFile { path, missing_ok } => match std::fs::remove_file(path) {
                 Ok(()) => {
                     #[cfg(feature = "crdt-coordination")]
                     crate::crdt::invalidate(path);
-                    Ok((None, None, None))
+                    Ok((None, None, None, None))
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound && *missing_ok => {
                     #[cfg(feature = "crdt-coordination")]
                     crate::crdt::invalidate(path);
-                    Ok((None, None, None))
+                    Ok((None, None, None, None))
                 }
                 Err(source) => Err(ApplyBatchError::Io {
                     op_index,
@@ -1255,7 +1283,7 @@ impl OpsApplier {
                             path: to.clone(),
                             source,
                         })?;
-                        Ok((None, Some(bytes.len()), Some(sha256_hex(&bytes))))
+                        Ok((None, Some(bytes.len()), Some(sha256_hex(&bytes)), None))
                     }
                     Err(source) => {
                         if !*overwrite {
@@ -1286,7 +1314,7 @@ impl OpsApplier {
                             crate::crdt::invalidate(from);
                             crate::crdt::invalidate(to);
                         }
-                        Ok((None, Some(bytes.len()), Some(sha256_hex(&bytes))))
+                        Ok((None, Some(bytes.len()), Some(sha256_hex(&bytes)), None))
                     }
                 }
             }
@@ -1370,7 +1398,12 @@ impl OpsApplier {
                     crate::crdt::mark_needs_resync(path, &crdt_site, &crdt_workspace_key);
                 }
                 let post = sha256_hex(&out_bytes);
-                Ok((Some(before), Some(out_bytes.len()), Some(post)))
+                Ok((
+                    Some(before),
+                    Some(out_bytes.len()),
+                    Some(post),
+                    Some((outcome.hunks_exact, outcome.hunks_fuzzy)),
+                ))
             }
             EditOp::NotebookCell { path, cell: cell_op } => {
                 let raw = std::fs::read_to_string(path).map_err(|source| {
@@ -1411,7 +1444,7 @@ impl OpsApplier {
                 }
                 let _ = cell_op_label(cell_op);
                 let post = sha256_hex(out.as_bytes());
-                Ok((Some(raw.len()), Some(out.len()), Some(post)))
+                Ok((Some(raw.len()), Some(out.len()), Some(post), None))
             }
             }
         })

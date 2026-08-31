@@ -8,11 +8,89 @@ use serde_json::json;
 use std::sync::Arc;
 
 const MAX_RESULTS: usize = 1000;
+const HARD_COLLECT_CAP: usize = 50_000;
 
 use super::{GLOB_WALK_TIMEOUT_SECS as WALK_TIMEOUT_SECS, crosses_skip_dir};
 
 pub struct GlobSearchTool {
     security: Arc<SecurityPolicy>,
+}
+
+enum WalkOutcome {
+    Ok {
+        results: Vec<String>,
+        truncated: bool,
+        timed_out: bool,
+    },
+    InvalidPattern(String),
+    BadWorkspace(String),
+}
+
+fn legacy_absolute_glob(
+    security: &SecurityPolicy,
+    full_pattern: &str,
+    workspace: &std::path::Path,
+) -> WalkOutcome {
+    let entries = match glob::glob(full_pattern) {
+        Ok(paths) => paths,
+        Err(e) => return WalkOutcome::InvalidPattern(e.to_string()),
+    };
+    let workspace_canon = match std::fs::canonicalize(workspace) {
+        Ok(p) => p,
+        Err(e) => return WalkOutcome::BadWorkspace(e.to_string()),
+    };
+    let deadline =
+        std::time::Instant::now() + std::time::Duration::from_secs(WALK_TIMEOUT_SECS);
+    let mut scored: Vec<(String, std::time::SystemTime)> = Vec::new();
+    let mut truncated = false;
+    let mut timed_out = false;
+    for entry in entries {
+        if std::time::Instant::now() >= deadline {
+            timed_out = true;
+            break;
+        }
+        let path = match entry {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if crosses_skip_dir(&path) {
+            continue;
+        }
+        let resolved = match std::fs::canonicalize(&path) {
+            Ok(p) => p,
+            Err(_) => continue,
+        };
+        if !security.is_resolved_path_allowed(&resolved) {
+            continue;
+        }
+        let meta = std::fs::metadata(&resolved).ok();
+        if meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let mtime = meta
+            .and_then(|m| m.modified().ok())
+            .unwrap_or(std::time::UNIX_EPOCH);
+        let rendered = match resolved.strip_prefix(&workspace_canon) {
+            Ok(rel) => rel.to_string_lossy().to_string(),
+            Err(_) => resolved.to_string_lossy().to_string(),
+        };
+        scored.push((rendered, mtime));
+        if scored.len() >= HARD_COLLECT_CAP {
+            truncated = true;
+            break;
+        }
+    }
+    scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+    if scored.len() > MAX_RESULTS {
+        truncated = true;
+        scored.truncate(MAX_RESULTS);
+    }
+    let results = scored.into_iter().map(|(rel, _)| rel).collect::<Vec<_>>();
+    WalkOutcome::Ok {
+        results,
+        truncated,
+        timed_out,
+    }
 }
 
 impl GlobSearchTool {
@@ -29,6 +107,7 @@ impl Tool for GlobSearchTool {
 
     fn description(&self) -> &str {
         "Search for files matching a glob pattern within the workspace. \
+         Respects .gitignore and skips heavy build/vendor directories. \
          Returns matching file paths relative to the workspace root, ordered by \
          most-recently-modified first (ties broken alphabetically). \
          Examples: '**/*.rs' (all Rust files), 'src/**/mod.rs' (all mod.rs in src)."
@@ -114,21 +193,21 @@ impl Tool for GlobSearchTool {
             }
         };
 
-        enum WalkOutcome {
-            Ok {
-                results: Vec<String>,
-                truncated: bool,
-                timed_out: bool,
-            },
-            InvalidPattern(String),
-            BadWorkspace(String),
-        }
-
         let security_arc = Arc::clone(&self.security);
         let workspace = self.security.workspace_dir().to_path_buf();
+        let pattern_owned = pattern.to_string();
+        let escapes_workspace = std::path::Path::new(pattern).is_absolute()
+            || pattern.contains(':')
+            || pattern.starts_with('~');
         let walk = tokio::task::spawn_blocking(move || -> WalkOutcome {
-            let entries = match glob::glob(&full_pattern) {
-                Ok(paths) => paths,
+            if escapes_workspace {
+                return legacy_absolute_glob(&security_arc, &full_pattern, &workspace);
+            }
+            let matcher = match globset::GlobBuilder::new(&pattern_owned)
+                .literal_separator(true)
+                .build()
+            {
+                Ok(g) => g.compile_matcher(),
                 Err(e) => return WalkOutcome::InvalidPattern(e.to_string()),
             };
             let workspace_canon = match std::fs::canonicalize(&workspace) {
@@ -140,41 +219,52 @@ impl Tool for GlobSearchTool {
             let mut scored: Vec<(String, std::time::SystemTime)> = Vec::new();
             let mut truncated = false;
             let mut timed_out = false;
-            for entry in entries {
+            let walker = ignore::WalkBuilder::new(&workspace_canon)
+                .hidden(false)
+                .git_global(false)
+                .follow_links(false)
+                .filter_entry(|entry| {
+                    entry.depth() == 0
+                        || entry
+                            .file_name()
+                            .to_str()
+                            .map(|name| !super::SKIP_DIRS.contains(&name))
+                            .unwrap_or(true)
+                })
+                .build();
+            for entry in walker {
                 if std::time::Instant::now() >= deadline {
                     timed_out = true;
                     break;
                 }
-                let path = match entry {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                if crosses_skip_dir(&path) {
-                    continue;
-                }
-                let resolved = match std::fs::canonicalize(&path) {
-                    Ok(p) => p,
-                    Err(_) => continue,
-                };
-                if !security_arc.is_resolved_path_allowed(&resolved) {
-                    continue;
-                }
-                let meta = std::fs::metadata(&resolved).ok();
-                if meta.as_ref().map(|m| m.is_dir()).unwrap_or(false) {
-                    continue;
-                }
-                let mtime = meta
-                    .and_then(|m| m.modified().ok())
-                    .unwrap_or(std::time::UNIX_EPOCH);
-                if let Ok(rel) = resolved.strip_prefix(&workspace_canon) {
-                    scored.push((rel.to_string_lossy().to_string(), mtime));
-                }
-                if scored.len() >= MAX_RESULTS {
+                if scored.len() >= HARD_COLLECT_CAP {
                     truncated = true;
                     break;
                 }
+                let Ok(entry) = entry else {
+                    continue;
+                };
+                if !entry.file_type().is_some_and(|t| t.is_file()) {
+                    continue;
+                }
+                let Ok(rel) = entry.path().strip_prefix(&workspace_canon) else {
+                    continue;
+                };
+                if !matcher.is_match(rel) {
+                    continue;
+                }
+                let mtime = entry
+                    .metadata()
+                    .ok()
+                    .and_then(|m| m.modified().ok())
+                    .unwrap_or(std::time::UNIX_EPOCH);
+                scored.push((rel.to_string_lossy().to_string(), mtime));
             }
             scored.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
+            if scored.len() > MAX_RESULTS {
+                truncated = true;
+                scored.truncate(MAX_RESULTS);
+            }
             let results = scored.into_iter().map(|(rel, _)| rel).collect::<Vec<_>>();
             WalkOutcome::Ok {
                 results,

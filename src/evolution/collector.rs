@@ -8,8 +8,8 @@ use std::sync::Arc;
 use tokio::task_local;
 
 use super::types::{
-    AnthropicMessageView, ChatMessageView, CostView, NextStateView, ResponseView, ToolCallView,
-    ToolOutcome, TurnClass, TurnRecord,
+    AnthropicMessageView, ChatMessageView, CostView, ResponseView, ToolOutcome, TurnClass,
+    TurnRecord,
 };
 use super::{EvolutionEngine, store::Store};
 
@@ -23,6 +23,7 @@ pub struct TurnAccumulator {
     pub response: ResponseView,
     pub tool_outcomes: Vec<ToolOutcome>,
     pub cost: CostView,
+    pub injected_lesson_ids: Vec<String>,
     pub finalized: bool,
 }
 
@@ -31,6 +32,7 @@ pub struct EvolutionCtx {
     engine: Arc<EvolutionEngine>,
     session_id: String,
     coding_mode: Option<String>,
+    user_message: Option<String>,
     turn_class: TurnClass,
     turn_idx: u64,
     accumulator: Arc<Mutex<TurnAccumulator>>,
@@ -42,6 +44,7 @@ impl EvolutionCtx {
             engine,
             session_id: session_id.into(),
             coding_mode: None,
+            user_message: None,
             turn_class: TurnClass::Main,
             turn_idx: 0,
             accumulator: Arc::new(Mutex::new(TurnAccumulator::default())),
@@ -51,6 +54,18 @@ impl EvolutionCtx {
     pub fn with_coding_mode(mut self, coding_mode: impl Into<String>) -> Self {
         self.coding_mode = Some(coding_mode.into());
         self
+    }
+
+    pub fn with_user_message(mut self, message: impl Into<String>) -> Self {
+        let value: String = message.into();
+        if !value.trim().is_empty() {
+            self.user_message = Some(value);
+        }
+        self
+    }
+
+    pub fn user_message(&self) -> Option<&str> {
+        self.user_message.as_deref()
     }
 
     pub fn with_turn_class(mut self, class: TurnClass) -> Self {
@@ -114,11 +129,6 @@ impl EvolutionCtx {
         acc.tool_outcomes.push(outcome);
     }
 
-    pub fn observe_tool_call(&self, call: ToolCallView) {
-        let mut acc = self.accumulator.lock();
-        acc.response.tool_calls.push(call);
-    }
-
     pub fn add_cost(&self, input_tokens: u64, output_tokens: u64, total_tokens: u64, usd: f64) {
         let mut acc = self.accumulator.lock();
         acc.cost.input_tokens = acc.cost.input_tokens.saturating_add(input_tokens);
@@ -133,10 +143,33 @@ impl EvolutionCtx {
     }
 
     pub fn set_thinking_text(&self, text: impl Into<String>) {
+        const MAX_THINKING_CHARS: usize = 64 * 1024;
         let mut acc = self.accumulator.lock();
         let value = text.into();
-        if !value.is_empty() {
-            acc.response.thinking = Some(value);
+        if value.is_empty() {
+            return;
+        }
+        match acc.response.thinking {
+            Some(ref mut existing) => {
+                if existing.chars().count() >= MAX_THINKING_CHARS {
+                    return;
+                }
+                existing.push_str("\n\n");
+                existing.push_str(&value);
+            }
+            None => acc.response.thinking = Some(value),
+        }
+    }
+
+    pub fn record_injected_lessons(&self, ids: &[String]) {
+        if ids.is_empty() {
+            return;
+        }
+        let mut acc = self.accumulator.lock();
+        for id in ids {
+            if !acc.injected_lesson_ids.iter().any(|existing| existing == id) {
+                acc.injected_lesson_ids.push(id.clone());
+            }
         }
     }
 
@@ -155,8 +188,13 @@ impl EvolutionCtx {
                 acc.response.content = Some(text);
             }
         }
+        let effective_turn_idx = if self.turn_idx == 0 {
+            self.store().session_turn_count(&self.session_id)
+        } else {
+            self.turn_idx
+        };
         let mut record =
-            TurnRecord::new(self.session_id.clone(), self.turn_idx, self.turn_class);
+            TurnRecord::new(self.session_id.clone(), effective_turn_idx, self.turn_class);
         record.coding_mode = self.coding_mode.clone();
         record.provider = acc.provider.take();
         record.model = acc.model.take();
@@ -166,6 +204,7 @@ impl EvolutionCtx {
         record.response = std::mem::take(&mut acc.response);
         record.tool_outcomes = std::mem::take(&mut acc.tool_outcomes);
         record.cost = std::mem::take(&mut acc.cost);
+        record.injected_lesson_ids = std::mem::take(&mut acc.injected_lesson_ids);
         record.completed_ts = Some(Utc::now());
         record.aborted = aborted_reason;
 
@@ -217,9 +256,6 @@ impl EvolutionCtx {
         Some(record)
     }
 
-    pub fn record_next_state(&self, turn_id: &str, next: NextStateView) {
-        let _ = (turn_id, next);
-    }
 }
 
 task_local! {
@@ -324,5 +360,38 @@ pub fn set_thinking_text(text: &str) {
 pub fn record_provider_model(provider: Option<&str>, model: Option<&str>) {
     if let Some(ctx) = try_ctx() {
         ctx.record_provider_model(provider.map(str::to_string), model.map(str::to_string));
+    }
+}
+
+pub fn snapshot_prompt_messages(messages: &[crate::providers::traits::ChatMessage]) {
+    if let Some(ctx) = try_ctx() {
+        if !ctx.store().persist_training_data() {
+            return;
+        }
+        let views: Vec<ChatMessageView> = messages
+            .iter()
+            .map(|m| ChatMessageView {
+                role: m.role.clone(),
+                content: if m.content.is_empty() {
+                    None
+                } else {
+                    Some(m.content.clone())
+                },
+                tool_calls: Vec::new(),
+                name: None,
+                tool_call_id: None,
+            })
+            .collect();
+        ctx.set_prompt_messages(views, Vec::new(), None);
+    }
+}
+
+pub fn collecting() -> bool {
+    try_ctx().is_some()
+}
+
+pub fn record_injected_lessons(ids: &[String]) {
+    if let Some(ctx) = try_ctx() {
+        ctx.record_injected_lessons(ids);
     }
 }

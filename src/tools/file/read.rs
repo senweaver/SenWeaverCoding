@@ -26,7 +26,7 @@ impl Tool for FileReadTool {
     }
 
     fn description(&self) -> &str {
-        "Read file contents with line numbers. Supports partial reading via offset and limit. The trailing summary line includes the file's mtime_ms, which can be passed as expected_mtime_ms to file_write/file_edit/multi_edit for conflict detection. Extracts text from office documents (Word .docx, Excel .xlsx, PowerPoint .pptx) and PDF; other binary files are read with lossy UTF-8 conversion."
+        "Read file contents with line numbers. Supports partial reading via offset and limit. The trailing summary line includes the file's mtime_ms, which can be passed as expected_mtime_ms to file_write/file_edit/multi_edit for conflict detection. Extracts text from office documents (Word .docx, Excel .xlsx, PowerPoint .pptx) and PDF; image files are reported with their metadata (inspect them with view_image), and other binary files return a notice instead of garbled text."
     }
 
     fn mcp_safe(&self) -> bool {
@@ -143,6 +143,39 @@ impl Tool for FileReadTool {
             .map(|m| format!(", mtime_ms: {m}"))
             .unwrap_or_default();
 
+        {
+            let ext = resolved_path
+                .extension()
+                .and_then(|e| e.to_str())
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            let image_mime = match ext.as_str() {
+                "png" => Some("image/png"),
+                "jpg" | "jpeg" => Some("image/jpeg"),
+                "gif" => Some("image/gif"),
+                "webp" => Some("image/webp"),
+                "bmp" => Some("image/bmp"),
+                "ico" => Some("image/x-icon"),
+                _ => None,
+            };
+            if let Some(mime) = image_mime {
+                let size = tokio::fs::metadata(&resolved_path)
+                    .await
+                    .map(|m| m.len())
+                    .unwrap_or(0);
+                #[cfg(feature = "tool-image")]
+                let hint = "Use the view_image tool to inspect its visual contents.";
+                #[cfg(not(feature = "tool-image"))]
+                let hint = "Binary image content is not rendered as text.";
+                crate::session::record_observed_for_current_session(&resolved_path);
+                return Ok(ToolResult {
+                    success: true,
+                    output: format!("[Image file: {path} ({mime}, {size} bytes). {hint}]"),
+                    error: None,
+                });
+            }
+        }
+
         let explicit_level = args.get("level").and_then(|v| v.as_str()).is_some();
         let mut level = args
             .get("level")
@@ -197,18 +230,42 @@ impl Tool for FileReadTool {
                         let bytes = tokio::fs::read(&resolved_path)
                             .await
                             .map_err(|e| anyhow::anyhow!("Failed to read file: {e}"))?;
-                        tokio::task::spawn_blocking(move || {
+                        let byte_count = bytes.len();
+                        let decoded = tokio::task::spawn_blocking(move || {
                             match crate::tools::file::office::extract_pdf_text_if_pdf(&bytes) {
-                                Some(text) => text,
+                                Some(text) => Some(text),
                                 None => {
-                                    let (text, _label) =
-                                        crate::tools::file::encoding::decode_best_effort(&bytes);
-                                    text
+                                    if crate::tools::file::encoding::is_probably_binary(&bytes) {
+                                        None
+                                    } else {
+                                        let (text, _label) =
+                                            crate::tools::file::encoding::decode_best_effort(
+                                                &bytes,
+                                            );
+                                        Some(text)
+                                    }
                                 }
                             }
                         })
                         .await
-                        .map_err(|e| anyhow::anyhow!("File decode task failed: {e}"))?
+                        .map_err(|e| anyhow::anyhow!("File decode task failed: {e}"))?;
+                        match decoded {
+                            Some(text) => text,
+                            None => {
+                                crate::session::record_observed_for_current_session(
+                                    &resolved_path,
+                                );
+                                return Ok(ToolResult {
+                                    success: true,
+                                    output: format!(
+                                        "[Binary file: {path} ({byte_count} bytes). Its raw \
+                                         bytes are not displayable as text; use a tool suited \
+                                         to this file type instead.]"
+                                    ),
+                                    error: None,
+                                });
+                            }
+                        }
                     }
                 }
             };
@@ -295,40 +352,69 @@ impl Tool for FileReadTool {
         }
 
         const MAX_READ_OUTPUT_BYTES: usize = 384 * 1024;
-        let mut clipped_end = end;
+        const MAX_LINE_OUTPUT_BYTES: usize = 4 * 1024;
+        let mut numbered = String::new();
         let mut emitted_bytes = 0usize;
+        let mut clipped_end = start;
+        let mut truncated_lines = 0usize;
         for (i, line) in lines[start..end].iter().enumerate() {
-            emitted_bytes += line.len() + 16;
-            if emitted_bytes > MAX_READ_OUTPUT_BYTES {
-                clipped_end = (start + i).max(start + 1);
+            let over_long = line.len() > MAX_LINE_OUTPUT_BYTES;
+            let entry_len = if over_long {
+                MAX_LINE_OUTPUT_BYTES + 64
+            } else {
+                line.len() + 16
+            };
+            if i > 0 && emitted_bytes + entry_len > MAX_READ_OUTPUT_BYTES {
                 break;
             }
+            if i > 0 {
+                numbered.push('\n');
+            }
+            if over_long {
+                let cut = crate::util::floor_char_boundary(line, MAX_LINE_OUTPUT_BYTES);
+                numbered.push_str(&format!(
+                    "{}: {} [line truncated: {} bytes total]",
+                    start + i + 1,
+                    &line[..cut],
+                    line.len()
+                ));
+                truncated_lines += 1;
+            } else {
+                numbered.push_str(&format!("{}: {}", start + i + 1, line));
+            }
+            emitted_bytes += entry_len;
+            clipped_end = start + i + 1;
         }
         let byte_clipped = clipped_end < end;
         let end = clipped_end;
 
-        let numbered: String = lines[start..end]
-            .iter()
-            .enumerate()
-            .map(|(i, line)| format!("{}: {}", start + i + 1, line))
-            .collect::<Vec<_>>()
-            .join("\n");
-
         crate::session::record_read_for_current_session(&resolved_path);
 
+        let truncation_note = if truncated_lines > 0 {
+            format!(
+                "; {truncated_lines} line(s) longer than {} KB were truncated",
+                MAX_LINE_OUTPUT_BYTES / 1024
+            )
+        } else {
+            String::new()
+        };
         let partial = start > 0 || end < total;
         let summary = if byte_clipped {
             format!(
-                "\n[Lines {}-{} of {total}{mtime_suffix}; output clipped at {} KB - use offset={} with a smaller limit to continue]",
+                "\n[Lines {}-{} of {total}{mtime_suffix}{truncation_note}; output clipped at {} KB - use offset={} with a smaller limit to continue]",
                 start + 1,
                 end,
                 MAX_READ_OUTPUT_BYTES / 1024,
                 end + 1
             )
         } else if partial {
-            format!("\n[Lines {}-{} of {total}{mtime_suffix}]", start + 1, end)
+            format!(
+                "\n[Lines {}-{} of {total}{mtime_suffix}{truncation_note}]",
+                start + 1,
+                end
+            )
         } else {
-            format!("\n[{total} lines total{mtime_suffix}]")
+            format!("\n[{total} lines total{mtime_suffix}{truncation_note}]")
         };
 
         Ok(ToolResult {

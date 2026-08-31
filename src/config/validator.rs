@@ -108,11 +108,6 @@ impl<'a> ConfigValidator<'a> {
         });
 
         report.sections.push(SectionReport {
-            section: "hardware",
-            errors: self.config.hardware.validate(),
-        });
-
-        report.sections.push(SectionReport {
             section: "heartbeat",
             errors: self.config.heartbeat.validate(),
         });

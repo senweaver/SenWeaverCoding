@@ -5,6 +5,7 @@
 import { create } from 'zustand'
 import { evolutionApi } from '../api/evolution'
 import { modelsApi } from '../api/models'
+import { useUIStore } from './uiStore'
 import type {
   AvailableModelEntry,
   AvailableModelsResponse,
@@ -93,6 +94,14 @@ type EvolutionStore = {
   purgeRecycling: () => Promise<number>
   updateReflectionConfig: (patch: Partial<SelfReflectionConfig>) => Promise<void>
   triggerReflection: (sessionId?: string | null) => Promise<string | null>
+}
+
+function notifyMutationFailure(operation: string, error: unknown) {
+  const message = error instanceof Error ? error.message : String(error)
+  useUIStore.getState().addToast({
+    type: 'error',
+    message: `${operation}: ${message}`,
+  })
 }
 
 export const useEvolutionStore = create<EvolutionStore>((set, get) => ({
@@ -231,29 +240,58 @@ export const useEvolutionStore = create<EvolutionStore>((set, get) => ({
   },
 
   async updateConfig(patch) {
-    await evolutionApi.updateConfig(patch)
+    try {
+      await evolutionApi.updateConfig(patch)
+    } catch (error) {
+      notifyMutationFailure('evolution config update failed', error)
+      await get().fetchConfig()
+      return
+    }
     await get().fetchConfig()
     await get().fetchOverview()
   },
 
   async updateLesson(id, patch) {
-    await evolutionApi.updateLesson(id, patch)
+    try {
+      await evolutionApi.updateLesson(id, patch)
+    } catch (error) {
+      notifyMutationFailure('lesson update failed', error)
+      await get().fetchLessons()
+      return
+    }
     await get().fetchLessons()
   },
 
   async deleteLesson(id) {
-    await evolutionApi.deleteLesson(id)
+    try {
+      await evolutionApi.deleteLesson(id)
+    } catch (error) {
+      notifyMutationFailure('lesson delete failed', error)
+      await get().fetchLessons()
+      return
+    }
     await get().fetchLessons()
     await get().fetchOverview()
   },
 
   async setPersistence(persist) {
-    await evolutionApi.setPersistence(persist)
+    try {
+      await evolutionApi.setPersistence(persist)
+    } catch (error) {
+      notifyMutationFailure('evolution persistence toggle failed', error)
+      await get().fetchPersistence()
+      return
+    }
     await Promise.all([get().fetchPersistence(), get().fetchConfig(), get().fetchOverview()])
   },
 
   async purge(scope, beforeMs) {
-    await evolutionApi.purgePersistence(scope, beforeMs)
+    try {
+      await evolutionApi.purgePersistence(scope, beforeMs)
+    } catch (error) {
+      notifyMutationFailure('purge failed', error)
+      return
+    }
     await Promise.all([
       get().fetchPersistence(),
       get().fetchOverview(),
@@ -275,7 +313,12 @@ export const useEvolutionStore = create<EvolutionStore>((set, get) => ({
   },
 
   async deleteExport(id) {
-    await evolutionApi.deleteExport(id)
+    try {
+      await evolutionApi.deleteExport(id)
+    } catch (error) {
+      notifyMutationFailure('export delete failed', error)
+      return
+    }
     await get().fetchExports()
     await get().fetchOverview()
   },
@@ -292,7 +335,12 @@ export const useEvolutionStore = create<EvolutionStore>((set, get) => ({
   },
 
   async deleteCloudTarget(id) {
-    await evolutionApi.deleteCloudTarget(id)
+    try {
+      await evolutionApi.deleteCloudTarget(id)
+    } catch (error) {
+      notifyMutationFailure('cloud target delete failed', error)
+      return
+    }
     await get().fetchCloudTargets()
   },
 
@@ -391,7 +439,9 @@ export const useEvolutionStore = create<EvolutionStore>((set, get) => ({
         }
       }
     } catch (error) {
+      notifyMutationFailure('recycling config update failed', error)
       set({ error: error instanceof Error ? error.message : 'failed' })
+      await get().fetchRecyclingConfig()
     }
   },
 
@@ -423,7 +473,9 @@ export const useEvolutionStore = create<EvolutionStore>((set, get) => ({
         }
       }
     } catch (error) {
+      notifyMutationFailure('reflection config update failed', error)
       set({ error: error instanceof Error ? error.message : 'failed' })
+      await get().fetchReflectionConfig()
     }
   },
 

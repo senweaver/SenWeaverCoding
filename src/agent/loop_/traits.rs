@@ -9,14 +9,6 @@ use tokio::sync::mpsc;
 use crate::agent::TurnEvent;
 use crate::providers::ChatMessage;
 
-#[derive(Debug, Clone)]
-pub struct TurnExperienceSummary {
-    pub user_query: String,
-    pub assistant_response: String,
-    pub tools_used: Vec<String>,
-    pub tool_results: Vec<(String, bool)>,
-}
-
 #[async_trait]
 pub trait ResponseCacheHook: Send + Sync {
     fn build_key(&self, messages: &[ChatMessage], model: &str) -> Option<String>;
@@ -60,11 +52,6 @@ pub trait IterationContextBudgetHook: Send + Sync {
         iteration: usize,
         event_tx: &mpsc::Sender<TurnEvent>,
     );
-}
-
-#[async_trait]
-pub trait ExperienceRecorderHook: Send + Sync {
-    async fn record(&self, summary: &TurnExperienceSummary);
 }
 
 #[async_trait]

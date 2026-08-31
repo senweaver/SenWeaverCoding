@@ -161,7 +161,7 @@ impl Tool for PowerShellTool {
                     error: Some(self.security.resolved_path_violation_message(&resolved)),
                 });
             }
-            cmd.current_dir(resolved);
+            cmd.current_dir(crate::util::strip_verbatim_prefix(resolved));
         }
 
         crate::tools::shell::core::prepare_isolated_command(

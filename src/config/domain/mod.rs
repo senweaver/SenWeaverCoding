@@ -8,7 +8,6 @@ pub mod channels;
 pub mod cloud_ops;
 pub mod delegate_agents;
 pub mod evolution;
-pub mod hardware;
 pub mod heartbeat;
 pub mod lan;
 pub mod mcp_server;

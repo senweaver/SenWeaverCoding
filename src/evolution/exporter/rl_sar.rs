@@ -4,12 +4,13 @@
 
 use crate::evolution::types::{EvolutionExportConfig, TurnRecord};
 
-use super::{ExportOptions, redact_text};
+use super::{ExportContext, ExportOptions, redact_text};
 
 pub fn project(
     turn: &TurnRecord,
     options: &ExportOptions,
     cfg: &EvolutionExportConfig,
+    _ctx: &ExportContext,
 ) -> Option<serde_json::Value> {
     let action_text = turn.response.content.as_deref()?.trim().to_string();
     if action_text.is_empty() {

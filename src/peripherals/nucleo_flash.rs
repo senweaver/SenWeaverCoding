@@ -4,7 +4,6 @@
 
 use anyhow::{Context, Result};
 use std::path::PathBuf;
-use std::process::Command;
 
 const CHIP: &str = "STM32F401RETx";
 const TARGET: &str = "thumbv7em-none-eabihf";

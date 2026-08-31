@@ -135,7 +135,21 @@ impl PatchApplyTool {
                     )
                     .await;
                 }
-                details.push(format!("  Successfully applied hunk(s) to {path}"));
+                match (op.hunks_exact, op.hunks_fuzzy) {
+                    (Some(exact), Some(fuzzy)) if fuzzy > 0 => {
+                        details.push(format!(
+                            "  Successfully applied hunk(s) to {path} ({exact} exact, {fuzzy} fuzzy - anchored away from stated line numbers; re-read to confirm placement)"
+                        ));
+                    }
+                    (Some(exact), Some(_)) => {
+                        details.push(format!(
+                            "  Successfully applied hunk(s) to {path} ({exact} exact)"
+                        ));
+                    }
+                    _ => {
+                        details.push(format!("  Successfully applied hunk(s) to {path}"));
+                    }
+                }
             } else {
                 failed += 1;
                 details.push(format!(
@@ -272,17 +286,111 @@ fn git_path_from_marker(raw: &str) -> Option<String> {
     if t == "/dev/null" || t.is_empty() {
         return None;
     }
-    let stripped = t
+    let unquoted: String = if t.len() >= 2 && t.starts_with('"') && t.ends_with('"') {
+        unescape_git_quoted_path(&t[1..t.len() - 1])
+    } else {
+        t.to_string()
+    };
+    let stripped = unquoted
         .strip_prefix("a/")
-        .or_else(|| t.strip_prefix("b/"))
-        .unwrap_or(t);
+        .or_else(|| unquoted.strip_prefix("b/"))
+        .unwrap_or(&unquoted);
+    if stripped.is_empty() {
+        return None;
+    }
     Some(stripped.to_string())
 }
 
 fn parse_diff_git_target(line: &str) -> Option<String> {
-    let rest = line.strip_prefix("diff --git ")?;
+    let rest = line.strip_prefix("diff --git ")?.trim_end();
+    if rest.ends_with('"') {
+        if let Some(quoted) = last_quoted_token(rest) {
+            return git_path_from_marker(&quoted);
+        }
+    }
     let b_token = rest.rsplit(' ').next()?;
     git_path_from_marker(b_token)
+}
+
+fn last_quoted_token(rest: &str) -> Option<String> {
+    let bytes = rest.as_bytes();
+    if bytes.len() < 2 || bytes[bytes.len() - 1] != b'"' {
+        return None;
+    }
+    let end = bytes.len() - 1;
+    let mut open = None;
+    let mut i = end;
+    while i > 0 {
+        i -= 1;
+        if bytes[i] == b'"' {
+            let mut backslashes = 0usize;
+            let mut j = i;
+            while j > 0 && bytes[j - 1] == b'\\' {
+                backslashes += 1;
+                j -= 1;
+            }
+            if backslashes % 2 == 0 {
+                open = Some(i);
+                break;
+            }
+        }
+    }
+    let open = open?;
+    Some(format!("\"{}\"", &rest[open + 1..end]))
+}
+
+fn unescape_git_quoted_path(inner: &str) -> String {
+    let bytes = inner.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\\' && i + 1 < bytes.len() {
+            match bytes[i + 1] {
+                b'n' => {
+                    out.push(b'\n');
+                    i += 2;
+                }
+                b't' => {
+                    out.push(b'\t');
+                    i += 2;
+                }
+                b'r' => {
+                    out.push(b'\r');
+                    i += 2;
+                }
+                b'\\' => {
+                    out.push(b'\\');
+                    i += 2;
+                }
+                b'"' => {
+                    out.push(b'"');
+                    i += 2;
+                }
+                b'0'..=b'7' => {
+                    let mut value = 0u32;
+                    let mut digits = 0usize;
+                    while digits < 3 && i + 1 + digits < bytes.len() {
+                        let d = bytes[i + 1 + digits];
+                        if !d.is_ascii_digit() || d > b'7' {
+                            break;
+                        }
+                        value = value * 8 + u32::from(d - b'0');
+                        digits += 1;
+                    }
+                    out.push(value as u8);
+                    i += 1 + digits;
+                }
+                other => {
+                    out.push(other);
+                    i += 2;
+                }
+            }
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
 }
 
 fn is_dev_null_marker(rest: &str) -> bool {

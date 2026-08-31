@@ -123,6 +123,9 @@ struct EditHistoryState {
     loaded: bool,
 
     session_first_index: HashMap<String, usize>,
+
+    dirty: bool,
+    flush_scheduled: bool,
 }
 
 impl EditHistory {
@@ -170,6 +173,40 @@ impl EditHistory {
             }
         }
         state.loaded = true;
+    }
+
+    fn schedule_index_flush(&self) {
+        {
+            let mut state = self.state.write();
+            state.dirty = true;
+            if state.flush_scheduled {
+                return;
+            }
+            state.flush_scheduled = true;
+        }
+        let workspace = self.workspace_dir.clone();
+        let spawned = std::thread::Builder::new()
+            .name("edit-history-flush".into())
+            .spawn(move || {
+                std::thread::sleep(std::time::Duration::from_millis(500));
+                EditHistory::shared_for_workspace(&workspace).flush_index_now();
+            })
+            .is_ok();
+        if !spawned {
+            self.flush_index_now();
+        }
+    }
+
+    fn flush_index_now(&self) {
+        {
+            let mut state = self.state.write();
+            state.flush_scheduled = false;
+            if !state.dirty {
+                return;
+            }
+            state.dirty = false;
+        }
+        self.save_index();
     }
 
     fn save_index(&self) {
@@ -350,7 +387,7 @@ impl EditHistory {
             }
         }
 
-        self.save_index();
+        self.schedule_index_flush();
         Ok(())
     }
 
@@ -715,7 +752,7 @@ impl EditHistory {
             }
         }
         drop(state);
-        self.save_index();
+        self.schedule_index_flush();
     }
 
     pub fn latest_batch_id_for(&self, path: &Path) -> Option<String> {

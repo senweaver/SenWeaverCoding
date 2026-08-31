@@ -297,47 +297,73 @@ pub enum PacingExceeded {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum DispatchMode {
-
-    Sequential,
-
-    Parallel { max_concurrency: usize },
+pub struct DispatchPhase {
+    pub start: usize,
+    pub end: usize,
+    pub parallel: bool,
 }
 
-impl DispatchMode {
-
-    pub fn select(
-        tool_names: &[impl AsRef<str>],
-        needs_approval: impl Fn(&str) -> bool,
-        max_concurrency: usize,
-    ) -> Self {
-        if tool_names.len() <= 1 {
-            return DispatchMode::Sequential;
-        }
-        if max_concurrency <= 1 {
-            return DispatchMode::Sequential;
-        }
-        if tool_names.iter().any(|n| n.as_ref() == "tool_search") {
-            return DispatchMode::Sequential;
-        }
-        if tool_names.iter().any(|n| needs_approval(n.as_ref())) {
-            return DispatchMode::Sequential;
-        }
-        let mutation_count = tool_names
-            .iter()
-            .filter(|n| crate::agent::mode::effects::is_file_mutation_tool(n.as_ref()))
-            .count();
-        let shell_count = tool_names
-            .iter()
-            .filter(|n| {
-                crate::agent::tool_handler::outcome::is_command_execution_tool(n.as_ref())
-            })
-            .count();
-        if mutation_count >= 1 || shell_count >= 2 {
-            return DispatchMode::Sequential;
-        }
-        DispatchMode::Parallel {
-            max_concurrency: max_concurrency.max(1),
+pub fn plan_dispatch_phases(
+    tool_names: &[impl AsRef<str>],
+    needs_approval: impl Fn(&str) -> bool,
+    max_concurrency: usize,
+) -> Vec<DispatchPhase> {
+    let len = tool_names.len();
+    if len == 0 {
+        return Vec::new();
+    }
+    if len == 1 || max_concurrency <= 1 {
+        return vec![DispatchPhase {
+            start: 0,
+            end: len,
+            parallel: false,
+        }];
+    }
+    let shell_count = tool_names
+        .iter()
+        .filter(|n| crate::agent::tool_handler::outcome::is_command_execution_tool(n.as_ref()))
+        .count();
+    let shell_is_barrier = shell_count >= 2;
+    let is_barrier = |name: &str| {
+        name == "tool_search"
+            || crate::agent::mode::effects::is_file_mutation_tool(name)
+            || needs_approval(name)
+            || (shell_is_barrier
+                && crate::agent::tool_handler::outcome::is_command_execution_tool(name))
+    };
+    let mut phases: Vec<DispatchPhase> = Vec::new();
+    let mut run_start: Option<usize> = None;
+    for (idx, name) in tool_names.iter().enumerate() {
+        if is_barrier(name.as_ref()) {
+            if let Some(start) = run_start.take() {
+                phases.push(DispatchPhase {
+                    start,
+                    end: idx,
+                    parallel: idx - start > 1,
+                });
+            }
+            phases.push(DispatchPhase {
+                start: idx,
+                end: idx + 1,
+                parallel: false,
+            });
+        } else if run_start.is_none() {
+            run_start = Some(idx);
         }
     }
+    if let Some(start) = run_start.take() {
+        phases.push(DispatchPhase {
+            start,
+            end: len,
+            parallel: len - start > 1,
+        });
+    }
+    if phases.iter().all(|p| !p.parallel) {
+        return vec![DispatchPhase {
+            start: 0,
+            end: len,
+            parallel: false,
+        }];
+    }
+    phases
 }

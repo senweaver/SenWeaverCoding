@@ -1228,7 +1228,10 @@ async fn run_role_agentic(ctx: RoleAgenticCtx<'_>) -> Result<String, String> {
     .with_on_delta(on_delta_for_loop);
     let loop_fut = crate::agent::coding_mode::scope_coding_mode(
         ctx.inherited_mode,
-        crate::agent::loop_::unified::UnifiedLoop::new(delegated_policy).run(&mut history),
+        crate::evolution::scope_evolution_ctx(
+            None,
+            crate::agent::loop_::unified::UnifiedLoop::new(delegated_policy).run(&mut history),
+        ),
     );
 
     let result = tokio::select! {

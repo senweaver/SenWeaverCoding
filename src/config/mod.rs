@@ -21,7 +21,7 @@ pub use schema::{
     DelegateAgentConfig, DelegateToolConfig, DiscordConfig, DockerRuntimeConfig, EdgeTtsConfig,
     ElevenLabsTtsConfig, EmbeddingRouteConfig, EstopConfig, FeishuConfig, GatewayConfig,
     GeminiCliConfig, GoogleSttConfig, GoogleTtsConfig, GoogleWorkspaceAllowedOperation,
-    GoogleWorkspaceConfig, HandsConfig, HardwareConfig, HardwareTransport, HeartbeatConfig,
+    GoogleWorkspaceConfig, HandsConfig, HeartbeatConfig,
     HooksConfig,
     HttpRequestConfig, IMessageConfig, IdentityConfig, ImageGenConfig, ImageProviderDalleConfig,
     ImageProviderFluxConfig, ImageProviderImagenConfig, ImageProviderStabilityConfig, JiraConfig,

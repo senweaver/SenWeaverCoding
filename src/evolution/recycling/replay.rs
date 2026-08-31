@@ -10,6 +10,8 @@ use crate::evolution::EvolutionEngine;
 
 const APPROX_CHARS_PER_TOKEN: usize = 4;
 
+const TOTAL_INJECTION_CHAR_CAP: usize = 2_500 * APPROX_CHARS_PER_TOKEN;
+
 pub fn build_recycled_block(
     engine: &Arc<EvolutionEngine>,
     coding_mode: Option<&str>,
@@ -18,22 +20,38 @@ pub fn build_recycled_block(
     if !snapshot.recycling.enabled {
         return None;
     }
+    let max_replay = snapshot.recycling.max_replay_in_prompt;
+    if max_replay == 0 {
+        return None;
+    }
     let store = engine.recycling_store()?;
     let recent_limit = snapshot.recycling.max_retained.clamp(8, 200);
     let candidates = store.list_recent(recent_limit).ok()?;
     if candidates.is_empty() {
         return None;
     }
-    let ranked = rank_experiences(candidates, coding_mode, &snapshot.recycling);
+    let user_message = crate::evolution::collector::try_ctx()
+        .and_then(|ctx| ctx.user_message().map(str::to_string));
+    let ranked = rank_experiences(
+        candidates,
+        coding_mode,
+        user_message.as_deref(),
+        &snapshot.recycling,
+    );
     if ranked.is_empty() {
         return None;
     }
-    let max_replay = snapshot.recycling.max_replay_in_prompt.max(1);
+    let lessons_chars = crate::evolution::injector::current_lesson_block_chars(coding_mode);
+    let remaining_cap = TOTAL_INJECTION_CHAR_CAP.saturating_sub(lessons_chars);
     let char_budget = snapshot
         .recycling
         .replay_token_budget
         .max(64)
-        .saturating_mul(APPROX_CHARS_PER_TOKEN);
+        .saturating_mul(APPROX_CHARS_PER_TOKEN)
+        .min(remaining_cap);
+    if char_budget < 64 {
+        return None;
+    }
     let mut chosen_ids: Vec<String> = Vec::new();
     let mut buf = String::from(
         "## Recycled past experiences\n\n\
@@ -42,7 +60,7 @@ pub fn build_recycled_block(
          repeating the failures. Ignore any that conflict with the current \
          task or with user instructions.\n\n",
     );
-    let mut used_chars: usize = 0;
+    let mut used_chars: usize = buf.chars().count();
     let mut emitted = 0_usize;
     for entry in ranked {
         if emitted >= max_replay {
@@ -50,7 +68,10 @@ pub fn build_recycled_block(
         }
         let formatted = format_experience(&entry.experience);
         let approx = formatted.chars().count() + 16;
-        if used_chars + approx > char_budget && emitted > 0 {
+        if used_chars + approx > char_budget {
+            if emitted == 0 {
+                continue;
+            }
             break;
         }
         buf.push_str(&formatted);

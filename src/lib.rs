@@ -112,7 +112,6 @@ pub mod evolution;
 pub mod gateway;
 pub mod guardrails;
 pub mod hands;
-pub mod hardware;
 pub mod health;
 pub mod heartbeat;
 pub mod hooks;
@@ -600,48 +599,6 @@ pub enum IntegrationCommands {
     },
 }
 
-#[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub enum HardwareCommands {
-
-    #[command(long_about = "\
-Enumerate USB devices and show known boards.
-
-Scans connected USB devices by VID/PID and matches them against \
-known development boards (STM32 Nucleo, Arduino, ESP32).
-
-Examples:
-  sen hardware discover")]
-    Discover,
-
-    #[command(long_about = "\
-Introspect a device by its serial or device path.
-
-Opens the specified device path and queries for board information, \
-firmware version, and supported capabilities.
-
-Examples:
-  sen hardware introspect /dev/ttyACM0
-  sen hardware introspect COM3")]
-    Introspect {
-
-        path: String,
-    },
-
-    #[command(long_about = "\
-Get chip info via USB using probe-rs over ST-Link.
-
-Queries the target MCU directly through the debug probe without \
-requiring any firmware on the target board.
-
-Examples:
-  sen hardware info
-  sen hardware info --chip STM32F401RETx")]
-    Info {
-
-        #[arg(long, default_value = "STM32F401RETx")]
-        chip: String,
-    },
-}
 
 #[derive(Subcommand, Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum PeripheralCommands {

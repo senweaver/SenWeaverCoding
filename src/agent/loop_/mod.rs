@@ -2249,6 +2249,63 @@ async fn run_auto_verify_gate(
 
 async fn execute_one_tool(
     call_name: &str,
+    call_arguments: serde_json::Value,
+    tools_registry: &[Box<dyn Tool>],
+    activated_tools: Option<&std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
+    observer: &dyn Observer,
+    cancellation_token: Option<&CancellationToken>,
+    rbac_engine: Option<&std::sync::Arc<crate::security::rbac::RbacEngine>>,
+    rbac_identity: Option<&crate::security::rbac::CallerIdentity>,
+    approval: Option<&ApprovalManager>,
+    guardrails_pre_cleared: bool,
+) -> Result<ToolExecutionOutcome> {
+    let evolution_args = if crate::evolution::collecting() {
+        Some(call_arguments.clone())
+    } else {
+        None
+    };
+    let result = execute_one_tool_inner(
+        call_name,
+        call_arguments,
+        tools_registry,
+        activated_tools,
+        observer,
+        cancellation_token,
+        rbac_engine,
+        rbac_identity,
+        approval,
+        guardrails_pre_cleared,
+    )
+    .await;
+    match &result {
+        Ok(outcome) => {
+            crate::evolution::record_tool_outcome(
+                call_name,
+                outcome.success,
+                Some(outcome.duration.as_millis() as u64),
+                None,
+                evolution_args.as_ref(),
+                Some(&outcome.output),
+                outcome.error_reason.as_deref(),
+            );
+        }
+        Err(error) => {
+            crate::evolution::record_tool_outcome(
+                call_name,
+                false,
+                None,
+                None,
+                evolution_args.as_ref(),
+                None,
+                Some(&error.to_string()),
+            );
+        }
+    }
+    result
+}
+
+async fn execute_one_tool_inner(
+    call_name: &str,
     mut call_arguments: serde_json::Value,
     tools_registry: &[Box<dyn Tool>],
     activated_tools: Option<&std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>>,
@@ -2671,8 +2728,9 @@ async fn execute_one_tool(
                 "tool execution panicked; recovering as a tool error so the turn keeps running"
             );
             Err(anyhow::anyhow!(
-                "Tool '{call_name}' crashed internally ({detail}). The underlying file/state was \
-                 left unchanged. Re-read the relevant file and try a smaller or different edit."
+                "Tool '{call_name}' crashed internally ({detail}). Its work may have been \
+                 partially applied; re-read the affected files to verify their current state \
+                 before retrying with a smaller or different operation."
             ))
         }
     };
@@ -2708,26 +2766,27 @@ async fn execute_one_tool(
     match tool_result {
         Ok(r) => {
             let duration = start.elapsed();
-            let normalized =
+            let mut normalized =
                 crate::agent::tool_handler::outcome::normalize_tool_result(call_name, r);
             observer.record_event(&ObserverEvent::ToolCall {
                 tool: call_name.to_string(),
                 duration,
                 success: normalized.success,
             });
+            const POSTPROCESS_SPAWN_THRESHOLD_BYTES: usize = 8 * 1024;
             if normalized.success {
-                const COMPRESS_SPAWN_THRESHOLD_BYTES: usize = 8 * 1024;
-                let scrubbed: std::sync::Arc<str> =
-                    scrub_tool_output(call_name, &normalized.output).into();
-                let compressed = if scrubbed.len() < COMPRESS_SPAWN_THRESHOLD_BYTES {
+                let raw: std::sync::Arc<str> = std::mem::take(&mut normalized.output).into();
+                let compressed = if raw.len() < POSTPROCESS_SPAWN_THRESHOLD_BYTES {
+                    let scrubbed = scrub_tool_output(call_name, &raw);
                     crate::agent::token::optimizer::compress_output(call_name, &scrubbed)
                 } else {
                     let call_name_owned = call_name.to_string();
-                    let scrubbed_for_task = std::sync::Arc::clone(&scrubbed);
+                    let raw_for_task = std::sync::Arc::clone(&raw);
                     match tokio::task::spawn_blocking(move || {
+                        let scrubbed = scrub_tool_output(&call_name_owned, &raw_for_task);
                         crate::agent::token::optimizer::compress_output(
                             &call_name_owned,
-                            &scrubbed_for_task,
+                            &scrubbed,
                         )
                     })
                     .await
@@ -2737,9 +2796,19 @@ async fn execute_one_tool(
                             tracing::warn!(
                                 tool = call_name,
                                 error = %err,
-                                "tool output compression task failed; using uncompressed output"
+                                "tool output post-processing task failed; withholding output"
                             );
-                            scrubbed.to_string()
+                            return Ok(ToolExecutionOutcome {
+                                output: format!(
+                                    "[Tool '{call_name}' produced {} bytes of output, but \
+                                     post-processing failed; output withheld. Re-run the tool \
+                                     if the content is needed.]",
+                                    raw.len()
+                                ),
+                                success: true,
+                                error_reason: None,
+                                duration,
+                            });
                         }
                     }
                 };
@@ -2761,11 +2830,40 @@ async fn execute_one_tool(
                     duration,
                 })
             } else {
-                let scrubbed = scrub_credentials(&normalized.output);
-                let reason = normalized
-                    .error_reason
-                    .map(|r| scrub_credentials(&r))
-                    .unwrap_or_else(|| scrubbed.clone());
+                let output = std::mem::take(&mut normalized.output);
+                let error_reason = normalized.error_reason.take();
+                let total_len = output.len() + error_reason.as_deref().map_or(0, str::len);
+                let (scrubbed, reason) = if total_len < POSTPROCESS_SPAWN_THRESHOLD_BYTES {
+                    let scrubbed = scrub_credentials(&output);
+                    let reason = error_reason
+                        .map(|r| scrub_credentials(&r))
+                        .unwrap_or_else(|| scrubbed.clone());
+                    (scrubbed, reason)
+                } else {
+                    match tokio::task::spawn_blocking(move || {
+                        let scrubbed = scrub_credentials(&output);
+                        let reason = error_reason
+                            .map(|r| scrub_credentials(&r))
+                            .unwrap_or_else(|| scrubbed.clone());
+                        (scrubbed, reason)
+                    })
+                    .await
+                    {
+                        Ok(pair) => pair,
+                        Err(err) => {
+                            tracing::warn!(
+                                tool = call_name,
+                                error = %err,
+                                "tool error post-processing task failed; withholding output"
+                            );
+                            let placeholder = format!(
+                                "[Tool '{call_name}' failed and its error output could not be \
+                                 post-processed; output withheld]"
+                            );
+                            (placeholder.clone(), placeholder)
+                        }
+                    }
+                };
                 Ok(ToolExecutionOutcome {
                     output: scrubbed,
                     success: false,
@@ -2918,15 +3016,12 @@ async fn run_self_consistency_resampling(
     (winner, result.agreement as f64, overridden, result.samples)
 }
 
-fn should_execute_tools_in_parallel(
+fn plan_tool_dispatch_phases(
     tool_calls: &[ParsedToolCall],
     approval: Option<&ApprovalManager>,
-) -> bool {
-
-    use crate::agent::executor_core::DispatchMode;
-
+) -> Vec<crate::agent::executor_core::DispatchPhase> {
     let names: Vec<&str> = tool_calls.iter().map(|c| c.name.as_str()).collect();
-    let mode = DispatchMode::select(
+    crate::agent::executor_core::plan_dispatch_phases(
         &names,
         |name| {
             let perm = crate::gateway::ws::desktop::active_permission_mode();
@@ -2939,8 +3034,7 @@ fn should_execute_tools_in_parallel(
             }
         },
         resolve_parallel_tool_cap(),
-    );
-    matches!(mode, DispatchMode::Parallel { .. })
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3130,9 +3224,6 @@ async fn fire_post_turn_hooks(
     channel_name: &str,
     hooks: Option<&crate::hooks::HookRunner>,
     response_cache_hook: Option<&std::sync::Arc<dyn crate::agent::loop_::traits::ResponseCacheHook>>,
-    experience_recorder_hook: Option<
-        &std::sync::Arc<dyn crate::agent::loop_::traits::ExperienceRecorderHook>,
-    >,
     memory_session_hook: Option<&std::sync::Arc<dyn crate::agent::loop_::traits::MemorySessionHook>>,
     cache_key: Option<&String>,
     user_message: &str,
@@ -3150,15 +3241,6 @@ async fn fire_post_turn_hooks(
         if let (Some(hook), Some(key)) = (response_cache_hook, cache_key) {
             hook.write_back(key, model, final_text, output_tokens).await;
         }
-    }
-    if let Some(hook) = experience_recorder_hook {
-        let summary = crate::agent::loop_::traits::TurnExperienceSummary {
-            user_query: user_message.to_string(),
-            assistant_response: final_text.to_string(),
-            tools_used: tools_used.to_vec(),
-            tool_results: tool_results.to_vec(),
-        };
-        hook.record(&summary).await;
     }
     if let Some(hook) = memory_session_hook {
         hook.on_turn_end(final_text, tools_used).await;
@@ -3405,7 +3487,6 @@ pub(crate) async fn run_unified_loop_impl(
         turn_preamble_hook,
         gui_model_switch_hook,
         iteration_context_budget_hook,
-        experience_recorder_hook,
         plan_mode_nudge_hook,
         tool_descriptions,
     } = policy;
@@ -3450,7 +3531,6 @@ pub(crate) async fn run_unified_loop_impl(
                 channel_name,
                 hooks,
                 response_cache_hook.as_ref(),
-                experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
                 response_cache_key.as_ref(),
                 &user_msg_for_hooks,
@@ -4416,7 +4496,6 @@ pub(crate) async fn run_unified_loop_impl(
                 channel_name,
                 hooks,
                 response_cache_hook.as_ref(),
-                experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
                 response_cache_key.as_ref(),
                 &user_msg_for_hooks,
@@ -4457,7 +4536,6 @@ pub(crate) async fn run_unified_loop_impl(
                     channel_name,
                     hooks,
                     response_cache_hook.as_ref(),
-                    experience_recorder_hook.as_ref(),
                     memory_session_hook.as_ref(),
                     response_cache_key.as_ref(),
                     &user_msg_for_hooks,
@@ -4998,6 +5076,20 @@ pub(crate) async fn run_unified_loop_impl(
                                     llm_started_at.elapsed().as_millis() as u64;
                             });
                         }
+                        crate::evolution::record_cost(
+                            reported_prompt_tokens,
+                            output_tokens,
+                            reported_prompt_tokens + output_tokens,
+                            cost_usd,
+                        );
+                    }
+                }
+
+                crate::evolution::record_provider_model(Some(provider_name), Some(model));
+                crate::evolution::snapshot_prompt_messages(&prepared_messages.messages);
+                if let Some(reasoning) = resp.reasoning_content.as_deref() {
+                    if !reasoning.is_empty() {
+                        crate::evolution::set_thinking_text(reasoning);
                     }
                 }
 
@@ -5581,7 +5673,6 @@ pub(crate) async fn run_unified_loop_impl(
                         channel_name,
                         hooks,
                         response_cache_hook.as_ref(),
-                        experience_recorder_hook.as_ref(),
                         memory_session_hook.as_ref(),
                         response_cache_key.as_ref(),
                         &user_msg_for_hooks,
@@ -5681,7 +5772,6 @@ pub(crate) async fn run_unified_loop_impl(
                 channel_name,
                 hooks,
                 response_cache_hook.as_ref(),
-                experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
                 response_cache_key.as_ref(),
                 &user_msg_for_hooks,
@@ -6628,17 +6718,35 @@ pub(crate) async fn run_unified_loop_impl(
         }
 
         let parent_draft_for_scope = on_delta.clone();
-        let allow_parallel_execution =
-            should_execute_tools_in_parallel(&executable_calls, approval);
-        let executed_outcomes: Vec<(usize, ParsedToolCall, ToolExecutionOutcome)> =
-            if allow_parallel_execution && executable_calls.len() > 1 {
-                let outcomes = PARENT_DRAFT_CHANNEL
-                    .scope(
-                        parent_draft_for_scope,
+        let dispatch_phases = plan_tool_dispatch_phases(&executable_calls, approval);
+        let outcomes: Vec<ToolExecutionOutcome> = PARENT_DRAFT_CHANNEL
+            .scope(parent_draft_for_scope, async {
+                let mut collected: Vec<ToolExecutionOutcome> =
+                    Vec::with_capacity(executable_calls.len());
+                for phase in &dispatch_phases {
+                    let calls_slice = &executable_calls[phase.start..phase.end];
+                    if cancellation_token
+                        .as_ref()
+                        .is_some_and(|t| t.is_cancelled())
+                    {
+                        for call in calls_slice {
+                            collected.push(ToolExecutionOutcome {
+                                output: format!(
+                                    "tool '{}' was not executed: the turn was cancelled before it ran",
+                                    call.name
+                                ),
+                                success: false,
+                                error_reason: Some("turn cancelled".to_string()),
+                                duration: Duration::ZERO,
+                            });
+                        }
+                        continue;
+                    }
+                    let phase_outcomes = if phase.parallel && calls_slice.len() > 1 {
                         execute_tools_parallel(
-                            &executable_calls,
-                            &executable_pre_cleared,
-                            &executable_runtime_approved,
+                            calls_slice,
+                            &executable_pre_cleared[phase.start..phase.end],
+                            &executable_runtime_approved[phase.start..phase.end],
                             tools_registry,
                             activated_tools,
                             observer,
@@ -6646,23 +6754,13 @@ pub(crate) async fn run_unified_loop_impl(
                             rbac_engine,
                             rbac_identity,
                             approval,
-                        ),
-                    )
-                    .await?;
-                executable_indices
-                    .into_iter()
-                    .zip(executable_calls.into_iter())
-                    .zip(outcomes.into_iter())
-                    .map(|((idx, call), outcome)| (idx, call, outcome))
-                    .collect()
-            } else {
-                let outcomes = PARENT_DRAFT_CHANNEL
-                    .scope(
-                        parent_draft_for_scope,
+                        )
+                        .await?
+                    } else {
                         execute_tools_sequential(
-                            &executable_calls,
-                            &executable_pre_cleared,
-                            &executable_runtime_approved,
+                            calls_slice,
+                            &executable_pre_cleared[phase.start..phase.end],
+                            &executable_runtime_approved[phase.start..phase.end],
                             tools_registry,
                             activated_tools,
                             observer,
@@ -6670,16 +6768,21 @@ pub(crate) async fn run_unified_loop_impl(
                             rbac_engine,
                             rbac_identity,
                             approval,
-                        ),
-                    )
-                    .await?;
-                executable_indices
-                    .into_iter()
-                    .zip(executable_calls.into_iter())
-                    .zip(outcomes.into_iter())
-                    .map(|((idx, call), outcome)| (idx, call, outcome))
-                    .collect()
-            };
+                        )
+                        .await?
+                    };
+                    collected.extend(phase_outcomes);
+                }
+                Ok::<Vec<ToolExecutionOutcome>, anyhow::Error>(collected)
+            })
+            .await?;
+        let executed_outcomes: Vec<(usize, ParsedToolCall, ToolExecutionOutcome)> =
+            executable_indices
+                .into_iter()
+                .zip(executable_calls.into_iter())
+                .zip(outcomes.into_iter())
+                .map(|((idx, call), outcome)| (idx, call, outcome))
+                .collect();
 
         for (idx, call, outcome) in executed_outcomes {
             if runtime_trace::is_enabled() {
@@ -7093,7 +7196,6 @@ pub(crate) async fn run_unified_loop_impl(
                 channel_name,
                 hooks,
                 response_cache_hook.as_ref(),
-                experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
                 response_cache_key.as_ref(),
                 &user_msg_for_hooks,
@@ -7136,7 +7238,6 @@ pub(crate) async fn run_unified_loop_impl(
                 channel_name,
                 hooks,
                 response_cache_hook.as_ref(),
-                experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
                 response_cache_key.as_ref(),
                 &user_msg_for_hooks,
@@ -7181,7 +7282,6 @@ pub(crate) async fn run_unified_loop_impl(
                 channel_name,
                 hooks,
                 response_cache_hook.as_ref(),
-                experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
                 response_cache_key.as_ref(),
                 &user_msg_for_hooks,
@@ -7312,7 +7412,6 @@ pub(crate) async fn run_unified_loop_impl(
                 channel_name,
                 hooks,
                 response_cache_hook.as_ref(),
-                experience_recorder_hook.as_ref(),
                 memory_session_hook.as_ref(),
                 response_cache_key.as_ref(),
                 &user_msg_for_hooks,
@@ -7402,7 +7501,6 @@ pub(crate) async fn run_unified_loop_impl(
         channel_name,
         hooks,
         response_cache_hook.as_ref(),
-        experience_recorder_hook.as_ref(),
         memory_session_hook.as_ref(),
         response_cache_key.as_ref(),
         &user_msg_for_hooks,
@@ -7593,6 +7691,8 @@ async fn run_impl(
             .parent()
             .map(|p| p.join("event_audit.jsonl")),
     );
+
+    let evolution_session_id = format!("cli-{}", uuid::Uuid::new_v4().simple());
 
     let mem: Arc<dyn Memory> = {
         let memory_config = config.clone();
@@ -8348,7 +8448,10 @@ async fn run_impl(
 
         let cli_hooks = crate::hooks::build_runner(&config, &config.workspace_dir);
         let model_switch_callback = get_model_switch_state();
-        let response = scope_model_switch(async {
+        let response = run_with_evolution_turn(
+            &evolution_session_id,
+            &effective_msg,
+            scope_model_switch(async {
             let mut current_provider = std::sync::Arc::clone(&provider);
             let mut current_provider_name = provider_name.to_string();
             let mut current_model_name = model_name.to_string();
@@ -8429,7 +8532,8 @@ async fn run_impl(
                     }
                 }
             }
-        })
+        }),
+        )
         .await?;
 
         #[cfg(feature = "skill-creation")]
@@ -8748,7 +8852,10 @@ async fn run_impl(
                     }
                 });
 
-            let response = scope_model_switch(async {
+            let response = run_with_evolution_turn(
+                &evolution_session_id,
+                &effective_input,
+                scope_model_switch(async {
             let model_switch_callback = get_model_switch_state();
             if let Some(bs) = crate::bootstrap::try_get_state() {
                 if let Some(requested) = bs.read(|s| s.main_loop_model_override.clone()) {
@@ -8839,12 +8946,14 @@ async fn run_impl(
                         if history.len() > history_len_before_turn {
                             crate::agent::dangling_tool_repair::note_failed_turn_chat(&mut history);
                         }
+                        let _ = crate::evolution::finalize_turn(None, Some(format!("{e}")));
                         break String::new();
                     }
                 }
             };
             Ok::<String, anyhow::Error>(turn_response)
-            })
+            }),
+            )
             .await?;
 
             drop(delta_tx);
@@ -8939,6 +9048,67 @@ async fn run_impl(
     Ok(final_output)
 }
 
+async fn run_with_evolution_turn<F>(
+    session_id: &str,
+    user_message: &str,
+    fut: F,
+) -> Result<String>
+where
+    F: std::future::Future<Output = Result<String>>,
+{
+    let evolution_ctx = crate::evolution::try_global().and_then(|engine| {
+        if !engine.enabled() {
+            return None;
+        }
+        engine.flush_next_state(session_id, "user", user_message);
+        let ctx = crate::evolution::EvolutionCtx::new(engine, session_id.to_string())
+            .with_turn_class(crate::evolution::TurnClass::Main)
+            .with_user_message(user_message.to_string());
+        let injected = crate::evolution::injector::last_injected_lesson_ids(Some(
+            crate::agent::coding_mode::active_coding_mode().label(),
+        ));
+        if !injected.is_empty() {
+            ctx.record_injected_lessons(&injected);
+        }
+        Some(ctx)
+    });
+    let result = crate::evolution::scope_evolution_ctx(evolution_ctx.clone(), fut).await;
+    if let Some(ref ctx) = evolution_ctx {
+        let aborted = match &result {
+            Ok(_) => None,
+            Err(error) => Some(format!("{error}")),
+        };
+        let _ = ctx.finalize_turn(result.as_ref().ok().cloned(), aborted);
+    }
+    result
+}
+
+static PROCESS_MESSAGE_MEMORY_CACHE: once_cell::sync::Lazy<
+    parking_lot::Mutex<Option<(u64, Arc<dyn Memory>)>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+static PROCESS_MESSAGE_MCP_CACHE: once_cell::sync::Lazy<
+    parking_lot::Mutex<Option<(u64, std::sync::Arc<crate::tools::McpRegistry>)>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+fn process_message_memory_fingerprint(config: &Config) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{:?}", config.memory).hash(&mut hasher);
+    format!("{:?}", config.embedding_routes).hash(&mut hasher);
+    format!("{:?}", config.storage.provider.config).hash(&mut hasher);
+    config.workspace_dir.hash(&mut hasher);
+    config.api_key.hash(&mut hasher);
+    hasher.finish()
+}
+
+fn process_message_mcp_fingerprint(config: &Config) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    format!("{:?}", config.mcp.servers).hash(&mut hasher);
+    hasher.finish()
+}
+
 pub async fn process_message(
     config: Config,
     message: &str,
@@ -8959,16 +9129,29 @@ pub async fn process_message(
             .map(|p| p.join("approval_audit.jsonl"));
         ApprovalManager::for_surface(&config.autonomy, false, audit_path)
     };
-    let mem: Arc<dyn Memory> = Arc::from(
-        memory::create_memory_with_storage_and_routes_async(
-            config.memory.clone(),
-            config.embedding_routes.clone(),
-            Some(config.storage.provider.config.clone()),
-            config.workspace_dir.clone(),
-            config.api_key.clone(),
-        )
-        .await?,
-    );
+    let memory_fp = process_message_memory_fingerprint(&config);
+    let cached_mem = PROCESS_MESSAGE_MEMORY_CACHE
+        .lock()
+        .as_ref()
+        .filter(|(fp, _)| *fp == memory_fp)
+        .map(|(_, m)| Arc::clone(m));
+    let mem: Arc<dyn Memory> = match cached_mem {
+        Some(m) => m,
+        None => {
+            let built: Arc<dyn Memory> = Arc::from(
+                memory::create_memory_with_storage_and_routes_async(
+                    config.memory.clone(),
+                    config.embedding_routes.clone(),
+                    Some(config.storage.provider.config.clone()),
+                    config.workspace_dir.clone(),
+                    config.api_key.clone(),
+                )
+                .await?,
+            );
+            *PROCESS_MESSAGE_MEMORY_CACHE.lock() = Some((memory_fp, Arc::clone(&built)));
+            built
+        }
+    };
 
     let (composio_key, composio_entity_id) = if config.composio.enabled {
         (
@@ -9011,16 +9194,41 @@ pub async fn process_message(
         std::sync::Arc<parking_lot::Mutex<crate::tools::ActivatedToolSet>>,
     > = None;
     if config.mcp.enabled && !config.mcp.servers.is_empty() {
-        tracing::info!(
-            "Initializing MCP client  - {} server(s) configured",
-            config.mcp.servers.len()
-        );
-        match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
+        let mcp_fp = process_message_mcp_fingerprint(&config);
+        let cached_registry = PROCESS_MESSAGE_MCP_CACHE
+            .lock()
+            .as_ref()
+            .filter(|(fp, _)| *fp == mcp_fp)
+            .map(|(_, r)| std::sync::Arc::clone(r));
+        let registry_result: anyhow::Result<std::sync::Arc<crate::tools::McpRegistry>> =
+            match cached_registry {
+                Some(registry) => {
+                    crate::tools::mcp::client::register_global_registry(std::sync::Arc::clone(
+                        &registry,
+                    ));
+                    Ok(registry)
+                }
+                None => {
+                    tracing::info!(
+                        "Initializing MCP client  - {} server(s) configured",
+                        config.mcp.servers.len()
+                    );
+                    match crate::tools::McpRegistry::connect_all(&config.mcp.servers).await {
+                        Ok(registry) => {
+                            let registry = std::sync::Arc::new(registry);
+                            crate::tools::mcp::client::register_global_registry(
+                                std::sync::Arc::clone(&registry),
+                            );
+                            *PROCESS_MESSAGE_MCP_CACHE.lock() =
+                                Some((mcp_fp, std::sync::Arc::clone(&registry)));
+                            Ok(registry)
+                        }
+                        Err(e) => Err(e),
+                    }
+                }
+            };
+        match registry_result {
             Ok(registry) => {
-                let registry = std::sync::Arc::new(registry);
-                crate::tools::mcp::client::register_global_registry(std::sync::Arc::clone(
-                    &registry,
-                ));
                 if config.mcp.deferred_loading {
                     let deferred_set = crate::tools::DeferredMcpToolSet::from_registry(
                         std::sync::Arc::clone(&registry),
@@ -9370,7 +9578,13 @@ pub async fn process_message(
     .with_activated_tools(activated_handle_pm.as_ref())
     .with_hooks(daemon_hooks.as_deref())
     .with_tool_descriptions(Some(&i18n_descs));
-    crate::agent::loop_::unified::UnifiedLoop::new(policy)
-        .run(&mut history)
-        .await
+    let evolution_session = session_id
+        .map(str::to_string)
+        .unwrap_or_else(|| format!("adhoc-{}", uuid::Uuid::new_v4().simple()));
+    run_with_evolution_turn(
+        &evolution_session,
+        &effective_message,
+        crate::agent::loop_::unified::UnifiedLoop::new(policy).run(&mut history),
+    )
+    .await
 }

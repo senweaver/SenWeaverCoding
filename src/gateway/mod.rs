@@ -29,7 +29,6 @@ pub mod workspace_files;
 pub mod a2a;
 pub mod client_ip;
 pub mod cors;
-pub mod hardware_context;
 pub mod lifecycle;
 pub mod channel_supervisor;
 pub mod loopback_auth;
@@ -418,11 +417,17 @@ impl AppState {
         };
         {
             let mut guard = self.provider.write();
-            *guard = provider_arc;
+            *guard = Arc::clone(&provider_arc);
         }
         {
             let mut guard = self.model.write();
-            *guard = model_string;
+            *guard = model_string.clone();
+        }
+        if let Some(engine) = crate::evolution::try_global() {
+            engine.set_judge_provider(crate::evolution::JudgeProviderRef {
+                provider: provider_arc,
+                model: model_string,
+            });
         }
         self.push_live_config(cfg);
     }
@@ -2674,14 +2679,6 @@ async fn run_gateway_inner(
         .route("/api/coordination/locks", get(api::handle_api_coordination_locks))
         .route("/api/multi-agent/status", get(api::handle_api_multi_agent_status))
 
-        .route("/api/hardware/boards", get(hardware_context::handle_hardware_boards))
-        .route("/api/hardware/pin", post(hardware_context::handle_hardware_pin))
-        .route(
-            "/api/hardware/context",
-            get(hardware_context::handle_hardware_context_get)
-                .post(hardware_context::handle_hardware_context_post),
-        )
-        .route("/api/hardware/reload", post(hardware_context::handle_hardware_reload))
         .route("/api/rbac/status", get(api::handle_api_rbac_status))
         .route("/api/rbac/users", get(api::handle_api_rbac_users_list).post(api::handle_api_rbac_users_create))
         .route("/api/rbac/users/{user_id}", get(api::handle_api_rbac_user_get).put(api::handle_api_rbac_user_update).delete(api::handle_api_rbac_user_delete))

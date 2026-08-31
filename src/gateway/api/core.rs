@@ -4981,9 +4981,9 @@ pub async fn handle_api_learning_features(
             "max_entries": config.feedback.max_entries,
         },
         "experience": {
-            "enabled": config.experience.enabled,
-            "capacity": config.experience.capacity,
-            "few_shot_count": config.experience.few_shot_count,
+            "enabled": config.evolution.recycling.enabled,
+            "capacity": config.evolution.recycling.max_retained,
+            "few_shot_count": config.evolution.recycling.max_replay_in_prompt,
         },
         "prompt_optimizer": {
             "enabled": config.prompt_optimizer.enabled,

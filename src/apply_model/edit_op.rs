@@ -55,6 +55,8 @@ pub enum NotebookCellOp {
         cell_index: usize,
         new_source: String,
         cell_type: String,
+        #[serde(default)]
+        insert_before: bool,
     },
     Delete {
         cell_index: usize,
@@ -290,6 +292,7 @@ pub enum EditOrigin {
     MultiEditTool,
     GlobEditTool,
     XfileRefactorTool,
+    LspFormatTool,
     NotebookEditTool,
     DiffSession,
     Agent { id: String },
@@ -309,6 +312,7 @@ impl EditOrigin {
             EditOrigin::MultiEditTool => "multi_edit",
             EditOrigin::GlobEditTool => "glob_edit",
             EditOrigin::XfileRefactorTool => "code_xfile_refactor",
+            EditOrigin::LspFormatTool => "lsp_format",
             EditOrigin::NotebookEditTool => "notebook_edit",
             EditOrigin::DiffSession => "diff_session",
             EditOrigin::Agent { .. } => "agent",

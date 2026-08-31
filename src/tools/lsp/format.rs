@@ -3,19 +3,38 @@
 // Licensed under the MIT License.
 
 use super::super::traits::{Tool, ToolResult};
+use super::text_edit::{adapt_edit_newtext_eols, apply_edits_to_content, secure_resolve_target};
+use crate::apply_model::{EditBatch, EditOp, EditOrigin, OpsApplier};
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
 use serde_json::json;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+
+const LSP_FORMAT_TIMEOUT: Duration = Duration::from_secs(10);
 
 pub struct LspFormatTool {
     security: Arc<SecurityPolicy>,
+    ops_applier: Arc<OpsApplier>,
 }
 
 impl LspFormatTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        Self { security }
+        let ops_applier = Arc::new(
+            OpsApplier::default_for_shared_workspace(security.workspace_root_handle())
+                .with_allowed_roots(security.allowed_roots.clone()),
+        );
+        Self {
+            security,
+            ops_applier,
+        }
+    }
+
+    #[must_use]
+    pub fn with_ops_applier(mut self, ops_applier: Arc<OpsApplier>) -> Self {
+        self.ops_applier = ops_applier;
+        self
     }
 
     fn resolve_path(&self, file_path: &str) -> PathBuf {
@@ -36,7 +55,8 @@ impl Tool for LspFormatTool {
 
     fn description(&self) -> &str {
         "Format a source file using the language server's document formatting provider \
-         (textDocument/formatting). Applies the returned text edits in place."
+         (textDocument/formatting). Applies the returned text edits in place while preserving \
+         the file's original line endings."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -110,10 +130,7 @@ impl Tool for LspFormatTool {
             .ok_or_else(|| anyhow::anyhow!("Services not initialized"))?;
 
         let lang = file_path.extension().and_then(|e| e.to_str()).unwrap_or("");
-        let file_uri = format!(
-            "file://{}",
-            file_path.display().to_string().replace('\\', "/")
-        );
+        let file_uri = crate::services::lsp::core::path_to_uri(&file_path);
 
         let params = json!({
             "textDocument": { "uri": file_uri },
@@ -123,17 +140,28 @@ impl Tool for LspFormatTool {
             }
         });
 
-        let resp = svc
-            .lsp
-            .request(
-                lang,
-                &self.security.workspace_dir(),
-                Some(&file_path),
-                "textDocument/formatting",
-                params,
-            )
-            .await
-            .map_err(|e| anyhow::anyhow!("LSP formatting failed: {e}"))?;
+        let workspace_dir = self.security.workspace_dir();
+        let request_fut = svc.lsp.request(
+            lang,
+            &workspace_dir,
+            Some(&file_path),
+            "textDocument/formatting",
+            params,
+        );
+        let resp = match tokio::time::timeout(LSP_FORMAT_TIMEOUT, request_fut).await {
+            Ok(Ok(resp)) => resp,
+            Ok(Err(e)) => return Err(anyhow::anyhow!("LSP formatting failed: {e}")),
+            Err(_) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "LSP formatting request timed out after {}s",
+                        LSP_FORMAT_TIMEOUT.as_secs()
+                    )),
+                });
+            }
+        };
 
         if !self.security.record_action() {
             return Ok(ToolResult {
@@ -143,7 +171,38 @@ impl Tool for LspFormatTool {
             });
         }
 
-        let _write_guard = match crate::session::acquire_file_write_guard(&file_path).await {
+        let edits = match resp.as_array() {
+            Some(arr) if !arr.is_empty() => arr.clone(),
+            _ => {
+                return Ok(ToolResult {
+                    success: true,
+                    output: format!(
+                        "No formatting edits returned for {}",
+                        file_path.display()
+                    ),
+                    error: None,
+                });
+            }
+        };
+
+        let security = self.security.clone();
+        let probe = file_path.clone();
+        let resolved =
+            match tokio::task::spawn_blocking(move || secure_resolve_target(&security, &probe))
+                .await
+                .map_err(|e| anyhow::anyhow!("Path resolution task failed: {e}"))?
+            {
+                Ok(p) => p,
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(e),
+                    });
+                }
+            };
+
+        let _write_guard = match crate::session::acquire_file_write_guard(&resolved).await {
             Ok(guard) => guard,
             Err(e) => {
                 return Ok(ToolResult {
@@ -154,114 +213,67 @@ impl Tool for LspFormatTool {
             }
         };
 
-        let file_for_apply = file_path.clone();
-        let security = self.security.clone();
-        let edits_applied =
-            tokio::task::spawn_blocking(move || apply_text_edits(&security, &file_for_apply, &resp))
-                .await
-                .unwrap_or(Ok(0))
-                .map_err(|e| anyhow::anyhow!("Failed to apply formatting edits: {e}"))?;
+        let content = match tokio::fs::read_to_string(&resolved).await {
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Failed to read {} for formatting: {e}",
+                        resolved.display()
+                    )),
+                });
+            }
+        };
 
-        if edits_applied > 0 {
-            crate::session::record_write_for_current_session(&file_path);
+        let dominant = crate::tools::file::eol::dominant_eol(&content);
+        let adapted_edits = adapt_edit_newtext_eols(&edits, dominant);
+        let (new_content, applied, edit_errors) =
+            apply_edits_to_content(&content, &adapted_edits);
+
+        if new_content == content {
+            return Ok(ToolResult {
+                success: true,
+                output: format!(
+                    "{} already formatted (no changes needed)",
+                    file_path.display()
+                ),
+                error: None,
+            });
         }
 
+        let op = EditOp::Replace {
+            path: resolved.clone(),
+            byte_range: 0..content.len(),
+            old_text: content,
+            new_text: new_content,
+            anchor: None,
+        };
+        let batch = EditBatch::new(EditOrigin::LspFormatTool).with_op(op);
+        if let Err(e) = self.ops_applier.apply_batch(batch).await {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(format!("Failed to apply formatting edits: {e}")),
+            });
+        }
+        crate::session::record_write_for_current_session(&resolved);
+
+        let mut output = format!(
+            "Formatted {} ({applied} edit(s) applied via language server)",
+            file_path.display()
+        );
+        if !edit_errors.is_empty() {
+            output.push_str(&format!(
+                "\nSkipped {} malformed edit(s) returned by the server",
+                edit_errors.len()
+            ));
+        }
         Ok(ToolResult {
             success: true,
-            output: format!(
-                "Formatted {} ({} edit(s) applied via language server)",
-                file_path.display(),
-                edits_applied
-            ),
+            output,
             error: None,
         })
     }
-}
-
-fn apply_text_edits(
-    security: &SecurityPolicy,
-    file_path: &PathBuf,
-    resp: &serde_json::Value,
-) -> std::io::Result<usize> {
-    let edits = match resp.as_array() {
-        Some(arr) if !arr.is_empty() => arr,
-        _ => return Ok(0),
-    };
-
-    if let Ok(meta) = std::fs::symlink_metadata(file_path) {
-        if meta.file_type().is_symlink() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::PermissionDenied,
-                format!("Refusing to write through symlink: {}", file_path.display()),
-            ));
-        }
-    }
-    let resolved = std::fs::canonicalize(file_path)?;
-    if !security.is_resolved_path_allowed(&resolved) {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::PermissionDenied,
-            security.resolved_path_violation_message(&resolved),
-        ));
-    }
-
-    let content = std::fs::read_to_string(&resolved)?;
-    let mut lines: Vec<String> = content.lines().map(String::from).collect();
-
-    let mut sorted: Vec<(usize, usize, usize, usize, String)> = edits
-        .iter()
-        .filter_map(|e| {
-            let sl = e.pointer("/range/start/line")?.as_u64()? as usize;
-            let sc = e.pointer("/range/start/character")?.as_u64()? as usize;
-            let el = e.pointer("/range/end/line")?.as_u64()? as usize;
-            let ec = e.pointer("/range/end/character")?.as_u64()? as usize;
-            let new_text = e.get("newText")?.as_str()?.to_string();
-            Some((sl, sc, el, ec, new_text))
-        })
-        .collect();
-
-    if sorted.is_empty() {
-        return Ok(0);
-    }
-
-    sorted.sort_by(|a, b| b.0.cmp(&a.0).then(b.1.cmp(&a.1)));
-
-    let mut applied = 0;
-    for (sl, sc, el, ec, new_text) in sorted {
-        if sl >= lines.len() {
-            continue;
-        }
-        if sl == el {
-            if let Some(line) = lines.get_mut(sl) {
-                let chars: Vec<char> = line.chars().collect();
-                let sc = sc.min(chars.len());
-                let ec = ec.min(chars.len());
-                let before: String = chars[..sc].iter().collect();
-                let after: String = chars[ec..].iter().collect();
-                *line = format!("{before}{new_text}{after}");
-                applied += 1;
-            }
-        } else {
-            let el = el.min(lines.len().saturating_sub(1));
-            if el < sl {
-                continue;
-            }
-            let start_chars: Vec<char> = lines[sl].chars().collect();
-            let sc = sc.min(start_chars.len());
-            let before: String = start_chars[..sc].iter().collect();
-            let end_chars: Vec<char> = lines[el].chars().collect();
-            let ec = ec.min(end_chars.len());
-            let after: String = end_chars[ec..].iter().collect();
-            let replacement = format!("{before}{new_text}{after}");
-            let new_block: Vec<String> = replacement.split('\n').map(String::from).collect();
-            lines.splice(sl..=el, new_block);
-            applied += 1;
-        }
-    }
-
-    let mut output = lines.join("\n");
-    if content.ends_with('\n') && !output.ends_with('\n') {
-        output.push('\n');
-    }
-    crate::util::atomic_write(&resolved, output.as_bytes())?;
-    Ok(applied)
 }

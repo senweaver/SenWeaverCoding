@@ -189,6 +189,8 @@ function appendChildToolCall(
 
 const supersededTodoCloneCache = new WeakMap<UIMessage, UIMessage>()
 
+const orphanToolUsePlaceholderCache = new WeakMap<UIMessage, UIMessage>()
+
 export function buildRenderModel(
   messages: UIMessage[],
   pendingAskToolUseId?: string | null,
@@ -246,9 +248,23 @@ export function buildRenderModel(
         continue
       }
       if (seenToolUseIds.has(msg.toolUseId)) continue
+      if (emittedToolUseIds.has(msg.toolUseId)) continue
 
       flush()
-      items.push({ kind: 'message', message: msg })
+      let placeholder = orphanToolUsePlaceholderCache.get(msg)
+      if (!placeholder) {
+        placeholder = {
+          id: `orphan-tool-use-${msg.toolUseId}`,
+          type: 'tool_use',
+          toolName: 'tool',
+          toolUseId: msg.toolUseId,
+          input: {},
+          timestamp: msg.timestamp,
+        }
+        orphanToolUsePlaceholderCache.set(msg, placeholder)
+      }
+      items.push({ kind: 'message', message: placeholder })
+      emittedToolUseIds.add(msg.toolUseId)
       continue
     }
 
@@ -1158,6 +1174,14 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     [messages],
   )
 
+  const lastAssistantTextMsgId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m && m.type === 'assistant_text') return m.id
+    }
+    return null
+  }, [messages])
+
   const isTailRendering = useMemo(() => {
     if (streamingText.trim().length > 0) return true
     if (hasLiveThinkingContent) return true
@@ -1470,6 +1494,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
             chatState === 'idle' &&
             Boolean(turnCopy?.isLastAssistantSegmentInTurn) &&
             Boolean((turnCopy?.fullText ?? '').trim())
+          const showThumbs = tailMenuEnabled && msg.id === lastAssistantTextMsgId
 
           const block = (
             <SectionErrorBoundary key={msg.id} label="message" resetKeys={[msg.id]}>
@@ -1478,6 +1503,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
               activeThinkingId={activeThinkingId}
               toolStreaming={toolStreaming}
               tailMenuEnabled={tailMenuEnabled}
+              showThumbs={showThumbs}
               assistantTurnCopy={turnCopy}
               sessionId={resolvedSessionId}
               sessionWorkDir={activeSessionMeta?.workDir ?? null}
@@ -1519,6 +1545,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     restoreAnchorMsgId,
     editingMessage,
     assistantTurnCopyByMsgId,
+    lastAssistantTextMsgId,
     childToolCallsByParent,
     childResultsByParent,
     activeSessionMeta?.workDir,
@@ -1830,6 +1857,7 @@ type MessageBlockProps = {
   toolResult?: { content: unknown; isError: boolean } | null
   toolStreaming: boolean
   tailMenuEnabled: boolean
+  showThumbs?: boolean
   assistantTurnCopy: AssistantTurnCopyInfo | null
   sessionId?: string | null
   sessionWorkDir?: string | null
@@ -1863,6 +1891,7 @@ function areMessageBlockPropsEqual(
   if (prev.onLiveThinkingGrow !== next.onLiveThinkingGrow) return false
   if (prev.toolStreaming !== next.toolStreaming) return false
   if (prev.tailMenuEnabled !== next.tailMenuEnabled) return false
+  if (prev.showThumbs !== next.showThumbs) return false
   if (prev.sessionId !== next.sessionId) return false
   if (prev.sessionWorkDir !== next.sessionWorkDir) return false
   if (prev.disableFork !== next.disableFork) return false
@@ -1923,6 +1952,7 @@ export const MessageBlock = memo(function MessageBlock({
   toolResult,
   toolStreaming,
   tailMenuEnabled,
+  showThumbs,
   assistantTurnCopy,
   sessionId,
   sessionWorkDir,
@@ -1988,6 +2018,7 @@ export const MessageBlock = memo(function MessageBlock({
         <AssistantMessage
           content={message.content}
           assistantTurnCopyText={allowTailMenu ? fullTurn : undefined}
+          showThumbs={showThumbs}
           sessionId={sessionId}
           workDir={sessionWorkDir}
           disableFork={disableFork}

@@ -2624,8 +2624,35 @@ async fn handle_socket(
                 crate::evolution::ReflectionTriggerCause::SessionEnd,
             );
         }
-        if snapshot.auto_distill_on_session_end {
-            let _ = snapshot;
+        if snapshot.auto_distill_on_session_end && snapshot.distill_enabled {
+            let engine_for_distill = std::sync::Arc::clone(&engine);
+            let session_for_distill = session_id.to_string();
+            tokio::task::spawn_blocking(move || {
+                let store = std::sync::Arc::clone(engine_for_distill.store());
+                let turn_ids = match store.top_session_turn_ids_by_reward(
+                    &session_for_distill,
+                    0.5,
+                    3,
+                ) {
+                    Ok(ids) => ids,
+                    Err(error) => {
+                        tracing::debug!(
+                            error = %error,
+                            "evolution: session-end distill query failed"
+                        );
+                        return;
+                    }
+                };
+                for turn_id in turn_ids {
+                    if store.has_distill_audit(&turn_id) {
+                        continue;
+                    }
+                    if let Ok(Some(turn)) = store.find_turn_record(&turn_id) {
+                        let _ = engine_for_distill
+                            .enqueue_distill_forced(crate::evolution::DistillRequest { turn });
+                    }
+                }
+            });
         }
     }
 }
@@ -2905,6 +2932,7 @@ fn is_critical_broadcast(payload: &serde_json::Value) -> bool {
                 | "workspace_busy"
                 | "permission_request"
                 | "message_complete"
+                | "tool_use_complete"
                 | "tool_result"
                 | "status"
         )
@@ -3785,16 +3813,16 @@ impl DesktopSqlitePersist {
 
     fn finish_for_interrupt(mut self) -> Vec<crate::providers::ChatMessage> {
         self.absorb_pending_text_into_segment();
-        while self
+        let dangling: Vec<String> = self
             .assistant_segment
-            .last()
-            .and_then(|v| v.get("type"))
-            .and_then(|t| t.as_str())
-            == Some("tool_use")
-        {
-            self.assistant_segment.pop();
-        }
+            .iter()
+            .filter(|v| v.get("type").and_then(|t| t.as_str()) == Some("tool_use"))
+            .filter_map(|v| v.get("id").and_then(|i| i.as_str()).map(String::from))
+            .collect();
         self.finalize_assistant_segment();
+        for tool_use_id in &dangling {
+            self.on_tool_result(tool_use_id, "[interrupted by user]".to_string(), true);
+        }
         self.out
     }
 }
@@ -4268,7 +4296,8 @@ async fn run_turn(
         }
         let mut ctx =
             crate::evolution::EvolutionCtx::new(engine, session_id.to_string())
-                .with_turn_class(crate::evolution::TurnClass::Main);
+                .with_turn_class(crate::evolution::TurnClass::Main)
+                .with_user_message(content_owned.clone());
         if let Some(ref mode) = coding_mode_label {
             ctx = ctx.with_coding_mode(mode.clone());
         }

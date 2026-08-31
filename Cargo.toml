@@ -207,8 +207,6 @@ ttf-parser = { version = "0.25", optional = true }
 subsetter = { version = "0.2", optional = true }
 
 [target.'cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))'.dependencies]
-nusb = { version = "0.2", default-features = false, optional = true }
-
 probe-rs = { version = "0.31", optional = true }
 
 pdf-extract = { version = "0.10", optional = true }
@@ -304,7 +302,7 @@ code-intel-java = ["dep:tree-sitter-java"]
 code-intel-c = ["dep:tree-sitter-c"]
 code-intel-cpp = ["dep:tree-sitter-cpp"]
 channel-nostr = ["dep:nostr-sdk"]
-hardware = ["nusb", "tokio-serial"]
+hardware = ["tokio-serial"]
 channel-matrix = ["dep:matrix-sdk"]
 channel-lark = ["dep:prost"]
 channel-feishu = ["channel-lark"]

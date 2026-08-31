@@ -3,7 +3,6 @@
 // Licensed under the MIT License.
 
 use anyhow::{Context, Result};
-use std::process::Command;
 
 const BRIDGE_APP_NAME: &str = "uno-q-bridge";
 
@@ -13,11 +12,14 @@ pub fn setup_uno_q_bridge(host: Option<&str>) -> Result<()> {
         .join("uno-q-bridge");
 
     if let Some(h) = host {
-        if bridge_dir.exists() {
+        if bridge_dir.is_dir() {
             deploy_remote(h, &bridge_dir)?;
+        } else if let Some(fallback) = home_bridge_dir().filter(|d| d.is_dir()) {
+            deploy_remote(h, &fallback)?;
         } else {
             anyhow::bail!(
-                "Bridge app not found at {}. Run from sen repo root.",
+                "Bridge app not found at {} or ~/.senweavercoding/firmware/{BRIDGE_APP_NAME}. \
+                 Place the app and retry.",
                 bridge_dir.display()
             );
         }
@@ -29,6 +31,15 @@ pub fn setup_uno_q_bridge(host: Option<&str>) -> Result<()> {
         })?;
     }
     Ok(())
+}
+
+fn home_bridge_dir() -> Option<std::path::PathBuf> {
+    directories::BaseDirs::new().map(|dirs| {
+        dirs.home_dir()
+            .join(".senweavercoding")
+            .join("firmware")
+            .join(BRIDGE_APP_NAME)
+    })
 }
 
 fn deploy_remote(host: &str, bridge_dir: &std::path::Path) -> Result<()> {
@@ -92,8 +103,7 @@ fn deploy_local(bridge_dir: Option<&std::path::Path>) -> Result<()> {
         println!("Copying Bridge app from repo...");
         copy_dir(src, &dest_dir)?;
     } else {
-        println!("Writing embedded Bridge app...");
-        write_embedded_bridge(&dest_dir)?;
+        install_bridge_assets(&dest_dir)?;
     }
 
     println!("Starting Bridge app...");
@@ -109,21 +119,15 @@ fn deploy_local(bridge_dir: Option<&std::path::Path>) -> Result<()> {
     Ok(())
 }
 
-fn write_embedded_bridge(dest: &std::path::Path) -> Result<()> {
-    let app_yaml = include_str!("../../firmware/uno-q-bridge/app.yaml");
-    let sketch_ino = include_str!("../../firmware/uno-q-bridge/sketch/sketch.ino");
-    let sketch_yaml = include_str!("../../firmware/uno-q-bridge/sketch/sketch.yaml");
-    let main_py = include_str!("../../firmware/uno-q-bridge/python/main.py");
-    let requirements = include_str!("../../firmware/uno-q-bridge/python/requirements.txt");
-
-    std::fs::write(dest.join("app.yaml"), app_yaml)?;
-    std::fs::create_dir_all(dest.join("sketch"))?;
-    std::fs::write(dest.join("sketch").join("sketch.ino"), sketch_ino)?;
-    std::fs::write(dest.join("sketch").join("sketch.yaml"), sketch_yaml)?;
-    std::fs::create_dir_all(dest.join("python"))?;
-    std::fs::write(dest.join("python").join("main.py"), main_py)?;
-    std::fs::write(dest.join("python").join("requirements.txt"), requirements)?;
-    Ok(())
+fn install_bridge_assets(dest: &std::path::Path) -> Result<()> {
+    if let Some(fallback) = home_bridge_dir().filter(|d| d.is_dir()) {
+        println!("Copying Bridge app from {}...", fallback.display());
+        return copy_dir(&fallback, dest);
+    }
+    anyhow::bail!(
+        "Bridge app assets not found. Place the uno-q-bridge app at <repo>/firmware/uno-q-bridge/ \
+         or ~/.senweavercoding/firmware/uno-q-bridge/ and retry."
+    )
 }
 
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) -> Result<()> {

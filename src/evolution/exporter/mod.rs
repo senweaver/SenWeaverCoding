@@ -54,6 +54,81 @@ pub struct ExportPreview {
     pub total_eligible: u64,
 }
 
+#[derive(Debug, Clone)]
+pub struct LowRewardSample {
+    pub turn_id: String,
+    pub content: String,
+    pub reward: f32,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct ExportContext {
+    low_reward_pool: std::collections::HashMap<String, Vec<LowRewardSample>>,
+}
+
+impl ExportContext {
+    pub fn pick_rejected(&self, turn: &TurnRecord) -> Option<&LowRewardSample> {
+        let mode_key = turn.coding_mode.clone().unwrap_or_default();
+        let pool = self
+            .low_reward_pool
+            .get(&mode_key)
+            .filter(|p| !p.is_empty())
+            .or_else(|| {
+                self.low_reward_pool
+                    .get("")
+                    .filter(|p| !p.is_empty())
+            })?;
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        std::hash::Hash::hash(&turn.id, &mut hasher);
+        let idx = usize::try_from(std::hash::Hasher::finish(&hasher) % pool.len() as u64)
+            .unwrap_or(0);
+        let candidate = &pool[idx];
+        if candidate.turn_id == turn.id {
+            pool.iter().find(|s| s.turn_id != turn.id)
+        } else {
+            Some(candidate)
+        }
+    }
+}
+
+const LOW_REWARD_POOL_PER_MODE: usize = 32;
+
+fn build_low_reward_pool(
+    turns_path: PathBuf,
+    filter: &ExportFilter,
+    latest_rewards: &std::collections::HashMap<String, f32>,
+) -> ExportContext {
+    let mut pool_filter = filter.clone();
+    pool_filter.min_reward = None;
+    pool_filter.max_samples = None;
+    let mut ctx = ExportContext::default();
+    let _ = iter_turns_filtered(turns_path, &pool_filter, Some(latest_rewards), |turn| {
+        if turn.reward.final_score > 0.0 {
+            return Ok(());
+        }
+        let Some(content) = turn
+            .response
+            .content
+            .as_deref()
+            .map(str::trim)
+            .filter(|c| !c.is_empty())
+        else {
+            return Ok(());
+        };
+        let key = turn.coding_mode.clone().unwrap_or_default();
+        let bucket = ctx.low_reward_pool.entry(key).or_default();
+        if bucket.len() < LOW_REWARD_POOL_PER_MODE {
+            bucket.push(LowRewardSample {
+                turn_id: turn.id.clone(),
+                content: content.to_string(),
+                reward: turn.reward.final_score,
+            });
+        }
+        Ok(())
+    });
+    ctx
+}
+
 pub fn export_to_file(
     engine: &Arc<EvolutionEngine>,
     format: EvolutionExportFormat,
@@ -82,11 +157,18 @@ pub fn export_to_file(
 
     let mut total_size: u64 = 0;
     let processor = make_processor(format);
+    let latest_rewards = store.all_final_rewards().unwrap_or_default();
+    let export_ctx = if format_needs_low_reward_pool(format) {
+        build_low_reward_pool(store.turns_path().to_path_buf(), filter, &latest_rewards)
+    } else {
+        ExportContext::default()
+    };
     iter_turns_filtered(
         store.turns_path().to_path_buf(),
         filter,
+        Some(&latest_rewards),
         |turn| {
-            if let Some(value) = processor(&turn, options, &snapshot.export) {
+            if let Some(value) = processor(&turn, options, &snapshot.export, &export_ctx) {
                 let line = serde_json::to_string(&value)
                     .context("failed to serialise export sample")?;
                 writer
@@ -111,14 +193,14 @@ pub fn export_to_file(
     writer.flush().ok();
     drop(writer);
 
-    let md5 = format!("{:x}", hasher.finalize());
+    let sha256 = format!("{:x}", hasher.finalize());
     let record = ExportRecord {
         id,
         format,
         path: path.to_string_lossy().to_string(),
         sample_count,
         size_bytes: total_size,
-        md5,
+        sha256,
         time_window_start: window_start,
         time_window_end: window_end,
         created_at: Utc::now(),
@@ -192,11 +274,18 @@ pub fn preview_export(
     let mut samples: Vec<serde_json::Value> = Vec::new();
     let mut total_eligible: u64 = 0;
     let processor = make_processor(format);
+    let latest_rewards = store.all_final_rewards().unwrap_or_default();
+    let export_ctx = if format_needs_low_reward_pool(format) {
+        build_low_reward_pool(store.turns_path().to_path_buf(), filter, &latest_rewards)
+    } else {
+        ExportContext::default()
+    };
     iter_turns_filtered(
         store.turns_path().to_path_buf(),
         filter,
+        Some(&latest_rewards),
         |turn| {
-            if let Some(value) = processor(&turn, options, &snapshot.export) {
+            if let Some(value) = processor(&turn, options, &snapshot.export, &export_ctx) {
                 if samples.len() < max_samples {
                     samples.push(value);
                 }
@@ -212,7 +301,21 @@ pub fn preview_export(
     })
 }
 
-type ProjectFn = Box<dyn Fn(&TurnRecord, &ExportOptions, &EvolutionExportConfig) -> Option<serde_json::Value>>;
+type ProjectFn = Box<
+    dyn Fn(
+        &TurnRecord,
+        &ExportOptions,
+        &EvolutionExportConfig,
+        &ExportContext,
+    ) -> Option<serde_json::Value>,
+>;
+
+fn format_needs_low_reward_pool(format: EvolutionExportFormat) -> bool {
+    matches!(
+        format,
+        EvolutionExportFormat::OpenaiDpo | EvolutionExportFormat::HfTrlDpo
+    )
+}
 
 fn make_processor(format: EvolutionExportFormat) -> ProjectFn {
     match format {
@@ -232,6 +335,7 @@ fn effective_export_dir(default_dir: PathBuf, cfg: &EvolutionExportConfig) -> Pa
 pub(crate) fn iter_turns_filtered<F>(
     turns_path: PathBuf,
     filter: &ExportFilter,
+    latest_rewards: Option<&std::collections::HashMap<String, f32>>,
     mut on_turn: F,
 ) -> Result<()>
 where
@@ -251,13 +355,18 @@ where
         if line.trim().is_empty() {
             continue;
         }
-        let turn: TurnRecord = match serde_json::from_str(&line) {
+        let mut turn: TurnRecord = match serde_json::from_str(&line) {
             Ok(t) => t,
             Err(error) => {
                 tracing::debug!(error = %error, "skipping malformed turn line");
                 continue;
             }
         };
+        if let Some(rewards) = latest_rewards {
+            if let Some(latest) = rewards.get(&turn.id) {
+                turn.reward.final_score = *latest;
+            }
+        }
         if !matches_filter(&turn, filter) {
             continue;
         }

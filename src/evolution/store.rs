@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use super::types::{
     AuditEvent, CloudTarget, CloudTargetKind, EvolutionExportFormat, ExportRecord, Lesson,
-    PersistenceStatus, Playbook, PurgeReport, PurgeScope, PushReceipt, ThumbVote, TurnRecord,
+    PersistenceStatus, PurgeReport, PurgeScope, PushReceipt, ThumbVote, TurnRecord,
 };
 
 const SCHEMA_BOOTSTRAP: &str = r"
@@ -26,22 +26,13 @@ CREATE TABLE IF NOT EXISTS lessons (
     coding_mode   TEXT,
     source_turn_ids TEXT NOT NULL DEFAULT '[]',
     hits          INTEGER NOT NULL DEFAULT 0,
+    negative_hits INTEGER NOT NULL DEFAULT 0,
     enabled       INTEGER NOT NULL DEFAULT 1,
     created_at    INTEGER NOT NULL,
     updated_at    INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_lessons_mode ON lessons(coding_mode);
 CREATE INDEX IF NOT EXISTS idx_lessons_enabled ON lessons(enabled);
-
-CREATE TABLE IF NOT EXISTS playbooks (
-    id          TEXT PRIMARY KEY,
-    title       TEXT NOT NULL,
-    body        TEXT NOT NULL,
-    coding_mode TEXT,
-    hits        INTEGER NOT NULL DEFAULT 0,
-    enabled     INTEGER NOT NULL DEFAULT 1,
-    created_at  INTEGER NOT NULL
-);
 
 CREATE TABLE IF NOT EXISTS thumbs (
     id         TEXT PRIMARY KEY,
@@ -60,7 +51,7 @@ CREATE TABLE IF NOT EXISTS exports (
     path              TEXT NOT NULL,
     sample_count      INTEGER NOT NULL DEFAULT 0,
     size_bytes        INTEGER NOT NULL DEFAULT 0,
-    md5               TEXT NOT NULL DEFAULT '',
+    sha256            TEXT NOT NULL DEFAULT '',
     time_window_start INTEGER,
     time_window_end   INTEGER,
     created_at        INTEGER NOT NULL
@@ -121,6 +112,7 @@ CREATE TABLE IF NOT EXISTS turn_index (
     reward_tool         REAL,
     reward_verification REAL,
     reward_cost         REAL,
+    injected_lesson_ids TEXT NOT NULL DEFAULT '[]',
     cost_usd            REAL NOT NULL DEFAULT 0,
     total_tokens        INTEGER NOT NULL DEFAULT 0,
     ts                  INTEGER NOT NULL
@@ -128,6 +120,11 @@ CREATE TABLE IF NOT EXISTS turn_index (
 CREATE INDEX IF NOT EXISTS idx_turn_index_session ON turn_index(session_id);
 CREATE INDEX IF NOT EXISTS idx_turn_index_ts ON turn_index(ts);
 CREATE INDEX IF NOT EXISTS idx_turn_index_mode ON turn_index(coding_mode);
+
+CREATE TABLE IF NOT EXISTS meta_counters (
+    key   TEXT PRIMARY KEY,
+    value INTEGER NOT NULL DEFAULT 0
+);
 ";
 
 pub struct Store {
@@ -161,6 +158,8 @@ impl Store {
         conn.execute_batch(SCHEMA_BOOTSTRAP)
             .context("bootstrap evolution.db schema")?;
         ensure_turn_index_columns(&conn).context("ensure turn_index reward columns")?;
+        ensure_lessons_columns(&conn).context("ensure lessons feedback columns")?;
+        ensure_exports_columns(&conn).context("ensure exports digest column")?;
         Ok(Self {
             base_dir,
             turns_jsonl,
@@ -210,6 +209,82 @@ impl Store {
         let line = serde_json::to_string(turn).context("serialise TurnRecord")?;
         append_line(&self.turns_jsonl, &line)?;
         Ok(())
+    }
+
+    pub fn session_turn_count(&self, session_id: &str) -> u64 {
+        let conn = self.db.lock();
+        conn.query_row(
+            "SELECT COUNT(*) FROM turn_index WHERE session_id = ?1",
+            params![session_id],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| u64::try_from(v).unwrap_or(0))
+        .unwrap_or(0)
+    }
+
+    pub fn has_distill_audit(&self, turn_id: &str) -> bool {
+        let conn = self.db.lock();
+        conn.query_row(
+            "SELECT 1 FROM audit_events WHERE kind = 'distill' AND turn_id = ?1 LIMIT 1",
+            params![turn_id],
+            |_| Ok(()),
+        )
+        .is_ok()
+    }
+
+    pub fn latest_turn_id_for_session(&self, session_id: &str) -> Result<Option<String>> {
+        let conn = self.db.lock();
+        let id = conn
+            .query_row(
+                "SELECT id FROM turn_index WHERE session_id = ?1
+                 ORDER BY ts DESC, turn_idx DESC LIMIT 1",
+                params![session_id],
+                |row| row.get::<_, String>(0),
+            )
+            .ok();
+        Ok(id)
+    }
+
+    pub fn top_session_turn_ids_by_reward(
+        &self,
+        session_id: &str,
+        min_reward: f64,
+        limit: usize,
+    ) -> Result<Vec<String>> {
+        let conn = self.db.lock();
+        let mut stmt = conn.prepare(
+            "SELECT id FROM turn_index
+             WHERE session_id = ?1 AND final_reward >= ?2
+             ORDER BY final_reward DESC, ts DESC
+             LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![session_id, min_reward, i64::try_from(limit).unwrap_or(i64::MAX)],
+            |row| row.get::<_, String>(0),
+        )?;
+        let mut out = Vec::new();
+        for row in rows {
+            out.push(row?);
+        }
+        Ok(out)
+    }
+
+    pub fn all_final_rewards(&self) -> Result<std::collections::HashMap<String, f32>> {
+        let conn = self.db.lock();
+        let mut stmt =
+            conn.prepare("SELECT id, final_reward FROM turn_index WHERE has_reward = 1")?;
+        let rows = stmt.query_map([], |row| {
+            let id: String = row.get(0)?;
+            let reward: f64 = row.get(1)?;
+            Ok((id, reward))
+        })?;
+        let mut out = std::collections::HashMap::new();
+        for row in rows {
+            let (id, reward) = row?;
+            #[allow(clippy::cast_possible_truncation)]
+            out.insert(id, reward as f32);
+        }
+        Ok(out)
     }
 
     pub fn update_turn_reward(&self, turn_id: &str, reward: &super::types::Reward) -> Result<()> {
@@ -285,85 +360,48 @@ impl Store {
         if !self.turns_jsonl.is_file() {
             return Ok(None);
         }
-        let file = std::fs::File::open(&self.turns_jsonl)
-            .with_context(|| format!("open {}", self.turns_jsonl.display()))?;
-        let reader = std::io::BufReader::new(file);
-        use std::io::BufRead as _;
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
+        let mut found: Option<TurnRecord> = None;
+        for_each_line_reverse(&self.turns_jsonl, |line| {
+            if let Ok(candidate) = serde_json::from_str::<TurnRecord>(line) {
+                if candidate.id == turn_id {
+                    found = Some(candidate);
+                    return false;
+                }
             }
-            let candidate: TurnRecord = match serde_json::from_str(trimmed) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if candidate.id == turn_id {
-                return Ok(Some(candidate));
-            }
-        }
-        Ok(None)
+            true
+        })?;
+        Ok(found)
     }
 
     pub fn find_turns_for_session(&self, session_id: &str, limit: usize) -> Result<Vec<TurnRecord>> {
-        if !self.turns_jsonl.is_file() {
+        if !self.turns_jsonl.is_file() || limit == 0 {
             return Ok(Vec::new());
         }
-        let file = std::fs::File::open(&self.turns_jsonl)
-            .with_context(|| format!("open {}", self.turns_jsonl.display()))?;
-        let reader = std::io::BufReader::new(file);
-        use std::io::BufRead as _;
         let mut matched: Vec<TurnRecord> = Vec::new();
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
+        for_each_line_reverse(&self.turns_jsonl, |line| {
+            if let Ok(candidate) = serde_json::from_str::<TurnRecord>(line) {
+                if candidate.session_id == session_id {
+                    matched.push(candidate);
+                }
             }
-            let candidate: TurnRecord = match serde_json::from_str(trimmed) {
-                Ok(v) => v,
-                Err(_) => continue,
-            };
-            if candidate.session_id == session_id {
-                matched.push(candidate);
-            }
-        }
+            matched.len() < limit
+        })?;
         matched.sort_by(|a, b| b.ts.cmp(&a.ts));
-        matched.truncate(limit);
         Ok(matched)
     }
 
     pub fn find_recent_turns(&self, limit: usize) -> Result<Vec<TurnRecord>> {
-        if !self.turns_jsonl.is_file() {
+        if !self.turns_jsonl.is_file() || limit == 0 {
             return Ok(Vec::new());
         }
-        let file = std::fs::File::open(&self.turns_jsonl)
-            .with_context(|| format!("open {}", self.turns_jsonl.display()))?;
-        let reader = std::io::BufReader::new(file);
-        use std::io::BufRead as _;
         let mut all: Vec<TurnRecord> = Vec::new();
-        for line in reader.lines() {
-            let line = match line {
-                Ok(l) => l,
-                Err(_) => continue,
-            };
-            let trimmed = line.trim();
-            if trimmed.is_empty() {
-                continue;
-            }
-            if let Ok(candidate) = serde_json::from_str::<TurnRecord>(trimmed) {
+        for_each_line_reverse(&self.turns_jsonl, |line| {
+            if let Ok(candidate) = serde_json::from_str::<TurnRecord>(line) {
                 all.push(candidate);
             }
-        }
+            all.len() < limit
+        })?;
         all.sort_by(|a, b| b.ts.cmp(&a.ts));
-        all.truncate(limit);
         Ok(all)
     }
 
@@ -398,29 +436,44 @@ impl Store {
         Ok(count)
     }
 
-    pub fn lesson_exists_by_title(
-        &self,
-        coding_mode: Option<&str>,
-        title: &str,
-    ) -> Result<bool> {
+    pub fn lesson_duplicate_exists(&self, title: &str, body: &str) -> Result<bool> {
+        let lessons = self.list_lessons(false)?;
+        let norm_title = normalize_lesson_text(title);
+        if norm_title.is_empty() {
+            return Ok(false);
+        }
+        let title_tokens = lesson_token_set(&norm_title);
+        let norm_body_prefix: String = normalize_lesson_text(body).chars().take(120).collect();
+        for lesson in &lessons {
+            let existing_title = normalize_lesson_text(&lesson.title);
+            if existing_title == norm_title {
+                return Ok(true);
+            }
+            let existing_tokens = lesson_token_set(&existing_title);
+            if lesson_jaccard(&title_tokens, &existing_tokens) >= 0.8 {
+                return Ok(true);
+            }
+            if !norm_body_prefix.is_empty() {
+                let existing_body: String =
+                    normalize_lesson_text(&lesson.body).chars().take(120).collect();
+                if existing_body == norm_body_prefix {
+                    return Ok(true);
+                }
+            }
+        }
+        Ok(false)
+    }
+
+    pub fn lessons_created_since(&self, ts_ms: i64) -> Result<u64> {
         let conn = self.db.lock();
-        let normalized = title.trim().to_lowercase();
-        let count: i64 = match coding_mode {
-            Some(mode) => conn.query_row(
-                "SELECT COUNT(*) FROM lessons
-                 WHERE LOWER(TRIM(title)) = ?1
-                   AND (coding_mode IS ?2 OR LOWER(coding_mode) = LOWER(?2))",
-                params![normalized, mode],
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM lessons WHERE created_at >= ?1",
+                params![ts_ms],
                 |row| row.get(0),
-            )?,
-            None => conn.query_row(
-                "SELECT COUNT(*) FROM lessons
-                 WHERE LOWER(TRIM(title)) = ?1 AND coding_mode IS NULL",
-                params![normalized],
-                |row| row.get(0),
-            )?,
-        };
-        Ok(count > 0)
+            )
+            .unwrap_or(0);
+        Ok(u64::try_from(count).unwrap_or(0))
     }
 
     pub fn append_audit(&self, event: &AuditEvent) -> Result<()> {
@@ -475,12 +528,16 @@ impl Store {
                 lesson.updated_at.timestamp_millis(),
             ],
         )?;
+        drop(conn);
+        super::injector::invalidate_lesson_cache();
         Ok(())
     }
 
     pub fn delete_lesson(&self, id: &str) -> Result<bool> {
         let conn = self.db.lock();
         let n = conn.execute("DELETE FROM lessons WHERE id = ?1", params![id])?;
+        drop(conn);
+        super::injector::invalidate_lesson_cache();
         Ok(n > 0)
     }
 
@@ -488,12 +545,12 @@ impl Store {
         let conn = self.db.lock();
         let mut stmt = if only_enabled {
             conn.prepare(
-                "SELECT id, title, body, tags, coding_mode, source_turn_ids, hits, enabled, created_at, updated_at
+                "SELECT id, title, body, tags, coding_mode, source_turn_ids, hits, enabled, created_at, updated_at, negative_hits
                  FROM lessons WHERE enabled = 1 ORDER BY updated_at DESC",
             )?
         } else {
             conn.prepare(
-                "SELECT id, title, body, tags, coding_mode, source_turn_ids, hits, enabled, created_at, updated_at
+                "SELECT id, title, body, tags, coding_mode, source_turn_ids, hits, enabled, created_at, updated_at, negative_hits
                  FROM lessons ORDER BY updated_at DESC",
             )?
         };
@@ -511,6 +568,7 @@ impl Store {
                     coding_mode: row.get(4)?,
                     source_turn_ids: serde_json::from_str(&source_raw).unwrap_or_default(),
                     hits: u64::try_from(row.get::<_, i64>(6)?).unwrap_or(0),
+                    negative_hits: u64::try_from(row.get::<_, i64>(10)?).unwrap_or(0),
                     enabled: row.get::<_, i64>(7)? != 0,
                     created_at: chrono::DateTime::from_timestamp_millis(created_ms)
                         .unwrap_or_else(Utc::now),
@@ -534,50 +592,45 @@ impl Store {
         Ok(())
     }
 
-    pub fn upsert_playbook(&self, playbook: &Playbook) -> Result<()> {
+    pub fn injected_lessons_for_turn(&self, turn_id: &str) -> Result<Vec<String>> {
         let conn = self.db.lock();
-        conn.execute(
-            "INSERT INTO playbooks (id, title, body, coding_mode, hits, enabled, created_at)
-             VALUES (?1,?2,?3,?4,?5,?6,?7)
-             ON CONFLICT(id) DO UPDATE SET
-                title = excluded.title,
-                body = excluded.body,
-                coding_mode = excluded.coding_mode,
-                enabled = excluded.enabled",
-            params![
-                playbook.id,
-                playbook.title,
-                playbook.body,
-                playbook.coding_mode,
-                i64::try_from(playbook.hits).unwrap_or(i64::MAX),
-                i64::from(playbook.enabled),
-                playbook.created_at.timestamp_millis(),
-            ],
-        )?;
-        Ok(())
+        let raw: Option<String> = conn
+            .query_row(
+                "SELECT injected_lesson_ids FROM turn_index WHERE id = ?1",
+                params![turn_id],
+                |row| row.get(0),
+            )
+            .ok();
+        Ok(raw
+            .and_then(|s| serde_json::from_str::<Vec<String>>(&s).ok())
+            .unwrap_or_default())
     }
 
-    pub fn list_playbooks(&self) -> Result<Vec<Playbook>> {
+    pub fn record_lesson_negative_feedback(&self, ids: &[String]) -> Result<Vec<String>> {
+        if ids.is_empty() {
+            return Ok(Vec::new());
+        }
+        const MIN_HITS_FOR_AUTO_DISABLE: i64 = 5;
         let conn = self.db.lock();
-        let mut stmt = conn.prepare(
-            "SELECT id, title, body, coding_mode, hits, enabled, created_at FROM playbooks ORDER BY created_at DESC",
-        )?;
-        let rows = stmt
-            .query_map([], |row| {
-                let created_ms: i64 = row.get(6)?;
-                Ok(Playbook {
-                    id: row.get(0)?,
-                    title: row.get(1)?,
-                    body: row.get(2)?,
-                    coding_mode: row.get(3)?,
-                    hits: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-                    enabled: row.get::<_, i64>(5)? != 0,
-                    created_at: chrono::DateTime::from_timestamp_millis(created_ms)
-                        .unwrap_or_else(Utc::now),
-                })
-            })?
-            .collect::<rusqlite::Result<Vec<_>>>()?;
-        Ok(rows)
+        let mut disabled: Vec<String> = Vec::new();
+        {
+            let mut bump =
+                conn.prepare("UPDATE lessons SET negative_hits = negative_hits + 1 WHERE id = ?1")?;
+            let mut disable = conn.prepare(
+                "UPDATE lessons SET enabled = 0, updated_at = ?2
+                 WHERE id = ?1 AND enabled = 1
+                   AND hits >= ?3 AND negative_hits * 2 >= hits",
+            )?;
+            let now_ms = Utc::now().timestamp_millis();
+            for id in ids {
+                bump.execute(params![id])?;
+                let changed = disable.execute(params![id, now_ms, MIN_HITS_FOR_AUTO_DISABLE])?;
+                if changed > 0 {
+                    disabled.push(id.clone());
+                }
+            }
+        }
+        Ok(disabled)
     }
 
     pub fn record_thumb(&self, vote: &ThumbVote) -> Result<()> {
@@ -615,7 +668,7 @@ impl Store {
         let conn = self.db.lock();
         conn.execute(
             "INSERT OR REPLACE INTO exports
-             (id, format, path, sample_count, size_bytes, md5, time_window_start, time_window_end, created_at)
+             (id, format, path, sample_count, size_bytes, sha256, time_window_start, time_window_end, created_at)
              VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9)",
             params![
                 record.id,
@@ -623,7 +676,7 @@ impl Store {
                 record.path,
                 i64::try_from(record.sample_count).unwrap_or(i64::MAX),
                 i64::try_from(record.size_bytes).unwrap_or(i64::MAX),
-                record.md5,
+                record.sha256,
                 record.time_window_start.map(|t| t.timestamp_millis()),
                 record.time_window_end.map(|t| t.timestamp_millis()),
                 record.created_at.timestamp_millis(),
@@ -635,7 +688,7 @@ impl Store {
     pub fn list_exports(&self) -> Result<Vec<ExportRecord>> {
         let conn = self.db.lock();
         let mut stmt = conn.prepare(
-            "SELECT id, format, path, sample_count, size_bytes, md5, time_window_start, time_window_end, created_at
+            "SELECT id, format, path, sample_count, size_bytes, sha256, time_window_start, time_window_end, created_at
              FROM exports ORDER BY created_at DESC",
         )?;
         let rows = stmt
@@ -652,7 +705,7 @@ impl Store {
                     path: row.get(2)?,
                     sample_count: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
                     size_bytes: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-                    md5: row.get(5)?,
+                    sha256: row.get(5)?,
                     time_window_start: start_ms
                         .and_then(chrono::DateTime::<Utc>::from_timestamp_millis),
                     time_window_end: end_ms
@@ -668,7 +721,7 @@ impl Store {
     pub fn get_export(&self, id: &str) -> Result<Option<ExportRecord>> {
         let conn = self.db.lock();
         conn.query_row(
-            "SELECT id, format, path, sample_count, size_bytes, md5, time_window_start, time_window_end, created_at
+            "SELECT id, format, path, sample_count, size_bytes, sha256, time_window_start, time_window_end, created_at
              FROM exports WHERE id = ?1",
             params![id],
             |row| {
@@ -684,7 +737,7 @@ impl Store {
                     path: row.get(2)?,
                     sample_count: u64::try_from(row.get::<_, i64>(3)?).unwrap_or(0),
                     size_bytes: u64::try_from(row.get::<_, i64>(4)?).unwrap_or(0),
-                    md5: row.get(5)?,
+                    sha256: row.get(5)?,
                     time_window_start: start_ms
                         .and_then(chrono::DateTime::<Utc>::from_timestamp_millis),
                     time_window_end: end_ms
@@ -859,9 +912,45 @@ impl Store {
         Ok(rows)
     }
 
+    pub fn bump_counter(&self, key: &str) {
+        let conn = self.db.lock();
+        let _ = conn.execute(
+            "INSERT INTO meta_counters (key, value) VALUES (?1, 1)
+             ON CONFLICT(key) DO UPDATE SET value = value + 1",
+            params![key],
+        );
+    }
+
+    pub fn counter(&self, key: &str) -> u64 {
+        let conn = self.db.lock();
+        conn.query_row(
+            "SELECT value FROM meta_counters WHERE key = ?1",
+            params![key],
+            |row| row.get::<_, i64>(0),
+        )
+        .map(|v| u64::try_from(v).unwrap_or(0))
+        .unwrap_or(0)
+    }
+
+    pub fn count_turns_jsonl_lines(&self) -> u64 {
+        if !self.turns_jsonl.is_file() {
+            return 0;
+        }
+        let Ok(file) = std::fs::File::open(&self.turns_jsonl) else {
+            return 0;
+        };
+        use std::io::BufRead as _;
+        let reader = std::io::BufReader::new(file);
+        reader
+            .lines()
+            .filter(|l| l.as_ref().map(|s| !s.trim().is_empty()).unwrap_or(false))
+            .count() as u64
+    }
+
     pub fn persistence_status(&self) -> Result<PersistenceStatus> {
         let turns_file_size = file_size_or_zero(&self.turns_jsonl);
         let events_file_size = file_size_or_zero(&self.events_jsonl);
+        let db_file_size = file_size_or_zero(&self.base_dir.join("evolution.db"));
         let conn = self.db.lock();
         let turns_count: u64 = conn
             .query_row("SELECT COUNT(*) FROM turn_index", [], |row| row.get(0))
@@ -886,6 +975,7 @@ impl Store {
             turns_file_size,
             turns_count,
             events_file_size,
+            db_file_size,
             exports_total_bytes,
             exports_count,
             push_receipts_count,
@@ -1029,13 +1119,15 @@ impl Store {
 }
 
 fn upsert_turn_index(conn: &Connection, turn: &TurnRecord) -> Result<()> {
+    let injected =
+        serde_json::to_string(&turn.injected_lesson_ids).unwrap_or_else(|_| "[]".into());
     conn.execute(
         "INSERT OR REPLACE INTO turn_index
          (id, session_id, turn_idx, turn_class, coding_mode, provider, model,
           final_reward, has_reward,
           reward_thumbs, reward_next_state, reward_tool, reward_verification, reward_cost,
-          cost_usd, total_tokens, ts)
-         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17)",
+          cost_usd, total_tokens, ts, injected_lesson_ids)
+         VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,?18)",
         params![
             turn.id,
             turn.session_id,
@@ -1054,6 +1146,7 @@ fn upsert_turn_index(conn: &Connection, turn: &TurnRecord) -> Result<()> {
             turn.cost.usd,
             i64::try_from(turn.cost.total_tokens).unwrap_or(i64::MAX),
             turn.ts.timestamp_millis(),
+            injected,
         ],
     )?;
     Ok(())
@@ -1073,6 +1166,7 @@ fn ensure_turn_index_columns(conn: &Connection) -> Result<()> {
         ("reward_tool", "REAL"),
         ("reward_verification", "REAL"),
         ("reward_cost", "REAL"),
+        ("injected_lesson_ids", "TEXT NOT NULL DEFAULT '[]'"),
     ];
     for (name, kind) in needed {
         if !existing.contains(*name) {
@@ -1083,6 +1177,136 @@ fn ensure_turn_index_columns(conn: &Connection) -> Result<()> {
         }
     }
     Ok(())
+}
+
+fn ensure_exports_columns(conn: &Connection) -> Result<()> {
+    let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stmt = conn.prepare("PRAGMA table_info(exports)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for col in rows {
+        existing.insert(col?.to_ascii_lowercase());
+    }
+    drop(stmt);
+    if existing.contains("md5") && !existing.contains("sha256") {
+        conn.execute("ALTER TABLE exports RENAME COLUMN md5 TO sha256", [])?;
+    }
+    Ok(())
+}
+
+fn ensure_lessons_columns(conn: &Connection) -> Result<()> {
+    let mut existing: std::collections::HashSet<String> = std::collections::HashSet::new();
+    let mut stmt = conn.prepare("PRAGMA table_info(lessons)")?;
+    let rows = stmt.query_map([], |row| row.get::<_, String>(1))?;
+    for col in rows {
+        existing.insert(col?.to_ascii_lowercase());
+    }
+    drop(stmt);
+    if !existing.contains("negative_hits") {
+        conn.execute(
+            "ALTER TABLE lessons ADD COLUMN negative_hits INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    Ok(())
+}
+
+pub const DAILY_LESSON_INTAKE_CAP: u64 = 12;
+
+fn for_each_line_reverse<F>(path: &Path, mut on_line: F) -> Result<()>
+where
+    F: FnMut(&str) -> bool,
+{
+    use std::io::{Read as _, Seek as _, SeekFrom};
+    let mut file = match std::fs::File::open(path) {
+        Ok(f) => f,
+        Err(_) => return Ok(()),
+    };
+    let len = file.metadata().map(|m| m.len()).unwrap_or(0);
+    if len == 0 {
+        return Ok(());
+    }
+    const CHUNK: u64 = 256 * 1024;
+    let mut end = len;
+    let mut pending_head: Vec<u8> = Vec::new();
+    while end > 0 {
+        let start = end.saturating_sub(CHUNK);
+        file.seek(SeekFrom::Start(start))
+            .with_context(|| format!("seek {}", path.display()))?;
+        let mut buf = vec![0u8; usize::try_from(end - start).unwrap_or(0)];
+        file.read_exact(&mut buf)
+            .with_context(|| format!("read {}", path.display()))?;
+        buf.extend_from_slice(&pending_head);
+        pending_head.clear();
+        let mut slice_end = buf.len();
+        while slice_end > 0 {
+            match buf[..slice_end].iter().rposition(|&b| b == b'\n') {
+                Some(nl) => {
+                    let line = &buf[nl + 1..slice_end];
+                    if let Ok(text) = std::str::from_utf8(line) {
+                        let trimmed = text.trim();
+                        if !trimmed.is_empty() && !on_line(trimmed) {
+                            return Ok(());
+                        }
+                    }
+                    slice_end = nl;
+                }
+                None => break,
+            }
+        }
+        if start == 0 {
+            if let Ok(text) = std::str::from_utf8(&buf[..slice_end]) {
+                let trimmed = text.trim();
+                if !trimmed.is_empty() && !on_line(trimmed) {
+                    return Ok(());
+                }
+            }
+        } else {
+            pending_head = buf[..slice_end].to_vec();
+        }
+        end = start;
+    }
+    Ok(())
+}
+
+fn normalize_lesson_text(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    let mut last_space = true;
+    for ch in text.chars() {
+        if ch.is_alphanumeric() {
+            for lower in ch.to_lowercase() {
+                out.push(lower);
+            }
+            last_space = false;
+        } else if !last_space {
+            out.push(' ');
+            last_space = true;
+        }
+    }
+    out.trim_end().to_string()
+}
+
+fn lesson_token_set(normalized: &str) -> std::collections::HashSet<String> {
+    let mut out = std::collections::HashSet::new();
+    for word in normalized.split_whitespace() {
+        super::text_match::push_segment_tokens(word, 1, &[], &mut out);
+    }
+    out
+}
+
+fn lesson_jaccard(
+    a: &std::collections::HashSet<String>,
+    b: &std::collections::HashSet<String>,
+) -> f32 {
+    if a.is_empty() || b.is_empty() {
+        return 0.0;
+    }
+    let intersection = a.intersection(b).count();
+    let union = a.union(b).count();
+    if union == 0 {
+        0.0
+    } else {
+        intersection as f32 / union as f32
+    }
 }
 
 fn append_line(path: &Path, line: &str) -> Result<()> {

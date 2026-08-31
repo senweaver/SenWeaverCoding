@@ -1443,10 +1443,62 @@ const pendingThinkingFirstAt = new Map<string, number>()
 const lastStreamActivityAtBySession = new Map<string, number>()
 const FLUSH_HIGH_WATER_CHARS = 96
 const FLUSH_HIGH_WATER_MS = 80
+const BUSY_FLUSH_MAX_DEFER_MS = 250
+const lastBusyFlushAtBySession = new Map<string, number>()
 
 const deferredDeltaFlush = new Map<string, () => void>()
 const deferredThinkingFlush = new Map<string, () => void>()
 let busyIdleUnsub: (() => void) | null = null
+
+type QueuedServerFrame = { sessionId: string; msg: ServerMessage }
+const serverFrameQueue: QueuedServerFrame[] = []
+let serverFrameDrainRaf: number | null = null
+let serverFrameDrainTimer: ReturnType<typeof setTimeout> | null = null
+const SERVER_FRAME_DRAIN_FALLBACK_MS = 32
+
+function drainServerFrameQueue(): void {
+  if (serverFrameDrainRaf !== null) {
+    if (typeof window !== 'undefined' && typeof window.cancelAnimationFrame === 'function') {
+      window.cancelAnimationFrame(serverFrameDrainRaf)
+    }
+    serverFrameDrainRaf = null
+  }
+  if (serverFrameDrainTimer !== null) {
+    clearTimeout(serverFrameDrainTimer)
+    serverFrameDrainTimer = null
+  }
+  if (serverFrameQueue.length === 0) return
+  const drained = serverFrameQueue.splice(0, serverFrameQueue.length)
+  const store = useChatStore.getState()
+  for (const frame of drained) {
+    try {
+      store.handleServerMessage(frame.sessionId, frame.msg)
+    } catch (err) {
+      console.warn('[chatStore] server frame handling failed', err)
+      const session = useChatStore.getState().sessions[frame.sessionId]
+      if (session && isSessionUiBusy(session.chatState)) {
+        dirtyMidTurnSessions.add(frame.sessionId)
+      } else {
+        void useChatStore.getState().reloadHistory(frame.sessionId)
+      }
+    }
+  }
+}
+
+function enqueueServerFrame(sessionId: string, msg: ServerMessage): void {
+  serverFrameQueue.push({ sessionId, msg })
+  if (serverFrameDrainRaf !== null || serverFrameDrainTimer !== null) return
+  if (typeof window !== 'undefined' && typeof window.requestAnimationFrame === 'function') {
+    serverFrameDrainRaf = window.requestAnimationFrame(() => {
+      serverFrameDrainRaf = null
+      drainServerFrameQueue()
+    })
+  }
+  serverFrameDrainTimer = setTimeout(() => {
+    serverFrameDrainTimer = null
+    drainServerFrameQueue()
+  }, SERVER_FRAME_DRAIN_FALLBACK_MS)
+}
 
 function ensureBusyIdleFlush(): void {
   if (busyIdleUnsub) return
@@ -1671,6 +1723,7 @@ function consumePendingDelta(sessionId: string): string {
     cancelScheduledFlush(timer)
     flushTimerBySession.delete(sessionId)
   }
+  deferredDeltaFlush.delete(sessionId)
   const text = pendingDeltaBySession.get(sessionId) ?? ''
   pendingDeltaBySession.delete(sessionId)
   pendingDeltaFirstAt.delete(sessionId)
@@ -1772,6 +1825,7 @@ function clearSessionStreamBuffers(sessionId: string): void {
     cancelScheduledFlush(deltaTimer)
     flushTimerBySession.delete(sessionId)
   }
+  deferredDeltaFlush.delete(sessionId)
   pendingDeltaBySession.delete(sessionId)
   pendingDeltaFirstAt.delete(sessionId)
   const thinkingTimer = thinkingFlushTimerBySession.get(sessionId)
@@ -1779,6 +1833,7 @@ function clearSessionStreamBuffers(sessionId: string): void {
     cancelScheduledFlush(thinkingTimer)
     thinkingFlushTimerBySession.delete(sessionId)
   }
+  deferredThinkingFlush.delete(sessionId)
   pendingThinkingBySession.delete(sessionId)
   pendingThinkingFirstAt.delete(sessionId)
   lastStreamActivityAtBySession.delete(sessionId)
@@ -1947,6 +2002,7 @@ function purgeSessionEphemera(sessionId: string): void {
   capReloadInFlight.delete(sessionId)
   dirtyMidTurnSessions.delete(sessionId)
   activeTurnSeqBySession.delete(sessionId)
+  lastBusyFlushAtBySession.delete(sessionId)
   clearHistoryLoadRetry(sessionId)
   pendingSubagentChunksBySession.delete(sessionId)
   const subagentTimer = subagentChunkFlushTimerBySession.get(sessionId)
@@ -3109,7 +3165,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
         }
       }
-      get().handleServerMessage(sessionId, msg)
+      enqueueServerFrame(sessionId, msg)
     })
 
     const runtimeSelection = useSessionRuntimeStore.getState().selections[sessionId]
@@ -3201,7 +3257,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           })),
         }))
       }
-      get().handleServerMessage(workerId, msg)
+      enqueueServerFrame(workerId, msg)
     })
 
     get().loadHistory(workerId)
@@ -4044,7 +4100,21 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const unackedHead = dropped.filter(
         (m) => m.type === 'user_text' && m.pending === true && !!m.clientMsgId,
       )
-      const trimmed = [...unackedHead, ...session.messages.slice(dropCount)]
+      const droppedToolUseIds = new Set<string>()
+      for (const m of dropped) {
+        if (m.type === 'tool_use' && m.toolUseId) {
+          droppedToolUseIds.add(m.toolUseId)
+        }
+      }
+      const retained =
+        droppedToolUseIds.size > 0
+          ? session.messages
+              .slice(dropCount)
+              .filter(
+                (m) => !(m.type === 'tool_result' && droppedToolUseIds.has(m.toolUseId)),
+              )
+          : session.messages.slice(dropCount)
+      const trimmed = [...unackedHead, ...retained]
       const prevFirst = session.historyFirstIndex ?? 0
       const minRetainedRawIndex = trimmed.reduce<number | null>((acc, m) => {
         const idx = rawIndexFromMessageId(m.rawId ?? m.id)
@@ -4617,6 +4687,15 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         if (frameTurnSeq > active) {
           activeTurnSeqBySession.set(sessionId, frameTurnSeq)
         } else if (frameTurnSeq < active) {
+          if (
+            msg.type === 'tool_use_complete' ||
+            msg.type === 'tool_result' ||
+            msg.type === 'content_delta' ||
+            msg.type === 'content_start' ||
+            msg.type === 'message_complete'
+          ) {
+            dirtyMidTurnSessions.add(sessionId)
+          }
           return
         }
       }
@@ -4640,6 +4719,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           msg.type === 'lsp_diagnostics' ||
           msg.type === 'permission_request' ||
           msg.type === 'system_notification' ||
+          msg.type === 'tool_use_complete' ||
+          msg.type === 'tool_result' ||
           msg.type === 'worker_spawned' ||
           msg.type === 'worker_status' ||
           msg.type === 'worker_progress' ||
@@ -4679,11 +4760,17 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const session = s.sessions[sessionId]
           if (!session) return s
           const cleaned = stripNoModelErrorMessages(session.messages)
-          if (cleaned === session.messages) return s
+          if (cleaned === session.messages && session.connectionState === 'connected') {
+            return s
+          }
           return {
             sessions: {
               ...s.sessions,
-              [sessionId]: { ...session, messages: cleaned },
+              [sessionId]: {
+                ...session,
+                messages: cleaned,
+                connectionState: 'connected',
+              },
             },
           }
         })
@@ -4825,11 +4912,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const elapsed = nowMs() - firstAt
 
           const flushDelta = () => {
-            flushTimerBySession.delete(sessionId)
+            const pendingHandle = flushTimerBySession.get(sessionId)
+            if (pendingHandle) {
+              cancelScheduledFlush(pendingHandle)
+              flushTimerBySession.delete(sessionId)
+            }
+            deferredDeltaFlush.delete(sessionId)
             if (isWindowBusy()) {
-              deferredDeltaFlush.set(sessionId, flushDelta)
-              ensureBusyIdleFlush()
-              return
+              const busyNow = Date.now()
+              const lastAt = lastBusyFlushAtBySession.get(sessionId) ?? 0
+              const sinceLast = busyNow - lastAt
+              if (sinceLast < BUSY_FLUSH_MAX_DEFER_MS) {
+                deferredDeltaFlush.set(sessionId, flushDelta)
+                ensureBusyIdleFlush()
+                if (!flushTimerBySession.has(sessionId)) {
+                  const id = setTimeout(
+                    () => {
+                      flushTimerBySession.delete(sessionId)
+                      deferredDeltaFlush.delete(sessionId)
+                      flushDelta()
+                    },
+                    Math.max(16, BUSY_FLUSH_MAX_DEFER_MS - sinceLast),
+                  ) as unknown as number
+                  flushTimerBySession.set(sessionId, { kind: 'timeout', id })
+                }
+                return
+              }
+              lastBusyFlushAtBySession.set(sessionId, busyNow)
             }
             const text = pendingDeltaBySession.get(sessionId) ?? ''
             pendingDeltaBySession.delete(sessionId)
@@ -4885,12 +4994,33 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const elapsed = nowMs() - firstAt
 
           const flushThinking = () => {
-            thinkingFlushTimerBySession.delete(sessionId)
+            const pendingHandle = thinkingFlushTimerBySession.get(sessionId)
+            if (pendingHandle) {
+              cancelScheduledFlush(pendingHandle)
+              thinkingFlushTimerBySession.delete(sessionId)
+            }
             deferredThinkingFlush.delete(sessionId)
             if (isWindowBusy()) {
-              deferredThinkingFlush.set(sessionId, flushThinking)
-              ensureBusyIdleFlush()
-              return
+              const busyNow = Date.now()
+              const lastAt = lastBusyFlushAtBySession.get(sessionId) ?? 0
+              const sinceLast = busyNow - lastAt
+              if (sinceLast < BUSY_FLUSH_MAX_DEFER_MS) {
+                deferredThinkingFlush.set(sessionId, flushThinking)
+                ensureBusyIdleFlush()
+                if (!thinkingFlushTimerBySession.has(sessionId)) {
+                  const id = setTimeout(
+                    () => {
+                      thinkingFlushTimerBySession.delete(sessionId)
+                      deferredThinkingFlush.delete(sessionId)
+                      flushThinking()
+                    },
+                    Math.max(16, BUSY_FLUSH_MAX_DEFER_MS - sinceLast),
+                  ) as unknown as number
+                  thinkingFlushTimerBySession.set(sessionId, { kind: 'timeout', id })
+                }
+                return
+              }
+              lastBusyFlushAtBySession.set(sessionId, busyNow)
             }
             const buffered = pendingThinkingBySession.get(sessionId) ?? ''
             pendingThinkingBySession.delete(sessionId)
@@ -5282,7 +5412,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ) {
           update((s) => ({
             messages: sealThinkingForSession(sessionId, s),
-            chatState: 'thinking',
+            chatState: s.chatState === 'idle' ? 'idle' : 'thinking',
             activeThinkingId: null,
           }))
           break
@@ -5296,7 +5426,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         ) {
           update((s) => ({
             messages: sealThinkingForSession(sessionId, s),
-            chatState: 'thinking',
+            chatState: s.chatState === 'idle' ? 'idle' : 'thinking',
             activeThinkingId: null,
           }))
           break
@@ -5332,7 +5462,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             next[cardIdx] = upgraded
             return {
               messages: next,
-              chatState: 'thinking',
+              chatState: s.chatState === 'idle' ? 'idle' : 'thinking',
               activeThinkingId: null,
               ...subagentPatch,
             }
@@ -5351,7 +5481,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             next[curatorIdx] = upgraded
             return {
               messages: next,
-              chatState: 'thinking',
+              chatState: s.chatState === 'idle' ? 'idle' : 'thinking',
               activeThinkingId: null,
               ...subagentPatch,
             }
@@ -5369,7 +5499,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 parentToolUseId: msg.parentToolUseId,
               },
             ],
-            chatState: 'thinking',
+            chatState: s.chatState === 'idle' ? 'idle' : 'thinking',
             activeThinkingId: null,
             ...subagentPatch,
           }
@@ -5792,7 +5922,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }))
           break
         }
-        if (msg.subtype === 'ws_handler_error' || msg.subtype === 'ws_frame_gap') {
+        if (
+          msg.subtype === 'ws_handler_error' ||
+          msg.subtype === 'ws_frame_gap' ||
+          msg.subtype === 'stream_lagged'
+        ) {
           const cur = get().sessions[sessionId]
           if (cur && isSessionUiBusy(cur.chatState)) {
             dirtyMidTurnSessions.add(sessionId)
