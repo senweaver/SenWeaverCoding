@@ -75,17 +75,19 @@ export function ToolResultBlock({ content, isError, toolName, standalone = true 
     () => (expanded ? extractText(content) : ''),
     [content, expanded],
   )
+  const qaDocs = useMemo(
+    () =>
+      !isError && toolName === 'debug_test_report'
+        ? extractQaDocPaths(content)
+        : null,
+    [content, isError, toolName],
+  )
 
   if (!standalone) return null
 
   const preview = previewInfo.text.slice(0, PREVIEW_LIMIT)
   const hasMore = previewInfo.truncated
   const text = expanded ? fullText : preview
-
-  const qaDocs =
-    !isError && toolName === 'debug_test_report'
-      ? extractQaDocPaths(content)
-      : null
 
   return (
     <div className={`mb-2 overflow-hidden rounded-xl border ${

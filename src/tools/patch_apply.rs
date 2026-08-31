@@ -741,7 +741,9 @@ impl Tool for PatchApplyTool {
                                 error: Some(format!(
                                     "Refusing to patch '{}': this session has not read the \
                                      file yet. Use file_read on it first (the patch must be \
-                                     based on the file's CURRENT contents), then retry.",
+                                     based on the file's CURRENT contents), then retry. A \
+                                     compacted/Signatures view does not count: use \
+                                     level=default, paging large files with offset/limit.",
                                     file.path.display()
                                 )),
                             });

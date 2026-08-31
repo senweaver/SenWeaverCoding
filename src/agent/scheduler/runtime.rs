@@ -146,7 +146,28 @@ impl TaskSchedulerRuntime {
             }
         }
 
+        {
+            let mut sched = self.scheduler.lock();
+            if !sched.is_finished() {
+                let synthesized = sched.synthesize_missing_outcomes(
+                    "scheduler run ended before this task reached a terminal state",
+                );
+                if synthesized > 0 {
+                    warn!(
+                        synthesized,
+                        "synthesized failure outcomes for tasks left non-terminal by the run"
+                    );
+                }
+            }
+        }
+
         self.scheduler.lock().outcomes()
+    }
+}
+
+impl Drop for TaskSchedulerRuntime {
+    fn drop(&mut self) {
+        self.cancellation.cancel();
     }
 }
 
@@ -160,7 +181,7 @@ async fn worker_loop(
 ) {
     let mut rx = scheduler.lock().subscribe();
 
-    drain_ready_snapshot(
+    drain_ready_by_priority(
         worker_idx,
         &scheduler,
         &semaphore,
@@ -185,15 +206,14 @@ async fn worker_loop(
         };
 
         match evt {
-            Ok(SchedulerEvent::TaskReady { id, .. }) => {
-                execute_one(
+            Ok(SchedulerEvent::TaskReady { .. }) => {
+                drain_ready_by_priority(
                     worker_idx,
                     &scheduler,
                     &semaphore,
                     &cancellation,
                     &executor,
                     &ctx,
-                    &id,
                 )
                 .await;
             }
@@ -208,7 +228,7 @@ async fn worker_loop(
             Err(RecvError::Closed) => return,
             Err(RecvError::Lagged(n)) => {
                 scheduler_metrics::incr_broadcast_lagged(n);
-                drain_ready_snapshot(
+                drain_ready_by_priority(
                     worker_idx,
                     &scheduler,
                     &semaphore,
@@ -222,7 +242,7 @@ async fn worker_loop(
     }
 }
 
-async fn drain_ready_snapshot(
+async fn drain_ready_by_priority(
     worker_idx: usize,
     scheduler: &Arc<Mutex<TaskScheduler>>,
     semaphore: &Arc<Semaphore>,
@@ -231,59 +251,24 @@ async fn drain_ready_snapshot(
     ctx: &Arc<SchedulerSpanContext>,
 ) {
     loop {
-        let snapshot = scheduler.lock().ready_snapshot();
-        if snapshot.is_empty() {
+        if cancellation.is_cancelled() {
             return;
         }
-        let mut claimed_any = false;
-        for id in snapshot {
-            if cancellation.is_cancelled() {
-                return;
-            }
-            let claimed = scheduler.lock().try_claim(&id);
-            if let Some(task) = claimed {
-                claimed_any = true;
-                execute_claimed(
-                    worker_idx,
-                    scheduler,
-                    semaphore,
-                    cancellation,
-                    executor,
-                    ctx,
-                    task,
-                )
-                .await;
-            }
-        }
-        if !claimed_any {
+        let claimed = scheduler.lock().claim_next();
+        let Some(task) = claimed else {
             return;
-        }
+        };
+        execute_claimed(
+            worker_idx,
+            scheduler,
+            semaphore,
+            cancellation,
+            executor,
+            ctx,
+            task,
+        )
+        .await;
     }
-}
-
-async fn execute_one(
-    worker_idx: usize,
-    scheduler: &Arc<Mutex<TaskScheduler>>,
-    semaphore: &Arc<Semaphore>,
-    cancellation: &CancellationToken,
-    executor: &TaskExecutor,
-    ctx: &Arc<SchedulerSpanContext>,
-    task_id: &str,
-) {
-    let claimed = scheduler.lock().try_claim(task_id);
-    let Some(task) = claimed else {
-        return;
-    };
-    execute_claimed(
-        worker_idx,
-        scheduler,
-        semaphore,
-        cancellation,
-        executor,
-        ctx,
-        task,
-    )
-    .await;
 }
 
 async fn execute_claimed(
@@ -334,7 +319,7 @@ async fn execute_claimed(
             },
         );
 
-        let result = match std::panic::AssertUnwindSafe(executor(&task, cancellation.clone()))
+        let result = match std::panic::AssertUnwindSafe(executor(&task, cancellation.child_token()))
             .catch_unwind()
             .await
         {

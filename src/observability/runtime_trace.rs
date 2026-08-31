@@ -302,6 +302,13 @@ pub struct AgentSpanContext<'a> {
     pub delegation_id: Option<&'a str>,
 }
 
+pub fn is_enabled() -> bool {
+    TRACE_LOGGER
+        .read()
+        .unwrap_or_else(|e| e.into_inner())
+        .is_some()
+}
+
 pub fn record_event(
     event_type: &str,
     channel: Option<&str>,

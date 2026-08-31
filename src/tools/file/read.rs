@@ -213,6 +213,10 @@ impl Tool for FileReadTool {
                 }
             };
 
+        if contents.starts_with('\u{feff}') {
+            contents = contents.trim_start_matches('\u{feff}').to_string();
+        }
+
         const AUTO_SMART_LINE_THRESHOLD: usize = 1500;
         const AUTO_SMART_BYTE_THRESHOLD: usize = 128 * 1024;
         if !explicit_level
@@ -238,7 +242,9 @@ impl Tool for FileReadTool {
             .map_err(|e| anyhow::anyhow!("file compact task failed: {e}"))?;
             let footer = format!(
                 "\n[Compacted view ({}) - {total_lines} lines total{mtime_suffix}; \
-                 use level=default for full content]",
+                 use level=default for full content. Note: a compacted view does NOT satisfy \
+                 the read-before-edit requirement; before editing this file, re-read it with \
+                 level=default (add offset/limit to page through large files)]",
                 level.as_str()
             );
             crate::session::record_observed_for_current_session(&resolved_path);

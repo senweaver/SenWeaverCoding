@@ -57,6 +57,25 @@ const CODE_TO_KEY: Record<string, TranslationKey> = {
 
 const NUMBER_IN_TEXT = /(\d+)/
 
+const DETAIL_CODES = new Set<string>([
+  'model_init_failed',
+  'skill_generate_failed',
+  'recorder_start_failed',
+  'recorder_stop_failed',
+  'recorder_marker_failed',
+  'replay_load_failed',
+  'plan_draft_failed',
+  'capture_failed',
+  'planning_failed',
+  'replay_step_failed',
+  'smart_replay_step_failed',
+])
+
+export function computerText(key: TranslationKey): string {
+  const locale = useSettingsStore.getState().locale
+  return translate(locale, key)
+}
+
 export function localizeComputerMessage(
   code: string | null | undefined,
   message: string | null | undefined,
@@ -69,5 +88,8 @@ export function localizeComputerMessage(
   const count = match ? Number(match[1]) : undefined
   const localized = translate(locale, key, count !== undefined ? { count } : undefined)
   if (localized === key) return message ?? null
+  if (message && DETAIL_CODES.has(code) && message !== localized) {
+    return `${localized} (${message})`
+  }
   return localized
 }

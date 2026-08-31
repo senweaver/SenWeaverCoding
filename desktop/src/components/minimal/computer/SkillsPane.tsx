@@ -18,6 +18,7 @@ import {
   emitMinimalEvent,
   type MinimalComputerReplay,
 } from '../../../lib/minimalMode'
+import { computerText } from '../../../lib/computerMessages'
 
 type SkillsPaneProps = {
   onReplayStarted: () => void
@@ -59,7 +60,11 @@ export function SkillsPane({ onReplayStarted }: SkillsPaneProps) {
       const list = await listRecordings()
       setRecordings(list)
     } catch (err) {
-      setLoadError(err instanceof Error ? err.message : 'failed to load recordings')
+      setLoadError(
+        err instanceof Error
+          ? err.message
+          : computerText('computerUse.msg.recordingsLoadFailed'),
+      )
     } finally {
       setLoaded(true)
     }
@@ -90,7 +95,11 @@ export function SkillsPane({ onReplayStarted }: SkillsPaneProps) {
         }
       } catch (err) {
         if (mountedRef.current) {
-          setLoadError(err instanceof Error ? err.message : 'failed to start skill generation')
+          setLoadError(
+            err instanceof Error
+              ? err.message
+              : computerText('computerUse.msg.generateStartFailed'),
+          )
         }
       } finally {
         if (mountedRef.current) {
@@ -115,7 +124,11 @@ export function SkillsPane({ onReplayStarted }: SkillsPaneProps) {
         await deleteRecording(name)
         setRecordings((prev) => prev.filter((r) => r.name !== name))
       } catch (err) {
-        setLoadError(err instanceof Error ? err.message : 'failed to delete recording')
+        setLoadError(
+          err instanceof Error
+            ? err.message
+            : computerText('computerUse.msg.recordingDeleteFailed'),
+        )
       }
     })()
   }

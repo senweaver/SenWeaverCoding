@@ -2,8 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { useShallow } from 'zustand/react/shallow'
+import { useEffect, useRef, useState } from 'react'
 import { useChatStore } from '../../stores/chatStore'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useWorkspaceFilesStore } from '../../stores/workspaceFilesStore'
@@ -11,6 +10,7 @@ import { useTranslation } from '../../i18n'
 import { Modal } from '../shared/Modal'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
+import { enqueueIdleTask } from '../../lib/idleTaskQueue'
 import { revealInExplorer } from '../../lib/revealInExplorer'
 import { useUIStore } from '../../stores/uiStore'
 import {
@@ -19,7 +19,7 @@ import {
   regenerateCuratorDocxWithDiagrams,
 } from '../../lib/mermaidToImage'
 import {
-  selectCuratorCardExecutionState,
+  selectCuratorCardExecutionStateCached,
   type CuratorExecutionState,
 } from '../../utils/activeCuratorSelector'
 
@@ -85,30 +85,25 @@ export function CuratorCard({
   const resumeCuratorExecution = useChatStore((s) => s.resumeCuratorExecution)
   const continueCuratorWriting = useChatStore((s) => s.continueCuratorWriting)
 
-  const curatorInputs = useChatStore(
-    useShallow((s) => {
-      const session = sessionId ? s.sessions[sessionId] : undefined
-      return {
-        messages: session?.messages,
-        chatState: session?.chatState,
-      }
-    }),
-  )
   const workDir = useSessionStore((s) => {
     if (!sessionId) return null
     const entry = s.sessions.find((item) => item.id === sessionId)
     return entry?.workDir?.trim() || null
   })
-  const execState = useMemo<CuratorExecutionState>(() => {
-    if (!sessionId || !curatorInputs.messages) return 'idle'
-    return selectCuratorCardExecutionState(
-      curatorInputs.messages,
+  const execState = useChatStore((s): CuratorExecutionState => {
+    if (!sessionId) return 'idle'
+    const session = s.sessions[sessionId]
+    if (!session) return 'idle'
+    return selectCuratorCardExecutionStateCached(
+      session.messages,
       messageId,
-      curatorInputs.chatState ?? 'idle',
+      session.chatState ?? 'idle',
     )
-  }, [sessionId, curatorInputs.messages, curatorInputs.chatState, messageId])
-
-  const sessionIsLive = (curatorInputs.chatState ?? 'idle') !== 'idle'
+  })
+  const sessionIsLive = useChatStore((s) => {
+    if (!sessionId) return false
+    return (s.sessions[sessionId]?.chatState ?? 'idle') !== 'idle'
+  })
   const interruptedWhileWriting = status === 'writing' && !sessionIsLive
   const isWriting = status === 'writing' && sessionIsLive
   const isFailed = status === 'failed' || interruptedWhileWriting
@@ -255,29 +250,35 @@ export function CuratorCard({
     if (diagramRanRef.current) return
     const processKey = `${messageId}::${docxPath}`
     if (docxDiagramsProcessed.has(processKey)) return
-    if (extractMermaidBlocks(body).length === 0) return
 
-    diagramRanRef.current = true
-    docxDiagramsProcessed.add(processKey)
     let cancelled = false
-    setDiagramState('rendering')
-    void (async () => {
-      try {
-        const diagrams = await renderCuratorDiagrams(body)
-        if (cancelled) return
-        if (diagrams.length > 0) {
-          await regenerateCuratorDocxWithDiagrams({
-            finalMdPath: cleanWinPath(finalMdPath),
-            template,
-            diagrams,
-          })
+    const cancelIdle = enqueueIdleTask(() => {
+      if (cancelled) return
+      if (diagramRanRef.current) return
+      if (docxDiagramsProcessed.has(processKey)) return
+      if (extractMermaidBlocks(body).length === 0) return
+      diagramRanRef.current = true
+      docxDiagramsProcessed.add(processKey)
+      setDiagramState('rendering')
+      void (async () => {
+        try {
+          const diagrams = await renderCuratorDiagrams(body)
+          if (cancelled) return
+          if (diagrams.length > 0) {
+            await regenerateCuratorDocxWithDiagrams({
+              finalMdPath: cleanWinPath(finalMdPath),
+              template,
+              diagrams,
+            })
+          }
+        } finally {
+          if (!cancelled) setDiagramState('done')
         }
-      } finally {
-        if (!cancelled) setDiagramState('done')
-      }
-    })()
+      })()
+    })
     return () => {
       cancelled = true
+      cancelIdle()
     }
   }, [messageId, docxPath, finalMdPath, body, template, isWriting])
 

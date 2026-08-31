@@ -94,8 +94,15 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
       const sessions = [...byId.values()]
       const availableProjects = [...new Set(sessions.map((s) => s.projectPath).filter(Boolean))].sort()
       const runningIds = sessions.filter((s) => s.running === true).map((s) => s.id)
-      if (runningIds.length > 0) {
-        useSessionRunStateStore.getState().mergeIds(runningIds)
+      const runState = useSessionRunStateStore.getState()
+      if (!runState.esConnected) {
+        if (project) {
+          if (runningIds.length > 0) {
+            runState.mergeIds(runningIds)
+          }
+        } else {
+          runState.setSnapshot(runningIds)
+        }
       }
       set({ sessions, availableProjects, isLoading: false })
     } catch (err) {

@@ -13,6 +13,13 @@ import {
   parseMarkdownAsync,
 } from '../../lib/markdownWorkerClient'
 import { useTranslation } from '../../i18n'
+import {
+  isScrollActive,
+  runWhenScrollQuiet,
+  getChatScrollerWidth,
+  onChatScrollerWidthChange,
+} from '../../lib/scrollActivity'
+import { StreamingMarkdownRenderer } from './StreamingMarkdownRenderer'
 
 const MermaidRenderer = lazy(() =>
   import('../chat/MermaidRenderer').then((m) => ({ default: m.MermaidRenderer })),
@@ -33,11 +40,139 @@ function shouldRenderAsMermaid(block: CodeBlock): boolean {
 }
 
 const ENHANCE_CACHE = new Map<string, string>()
-const ENHANCE_CACHE_MAX = 200
+const ENHANCE_CACHE_MAX = 400
+
+const MEASURED_HEIGHT_CACHE = new Map<string, number>()
+const MEASURED_HEIGHT_CACHE_MAX = 600
+
+function contentHeightKey(content: string, variant: string, scale: string): string {
+  let h1 = 5381
+  let h2 = 52711
+  for (let i = 0; i < content.length; i++) {
+    const code = content.charCodeAt(i)
+    h1 = Math.imul(h1, 33) ^ code
+    h2 = Math.imul(h2, 31) ^ code
+  }
+  return `${variant}:${scale}:${(h1 >>> 0).toString(36)}-${(h2 >>> 0).toString(36)}-${content.length.toString(36)}`
+}
+
+function getMeasuredHeight(key: string): number | undefined {
+  const value = MEASURED_HEIGHT_CACHE.get(key)
+  if (value !== undefined) {
+    MEASURED_HEIGHT_CACHE.delete(key)
+    MEASURED_HEIGHT_CACHE.set(key, value)
+  }
+  return value
+}
+
+function setMeasuredHeight(key: string, height: number): void {
+  const existing = MEASURED_HEIGHT_CACHE.get(key)
+  if (existing === height) return
+  if (existing === undefined && MEASURED_HEIGHT_CACHE.size >= MEASURED_HEIGHT_CACHE_MAX) {
+    const oldest = MEASURED_HEIGHT_CACHE.keys().next().value
+    if (oldest !== undefined) MEASURED_HEIGHT_CACHE.delete(oldest)
+  }
+  MEASURED_HEIGHT_CACHE.set(key, height)
+  schedulePersistHeights()
+}
+
+const HEIGHT_STORE_KEY = 'sen.mdHeights.v2'
+let persistHeightsTimer: number | null = null
+let measureWidth = 0
+let pendingPersisted: { w: number; e: Array<[string, number]> } | null = null
+
+function persistHeightsNow(): void {
+  if (measureWidth <= 0) return
+  try {
+    window.localStorage.setItem(
+      HEIGHT_STORE_KEY,
+      JSON.stringify({
+        w: measureWidth,
+        e: Array.from(MEASURED_HEIGHT_CACHE.entries()),
+      }),
+    )
+  } catch {
+    return
+  }
+}
+
+function schedulePersistHeights(): void {
+  if (typeof window === 'undefined') return
+  if (persistHeightsTimer !== null) return
+  persistHeightsTimer = window.setTimeout(() => {
+    persistHeightsTimer = null
+    persistHeightsNow()
+  }, 1500)
+}
+
+if (typeof window !== 'undefined') {
+  try {
+    const raw = window.localStorage.getItem(HEIGHT_STORE_KEY)
+    if (raw) {
+      const data = JSON.parse(raw) as { w?: number; e?: Array<[string, number]> }
+      if (typeof data.w === 'number' && data.w > 0 && Array.isArray(data.e)) {
+        pendingPersisted = { w: data.w, e: data.e }
+      }
+    }
+  } catch {
+    pendingPersisted = null
+  }
+  onChatScrollerWidthChange((width) => {
+    if (measureWidth > 0 && width !== measureWidth) {
+      MEASURED_HEIGHT_CACHE.clear()
+      if (persistHeightsTimer !== null) {
+        window.clearTimeout(persistHeightsTimer)
+        persistHeightsTimer = null
+      }
+      try {
+        window.localStorage.removeItem(HEIGHT_STORE_KEY)
+      } catch {
+        return
+      }
+    }
+    measureWidth = width
+    if (pendingPersisted) {
+      if (pendingPersisted.w === width) {
+        for (const entry of pendingPersisted.e) {
+          if (
+            Array.isArray(entry) &&
+            typeof entry[0] === 'string' &&
+            typeof entry[1] === 'number'
+          ) {
+            MEASURED_HEIGHT_CACHE.set(entry[0], entry[1])
+          }
+        }
+      }
+      pendingPersisted = null
+    }
+  })
+  window.addEventListener('pagehide', () => {
+    if (persistHeightsTimer === null) return
+    window.clearTimeout(persistHeightsTimer)
+    persistHeightsTimer = null
+    persistHeightsNow()
+  })
+}
+
+function estimateMarkdownHeight(text: string): number {
+  let lines = 1
+  for (let i = 0; i < text.length; i++) {
+    if (text.charCodeAt(i) === 10) lines++
+  }
+  const width = getChatScrollerWidth()
+  const charsPerLine =
+    width > 0 ? Math.min(140, Math.max(48, Math.floor(width / 8))) : 90
+  const wrapped = Math.max(lines, Math.ceil(text.length / charsPerLine))
+  return Math.min(1600, Math.max(40, wrapped * 24 + 12))
+}
 
 function enhanceMarkdownHtml(html: string, cacheWrite = true): string {
   const cached = ENHANCE_CACHE.get(html)
-  if (cached !== undefined) return cached
+  if (cached !== undefined) {
+    ENHANCE_CACHE.delete(html)
+    ENHANCE_CACHE.set(html, cached)
+    return cached
+  }
 
   const cleanHtml = DOMPurify.sanitize(html, {
     ADD_TAGS: ['use'],
@@ -168,13 +303,41 @@ function getProseClasses(
 
 const MARKDOWN_RENDER_CHAR_CAP = 20_000
 
+function MarkdownSkeleton({ height }: { height: number }) {
+  const bars = Math.max(1, Math.min(28, Math.floor((height - 8) / 26)))
+  return (
+    <div className="flex flex-col gap-3 py-1" aria-hidden>
+      {Array.from({ length: bars }, (_, i) => (
+        <div
+          key={i}
+          className="h-[14px] animate-pulse rounded bg-[var(--color-surface-container-low)]"
+          style={{ width: i === bars - 1 ? '62%' : '100%' }}
+        />
+      ))}
+    </div>
+  )
+}
+
 function MarkdownRendererInner({ content, variant = 'default', className, scale = 'default', streaming = false }: Props) {
   const t = useTranslation()
   const hostRef = useRef<HTMLDivElement>(null)
-  const [inView, setInView] = useState(streaming)
+  const [inView, setInView] = useState(
+    () =>
+      streaming ||
+      getCachedMarkdown(
+        content.length > MARKDOWN_RENDER_CHAR_CAP
+          ? content.slice(0, MARKDOWN_RENDER_CHAR_CAP)
+          : content,
+      ) !== undefined,
+  )
   const [expanded, setExpanded] = useState(false)
   const overCap = content.length > MARKDOWN_RENDER_CHAR_CAP
   const visibleContent = !expanded && overCap ? content.slice(0, MARKDOWN_RENDER_CHAR_CAP) : content
+
+  const heightKey = useMemo(
+    () => contentHeightKey(visibleContent, variant, scale),
+    [visibleContent, variant, scale],
+  )
 
   useEffect(() => {
     if (streaming) {
@@ -184,15 +347,32 @@ function MarkdownRendererInner({ content, variant = 'default', className, scale 
     if (inView) return
     const el = hostRef.current
     if (!el) return
+    let cancelQuiet: (() => void) | null = null
     const io = new IntersectionObserver(
       (entries) => {
-        if (entries.some((entry) => entry.isIntersecting)) setInView(true)
+        const hit = entries.find((entry) => entry.isIntersecting)
+        if (!hit) return
+        io.disconnect()
+        const zeroShift =
+          getCachedMarkdown(visibleContent) !== undefined &&
+          MEASURED_HEIGHT_CACHE.has(heightKey)
+        if (zeroShift || !isScrollActive()) {
+          setInView(true)
+          return
+        }
+        cancelQuiet = runWhenScrollQuiet(() => {
+          cancelQuiet = null
+          setInView(true)
+        })
       },
-      { rootMargin: '280px 0px' },
+      { rootMargin: '720px 0px' },
     )
     io.observe(el)
-    return () => io.disconnect()
-  }, [streaming, inView])
+    return () => {
+      io.disconnect()
+      if (cancelQuiet) cancelQuiet()
+    }
+  }, [streaming, inView, visibleContent, heightKey])
 
   const [parsed, setParsed] = useState<{ source: string; result: ParsedMarkdown } | null>(null)
 
@@ -205,7 +385,9 @@ function MarkdownRendererInner({ content, variant = 'default', className, scale 
       )
       return
     }
-    const eager = getMarkdownForImmediateRender(visibleContent)
+    const eager = getMarkdownForImmediateRender(visibleContent, {
+      cacheWrite: !streaming,
+    })
     if (eager) {
       setParsed({ source: visibleContent, result: eager })
     }
@@ -219,8 +401,29 @@ function MarkdownRendererInner({ content, variant = 'default', className, scale 
   }, [inView, visibleContent, streaming])
 
   const active = parsed && parsed.source === visibleContent ? parsed.result : null
-  const html = active?.html ?? ''
-  const codeBlocks = useMemo(() => active?.codeBlocks ?? [], [active])
+  const rendered = active ?? parsed?.result ?? null
+  const pendingSuffix =
+    !active && parsed && visibleContent.startsWith(parsed.source)
+      ? visibleContent.slice(parsed.source.length)
+      : ''
+  const html = rendered?.html ?? ''
+  const cachedHeight = streaming ? undefined : getMeasuredHeight(heightKey)
+  const estimatedHeight = estimateMarkdownHeight(visibleContent)
+  const stableBoxHeight = cachedHeight ?? estimatedHeight
+
+  useEffect(() => {
+    if (streaming || !inView) return
+    if (!html || pendingSuffix) return
+    if (!parsed || parsed.source !== visibleContent) return
+    const el = hostRef.current
+    if (!el) return
+    if (parsed.result.codeBlocks.some(shouldRenderAsMermaid)) return
+    const measured = el.offsetHeight
+    if (measured > 0 && el.querySelector('img') === null) {
+      setMeasuredHeight(heightKey, measured)
+    }
+  }, [streaming, inView, html, pendingSuffix, parsed, visibleContent, heightKey])
+  const codeBlocks = useMemo(() => rendered?.codeBlocks ?? [], [rendered])
   const proseClasses = useMemo(
     () => getProseClasses(variant, className, scale),
     [variant, className, scale],
@@ -283,35 +486,42 @@ function MarkdownRendererInner({ content, variant = 'default', className, scale 
     }
   }, [])
 
-  const expandControl =
-    overCap && !expanded ? (
-      <button
-        type="button"
-        className="mt-2 text-[12px] text-[var(--color-text-secondary)]"
-        onClick={() => setExpanded(true)}
-      >
-        {t('common.expand')}
-      </button>
-    ) : null
+  const expandControl = overCap ? (
+    <button
+      type="button"
+      className="mt-2 text-[12px] text-[var(--color-text-secondary)]"
+      onClick={() => setExpanded((prev) => !prev)}
+    >
+      {expanded ? t('common.collapse') : t('common.expand')}
+    </button>
+  ) : null
 
   if (!inView) {
-    const est = Math.min(480, Math.max(64, Math.round(content.length / 12)))
     return (
       <div
         ref={hostRef}
-        className={proseClasses}
-        style={{ contentVisibility: 'auto', containIntrinsicSize: `auto ${est}px` }}
+        style={{ height: stableBoxHeight, overflow: 'hidden' }}
       >
-        <p style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{content.slice(0, 320)}</p>
+        <MarkdownSkeleton height={stableBoxHeight} />
       </div>
     )
   }
 
-  if (!active) {
+  if (!rendered) {
+    if (streaming) {
+      return (
+        <div ref={hostRef} className={proseClasses}>
+          <StreamingMarkdownRenderer content={visibleContent} />
+          {expandControl}
+        </div>
+      )
+    }
     return (
-      <div ref={hostRef} className={proseClasses}>
-        <p style={{ whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}>{visibleContent}</p>
-        {expandControl}
+      <div
+        ref={hostRef}
+        style={{ height: stableBoxHeight, overflow: 'hidden' }}
+      >
+        <MarkdownSkeleton height={stableBoxHeight} />
       </div>
     )
   }
@@ -325,6 +535,11 @@ function MarkdownRendererInner({ content, variant = 'default', className, scale 
           dangerouslySetInnerHTML={{ __html: cleanHtml }}
           onClick={handleClick}
         />
+        {streaming && pendingSuffix && (
+          <div className={proseClasses}>
+            <StreamingMarkdownRenderer content={pendingSuffix} />
+          </div>
+        )}
         {expandControl}
       </div>
     )
@@ -354,6 +569,9 @@ function MarkdownRendererInner({ content, variant = 'default', className, scale 
             />
           </div>
         )
+      )}
+      {streaming && pendingSuffix && (
+        <StreamingMarkdownRenderer content={pendingSuffix} />
       )}
       {expandControl}
     </div>

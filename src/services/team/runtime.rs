@@ -41,15 +41,22 @@ pub fn create_team(
     members: &[String],
     leader: Option<&str>,
     config: TeamConfig,
-) {
+) -> Result<Vec<String>, String> {
+    if manager().read().contains_key(id) {
+        return Err(format!("team '{id}' already exists"));
+    }
     let mut team = Team::new(id.to_string(), name.to_string(), config);
+    let mut rejected: Vec<String> = Vec::new();
     for member in members {
         let role = if leader == Some(member.as_str()) {
             Role::Orchestrator
         } else {
             Role::Specialist
         };
-        team.add_member(member.clone(), role);
+        if let Err(e) = team.add_member(member.clone(), role) {
+            tracing::warn!(team = id, member = %member, error = %e, "team member rejected");
+            rejected.push(member.clone());
+        }
     }
     let keepalive = team.subscribe();
     let entry = TeamRuntimeEntry {
@@ -58,7 +65,12 @@ pub fn create_team(
         next_id: 1,
         _keepalive: keepalive,
     };
-    manager().write().insert(id.to_string(), entry);
+    let mut guard = manager().write();
+    if guard.contains_key(id) {
+        return Err(format!("team '{id}' already exists"));
+    }
+    guard.insert(id.to_string(), entry);
+    Ok(rejected)
 }
 
 pub fn delete_team(id: &str) -> bool {
@@ -80,9 +92,19 @@ pub fn send_message(
         .get_mut(team_id)
         .ok_or_else(|| format!("team '{team_id}' not found"))?;
 
+    let is_broadcast = to.eq_ignore_ascii_case("broadcast") || to.is_empty();
+    if !entry.team.members.contains_key(from) {
+        return Err(format!(
+            "sender '{from}' is not a member of team '{team_id}'"
+        ));
+    }
+    if !is_broadcast && !entry.team.members.contains_key(to) {
+        return Err(format!(
+            "recipient '{to}' is not a member of team '{team_id}'"
+        ));
+    }
     let id = entry.next_id;
     entry.next_id += 1;
-    let is_broadcast = to.eq_ignore_ascii_case("broadcast") || to.is_empty();
     let record = TeamMessageRecord {
         id,
         from: from.to_string(),
@@ -104,11 +126,11 @@ pub fn send_message(
 
     let payload = MessagePayload::Text(content.to_string());
     let send_result = if is_broadcast {
-        entry.team.broadcast(&from.to_string(), payload)
+        entry.team.broadcast(id, &from.to_string(), payload)
     } else {
         entry
             .team
-            .send_direct(&from.to_string(), &to.to_string(), payload)
+            .send_direct(id, &from.to_string(), &to.to_string(), payload)
     };
     if let Err(e) = send_result {
         tracing::debug!(team = team_id, error = %e, "team bus send had no active subscribers");

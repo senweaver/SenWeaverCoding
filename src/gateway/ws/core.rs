@@ -437,10 +437,13 @@ async fn handle_socket(
     let mut message_count: usize = 0;
     let mut effective_name: Option<String> = None;
     if let Some(backend) = state.session_backend.clone() {
+        const SEED_HISTORY_WINDOW: usize = 400;
         let session_key_load = session_key.clone();
         let backend_load = backend.clone();
-        let messages = match tokio::task::spawn_blocking(move || backend_load.load(&session_key_load))
-            .await
+        let messages = match tokio::task::spawn_blocking(move || {
+            backend_load.load_tail(&session_key_load, SEED_HISTORY_WINDOW)
+        })
+        .await
         {
             Ok(messages) => messages,
             Err(e) => {
@@ -1074,7 +1077,7 @@ async fn process_chat_message(
                 session_key,
                 "websocket disconnected mid-turn: firing cancel to stop orphaned turn"
             );
-            const DISCONNECT_CANCEL_GRACE_SECS: u64 = 30;
+            const DISCONNECT_CANCEL_GRACE_SECS: u64 = 630;
             match tokio::time::timeout(
                 std::time::Duration::from_secs(DISCONNECT_CANCEL_GRACE_SECS),
                 &mut joined,
@@ -1087,7 +1090,7 @@ async fn process_chat_message(
                         target: "agent_cancel",
                         session_key,
                         grace_secs = DISCONNECT_CANCEL_GRACE_SECS,
-                        "orphaned turn did not stop within the cancellation grace period after websocket disconnect; dropping the turn future"
+                        "orphaned turn ignored cooperative cancellation for the full grace period (covers one tool-timeout window) after websocket disconnect; dropping the turn future as a last resort"
                     );
                     (Ok(Err(crate::error::AgentError::TurnCancelled)), String::new())
                 }

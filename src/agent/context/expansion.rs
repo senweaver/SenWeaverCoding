@@ -5,7 +5,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::context_resolver::{
-    ContextBudget, ContextItem, DefaultResolver, parse_context_tags, strip_context_tags,
+    ContextBudget, ContextItem, DefaultResolver, parse_context_tags_with_spans, strip_spans,
 };
 
 pub const DEFAULT_BUDGET_TOKENS: usize = 8_192;
@@ -33,8 +33,8 @@ pub async fn expand_input_with_budget(
     current_selection: String,
     budget_tokens: usize,
 ) -> String {
-    let tags = parse_context_tags(input);
-    if tags.is_empty() {
+    let tagged = parse_context_tags_with_spans(input);
+    if tagged.is_empty() {
         return input.to_string();
     }
 
@@ -43,8 +43,9 @@ pub async fn expand_input_with_budget(
         .with_selection(current_selection);
     let budget = ContextBudget::new(budget_tokens.max(1));
 
-    let mut items: Vec<ContextItem> = Vec::with_capacity(tags.len());
-    for tag in tags {
+    let mut items: Vec<ContextItem> = Vec::with_capacity(tagged.len());
+    let mut resolved_spans: Vec<std::ops::Range<usize>> = Vec::with_capacity(tagged.len());
+    for (tag, span) in tagged {
         match crate::context_resolver::handlers::resolve_tag_async(
             &tag,
             workspace,
@@ -54,22 +55,25 @@ pub async fn expand_input_with_budget(
         )
         .await
         {
-            Ok(item) => items.push(item),
+            Ok(item) => {
+                items.push(item);
+                resolved_spans.push(span);
+            }
             Err(err) => {
                 tracing::debug!(
                     target: "context_expansion",
                     tag = %tag.label(),
                     error = %err,
-                    "skipping unresolvable @tag"
+                    "keeping unresolvable @tag verbatim in the prompt"
                 );
             }
         }
     }
 
-    let prose = strip_context_tags(input);
     if items.is_empty() {
-        return prose;
+        return input.to_string();
     }
+    let prose = strip_spans(input, &resolved_spans);
 
     let mut out = String::with_capacity(prose.len() + items.iter().map(|i| i.body.len()).sum::<usize>());
     out.push_str(prose.trim_end());

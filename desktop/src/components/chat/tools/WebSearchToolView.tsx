@@ -267,9 +267,13 @@ function uniqueHosts(hits: WebSearchHit[], max: number): string[] {
   return out
 }
 
+const SUMMARY_PARSE_MAX_CHARS = 65_536
+
 function readSummary(props: ToolViewProps): WebSearchSummary {
   const text = props.result ? extractTextContent(props.result.content) : ''
-  return parseWebSearchResults(text)
+  return parseWebSearchResults(
+    text.length > SUMMARY_PARSE_MAX_CHARS ? text.slice(0, SUMMARY_PARSE_MAX_CHARS) : text,
+  )
 }
 
 function fallbackQuery(props: ToolViewProps): string {
@@ -383,7 +387,24 @@ export function WebSearchDetail(props: ToolViewProps) {
             {summary.errorMessage}
           </div>
         )}
-        {summary.raw && summary.raw !== summary.errorMessage && (
+        {summary.failedEngines && summary.failedEngines.length > 0 && (
+          <ul className="space-y-0.5 rounded border border-[var(--color-border)]/60 bg-[var(--color-surface-container-lowest)] px-2 py-1.5 text-[11px] text-[var(--color-text-tertiary)]">
+            {summary.failedEngines.map((f, idx) => (
+              <li
+                key={`${f.engine}-${idx}`}
+                className="truncate"
+                title={`${f.engine}: ${f.reason}`}
+              >
+                <span className="font-medium text-[var(--color-text-secondary)]">
+                  {f.engine}
+                </span>
+                {f.reason && <span className="mx-1">·</span>}
+                {f.reason}
+              </li>
+            ))}
+          </ul>
+        )}
+        {!summary.errorMessage && summary.raw && (
           <pre className="max-h-48 overflow-auto rounded border border-[var(--color-border)]/60 bg-[var(--color-surface-container-lowest)] p-2 text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap">
             {summary.raw}
           </pre>
@@ -396,9 +417,9 @@ export function WebSearchDetail(props: ToolViewProps) {
     return (
       <div className="space-y-1.5">
         <div className="text-[11px] text-[var(--color-text-tertiary)]">
-          {t('tool.web.noResults')}
+          {summary.notice ?? t('tool.web.noResults')}
         </div>
-        {summary.raw && (
+        {!summary.notice && summary.raw && (
           <pre className="max-h-32 overflow-auto rounded border border-[var(--color-border)]/60 bg-[var(--color-surface-container-lowest)] p-2 text-[11px] text-[var(--color-text-secondary)] whitespace-pre-wrap">
             {summary.raw}
           </pre>

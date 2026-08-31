@@ -96,6 +96,36 @@ pub enum PlanParseError {
     EscapingPath { step: String, path: String },
     #[error("step `{step}` description is empty")]
     EmptyDescription { step: String },
+    #[error("rename step `{step}` is missing the required `to_path` field")]
+    MissingRenameTarget { step: String },
+}
+
+fn validate_workspace_relative_path(
+    step_id: &str,
+    raw_path: &str,
+) -> Result<(), PlanParseError> {
+    let normalized = raw_path.replace('\\', "/");
+    let path = Path::new(normalized.as_str());
+    if path.is_absolute() || path.has_root() {
+        return Err(PlanParseError::AbsolutePath {
+            step: step_id.to_string(),
+            path: raw_path.to_string(),
+        });
+    }
+    for component in path.components() {
+        match component {
+            std::path::Component::ParentDir
+            | std::path::Component::Prefix(_)
+            | std::path::Component::RootDir => {
+                return Err(PlanParseError::EscapingPath {
+                    step: step_id.to_string(),
+                    path: raw_path.to_string(),
+                });
+            }
+            _ => {}
+        }
+    }
+    Ok(())
 }
 
 pub fn validate_planner_response(raw: &str) -> Result<PlannerResponse, PlanParseError> {
@@ -127,22 +157,16 @@ pub fn validate_planner_response(raw: &str) -> Result<PlannerResponse, PlanParse
                 step: step.id.clone(),
             });
         }
-        let path = Path::new(&step.path);
-        if path.is_absolute() {
-            return Err(PlanParseError::AbsolutePath {
-                step: step.id.clone(),
-                path: step.path.clone(),
-            });
-        }
-        if step
-            .path
-            .split('/')
-            .any(|seg| seg == "..")
-        {
-            return Err(PlanParseError::EscapingPath {
-                step: step.id.clone(),
-                path: step.path.clone(),
-            });
+        validate_workspace_relative_path(&step.id, &step.path)?;
+        match step.to_path.as_deref().map(str::trim).filter(|p| !p.is_empty()) {
+            Some(to_path) => validate_workspace_relative_path(&step.id, to_path)?,
+            None => {
+                if matches!(step.kind, PlanStepKind::Rename) {
+                    return Err(PlanParseError::MissingRenameTarget {
+                        step: step.id.clone(),
+                    });
+                }
+            }
         }
         for dep in &step.depends_on {
             if dep == &step.id {
@@ -228,6 +252,9 @@ impl PlanDependencyGraph {
             }
             for w in ids.windows(2) {
                 let (prev, curr) = (&w[0], &w[1]);
+                if reaches(&edges_out, curr, prev) {
+                    continue;
+                }
                 let inserted = edges_out
                     .entry(prev.clone())
                     .or_default()
@@ -247,37 +274,44 @@ impl PlanDependencyGraph {
 
     pub fn topo_layers(&self) -> Result<Vec<Vec<String>>, PlanParseError> {
         let mut in_degree: HashMap<String, usize> = self.in_degree.clone();
+        let declaration_index: HashMap<&str, usize> = self
+            .steps
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (s.id.as_str(), i))
+            .collect();
+        let total = self.steps.len();
         let mut layers: Vec<Vec<String>> = Vec::new();
         let mut visited: usize = 0;
-        let total = self.steps.len();
 
-        loop {
+        let mut current: Vec<String> = self
+            .steps
+            .iter()
+            .filter(|s| in_degree.get(&s.id).copied().unwrap_or(0) == 0)
+            .map(|s| s.id.clone())
+            .collect();
 
-            let mut layer: Vec<String> = Vec::new();
-            for step in &self.steps {
-                if in_degree.get(&step.id).copied().unwrap_or(0) == 0 && !already_layered(&layers, &step.id) {
-                    layer.push(step.id.clone());
-                }
-            }
-            if layer.is_empty() {
-                break;
-            }
-            for id in &layer {
+        while !current.is_empty() {
+            let mut next: Vec<String> = Vec::new();
+            for id in &current {
                 if let Some(succs) = self.edges_out.get(id) {
                     for succ in succs {
                         if let Some(deg) = in_degree.get_mut(succ) {
-                            *deg = deg.saturating_sub(1);
+                            if *deg > 0 {
+                                *deg -= 1;
+                                if *deg == 0 {
+                                    next.push(succ.clone());
+                                }
+                            }
                         }
                     }
                 }
-
-                in_degree.insert(id.clone(), usize::MAX);
             }
-            visited += layer.len();
-            layers.push(layer);
-            if visited >= total {
-                break;
-            }
+            next.sort_unstable_by_key(|id| {
+                declaration_index.get(id.as_str()).copied().unwrap_or(usize::MAX)
+            });
+            visited += current.len();
+            layers.push(std::mem::replace(&mut current, next));
         }
 
         if visited < total {
@@ -286,7 +320,7 @@ impl PlanDependencyGraph {
                 .steps
                 .iter()
                 .map(|s| &s.id)
-                .filter(|id| !already_layered(&layers, id))
+                .filter(|id| in_degree.get(id.as_str()).copied().unwrap_or(0) > 0)
                 .collect();
             return Err(PlanParseError::DependencyCycle {
                 cycle: stuck
@@ -309,8 +343,26 @@ impl PlanDependencyGraph {
     }
 }
 
-fn already_layered(layers: &[Vec<String>], id: &str) -> bool {
-    layers.iter().any(|layer| layer.iter().any(|x| x == id))
+fn reaches(edges_out: &HashMap<String, HashSet<String>>, from: &str, target: &str) -> bool {
+    if from == target {
+        return true;
+    }
+    let mut stack: Vec<&str> = vec![from];
+    let mut seen: HashSet<&str> = HashSet::new();
+    while let Some(node) = stack.pop() {
+        if !seen.insert(node) {
+            continue;
+        }
+        if let Some(succs) = edges_out.get(node) {
+            for succ in succs {
+                if succ == target {
+                    return true;
+                }
+                stack.push(succ.as_str());
+            }
+        }
+    }
+    false
 }
 
 pub fn auto_expand_with_symbol_graph(steps: &mut Vec<PlanStepJson>, workspace_root: &Path) -> usize {

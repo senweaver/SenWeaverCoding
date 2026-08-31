@@ -252,15 +252,46 @@ impl StreamDelta {
             return Vec::new();
         };
         match value {
-            serde_json::Value::Array(items) => items
-                .iter()
-                .filter_map(|item| serde_json::from_value(item.clone()).ok())
-                .collect(),
-            other => serde_json::from_value(other.clone())
-                .ok()
-                .into_iter()
-                .collect(),
+            serde_json::Value::Array(items) => {
+                items.iter().map(salvage_tool_call_delta).collect()
+            }
+            other => vec![salvage_tool_call_delta(other)],
         }
+    }
+}
+
+fn coerce_delta_string(value: &serde_json::Value) -> Option<String> {
+    match value {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        _ => None,
+    }
+}
+
+fn salvage_tool_call_delta(item: &serde_json::Value) -> StreamToolCallDelta {
+    if let Ok(parsed) = serde_json::from_value::<StreamToolCallDelta>(item.clone()) {
+        return parsed;
+    }
+    let obj = item.as_object();
+    let field = |key: &str| obj.and_then(|o| o.get(key)).and_then(coerce_delta_string);
+    let index = obj.and_then(|o| o.get("index")).and_then(|v| {
+        v.as_u64()
+            .map(|n| n as usize)
+            .or_else(|| v.as_str().and_then(|s| s.trim().parse::<usize>().ok()))
+    });
+    let function = obj
+        .and_then(|o| o.get("function"))
+        .and_then(|f| f.as_object())
+        .map(|f| StreamFunctionDelta {
+            name: f.get("name").and_then(coerce_delta_string),
+            arguments: f.get("arguments").and_then(coerce_delta_string),
+        });
+    StreamToolCallDelta {
+        index,
+        id: field("id"),
+        function,
+        name: field("name"),
+        arguments: field("arguments"),
     }
 }
 
@@ -457,6 +488,11 @@ impl StreamToolCallAccumulator {
     #[must_use]
     pub fn current_name(&self) -> Option<&str> {
         self.name.as_deref()
+    }
+
+    #[must_use]
+    pub fn current_id(&self) -> Option<&str> {
+        self.id.as_deref()
     }
 
     #[must_use]
@@ -753,8 +789,14 @@ pub fn sse_bytes_to_chunks(
             if made_progress && !saw_terminator {
                 tracing::warn!(
                     target: "provider.stream",
-                    "upstream stream closed without [DONE]/finish_reason after partial output; finishing gracefully with the partial response instead of failing the turn"
+                    "upstream stream closed without [DONE]/finish_reason after partial output; failing closed so the turn is retried instead of presenting truncated output as complete"
                 );
+                let _ = tx
+                    .send(Err(StreamError::Provider(
+                        "upstream stream closed without [DONE]/finish_reason after partial output; connection closed mid-response".to_string(),
+                    )))
+                    .await;
+                return;
             }
 
             let _ = tx.send(Ok(StreamChunk::final_chunk())).await;
@@ -923,22 +965,32 @@ pub fn sse_bytes_to_events(
                                         let index = match delta.index {
                                             Some(i) => i,
                                             None => {
-                                                let starts_new_call = delta
+                                                let delta_id = delta
                                                     .id
                                                     .as_deref()
-                                                    .is_some_and(|v| !v.is_empty())
-                                                    || delta
-                                                        .function
-                                                        .as_ref()
-                                                        .and_then(|f| f.name.as_deref())
-                                                        .or(delta.name.as_deref())
-                                                        .is_some_and(|v| !v.is_empty());
-                                                if tool_calls.is_empty() {
-                                                    0
-                                                } else if starts_new_call {
-                                                    tool_calls.len()
+                                                    .filter(|v| !v.is_empty());
+                                                let existing_by_id = delta_id.and_then(|id| {
+                                                    tool_calls
+                                                        .iter()
+                                                        .position(|acc| acc.current_id() == Some(id))
+                                                });
+                                                if let Some(existing) = existing_by_id {
+                                                    existing
                                                 } else {
-                                                    tool_calls.len() - 1
+                                                    let starts_new_call = delta_id.is_some()
+                                                        || delta
+                                                            .function
+                                                            .as_ref()
+                                                            .and_then(|f| f.name.as_deref())
+                                                            .or(delta.name.as_deref())
+                                                            .is_some_and(|v| !v.is_empty());
+                                                    if tool_calls.is_empty() {
+                                                        0
+                                                    } else if starts_new_call {
+                                                        tool_calls.len()
+                                                    } else {
+                                                        tool_calls.len() - 1
+                                                    }
                                                 }
                                             }
                                         };
@@ -1090,8 +1142,14 @@ pub fn sse_bytes_to_events(
             if made_progress && !saw_terminator && !clean_non_text_finish {
                 tracing::warn!(
                     target: "provider.stream",
-                    "upstream stream closed without [DONE]/finish_reason after partial output; finishing gracefully with the partial response instead of failing the turn"
+                    "upstream stream closed without [DONE]/finish_reason after partial output; failing closed so the turn is retried instead of presenting truncated output as complete"
                 );
+                let _ = tx
+                    .send(Err(StreamError::Provider(
+                        "upstream stream closed without [DONE]/finish_reason after partial output; connection closed mid-response".to_string(),
+                    )))
+                    .await;
+                return;
             }
 
             let _ = tx.send(Ok(StreamEvent::Final)).await;

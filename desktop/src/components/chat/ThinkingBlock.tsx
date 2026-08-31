@@ -70,13 +70,24 @@ export function ThinkingBlock({
     if (isActive) {
       el.scrollTop = el.scrollHeight
     }
-    const scrollable = el.scrollHeight - el.clientHeight > 1
-    setIsContentScrollable((prev) => (prev === scrollable ? prev : scrollable))
+    if (!isContentScrollable) {
+      const scrollable = el.scrollHeight - el.clientHeight > 1
+      if (scrollable) setIsContentScrollable(true)
+    }
   }, [content, expanded, isActive, isContentScrollable])
 
-  const lines = content.split('\n').filter((l) => l.trim())
-  const firstLine = lines[0]?.replace(/\s+/g, ' ').trim() || ''
-  const preview = firstLine.length > 80 ? firstLine.slice(0, 80) + '...' : firstLine
+  const preview = useMemo(() => {
+    const len = content.length
+    let start = 0
+    while (start < len) {
+      let end = content.indexOf('\n', start)
+      if (end === -1) end = len
+      const line = content.slice(start, end).replace(/\s+/g, ' ').trim()
+      if (line) return line.length > 80 ? line.slice(0, 80) + '...' : line
+      start = end + 1
+    }
+    return ''
+  }, [content])
 
   const durationSeconds =
     isActive ? (startedAt != null ? elapsedSec : null) : completedSeconds

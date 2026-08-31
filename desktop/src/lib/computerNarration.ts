@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import { uploadAudioSegment } from '../api/computer'
+import { computerText } from './computerMessages'
 
 export type MicrophoneDevice = {
   id: string
@@ -81,7 +82,7 @@ export class NarrationCapture {
 
   async start(): Promise<void> {
     if (typeof navigator === 'undefined' || !navigator.mediaDevices) {
-      throw new Error('microphone capture is not available in this environment')
+      throw new Error(computerText('computerUse.msg.microphoneUnavailable'))
     }
     const constraints: MediaStreamConstraints = {
       audio: {
@@ -113,7 +114,7 @@ export class NarrationCapture {
       this.segments.push({ blob: event.data, startEpoch, stopEpoch })
     }
     recorder.onerror = () => {
-      this.options.onError?.('the microphone stopped unexpectedly')
+      this.options.onError?.(computerText('computerUse.msg.microphoneStopped'))
     }
     recorder.start(SEGMENT_TIMESLICE_MS)
   }

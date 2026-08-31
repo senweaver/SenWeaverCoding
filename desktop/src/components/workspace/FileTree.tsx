@@ -657,14 +657,15 @@ export function FileTree({ workDir, onSelect }: Props) {
 
   useEffect(() => {
     if (!root) return
+    const dirs = useWorkspaceFilesStore.getState().dirs
     const prefix = `${root}::`
-    for (const key of Object.keys(dirsForFlat)) {
+    for (const key of Object.keys(dirs)) {
       if (!key.startsWith(prefix)) continue
       const rel = key.slice(prefix.length)
       if (!rel) continue
       ensureDirectoryLoaded(rel)
     }
-  }, [dirsForFlat, ensureDirectoryLoaded, root])
+  }, [ensureDirectoryLoaded, root])
 
   const treeRows = useMemo<TreeRow[]>(() => {
     if (!root) return []

@@ -41,6 +41,30 @@ static GATEWAY_CHILD_PID: Mutex<Option<u32>> = Mutex::new(None);
 
 static QUIT_IN_PROGRESS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
+static EXIT_CLEANUP_DONE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn spawn_exit_cleanup(app: &AppHandle) {
+    if QUIT_IN_PROGRESS.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let handle = app.clone();
+    let spawn_result = thread::Builder::new()
+        .name("sen-exit-cleanup".into())
+        .spawn(move || {
+            process_lifetime::run_full_shutdown(&handle, Duration::from_secs(8));
+            kill_gateway_child();
+            EXIT_CLEANUP_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
+            handle.exit(0);
+        });
+    if let Err(err) = spawn_result {
+        tracing::error!("[sen-desktop] could not spawn exit cleanup thread: {err}");
+        process_lifetime::run_full_shutdown(app, Duration::from_secs(8));
+        kill_gateway_child();
+        EXIT_CLEANUP_DONE.store(true, std::sync::atomic::Ordering::SeqCst);
+        app.exit(0);
+    }
+}
+
 pub(crate) fn warn_emit_failure(
     counter: &std::sync::atomic::AtomicU64,
     site: &str,
@@ -359,9 +383,9 @@ fn reapply_chrome_styles_ex(hwnd: windows_sys::Win32::Foundation::HWND, overlay:
                 0,
                 SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE,
             );
-        }
-        if !overlay {
-            InvalidateRect(hwnd, ptr::null(), 1);
+            if !overlay {
+                InvalidateRect(hwnd, ptr::null(), 0);
+            }
         }
     }
 }
@@ -384,8 +408,8 @@ fn disable_window_focus_border_ex(window: &tauri::WebviewWindow, overlay: bool) 
     use std::ptr;
     use windows_sys::Win32::Foundation::{HWND, LPARAM, LRESULT, RECT, WPARAM};
     use windows_sys::Win32::Graphics::Gdi::{
-        GetMonitorInfoW, InvalidateRect, MonitorFromWindow, RedrawWindow, MONITORINFO,
-        MONITOR_DEFAULTTONEAREST, RDW_FRAME,
+        GetMonitorInfoW, InvalidateRect, MonitorFromWindow, MONITORINFO,
+        MONITOR_DEFAULTTONEAREST,
     };
     use windows_sys::Win32::UI::Shell::{DefSubclassProc, SetWindowSubclass};
     use windows_sys::Win32::UI::WindowsAndMessaging::{
@@ -394,7 +418,7 @@ fn disable_window_focus_border_ex(window: &tauri::WebviewWindow, overlay: bool) 
         WM_ACTIVATE, WM_ACTIVATEAPP, WM_DPICHANGED, WM_DWMCOMPOSITIONCHANGED,
         WM_DWMNCRENDERINGCHANGED, WM_GETMINMAXINFO, WM_NCACTIVATE, WM_NCCALCSIZE, WM_NCHITTEST,
         WM_NCPAINT, WM_SETFOCUS, WM_SETTINGCHANGE, WM_SHOWWINDOW, WM_THEMECHANGED,
-        WM_WINDOWPOSCHANGED, MINMAXINFO, NCCALCSIZE_PARAMS, WINDOWPOS, HTBOTTOM, HTBOTTOMLEFT,
+        MINMAXINFO, NCCALCSIZE_PARAMS, HTBOTTOM, HTBOTTOMLEFT,
         HTBOTTOMRIGHT, HTCLIENT, HTLEFT, HTRIGHT, HTTOP, HTTOPLEFT, HTTOPRIGHT,
     };
 
@@ -438,7 +462,10 @@ fn disable_window_focus_border_ex(window: &tauri::WebviewWindow, overlay: bool) 
                 0
             }
             WM_NCCALCSIZE => {
-                if !overlay && wparam != 0 && unsafe { IsZoomed(hwnd) } != 0 {
+                if wparam == 0 {
+                    return unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
+                }
+                if !overlay && unsafe { IsZoomed(hwnd) } != 0 {
                     unsafe {
                         let monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
                         if !monitor.is_null() {
@@ -519,27 +546,6 @@ fn disable_window_focus_border_ex(window: &tauri::WebviewWindow, overlay: bool) 
                 let r = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
                 if wparam != 0 {
                     reapply_chrome_styles_ex(hwnd, overlay);
-                }
-                r
-            }
-
-            WM_WINDOWPOSCHANGED => {
-                let r = unsafe { DefSubclassProc(hwnd, msg, wparam, lparam) };
-                if !overlay {
-                    let flags = {
-                        let wp = lparam as *const WINDOWPOS;
-                        if wp.is_null() {
-                            0
-                        } else {
-                            unsafe { (*wp).flags }
-                        }
-                    };
-                    let size_changed = (flags & SWP_NOSIZE) == 0;
-                    unsafe {
-                        if size_changed {
-                            RedrawWindow(hwnd, ptr::null(), ptr::null_mut(), RDW_FRAME);
-                        }
-                    }
                 }
                 r
             }
@@ -872,8 +878,18 @@ async fn recover_from_failed_update(
     spawn_gateway_bootstrap_thread(handle, state.inner().clone())
 }
 
-static FRONTEND_READY_SIGNALED: std::sync::atomic::AtomicBool =
-    std::sync::atomic::AtomicBool::new(false);
+static MAIN_WINDOW_GENERATION: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
+
+static FRONTEND_READY_SIGNALED_GEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+
+static MAIN_WINDOW_SHOWN_GEN: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(u64::MAX);
+
+fn current_main_window_generation() -> u64 {
+    MAIN_WINDOW_GENERATION.load(std::sync::atomic::Ordering::SeqCst)
+}
 
 const MAIN_WINDOW_BROWSER_ARGS: &str = "--disable-features=msWebOOUI,msPdfOOUI,msSmartScreenProtection --autoplay-policy=document-user-activation-required --disable-background-timer-throttling --disable-renderer-backgrounding --disable-backgrounding-occluded-windows";
 
@@ -883,7 +899,10 @@ static MAIN_WINDOW_REBUILD_FAILURES: std::sync::atomic::AtomicU64 =
 #[tauri::command]
 fn signal_frontend_ready(handle: AppHandle) -> Result<(), String> {
     tracing::info!("[sen-desktop] signal_frontend_ready invoked; revealing main window");
-    let first = !FRONTEND_READY_SIGNALED.swap(true, std::sync::atomic::Ordering::SeqCst);
+    let generation = current_main_window_generation();
+    let first = FRONTEND_READY_SIGNALED_GEN
+        .swap(generation, std::sync::atomic::Ordering::SeqCst)
+        != generation;
     if first {
         show_and_focus_main_window(&handle);
     }
@@ -892,20 +911,11 @@ fn signal_frontend_ready(handle: AppHandle) -> Result<(), String> {
 
 #[tauri::command]
 fn quit_app(app: AppHandle) {
-    if QUIT_IN_PROGRESS.swap(true, std::sync::atomic::Ordering::SeqCst) {
+    if QUIT_IN_PROGRESS.load(std::sync::atomic::Ordering::SeqCst) {
         app.exit(0);
         return;
     }
-    let handle = app.clone();
-    tauri::async_runtime::spawn(async move {
-        let shutdown_handle = handle.clone();
-        let _ = tauri::async_runtime::spawn_blocking(move || {
-            process_lifetime::run_full_shutdown(&shutdown_handle, Duration::from_secs(8));
-            kill_gateway_child();
-        })
-        .await;
-        handle.exit(0);
-    });
+    spawn_exit_cleanup(&app);
 }
 
 #[cfg(target_os = "windows")]
@@ -952,13 +962,27 @@ fn force_show_foreground_window(raw: windows_sys::Win32::Foundation::HWND) {
 }
 
 fn pin_overlay_window(window: &tauri::WebviewWindow) {
-    let _ = window.set_always_on_top(true);
     #[cfg(target_os = "windows")]
-    if let Ok(handle) = window.hwnd() {
+    {
         use windows_sys::Win32::Foundation::HWND;
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            GetWindowLongPtrW, GWL_EXSTYLE, WS_EX_TOPMOST,
+        };
+        let Ok(handle) = window.hwnd() else {
+            let _ = window.set_always_on_top(true);
+            return;
+        };
         let hwnd = handle.0 as HWND;
-        reapply_overlay_chrome_styles(hwnd);
+        let already_topmost =
+            unsafe { GetWindowLongPtrW(hwnd, GWL_EXSTYLE) } & (WS_EX_TOPMOST as isize) != 0;
+        if !already_topmost {
+            let _ = window.set_always_on_top(true);
+        }
         senweavercoding::computer::capture::pin_overlay_hwnd(handle.0 as isize);
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = window.set_always_on_top(true);
     }
 }
 
@@ -1006,11 +1030,13 @@ fn build_main_window(app: &AppHandle) -> Option<tauri::WebviewWindow> {
             tracing::warn!(
                 "[sen-desktop] reveal main: 'main' window was absent from the window map; rebuilt it from scratch"
             );
+            MAIN_WINDOW_GENERATION.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             if let Err(err) = win.set_resizable(true) {
                 tracing::debug!("[sen-desktop] rebuilt main set_resizable failed: {err}");
             }
             #[cfg(target_os = "windows")]
             disable_window_focus_border(&win);
+            browser_dock::install_main_window_dock_layout_events(app);
             schedule_frontend_ready_watchdog(win.clone());
             Some(win)
         }
@@ -1086,37 +1112,98 @@ const TRAY_COMPUTER_STOP_EVENT: &str = "minimal://computer-stop";
 const RECORDER_HOTKEY_EVENT: &str = "minimal://recorder-hotkey";
 
 #[cfg(target_os = "windows")]
+static RECORDER_HOTKEY_THREAD_ID: std::sync::atomic::AtomicU32 =
+    std::sync::atomic::AtomicU32::new(0);
+
+#[cfg(target_os = "windows")]
+const RECORDER_HOTKEY_MSG_ENABLE: u32 =
+    windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 0x40;
+#[cfg(target_os = "windows")]
+const RECORDER_HOTKEY_MSG_DISABLE: u32 =
+    windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 0x41;
+
+#[cfg(target_os = "windows")]
 fn spawn_recorder_hotkey_thread(app: AppHandle) {
+    use windows_sys::Win32::System::Threading::GetCurrentThreadId;
     use windows_sys::Win32::UI::Input::KeyboardAndMouse::{
-        RegisterHotKey, MOD_CONTROL, MOD_SHIFT,
+        RegisterHotKey, UnregisterHotKey, MOD_CONTROL, MOD_SHIFT,
     };
     use windows_sys::Win32::UI::WindowsAndMessaging::{
-        DispatchMessageW, GetMessageW, TranslateMessage, MSG, WM_HOTKEY,
+        DispatchMessageW, GetMessageW, PeekMessageW, TranslateMessage, MSG, PM_NOREMOVE,
+        WM_HOTKEY,
     };
     const HOTKEY_ID: i32 = 0xB0B0;
     const VK_R: u32 = 0x52;
     std::thread::spawn(move || unsafe {
-        if RegisterHotKey(
-            std::ptr::null_mut(),
-            HOTKEY_ID,
-            MOD_CONTROL | MOD_SHIFT,
-            VK_R,
-        ) == 0
-        {
-            tracing::warn!("[sen-desktop] RegisterHotKey Ctrl+Shift+R failed");
-            return;
-        }
         let mut msg: MSG = std::mem::zeroed();
+        let _ = PeekMessageW(&mut msg, std::ptr::null_mut(), 0, 0, PM_NOREMOVE);
+        RECORDER_HOTKEY_THREAD_ID
+            .store(GetCurrentThreadId(), std::sync::atomic::Ordering::Release);
+        let mut registered = false;
         while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
-            if msg.message == WM_HOTKEY && msg.wParam as i32 == HOTKEY_ID {
-                if let Err(err) = app.emit(RECORDER_HOTKEY_EVENT, ()) {
-                    tracing::warn!("[sen-desktop] emit {RECORDER_HOTKEY_EVENT} failed: {err}");
+            match msg.message {
+                m if m == RECORDER_HOTKEY_MSG_ENABLE => {
+                    if !registered {
+                        if RegisterHotKey(
+                            std::ptr::null_mut(),
+                            HOTKEY_ID,
+                            MOD_CONTROL | MOD_SHIFT,
+                            VK_R,
+                        ) == 0
+                        {
+                            tracing::warn!("[sen-desktop] RegisterHotKey Ctrl+Shift+R failed");
+                        } else {
+                            registered = true;
+                        }
+                    }
                 }
+                m if m == RECORDER_HOTKEY_MSG_DISABLE => {
+                    if registered {
+                        let _ = UnregisterHotKey(std::ptr::null_mut(), HOTKEY_ID);
+                        registered = false;
+                    }
+                }
+                m if m == WM_HOTKEY => {
+                    if msg.wParam as i32 == HOTKEY_ID {
+                        if let Err(err) = app.emit(RECORDER_HOTKEY_EVENT, ()) {
+                            tracing::warn!(
+                                "[sen-desktop] emit {RECORDER_HOTKEY_EVENT} failed: {err}"
+                            );
+                        }
+                    }
+                }
+                _ => {}
             }
             let _ = TranslateMessage(&msg);
             DispatchMessageW(&msg);
         }
     });
+}
+
+#[tauri::command]
+fn recorder_hotkey_set_enabled(enabled: bool) -> Result<(), String> {
+    #[cfg(target_os = "windows")]
+    {
+        use windows_sys::Win32::UI::WindowsAndMessaging::PostThreadMessageW;
+        let thread_id = RECORDER_HOTKEY_THREAD_ID.load(std::sync::atomic::Ordering::Acquire);
+        if thread_id == 0 {
+            return Ok(());
+        }
+        let message = if enabled {
+            RECORDER_HOTKEY_MSG_ENABLE
+        } else {
+            RECORDER_HOTKEY_MSG_DISABLE
+        };
+        let posted = unsafe { PostThreadMessageW(thread_id, message, 0, 0) };
+        if posted == 0 {
+            return Err("recorder hotkey thread unavailable".to_string());
+        }
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = enabled;
+    }
+    Ok(())
 }
 
 struct TrayMenuItems {
@@ -1174,17 +1261,21 @@ fn read_ui_locale_snapshot(app: &AppHandle) -> Option<String> {
 }
 
 #[tauri::command]
-fn persist_ui_locale(app: AppHandle, locale: String) -> Result<(), String> {
+async fn persist_ui_locale(app: AppHandle, locale: String) -> Result<(), String> {
     if locale != "en" && locale != "zh" {
         return Err(format!("unsupported locale: {locale}"));
     }
     let path = ui_locale_snapshot_path(&app)
         .ok_or_else(|| "app config dir unavailable".to_string())?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
-    }
-    let body = serde_json::json!({ "locale": locale }).to_string();
-    std::fs::write(&path, body).map_err(|e| e.to_string())
+    tauri::async_runtime::spawn_blocking(move || {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+        }
+        let body = serde_json::json!({ "locale": locale }).to_string();
+        std::fs::write(&path, body).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|err| format!("persist locale task failed: {err}"))?
 }
 
 struct TrayInitialLabels {
@@ -1268,13 +1359,9 @@ fn setup_system_tray(app: &AppHandle) -> tauri::Result<()> {
 const FRONTEND_READY_TIMEOUT_MS: u64 = 60_000;
 
 fn show_main_window_now(window: &tauri::WebviewWindow) {
-    static SHOWN: parking_lot::Mutex<bool> = parking_lot::Mutex::new(false);
-    {
-        let mut guard = SHOWN.lock();
-        if *guard {
-            return;
-        }
-        *guard = true;
+    let generation = current_main_window_generation();
+    if MAIN_WINDOW_SHOWN_GEN.swap(generation, std::sync::atomic::Ordering::SeqCst) == generation {
+        return;
     }
 
     #[cfg(target_os = "windows")]
@@ -1306,9 +1393,13 @@ fn show_main_window_now(window: &tauri::WebviewWindow) {
 }
 
 fn schedule_frontend_ready_watchdog(window: tauri::WebviewWindow) {
+    let generation = current_main_window_generation();
     std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(FRONTEND_READY_TIMEOUT_MS));
-        if FRONTEND_READY_SIGNALED.load(std::sync::atomic::Ordering::SeqCst) {
+        if current_main_window_generation() != generation {
+            return;
+        }
+        if FRONTEND_READY_SIGNALED_GEN.load(std::sync::atomic::Ordering::SeqCst) == generation {
             return;
         }
         let win = window.clone();
@@ -1698,33 +1789,15 @@ fn spawn_minimal_input_foreground_watch(app: &AppHandle) {
 }
 
 #[cfg(target_os = "windows")]
-fn force_activate_window(hwnd: windows_sys::Win32::Foundation::HWND) {
-    use windows_sys::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::SetFocus;
-    use windows_sys::Win32::UI::WindowsAndMessaging::{
-        BringWindowToTop, GetForegroundWindow, GetWindowThreadProcessId, SetForegroundWindow,
-    };
+fn try_activate_window(hwnd: windows_sys::Win32::Foundation::HWND) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{BringWindowToTop, SetForegroundWindow};
 
     if hwnd.is_null() {
         return;
     }
     unsafe {
-        let fg = GetForegroundWindow();
-        let this_thread = GetCurrentThreadId();
-        let mut fg_thread = 0u32;
-        let mut attached = false;
-        if !fg.is_null() && fg != hwnd {
-            fg_thread = GetWindowThreadProcessId(fg, std::ptr::null_mut());
-            if fg_thread != 0 && fg_thread != this_thread {
-                attached = AttachThreadInput(fg_thread, this_thread, 1) != 0;
-            }
-        }
         BringWindowToTop(hwnd);
         SetForegroundWindow(hwnd);
-        SetFocus(hwnd);
-        if attached {
-            AttachThreadInput(fg_thread, this_thread, 0);
-        }
     }
 }
 
@@ -1883,7 +1956,6 @@ fn minimal_input_show(app: AppHandle, width: f64, height: f64) -> Result<(), Str
             return Err("window handle unavailable".to_string());
         }
         disable_show_transitions(raw);
-        reapply_overlay_chrome_styles(raw);
         unsafe {
             SetWindowPos(
                 raw,
@@ -1895,7 +1967,6 @@ fn minimal_input_show(app: AppHandle, width: f64, height: f64) -> Result<(), Str
                 SWP_NOACTIVATE,
             );
         }
-        reapply_overlay_chrome_styles(raw);
     }
 
     #[cfg(not(target_os = "windows"))]
@@ -1917,7 +1988,7 @@ fn minimal_input_show(app: AppHandle, width: f64, height: f64) -> Result<(), Str
         let _ = input_focus.set_focus();
         #[cfg(target_os = "windows")]
         if let Ok(hwnd) = input_focus.hwnd() {
-            force_activate_window(hwnd.0 as windows_sys::Win32::Foundation::HWND);
+            try_activate_window(hwnd.0 as windows_sys::Win32::Foundation::HWND);
         }
     });
     if dispatched.is_err() {
@@ -1959,7 +2030,7 @@ fn minimal_input_activate(app: AppHandle) -> Result<(), String> {
         let _ = input_focus.set_focus();
         #[cfg(target_os = "windows")]
         if let Ok(hwnd) = input_focus.hwnd() {
-            force_activate_window(hwnd.0 as windows_sys::Win32::Foundation::HWND);
+            try_activate_window(hwnd.0 as windows_sys::Win32::Foundation::HWND);
         }
     });
     if dispatched.is_err() {
@@ -2015,8 +2086,6 @@ fn minimal_resize_anchored(
                 SWP_NOACTIVATE,
             );
         }
-        reapply_overlay_chrome_styles(raw);
-        pin_overlay_window(&window);
         Ok(())
     }
 
@@ -2082,6 +2151,7 @@ pub fn run() {
             minimal_input_should_stay_visible,
             minimal_input_activate,
             minimal_pin_overlay,
+            recorder_hotkey_set_enabled,
             curator_render_docx_with_diagrams,
             terminal::terminal_spawn,
             terminal::terminal_write,
@@ -2158,6 +2228,7 @@ pub fn run() {
 
             browser_dock::install_into(app.handle());
             fetch_worker::install_into(app.handle());
+            process_lifetime::spawn_singleton_wake_watcher(app.handle().clone());
 
             let _ = app.handle().remove_tray_by_id("sen-main-tray");
             if let Err(err) = setup_system_tray(app.handle()) {
@@ -2243,10 +2314,12 @@ pub fn run() {
     };
 
     app.run(|app_handle, event| match event {
-        RunEvent::ExitRequested { .. } => {
+        RunEvent::ExitRequested { api, .. } => {
             let _ = app_handle.remove_tray_by_id("sen-main-tray");
-            process_lifetime::run_full_shutdown(app_handle, Duration::from_secs(8));
-            kill_gateway_child();
+            if !EXIT_CLEANUP_DONE.load(std::sync::atomic::Ordering::SeqCst) {
+                api.prevent_exit();
+                spawn_exit_cleanup(app_handle);
+            }
         }
         RunEvent::Exit => {
             let _ = app_handle.remove_tray_by_id("sen-main-tray");

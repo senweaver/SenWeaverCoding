@@ -112,6 +112,8 @@ export interface MinimalRecorderProgress {
   savedRecordingName: string | null
   savedSkillName: string | null
   startedAt: number | null
+  narrationEnabled: boolean
+  narrationMuted: boolean
 }
 
 export interface MinimalRecorderControl {

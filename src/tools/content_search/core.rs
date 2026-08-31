@@ -406,7 +406,11 @@ fn render_engine_output(
     }
 
     if lines.is_empty() {
-        return "No matches found.".to_string();
+        return "No matches found. Note: files that are not valid UTF-8 (e.g. UTF-16) are \
+                skipped as binary, and other encodings (e.g. GBK) only match when the \
+                `encoding` parameter is specified; if the target may use such an encoding, \
+                retry with `encoding` set."
+            .to_string();
     }
 
     let mut buf = lines.join("\n");
@@ -511,10 +515,14 @@ fn finalise_search_result(
     let saver_applied = apply_token_saver(&formatted, output_mode);
     let pre_pagination = saver_applied.unwrap_or(formatted);
     let paginated = if offset > 0 {
-        let blocks: Vec<&str> = split_result_blocks(&pre_pagination);
+        let (body, footer) = match pre_pagination.rfind("\n\nTotal: ") {
+            Some(idx) => pre_pagination.split_at(idx),
+            None => (pre_pagination.as_str(), ""),
+        };
+        let blocks: Vec<&str> = split_result_blocks(body);
         let total = blocks.len();
         if offset >= total {
-            format!("[No more results: offset {offset} >= total {total} results]")
+            format!("[No more results: offset {offset} >= total {total} results]{footer}")
         } else {
             let end = total.min(offset + max_results);
             let page = &blocks[offset..end];
@@ -527,6 +535,7 @@ fn finalise_search_result(
                     end
                 ));
             }
+            out.push_str(footer);
             out
         }
     } else {

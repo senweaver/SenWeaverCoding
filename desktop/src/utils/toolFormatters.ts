@@ -252,8 +252,14 @@ export type SearchHit = {
 export function parseSearchHits(text: string, max = 50): SearchHit[] {
   if (!text) return []
   const hits: SearchHit[] = []
-  for (const raw of text.split(/\r?\n/)) {
-    if (hits.length >= max) break
+  const len = text.length
+  let cursor = 0
+  while (cursor <= len && hits.length < max) {
+    if (cursor === len) break
+    let lineEnd = text.indexOf('\n', cursor)
+    if (lineEnd === -1) lineEnd = len
+    const raw = text.slice(cursor, lineEnd)
+    cursor = lineEnd + 1
     const line = raw.replace(/\u001b\[[0-9;]*m/g, '').replace(/\s+$/, '')
     if (!line) continue
     if (/^---+$|^==+$/.test(line)) continue
@@ -305,6 +311,8 @@ export type WebSearchHit = {
   index?: number
 }
 
+export type WebSearchFailedEngine = { engine: string; reason: string }
+
 export type WebSearchSummary = {
   query: string
   provider?: string
@@ -315,6 +323,11 @@ export type WebSearchSummary = {
   looksLikeError: boolean
   errorMessage?: string
   fallbackHeader?: string
+  status?: string
+  notice?: string
+  failedEngines?: WebSearchFailedEngine[]
+  triedEngines?: number
+  elapsedMs?: number
 }
 
 const WEB_SEARCH_ENVELOPE_RE =
@@ -364,12 +377,39 @@ function parseWebSearchEnvelope(text: string): WebSearchSummary | null {
     })
   }
   if (hits.length === 0 && !query) return null
+  const status = typeof obj.status === 'string' ? obj.status : undefined
+  const notice =
+    typeof obj.notice === 'string' && obj.notice.trim().length > 0
+      ? obj.notice.trim()
+      : undefined
+  const failedEngines: WebSearchFailedEngine[] = Array.isArray(obj.failed_engines)
+    ? (obj.failed_engines as unknown[])
+        .map((f) => {
+          if (!f || typeof f !== 'object') return null
+          const fobj = f as Record<string, unknown>
+          const engine = typeof fobj.engine === 'string' ? fobj.engine.trim() : ''
+          const reason = typeof fobj.reason === 'string' ? fobj.reason.trim() : ''
+          if (!engine && !reason) return null
+          return { engine: engine || 'search', reason }
+        })
+        .filter((f): f is WebSearchFailedEngine => f !== null)
+    : []
+  const triedEngines =
+    typeof obj.tried_engines === 'number' ? obj.tried_engines : undefined
+  const elapsedMs = typeof obj.elapsed_ms === 'number' ? obj.elapsed_ms : undefined
+  const isErrorStatus = status === 'network_error' || status === 'blocked'
   return {
     query,
     successfulEngines,
     hits,
     raw: text,
-    looksLikeError: false,
+    looksLikeError: isErrorStatus,
+    errorMessage: isErrorStatus ? notice : undefined,
+    status,
+    notice,
+    failedEngines: failedEngines.length > 0 ? failedEngines : undefined,
+    triedEngines,
+    elapsedMs,
   }
 }
 

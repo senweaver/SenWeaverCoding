@@ -180,7 +180,7 @@ struct PrioritizedTask {
 
 impl PartialEq for PrioritizedTask {
     fn eq(&self, other: &Self) -> bool {
-        self.task_id == other.task_id
+        self.cmp(other) == Ordering::Equal
     }
 }
 
@@ -199,6 +199,7 @@ impl Ord for PrioritizedTask {
             .weight()
             .cmp(&other.priority.weight())
             .then_with(|| other.submitted_at.cmp(&self.submitted_at))
+            .then_with(|| other.task_id.cmp(&self.task_id))
     }
 }
 
@@ -276,7 +277,46 @@ impl TaskQueue {
         None
     }
 
-    pub fn complete(&self, task_id: &str, result: impl Into<String>) -> Result<(), TaskQueueError> {
+    fn verify_fence(
+        task: &Task,
+        task_id: &str,
+        agent_id: &str,
+        attempt: u32,
+    ) -> Result<(), TaskQueueError> {
+        let holder = task.claimed_by.as_deref().unwrap_or("");
+        if holder != agent_id || task.attempts != attempt {
+            return Err(TaskQueueError::StaleClaim {
+                task_id: task_id.to_string(),
+                reporter: agent_id.to_string(),
+                reported_attempt: attempt,
+                holder: holder.to_string(),
+                current_attempt: task.attempts,
+            });
+        }
+        Ok(())
+    }
+
+    pub fn renew_lease(&self, task_id: &str, agent_id: &str, attempt: u32) -> bool {
+        let mut tasks = self.tasks.write();
+        let Some(task) = tasks.get_mut(task_id) else {
+            return false;
+        };
+        if task.status != TaskStatus::Running
+            || Self::verify_fence(task, task_id, agent_id, attempt).is_err()
+        {
+            return false;
+        }
+        task.claimed_at = Some(Utc::now());
+        true
+    }
+
+    pub fn complete(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        attempt: u32,
+        result: impl Into<String>,
+    ) -> Result<(), TaskQueueError> {
         let mut tasks = self.tasks.write();
         if let Some(task) = tasks.get_mut(task_id) {
             if task.status != TaskStatus::Running {
@@ -286,6 +326,7 @@ impl TaskQueue {
                     found: format!("{:?}", task.status),
                 });
             }
+            Self::verify_fence(task, task_id, agent_id, attempt)?;
             task.status = TaskStatus::Completed;
             task.result = Some(result.into());
             task.finished_at = Some(Utc::now());
@@ -296,7 +337,13 @@ impl TaskQueue {
         }
     }
 
-    pub fn fail(&self, task_id: &str, error: impl Into<String>) -> Result<(), TaskQueueError> {
+    pub fn fail(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        attempt: u32,
+        error: impl Into<String>,
+    ) -> Result<(), TaskQueueError> {
         let error_str = error.into();
 
         let requeue = {
@@ -311,6 +358,7 @@ impl TaskQueue {
                     found: format!("{:?}", task.status),
                 });
             }
+            Self::verify_fence(task, task_id, agent_id, attempt)?;
 
             if task.can_retry() {
                 task.status = TaskStatus::Queued;
@@ -425,7 +473,12 @@ impl TaskQueue {
     }
 
     pub fn reclaim_stale_running(&self, max_running: Duration) -> usize {
-        let cutoff = Utc::now() - chrono::Duration::from_std(max_running).unwrap_or_default();
+        let Some(cutoff) = chrono::Duration::from_std(max_running)
+            .ok()
+            .and_then(|d| Utc::now().checked_sub_signed(d))
+        else {
+            return 0;
+        };
         let mut requeues: Vec<(String, PrioritizedTask)> = Vec::new();
         let mut count = 0;
         {
@@ -487,7 +540,12 @@ impl TaskQueue {
     }
 
     pub fn purge_old(&self, max_age: Duration) -> usize {
-        let cutoff = Utc::now() - chrono::Duration::from_std(max_age).unwrap_or_default();
+        let Some(cutoff) = chrono::Duration::from_std(max_age)
+            .ok()
+            .and_then(|d| Utc::now().checked_sub_signed(d))
+        else {
+            return 0;
+        };
         let mut index = self.capability_index.write();
         let mut tasks = self.tasks.write();
         let before = tasks.len();
@@ -557,12 +615,28 @@ impl TaskQueueHandle {
         self.inner.claim(agent_id, capability)
     }
 
-    pub fn complete(&self, task_id: &str, result: impl Into<String>) -> Result<(), TaskQueueError> {
-        self.inner.complete(task_id, result)
+    pub fn complete(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        attempt: u32,
+        result: impl Into<String>,
+    ) -> Result<(), TaskQueueError> {
+        self.inner.complete(task_id, agent_id, attempt, result)
     }
 
-    pub fn fail(&self, task_id: &str, error: impl Into<String>) -> Result<(), TaskQueueError> {
-        self.inner.fail(task_id, error)
+    pub fn fail(
+        &self,
+        task_id: &str,
+        agent_id: &str,
+        attempt: u32,
+        error: impl Into<String>,
+    ) -> Result<(), TaskQueueError> {
+        self.inner.fail(task_id, agent_id, attempt, error)
+    }
+
+    pub fn renew_lease(&self, task_id: &str, agent_id: &str, attempt: u32) -> bool {
+        self.inner.renew_lease(task_id, agent_id, attempt)
     }
 
     pub fn pending_count(&self) -> usize {

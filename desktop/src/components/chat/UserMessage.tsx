@@ -2,9 +2,11 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+import { useMemo } from 'react'
 import { useTranslation } from '../../i18n'
 import { isCredentialGroup } from '../../api/credentials'
 import { useCredentialsStore } from '../../stores/credentialsStore'
+import { wsManager } from '../../api/websocket'
 import type { UIAttachment } from '../../types/chat'
 import { AttachmentGallery } from './AttachmentGallery'
 import {
@@ -30,6 +32,12 @@ type Props = {
   onEditAsDraft?: () => void
 
   superseded?: boolean
+
+  pending?: boolean
+
+  clientMsgId?: string
+
+  sessionId?: string | null
 
   designRef?: string
   designRefName?: string
@@ -110,6 +118,9 @@ export function UserMessage({
   restoreLabel,
   onEditAsDraft,
   superseded,
+  pending,
+  clientMsgId,
+  sessionId,
   designRef,
   designRefName,
   designRefElement,
@@ -117,6 +128,8 @@ export function UserMessage({
 }: Props) {
   const t = useTranslation()
   const hasText = content.trim().length > 0
+  const renderedContent = useMemo(() => renderMessageContent(content), [content])
+  const canRetrySend = pending === true && !!clientMsgId && !!sessionId
   const refLabel = designRef
     ? (designRefName?.trim() || designRef.split('/').pop() || designRef)
     : ''
@@ -175,14 +188,14 @@ export function UserMessage({
                 className="inline-block max-w-full bg-[var(--color-surface-user-msg)] px-4 py-3 pr-9 text-left text-sm leading-relaxed text-[var(--color-text-primary)] whitespace-pre-wrap break-words transition-shadow hover:ring-1 hover:ring-[var(--color-brand)]/35 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[var(--color-brand)]/35"
                 style={{ borderRadius: '18px 4px 18px 18px' }}
               >
-                {renderMessageContent(content)}
+                {renderedContent}
               </button>
             ) : (
               <div
                 className="inline-block max-w-full bg-[var(--color-surface-user-msg)] px-4 py-3 pr-9 text-sm leading-relaxed text-[var(--color-text-primary)] whitespace-pre-wrap break-words"
                 style={{ borderRadius: '18px 4px 18px 18px' }}
               >
-                {renderMessageContent(content)}
+                {renderedContent}
               </div>
             )}
 
@@ -210,6 +223,24 @@ export function UserMessage({
               </button>
             )}
           </div>
+        )}
+
+        {pending === true && (
+          <button
+            type="button"
+            onClick={
+              canRetrySend
+                ? () => wsManager.retryUserMessage(sessionId!, clientMsgId!)
+                : undefined
+            }
+            title={canRetrySend ? t('chat.retrySendTitle') : undefined}
+            className={`inline-flex items-center gap-1.5 px-1 text-[10px] text-[var(--color-text-tertiary)] ${
+              canRetrySend ? 'hover:text-[var(--color-text-primary)]' : 'cursor-default'
+            }`}
+          >
+            <span className="size-1.5 rounded-full bg-[var(--color-warning)] animate-pulse" />
+            <span>{t('chat.sendingPending')}</span>
+          </button>
         )}
       </div>
     </div>

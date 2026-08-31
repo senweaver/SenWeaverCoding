@@ -4,6 +4,7 @@
 
 pub mod engine;
 pub mod engines;
+pub mod health;
 pub mod parsers;
 pub mod provider_routing;
 pub mod ranker;

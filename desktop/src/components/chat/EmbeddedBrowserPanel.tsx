@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
+import { useShallow } from 'zustand/react/shallow'
 
 import { useAnchoredDropdown } from '../../hooks/useAnchoredDropdown'
 import { useTabStore } from '../../stores/tabStore'
@@ -26,6 +27,7 @@ import {
   dockScreenshot,
   dockSetRect,
   listenDockEvents,
+  type BrowserDockTabInfo,
 } from '../../lib/browserDock'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
 import { isWindowBusy, onWindowIdle } from '../../lib/windowBusy'
@@ -39,6 +41,12 @@ const VIEWPORT_MIN_PX = 200
 const HEADER_PX = 32
 const TOOLBAR_PX = 38
 const TABBAR_PX = 34
+
+const EMPTY_TABS: BrowserDockTabInfo[] = []
+const EMPTY_TAB_ACTIVITY: Record<number, number> = {}
+const EMPTY_CONSOLE_LOG: BrowserConsoleEntry[] = []
+const EMPTY_AGENT_LOG: BrowserAgentActionEntry[] = []
+const EMPTY_USER_LOG: BrowserUserActionEntry[] = []
 
 function clampZoom(z: number): number {
   if (!Number.isFinite(z) || z <= 0) return 1
@@ -65,7 +73,48 @@ export function EmbeddedBrowserPanel() {
   const isMemberSession = !!memberInfo
   const sessionId = activeTabId
 
-  const panel = useBrowserPanelStore((s) => (sessionId ? s.panels[sessionId] : undefined))
+  const {
+    visible,
+    url,
+    liveUrl,
+    title,
+    consoleOpen,
+    inspectorOpen,
+    pickMode,
+    zoom,
+    driverOpen,
+    lastAgentActionAt,
+    drawerHeightRatio,
+    columnWidthAuto,
+    columnWidth,
+    tabs,
+    activeTabId: activeBrowserTabId,
+    preferredTestTabId,
+    tabActivity,
+  } = useBrowserPanelStore(
+    useShallow((s) => {
+      const p = sessionId ? s.panels[sessionId] : undefined
+      return {
+        visible: p?.visible ?? false,
+        url: p?.url ?? '',
+        liveUrl: p?.liveUrl ?? '',
+        title: p?.title ?? '',
+        consoleOpen: p?.consoleOpen ?? false,
+        inspectorOpen: p?.inspectorOpen ?? false,
+        pickMode: p?.pickMode ?? false,
+        zoom: p?.zoom ?? 1,
+        driverOpen: p?.driverOpen ?? false,
+        lastAgentActionAt: p?.lastAgentActionAt ?? 0,
+        drawerHeightRatio: p?.drawerHeightRatio ?? 0.35,
+        columnWidthAuto: p?.columnWidthAuto ?? true,
+        columnWidth: p?.columnWidth ?? BROWSER_COLUMN_WIDTH_BOUNDS.default,
+        tabs: p?.tabs ?? EMPTY_TABS,
+        activeTabId: p?.activeTabId ?? null,
+        preferredTestTabId: p?.preferredTestTabId ?? null,
+        tabActivity: p?.tabActivity ?? EMPTY_TAB_ACTIVITY,
+      }
+    }),
+  )
   const activeSessionId = useBrowserPanelStore((s) => s.activeSessionId)
   const ensure = useBrowserPanelStore((s) => s.ensure)
   const setAnchorRect = useBrowserPanelStore((s) => s.setAnchorRect)
@@ -78,26 +127,10 @@ export function EmbeddedBrowserPanel() {
     sessionId ? s.sessions[sessionId]?.activeToolName : undefined,
   )
 
-  const visible = panel?.visible ?? false
-  const url = panel?.url ?? ''
-  const liveUrl = panel?.liveUrl ?? ''
-  const title = panel?.title ?? ''
-  const consoleOpen = panel?.consoleOpen ?? false
-  const inspectorOpen = panel?.inspectorOpen ?? false
-  const pickMode = panel?.pickMode ?? false
-  const zoom = panel?.zoom ?? 1
-  const consoleLog = panel?.consoleLog ?? []
-  const inspector = panel?.inspector ?? null
-  const driverOpen = panel?.driverOpen ?? false
-  const agentLog = panel?.agentLog ?? []
-  const userLog = panel?.userLog ?? []
-  const lastAgentActionAt = panel?.lastAgentActionAt ?? 0
-  const drawerHeightRatio = panel?.drawerHeightRatio ?? 0.35
-  const columnWidthAuto = panel?.columnWidthAuto ?? true
   const ownsDock = sessionId !== null && activeSessionId === sessionId
   const hasContent = Boolean(
-    (panel?.tabs?.length ?? 0) > 0 ||
-    panel?.activeTabId != null ||
+    tabs.length > 0 ||
+    activeBrowserTabId != null ||
     (liveUrl && liveUrl.trim()) ||
     (url && url.trim()),
   )
@@ -326,7 +359,6 @@ export function EmbeddedBrowserPanel() {
   const sidebarOpen = useUIStore((s) => s.sidebarOpen)
   const rightSidebarOpen = useUIStore((s) => s.rightSidebarOpen)
   const rightSidebarWidth = useUIStore((s) => s.rightSidebarWidth)
-  const columnWidth = panel?.columnWidth ?? BROWSER_COLUMN_WIDTH_BOUNDS.default
 
   useEffect(() => {
     if (!sessionId) return
@@ -541,9 +573,6 @@ export function EmbeddedBrowserPanel() {
     }
   }, [sessionId])
 
-  const tabs = panel?.tabs ?? []
-  const activeBrowserTabId = panel?.activeTabId ?? null
-
   const navigate = useBrowserPanelStore((s) => s.navigate)
   const back = useBrowserPanelStore((s) => s.back)
   const forward = useBrowserPanelStore((s) => s.forward)
@@ -554,10 +583,7 @@ export function EmbeddedBrowserPanel() {
   const toggleInspector = useBrowserPanelStore((s) => s.toggleInspector)
   const clearStorage = useBrowserPanelStore((s) => s.clearStorage)
   const closeForSession = useBrowserPanelStore((s) => s.closeForSession)
-  const clearConsole = useBrowserPanelStore((s) => s.clearConsole)
   const toggleDriver = useBrowserPanelStore((s) => s.toggleDriver)
-  const clearAgentLog = useBrowserPanelStore((s) => s.clearAgentLog)
-  const clearUserLog = useBrowserPanelStore((s) => s.clearUserLog)
   const newTabAction = useBrowserPanelStore((s) => s.newTab)
   const closeTabAction = useBrowserPanelStore((s) => s.closeTab)
   const activateTabAction = useBrowserPanelStore((s) => s.activateTab)
@@ -748,7 +774,7 @@ export function EmbeddedBrowserPanel() {
         columnWidthAuto
           ? undefined
           : {
-              flex: `0 1 ${panel?.columnWidth ?? BROWSER_COLUMN_WIDTH_BOUNDS.default}px`,
+              flex: `0 1 ${columnWidth}px`,
               maxWidth: '100%',
             }
       }
@@ -827,12 +853,12 @@ export function EmbeddedBrowserPanel() {
                 {tabs.map((tab) => {
                   const isActive = tab.id === activeBrowserTabId
                   const label = tab.title || tab.url || t('browser.panel.tabs.untitled')
-                  const tabAgentTs = panel?.tabActivity?.[tab.id] ?? 0
+                  const tabAgentTs = tabActivity[tab.id] ?? 0
                   const tabIsLive =
                     tabAgentTs > 0 && Date.now() - tabAgentTs < AGENT_LIVE_WINDOW_MS
                   const ownedByAgent = tab.owner === 'agent'
                   const inTakeover = !!takeoverTabs[tab.id]
-                  const isPinned = (panel?.preferredTestTabId ?? null) === tab.id
+                  const isPinned = preferredTestTabId === tab.id
                   void liveTick
                   return (
                     <div
@@ -1199,9 +1225,8 @@ export function EmbeddedBrowserPanel() {
                             borderRightColor: 'var(--color-border)',
                           }}
                         >
-                          <ConsoleDrawer
-                            entries={consoleLog}
-                            onClear={() => sessionId && clearConsole(sessionId)}
+                          <SessionConsoleDrawer
+                            sessionId={sessionId}
                             title={t('browser.panel.consoleTitle')}
                             emptyLabel={t('browser.panel.consoleEmpty')}
                             clearLabel={t('browser.panel.consoleClear')}
@@ -1217,8 +1242,8 @@ export function EmbeddedBrowserPanel() {
                             borderRightColor: 'var(--color-border)',
                           }}
                         >
-                          <InspectorDrawer
-                            snapshot={inspector}
+                          <SessionInspectorDrawer
+                            sessionId={sessionId}
                             emptyLabel={t('browser.panel.inspectorEmpty')}
                             title={t('browser.panel.inspectorTitle')}
                           />
@@ -1226,14 +1251,8 @@ export function EmbeddedBrowserPanel() {
                       )}
                       {driverOpen && (
                         <div className="flex min-w-0 flex-1 flex-col">
-                          <CooperateTimeline
-                            agentEntries={agentLog}
-                            userEntries={userLog}
-                            onClear={() => {
-                              if (!sessionId) return
-                              clearAgentLog(sessionId)
-                              clearUserLog(sessionId)
-                            }}
+                          <SessionCooperateTimeline
+                            sessionId={sessionId}
                             title={t('browser.panel.cooperate.title')}
                             emptyLabel={t('browser.panel.cooperate.empty')}
                             clearLabel={t('browser.panel.driver.clear')}
@@ -1309,6 +1328,87 @@ function MenuItem({ icon, label, onClick }: { icon: string; label: string; onCli
       <span className="material-symbols-outlined text-[14px] text-[var(--color-text-tertiary)]">{icon}</span>
       <span>{label}</span>
     </button>
+  )
+}
+
+function SessionConsoleDrawer({
+  sessionId,
+  title,
+  emptyLabel,
+  clearLabel,
+}: {
+  sessionId: string
+  title: string
+  emptyLabel: string
+  clearLabel: string
+}) {
+  const entries = useBrowserPanelStore(
+    (s) => s.panels[sessionId]?.consoleLog ?? EMPTY_CONSOLE_LOG,
+  )
+  const clearConsole = useBrowserPanelStore((s) => s.clearConsole)
+  return (
+    <ConsoleDrawer
+      entries={entries}
+      onClear={() => clearConsole(sessionId)}
+      title={title}
+      emptyLabel={emptyLabel}
+      clearLabel={clearLabel}
+    />
+  )
+}
+
+function SessionInspectorDrawer({
+  sessionId,
+  emptyLabel,
+  title,
+}: {
+  sessionId: string
+  emptyLabel: string
+  title: string
+}) {
+  const inspector = useBrowserPanelStore(
+    (s) => s.panels[sessionId]?.inspector ?? null,
+  )
+  return <InspectorDrawer snapshot={inspector} emptyLabel={emptyLabel} title={title} />
+}
+
+function SessionCooperateTimeline({
+  sessionId,
+  title,
+  emptyLabel,
+  clearLabel,
+  agentLabel,
+  userLabel,
+}: {
+  sessionId: string
+  title: string
+  emptyLabel: string
+  clearLabel: string
+  agentLabel: string
+  userLabel: string
+}) {
+  const agentEntries = useBrowserPanelStore(
+    (s) => s.panels[sessionId]?.agentLog ?? EMPTY_AGENT_LOG,
+  )
+  const userEntries = useBrowserPanelStore(
+    (s) => s.panels[sessionId]?.userLog ?? EMPTY_USER_LOG,
+  )
+  const clearAgentLog = useBrowserPanelStore((s) => s.clearAgentLog)
+  const clearUserLog = useBrowserPanelStore((s) => s.clearUserLog)
+  return (
+    <CooperateTimeline
+      agentEntries={agentEntries}
+      userEntries={userEntries}
+      onClear={() => {
+        clearAgentLog(sessionId)
+        clearUserLog(sessionId)
+      }}
+      title={title}
+      emptyLabel={emptyLabel}
+      clearLabel={clearLabel}
+      agentLabel={agentLabel}
+      userLabel={userLabel}
+    />
   )
 }
 

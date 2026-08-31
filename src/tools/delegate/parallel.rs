@@ -132,14 +132,6 @@ fn lock_degraded_notes(
     })
 }
 
-fn ok_result(output: impl Into<String>) -> ToolResult {
-    ToolResult {
-        success: true,
-        output: output.into(),
-        error: None,
-    }
-}
-
 #[async_trait]
 impl Tool for DelegateParallelTool {
     fn name(&self) -> &str {
@@ -315,7 +307,7 @@ impl Tool for DelegateParallelTool {
                     "global multi-agent runtime missing; running with an ephemeral runtime in \
                      single-agent fallback mode"
                 );
-                Arc::new(MultiAgentRuntime::new())
+                Arc::new(MultiAgentRuntime::ephemeral())
             }
         };
         let runtime_exec = Arc::clone(&effective_runtime);
@@ -380,20 +372,48 @@ impl Tool for DelegateParallelTool {
                 let rt = rt.as_ref();
 
                 let (agent_info, reserved) = {
+                    const ASSIGN_WAIT_MAX: std::time::Duration =
+                        std::time::Duration::from_secs(300);
                     let mut chosen: Option<(
                         crate::agent::registry::AgentInfo,
                         crate::agent::registry::TaskAssignmentGuard,
                     )> = None;
-                    for _ in 0..4 {
-                        let Some(candidate) = rt.registry.find_best_available(&capability) else {
-                            break;
-                        };
-                        match rt.registry.assign_task_guarded(&candidate.id, &id) {
-                            Ok(guard) => {
-                                chosen = Some((candidate, guard));
+                    let has_capability_agents = !rt
+                        .registry
+                        .inner()
+                        .find_by_capability(&capability)
+                        .is_empty();
+                    if has_capability_agents {
+                        let wait_budget = call_timeout
+                            .map(|t| t.min(ASSIGN_WAIT_MAX))
+                            .unwrap_or(ASSIGN_WAIT_MAX);
+                        let assign_deadline = tokio::time::Instant::now() + wait_budget;
+                        loop {
+                            let notified = rt.registry.inner().availability().notified();
+                            if let Some(candidate) =
+                                rt.registry.find_best_available(&capability)
+                            {
+                                match rt.registry.assign_task_guarded(&candidate.id, &id) {
+                                    Ok(guard) => {
+                                        chosen = Some((candidate, guard));
+                                        break;
+                                    }
+                                    Err(_) => continue,
+                                }
+                            }
+                            let timed_out = tokio::select! {
+                                biased;
+                                () = cancel.cancelled() => {
+                                    return Err(format!(
+                                        "subagent '{id}' cancelled while waiting for an available agent"
+                                    ));
+                                }
+                                () = tokio::time::sleep_until(assign_deadline) => true,
+                                () = notified => false,
+                            };
+                            if timed_out {
                                 break;
                             }
-                            Err(_) => continue,
                         }
                     }
                     match chosen {
@@ -659,19 +679,49 @@ impl Tool for DelegateParallelTool {
                             let _base_guard = base_lock.lock().await;
                             match loop_result {
                                 Ok(output) => {
-                                    match crate::workers::worktree::commit_and_merge_worker(
-                                        &info,
+                                    match crate::workers::worktree::parent_workspace_is_dirty(
+                                        &info.base,
                                     )
                                     .await
                                     {
-                                        Ok(note) => Ok(format!(
-                                            "{output}\n\n[worktree `{}`] {note}",
-                                            info.branch
-                                        )),
-                                        Err(err) => Ok(format!(
-                                            "{output}\n\n[worktree `{}`] MERGE FAILED — {err}",
-                                            info.branch
-                                        )),
+                                        Ok(false) => {
+                                            match crate::workers::worktree::commit_and_merge_worker(
+                                                &info,
+                                            )
+                                            .await
+                                            {
+                                                Ok(note) => Ok(format!(
+                                                    "{output}\n\n[worktree `{}`] {note}",
+                                                    info.branch
+                                                )),
+                                                Err(err) => Ok(format!(
+                                                    "{output}\n\n[worktree `{}`] MERGE FAILED — {err}",
+                                                    info.branch
+                                                )),
+                                            }
+                                        }
+                                        Ok(true) => {
+                                            let salvage =
+                                                crate::workers::worktree::salvage_worktree(&info)
+                                                    .await;
+                                            Ok(format!(
+                                                "{output}\n\n[worktree `{}`] merge skipped: the \
+                                                 parent workspace has uncommitted changes; worker \
+                                                 changes were preserved on the branch. {}",
+                                                info.branch, salvage.note
+                                            ))
+                                        }
+                                        Err(err) => {
+                                            let salvage =
+                                                crate::workers::worktree::salvage_worktree(&info)
+                                                    .await;
+                                            Ok(format!(
+                                                "{output}\n\n[worktree `{}`] merge skipped: could \
+                                                 not verify the parent workspace state ({err}); \
+                                                 treated as dirty. {}",
+                                                info.branch, salvage.note
+                                            ))
+                                        }
                                     }
                                 }
                                 Err(e) => {
@@ -897,19 +947,28 @@ impl Tool for DelegateParallelTool {
         });
         match serde_json::to_string(&payload) {
             Ok(s) => {
-                if any_degraded {
-                    Ok(ToolResult {
-                        success: results.iter().all(|r| r.success),
-                        output: s,
-                        error: Some(
-                            "delegate_parallel completed with degraded single-agent fallback(s); \
-                             see metadata.degraded and DEGRADED PARALLELISM banner"
-                                .into(),
-                        ),
-                    })
+                let all_succeeded = !results.is_empty() && results.iter().all(|r| r.success);
+                let failed_count = results.iter().filter(|r| !r.success).count();
+                let error = if !all_succeeded {
+                    Some(format!(
+                        "delegate_parallel: {failed_count}/{} sub-task(s) failed; see \
+                         metadata.tasks and metadata.failures for details",
+                        results.len()
+                    ))
+                } else if any_degraded {
+                    Some(
+                        "delegate_parallel completed with degraded single-agent fallback(s); \
+                         see metadata.degraded and DEGRADED PARALLELISM banner"
+                            .into(),
+                    )
                 } else {
-                    Ok(ok_result(s))
-                }
+                    None
+                };
+                Ok(ToolResult {
+                    success: all_succeeded,
+                    output: s,
+                    error,
+                })
             }
             Err(e) => Ok(err_result(format!("delegate_parallel: serialize merged output failed: {e}"))),
         }

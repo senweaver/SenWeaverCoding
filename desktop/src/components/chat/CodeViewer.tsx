@@ -6,6 +6,7 @@ import { useState, useRef, useEffect, useMemo } from 'react'
 import { ShikiHighlighter, createJavaScriptRegexEngine } from 'react-shiki'
 import 'react-shiki/css'
 import { CopyButton } from '../shared/CopyButton'
+import { enqueueIdleTask } from '../../lib/idleTaskQueue'
 
 function countLinesFast(input: string): number {
   let n = 1
@@ -29,24 +30,24 @@ function sliceFirstNLines(input: string, n: number): string {
   return input
 }
 
-function scheduleIdleCallback(cb: () => void): () => void {
-  if (typeof window === 'undefined') {
-    cb()
-    return () => {}
-  }
-  type IdleHandle = number
-  type IdleFn = (cb: () => void, options?: { timeout?: number }) => IdleHandle
-  const ric = (window as unknown as { requestIdleCallback?: IdleFn }).requestIdleCallback
-  if (typeof ric === 'function') {
-    const handle = ric(cb, { timeout: 250 })
-    const cancel = (window as unknown as { cancelIdleCallback?: (h: IdleHandle) => void })
-      .cancelIdleCallback
-    return () => {
-      if (typeof cancel === 'function') cancel(handle)
+const HIGHLIGHT_MAX_CHARS = 8_000
+const HIGHLIGHT_MAX_LINES = 240
+const HIGHLIGHT_MAX_LINE_CHARS = 2_000
+const DISPLAY_MAX_CHARS = 120_000
+
+function isHighlightable(code: string): boolean {
+  if (code.length > HIGHLIGHT_MAX_CHARS) return false
+  let lineStart = 0
+  let lines = 1
+  for (let i = 0; i < code.length; i++) {
+    if (code.charCodeAt(i) === 10) {
+      if (i - lineStart > HIGHLIGHT_MAX_LINE_CHARS) return false
+      lineStart = i + 1
+      lines++
+      if (lines > HIGHLIGHT_MAX_LINES) return false
     }
   }
-  const t = setTimeout(cb, 80)
-  return () => clearTimeout(t)
+  return code.length - lineStart <= HIGHLIGHT_MAX_LINE_CHARS
 }
 
 type Props = {
@@ -91,13 +92,24 @@ const CODE_AREA_PADDING = '0.5rem 12px'
 const CODE_LINE_HEIGHT = 1.3
 const shikiEngine = createJavaScriptRegexEngine({ forgiving: true })
 
-function CodeArea({ code, language, showLineNumbers }: { code: string; language?: string; showLineNumbers: boolean }) {
+function CodeArea({
+  code,
+  language,
+  showLineNumbers,
+  highlight,
+}: {
+  code: string
+  language?: string
+  showLineNumbers: boolean
+  highlight: boolean
+}) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [inView, setInView] = useState(false)
   const [loaded, setLoaded] = useState(false)
   const [renderShiki, setRenderShiki] = useState(false)
 
   useEffect(() => {
+    if (!highlight) return
     const el = containerRef.current
     if (!el) return
     const io = new IntersectionObserver(
@@ -111,15 +123,20 @@ function CodeArea({ code, language, showLineNumbers }: { code: string; language?
     )
     io.observe(el)
     return () => io.disconnect()
-  }, [])
+  }, [highlight])
 
   useEffect(() => {
+    if (!highlight) {
+      setRenderShiki(false)
+      setLoaded(false)
+      return
+    }
     if (!inView) return
     setRenderShiki(false)
     setLoaded(false)
-    const cancel = scheduleIdleCallback(() => setRenderShiki(true))
+    const cancel = enqueueIdleTask(() => setRenderShiki(true))
     return cancel
-  }, [code, language, inView])
+  }, [code, language, inView, highlight])
 
   useEffect(() => {
     if (!renderShiki) return
@@ -205,10 +222,13 @@ export function CodeViewer({ code, language, maxLines = 20, showLineNumbers = fa
 
   const totalLines = useMemo(() => countLinesFast(code), [code])
   const isTruncated = !expanded && totalLines > maxLines
-  const visibleCode = useMemo(
-    () => (isTruncated ? sliceFirstNLines(code, maxLines) : code),
-    [code, isTruncated, maxLines],
-  )
+  const visibleCode = useMemo(() => {
+    const lineCapped = isTruncated ? sliceFirstNLines(code, maxLines) : code
+    return lineCapped.length > DISPLAY_MAX_CHARS
+      ? `${lineCapped.slice(0, DISPLAY_MAX_CHARS)}\n\u2026`
+      : lineCapped
+  }, [code, isTruncated, maxLines])
+  const highlightable = useMemo(() => isHighlightable(code), [code])
 
   const effectiveShowLineNumbers = showLineNumbers && !!language && language !== 'text'
   const languageLabel = language || 'code'
@@ -234,6 +254,7 @@ export function CodeViewer({ code, language, maxLines = 20, showLineNumbers = fa
         code={visibleCode}
         language={language}
         showLineNumbers={effectiveShowLineNumbers}
+        highlight={highlightable}
       />
 
       {}

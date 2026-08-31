@@ -14,7 +14,7 @@ import {
   type BuildTarget,
   type SensitiveReport,
 } from '../api/computer'
-import { localizeComputerMessage } from '../lib/computerMessages'
+import { computerText, localizeComputerMessage } from '../lib/computerMessages'
 import { useComputerUseStore } from './computerUseStore'
 
 export type AnalyzePhase = 'idle' | 'running' | 'done' | 'error'
@@ -188,7 +188,12 @@ export const useComputerAnalysisStore = create<Store>((set, get) => ({
       const analysis = await saveAnalysis(recording, patch)
       set({ analysis })
     } catch (err) {
-      set({ analyzeError: err instanceof Error ? err.message : 'failed to save' })
+      set({
+        analyzeError:
+          err instanceof Error
+            ? err.message
+            : computerText('computerUse.msg.analysisSaveFailed'),
+      })
     }
   },
 
@@ -199,7 +204,12 @@ export const useComputerAnalysisStore = create<Store>((set, get) => ({
       const analysis = await saveAnalysis(recording, { approved: true })
       set({ analysis })
     } catch (err) {
-      set({ analyzeError: err instanceof Error ? err.message : 'failed to approve' })
+      set({
+        analyzeError:
+          err instanceof Error
+            ? err.message
+            : computerText('computerUse.msg.analysisSaveFailed'),
+      })
     }
   },
 
@@ -307,6 +317,15 @@ function runAnalyzeSocket(
   set: (partial: Partial<Store>) => void,
   get: () => Store,
 ) {
+  const { provider, model } = useComputerUseStore.getState()
+  if (!provider || !model) {
+    set({
+      analyzePhase: 'error',
+      analyzeError: computerText('computerUse.msg.noVisionModel'),
+      analyzeMessage: null,
+    })
+    return
+  }
   closeSocket(analyzeSocket)
   set({
     analyzePhase: 'running',
@@ -314,12 +333,17 @@ function runAnalyzeSocket(
     analyzeMessage: null,
     redactedCount: null,
   })
-  const { provider, model } = useComputerUseStore.getState()
   let ws: WebSocket
   try {
     ws = new WebSocket(wsUrl('/ws/computer-analyze/session'))
   } catch (err) {
-    set({ analyzePhase: 'error', analyzeError: err instanceof Error ? err.message : 'connection failed' })
+    set({
+      analyzePhase: 'error',
+      analyzeError:
+        err instanceof Error
+          ? err.message
+          : computerText('computerUse.msg.connectionOpenFailed'),
+    })
     return
   }
   analyzeSocket = ws
@@ -353,7 +377,10 @@ function runAnalyzeSocket(
       set({ analysis, analyzePhase: 'done', analyzeMessage: null, redactedCount: redacted })
       void refreshSensitive(recording, set)
     } else if (type === 'error') {
-      const raw = typeof payload.message === 'string' ? payload.message : 'analysis failed'
+      const raw =
+        typeof payload.message === 'string'
+          ? payload.message
+          : computerText('computerUse.msg.analysisFailed')
       set({ analyzePhase: 'error', analyzeError: localizeComputerMessage(null, raw) })
     }
   }
@@ -361,7 +388,10 @@ function runAnalyzeSocket(
     if (analyzeSocket !== ws) return
     analyzeSocket = null
     if (get().analyzePhase === 'running') {
-      set({ analyzePhase: 'error', analyzeError: 'connection closed' })
+      set({
+        analyzePhase: 'error',
+        analyzeError: computerText('computerUse.msg.connectionClosed'),
+      })
     }
   }
 }
@@ -381,6 +411,15 @@ function runBuildSocket(
   get: () => Store,
   creating = false,
 ) {
+  const { provider, model } = useComputerUseStore.getState()
+  if (!provider || !model) {
+    set({
+      buildPhase: 'error',
+      buildError: computerText('computerUse.msg.noVisionModel'),
+      buildMessage: null,
+    })
+    return
+  }
   closeSocket(buildSocket)
   set({
     buildPhase: creating ? 'creating' : 'planning',
@@ -392,7 +431,13 @@ function runBuildSocket(
   try {
     ws = new WebSocket(wsUrl('/ws/computer-build/session'))
   } catch (err) {
-    set({ buildPhase: 'error', buildError: err instanceof Error ? err.message : 'connection failed' })
+    set({
+      buildPhase: 'error',
+      buildError:
+        err instanceof Error
+          ? err.message
+          : computerText('computerUse.msg.connectionOpenFailed'),
+    })
     return
   }
   buildSocket = ws
@@ -426,7 +471,10 @@ function runBuildSocket(
         builtPlacement: typeof payload.placement === 'string' ? payload.placement : null,
       })
     } else if (type === 'error') {
-      const raw = typeof payload.message === 'string' ? payload.message : 'build failed'
+      const raw =
+        typeof payload.message === 'string'
+          ? payload.message
+          : computerText('computerUse.msg.buildFailed')
       set({ buildPhase: 'error', buildError: localizeComputerMessage(null, raw) })
     }
   }
@@ -435,7 +483,10 @@ function runBuildSocket(
     buildSocket = null
     const phase = get().buildPhase
     if (phase === 'planning' || phase === 'creating') {
-      set({ buildPhase: 'error', buildError: 'connection closed' })
+      set({
+        buildPhase: 'error',
+        buildError: computerText('computerUse.msg.connectionClosed'),
+      })
     }
   }
 }

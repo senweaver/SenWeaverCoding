@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState } from 'react'
+import { useRef, useState, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
@@ -12,6 +12,7 @@ import {
   isWorkspaceRootPath,
   splitPathForDisplay,
 } from '../../utils/toolFormatters'
+import { Collapse } from '../shared/Collapse'
 
 const EMPTY_PENDING_EDITS: ReturnType<
   typeof useChatStore.getState
@@ -25,12 +26,14 @@ export function ReviewCard() {
       const st = activeTabId ? s.sessions[activeTabId] : undefined
       return {
         pendingEdits: st?.pendingEdits,
+        keptEdits: st?.keptEdits,
         chatState: st?.chatState ?? 'idle',
       }
     }),
   )
   const stopGeneration = useChatStore((s) => s.stopGeneration)
   const clearPendingEdits = useChatStore((s) => s.clearPendingEdits)
+  const clearKeptEdits = useChatStore((s) => s.clearKeptEdits)
   const undoAllPendingEdits = useChatStore((s) => s.undoAllPendingEdits)
   const undoPendingEditFile = useChatStore((s) => s.undoPendingEditFile)
   const keepPendingEditFile = useChatStore((s) => s.keepPendingEditFile)
@@ -39,16 +42,29 @@ export function ReviewCard() {
   const [undoing, setUndoing] = useState(false)
   const [undoingPath, setUndoingPath] = useState<string | null>(null)
   const [errorMessage, setErrorMessage] = useState<string | null>(null)
+  const [prevResetKey, setPrevResetKey] = useState('')
+  const lastContentRef = useRef<ReactNode>(null)
 
   const pendingEdits = sessionView.pendingEdits ?? EMPTY_PENDING_EDITS
+  const keptEdits = sessionView.keptEdits ?? EMPTY_PENDING_EDITS
   const chatState = sessionView.chatState
   const isActive = chatState !== 'idle'
+  const pendingPaths = new Set(pendingEdits.map((e) => e.path))
+  const keptVisible = keptEdits.filter((e) => !pendingPaths.has(e.path))
+  const open = pendingEdits.length > 0 || keptVisible.length > 0
+
+  const resetKey = `${activeTabId ?? ''}:${open ? 1 : 0}`
+  if (prevResetKey !== resetKey) {
+    setPrevResetKey(resetKey)
+    if (open) {
+      setExpanded(false)
+      setErrorMessage(null)
+    }
+  }
 
   if (!activeTabId) return null
 
-  if (!isActive && pendingEdits.length === 0) return null
-
-  const fileCount = pendingEdits.length
+  const fileCount = pendingEdits.length + keptVisible.length
   const onToggle = () => setExpanded((v) => !v)
 
   const onStop = (e: React.MouseEvent) => {
@@ -60,6 +76,12 @@ export function ReviewCard() {
     e.stopPropagation()
     if (!activeTabId) return
     clearPendingEdits(activeTabId)
+    setErrorMessage(null)
+  }
+  const onClearKept = (e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (!activeTabId) return
+    clearKeptEdits(activeTabId)
     setErrorMessage(null)
   }
   const onUndoAll = async (e: React.MouseEvent) => {
@@ -99,7 +121,7 @@ export function ReviewCard() {
     setErrorMessage(null)
   }
 
-  return (
+  const content = open ? (
     <div className="mb-1.5">
       <div
         className="flex w-full items-center gap-2 rounded-lg border border-[var(--color-border)]/40 bg-[var(--color-surface-container-low)] px-3 py-1.5 text-left transition-colors hover:bg-[var(--color-surface-container-high)]"
@@ -152,6 +174,15 @@ export function ReviewCard() {
               </>
             )
           )}
+          {!isActive && pendingEdits.length === 0 && keptVisible.length > 0 && (
+            <button
+              type="button"
+              onClick={onClearKept}
+              className="rounded-md px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-container-high)]"
+            >
+              {t('review.clearKept')}
+            </button>
+          )}
           <button
             type="button"
             onClick={(e) => {
@@ -173,9 +204,12 @@ export function ReviewCard() {
         </div>
       )}
 
-      {expanded && pendingEdits.length > 0 && (
+      {expanded && fileCount > 0 && (
         <div className="mt-1.5 max-h-[320px] overflow-y-auto rounded-lg border border-[var(--color-border)]/30 bg-[var(--color-surface-container-lowest)]">
-          {pendingEdits.map((edit) => {
+          {[
+            ...pendingEdits.map((edit) => ({ edit, kept: false })),
+            ...keptVisible.map((edit) => ({ edit, kept: true })),
+          ].map(({ edit, kept }) => {
             const workspaceRoot = isWorkspaceRootPath(edit.path)
             const { dir, tail, separator } = splitPathForDisplay(edit.path)
             const isCuratorPath = /(?:^|[\\/])curator[\\/]/i.test(edit.path)
@@ -223,7 +257,12 @@ export function ReviewCard() {
                     -{edit.deletions}
                   </span>
                 )}
-                {!isActive && (
+                {kept && (
+                  <span className="shrink-0 rounded-full bg-[var(--color-surface-container-high)] px-1.5 py-0.5 text-[10px] text-[var(--color-text-tertiary)]">
+                    {t('review.keptBadge')}
+                  </span>
+                )}
+                {!isActive && !kept && (
                   <div className="flex shrink-0 items-center gap-1">
                     <button
                       type="button"
@@ -250,5 +289,9 @@ export function ReviewCard() {
         </div>
       )}
     </div>
+  ) : null
+  if (open) lastContentRef.current = content
+  return (
+    <Collapse open={open}>{open ? content : lastContentRef.current}</Collapse>
   )
 }

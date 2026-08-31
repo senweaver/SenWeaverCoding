@@ -17,6 +17,19 @@ const CONFLICT_JOURNAL_CAP: usize = 256;
 
 const REPLAY_BUFFER_CAP: usize = 1024;
 
+const MAX_RETAINED_TURNS: usize = 512;
+
+const MAX_TURN_TEXT_BYTES: usize = 2 * 1024 * 1024;
+
+const TURN_TEXT_KEEP_BYTES: usize = 1_536 * 1024;
+
+fn cap_turn_text(buf: &mut String) {
+    if buf.len() > MAX_TURN_TEXT_BYTES {
+        let cut = crate::util::ceil_char_boundary(buf, buf.len() - TURN_TEXT_KEEP_BYTES);
+        buf.replace_range(..cut, "…[truncated]");
+    }
+}
+
 use crate::observability::session_write_mode_metrics;
 use crate::session::event::{SessionEvent, SessionEventKind};
 use crate::session::persistence::SessionEventLog;
@@ -30,6 +43,8 @@ pub type AgentId = String;
 pub struct SessionState {
     pub id: SessionId,
     pub turns: Vec<Turn>,
+    #[serde(default)]
+    pub dropped_turns: u64,
     pub edits: Vec<EditBatchRef>,
     pub open_files: HashMap<PathBuf, OpenFileState>,
     pub active_agents: HashMap<AgentId, AgentRuntimeState>,
@@ -45,6 +60,8 @@ pub struct Turn {
     pub input: String,
 
     pub output: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub thinking: Option<String>,
     pub tool_calls: Vec<ToolInvocation>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
@@ -126,6 +143,7 @@ impl SessionState {
         Self {
             id: id.into(),
             turns: Vec::new(),
+            dropped_turns: 0,
             edits: Vec::new(),
             open_files: HashMap::new(),
             active_agents: HashMap::new(),
@@ -138,22 +156,73 @@ impl SessionState {
     pub fn apply(&mut self, evt: &SessionEvent) -> u64 {
         match &evt.kind {
             SessionEventKind::TurnStarted { input } => {
-                let seq = self.turns.len() as u64;
+                let seq = self.dropped_turns + self.turns.len() as u64;
                 self.turns.push(Turn {
                     seq,
                     input: input.clone(),
                     output: None,
+                    thinking: None,
                     tool_calls: Vec::new(),
                     started_at: evt.timestamp,
                     finished_at: None,
                 });
+                if self.turns.len() > MAX_RETAINED_TURNS {
+                    let drop_n = self.turns.len() - MAX_RETAINED_TURNS;
+                    self.dropped_turns += drop_n as u64;
+                    self.turns.drain(..drop_n);
+                }
                 self.metrics.total_turns += 1;
             }
             SessionEventKind::Delta { text } => {
                 if let Some(last) = self.turns.last_mut() {
                     match last.output.as_mut() {
-                        Some(buf) => buf.push_str(text),
+                        Some(buf) => {
+                            buf.push_str(text);
+                            cap_turn_text(buf);
+                        }
                         None => last.output = Some(text.clone()),
+                    }
+                }
+            }
+            SessionEventKind::Thinking { text } => {
+                if let Some(last) = self.turns.last_mut() {
+                    match last.thinking.as_mut() {
+                        Some(buf) => {
+                            buf.push_str(text);
+                            cap_turn_text(buf);
+                        }
+                        None => last.thinking = Some(text.clone()),
+                    }
+                }
+            }
+            SessionEventKind::StreamReset => {
+                if let Some(last) = self.turns.last_mut() {
+                    if last.finished_at.is_none() {
+                        last.output = None;
+                        last.thinking = None;
+                    }
+                }
+            }
+            SessionEventKind::FileEdit {
+                path,
+                additions: _,
+                deletions: _,
+            } => {
+                let path_buf = std::path::PathBuf::from(path);
+                match self.edits.last_mut() {
+                    Some(batch) if batch.journal_id.is_none() && batch.checkpoint_id.is_none() => {
+                        if !batch.paths.contains(&path_buf) {
+                            batch.paths.push(path_buf);
+                        }
+                    }
+                    _ => {
+                        let turn_seq = self.dropped_turns + self.turns.len() as u64;
+                        self.edits.push(EditBatchRef {
+                            id: format!("edits-turn-{turn_seq}-v{}", self.version + 1),
+                            paths: vec![path_buf],
+                            journal_id: None,
+                            checkpoint_id: None,
+                        });
                     }
                 }
             }
@@ -204,7 +273,7 @@ impl SessionState {
                 tokens_used,
             } => {
                 if let Some(last) = self.turns.last_mut() {
-                    if last.output.is_none() && !output.is_empty() {
+                    if !output.is_empty() {
                         last.output = Some(output.clone());
                     }
                     last.finished_at = Some(evt.timestamp);
@@ -610,6 +679,13 @@ impl SessionActor {
 
     pub fn apply_remote(&self, remote: RemoteDelta) -> SessionDelta {
         session_write_mode_metrics::incr_session_rpc_recv();
+        if remote.source_session_id == crate::session::rpc::process_instance_id() {
+            tracing::debug!(
+                target: "session.rpc",
+                "ignoring self-originated remote delta (loopback)"
+            );
+            return remote.delta;
+        }
         {
             let mut seen = self.remote_versions.lock();
             let last_applied = seen

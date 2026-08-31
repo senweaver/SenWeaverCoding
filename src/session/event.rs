@@ -30,6 +30,16 @@ pub enum SessionEventKind {
 
     Delta { text: String },
 
+    Thinking { text: String },
+
+    StreamReset,
+
+    FileEdit {
+        path: String,
+        additions: i32,
+        deletions: i32,
+    },
+
     ToolCall {
         tool_name: String,
         tool_call_id: String,

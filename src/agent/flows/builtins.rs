@@ -731,14 +731,37 @@ impl CodeEditExecutor {
         let to_rel = if let Some(tp) = step.inputs.get("to_path").filter(|s| !s.is_empty()) {
             tp.clone()
         } else {
-            extract_path_token(&step.description).ok_or_else(|| {
+            extract_rename_target(&step.description).ok_or_else(|| {
                 FlowError::Executor(format!(
                     "rename step {} has no destination path in description or to_path input",
                     step.id
                 ))
             })?
         };
-        let to_abs = workspace_root.join(&to_rel);
+        let normalized_to_rel = to_rel.replace('\\', "/");
+        let to_rel_path = Path::new(normalized_to_rel.as_str());
+        if to_rel_path.is_absolute()
+            || to_rel_path.has_root()
+            || to_rel_path.components().any(|c| {
+                matches!(
+                    c,
+                    std::path::Component::ParentDir | std::path::Component::Prefix(_)
+                )
+            })
+        {
+            return Err(FlowError::Executor(format!(
+                "rename step {} destination `{to_rel}` must be a workspace-relative path",
+                step.id
+            )));
+        }
+        let to_abs = workspace_root.join(to_rel_path);
+        if to_abs == abs_path {
+            return Err(FlowError::Executor(format!(
+                "rename step {} resolved destination equals the source path {}",
+                step.id,
+                abs_path.display()
+            )));
+        }
         tracing::info!(
             target: "agent.flows.code_edit",
             stage = "executor",
@@ -842,9 +865,11 @@ fn window_snippet_block(path: &Path, body: &str, description: &str) -> String {
         .map(|e| e.line as usize)
         .unwrap_or(1);
 
+    let total_lines = lines.len();
     let half = 25usize;
-    let start = center.saturating_sub(half).max(1);
-    let end = (center.saturating_add(half)).min(lines.len()).max(start);
+    let center = center.min(total_lines).max(1);
+    let start = center.saturating_sub(half).max(1).min(total_lines);
+    let end = center.saturating_add(half).min(total_lines).max(start);
     let snippet = lines[(start - 1)..end].join("\n");
     format!(
         "Current file (lines {start}-{end} of {total}):\n```\n{snippet}\n```",
@@ -886,20 +911,33 @@ fn first_identifier_from(text: &str) -> Option<String> {
     None
 }
 
-fn extract_path_token(text: &str) -> Option<String> {
+fn clean_path_token(raw: &str) -> String {
+    raw.trim_start_matches(['`', '"', '\''])
+        .trim_end_matches(['`', '"', '\'', ',', '.', ';', ':', ')', ']'])
+        .to_string()
+}
+
+fn path_tokens(text: &str) -> impl Iterator<Item = String> + '_ {
     text.split_whitespace()
-        .find(|t| {
+        .filter(|t| {
             !t.is_empty()
                 && (t.contains('/') || t.contains('\\'))
                 && !t.starts_with('-')
                 && !t.starts_with('@')
         })
-        .map(|t| {
-            let trimmed = t.trim_matches(|c: char| {
-                c == '`' || c == '"' || c == '\'' || c == ',' || c == '.'
-            });
-            trimmed.to_string()
-        })
+        .map(clean_path_token)
+        .filter(|t| !t.is_empty())
+}
+
+fn extract_rename_target(text: &str) -> Option<String> {
+    for sep in [" to ", "->", "→", " as "] {
+        if let Some(pos) = text.find(sep) {
+            if let Some(tok) = path_tokens(&text[pos + sep.len()..]).next() {
+                return Some(tok);
+            }
+        }
+    }
+    path_tokens(text).last()
 }
 
 fn strip_markdown_fence(s: &str) -> &str {
@@ -1045,7 +1083,7 @@ impl Verifier for CodeEditVerifier {
             language: lang,
         };
 
-        let root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        let root = resolve_workspace_root(ctx);
         let pipeline = VerificationPipeline::default_for_workspace(&root, None);
 
         tracing::info!(

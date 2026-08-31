@@ -185,4 +185,45 @@ function ExploredCardImpl({
   )
 }
 
-export const ExploredCard = memo(ExploredCardImpl)
+function areExploredCardPropsEqual(prev: Props, next: Props): boolean {
+  if (prev.isStreaming !== next.isStreaming) return false
+  if (prev.sessionId !== next.sessionId) return false
+  if (prev.onLiveThinkingGrow !== next.onLiveThinkingGrow) return false
+  if (prev.items !== next.items) {
+    if (prev.items.length !== next.items.length) return false
+    for (let i = 0; i < prev.items.length; i++) {
+      if (prev.items[i] !== next.items[i]) return false
+    }
+  }
+  const prevActiveInside =
+    prev.activeThinkingId != null &&
+    prev.items.some((m) => m.type === 'thinking' && m.id === prev.activeThinkingId)
+  const nextActiveInside =
+    next.activeThinkingId != null &&
+    next.items.some((m) => m.type === 'thinking' && m.id === next.activeThinkingId)
+  if (prevActiveInside !== nextActiveInside) return false
+  if (nextActiveInside && prev.activeThinkingId !== next.activeThinkingId) return false
+  if (prev.resultMap !== next.resultMap) {
+    for (const item of next.items) {
+      if (item.type === 'tool_use') {
+        if (prev.resultMap.get(item.toolUseId) !== next.resultMap.get(item.toolUseId)) {
+          return false
+        }
+      }
+    }
+  }
+  if (prev.summary !== next.summary) {
+    if (
+      prev.summary.reads !== next.summary.reads ||
+      prev.summary.lists !== next.summary.lists ||
+      prev.summary.searches !== next.summary.searches ||
+      prev.summary.recalls !== next.summary.recalls ||
+      prev.summary.thinkingCount !== next.summary.thinkingCount
+    ) {
+      return false
+    }
+  }
+  return true
+}
+
+export const ExploredCard = memo(ExploredCardImpl, areExploredCardPropsEqual)

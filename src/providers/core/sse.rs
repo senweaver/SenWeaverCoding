@@ -46,7 +46,7 @@ impl SseParser {
     pub fn push(&mut self, chunk: &[u8]) {
         self.buf.extend_from_slice(chunk);
         if self.buf.len() > MAX_SSE_LINE_BYTES
-            && memchr::memchr(b'\n', &self.buf).is_none()
+            && memchr::memchr2(b'\n', b'\r', &self.buf).is_none()
         {
             self.buf.clear();
             self.skip_until_newline = true;
@@ -87,20 +87,25 @@ impl SseParser {
     fn parse_buffer(&mut self) {
         let mut cursor = 0usize;
         loop {
-            let Some(rel) = memchr::memchr(b'\n', &self.buf[cursor..]) else {
+            let Some(rel) = memchr::memchr2(b'\n', b'\r', &self.buf[cursor..]) else {
                 break;
             };
-            let nl = cursor + rel;
+            let term = cursor + rel;
+            let is_cr = self.buf[term] == b'\r';
+            if is_cr && term + 1 >= self.buf.len() {
+                break;
+            }
+            let after = if is_cr && self.buf[term + 1] == b'\n' {
+                term + 2
+            } else {
+                term + 1
+            };
             if self.skip_until_newline {
                 self.skip_until_newline = false;
-                cursor = nl + 1;
+                cursor = after;
                 continue;
             }
-            let mut end = nl;
-            if end > cursor && self.buf[end - 1] == b'\r' {
-                end -= 1;
-            }
-            let line_slice = &self.buf[cursor..end];
+            let line_slice = &self.buf[cursor..term];
             let line: String = match std::str::from_utf8(line_slice) {
                 Ok(s) => s.to_string(),
                 Err(_) => {
@@ -111,7 +116,7 @@ impl SseParser {
                     String::from_utf8_lossy(line_slice).into_owned()
                 }
             };
-            cursor = nl + 1;
+            cursor = after;
             self.process_line(&line);
         }
         if cursor > 0 {

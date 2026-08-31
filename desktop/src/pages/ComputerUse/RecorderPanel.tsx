@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation } from '../../i18n'
 import { enterMinimalMode } from '../../lib/minimalMode'
 import {
@@ -76,10 +76,24 @@ export function RecorderPanel({ onClose }: { onClose: () => void }) {
 
   const [showPrivacy, setShowPrivacy] = useState(false)
   const [showWhatsRecorded, setShowWhatsRecorded] = useState(false)
+  const stepListRef = useRef<HTMLOListElement>(null)
+  const prevSelectedRef = useRef<number | null>(null)
 
   useEffect(() => {
     if (narrationEnabled) void loadMicrophones()
   }, [narrationEnabled, loadMicrophones])
+
+  useEffect(() => {
+    const idx = selectedStepIndex ?? steps.length - 1
+    if (idx < 0) return
+    const selectionChanged = prevSelectedRef.current !== selectedStepIndex
+    prevSelectedRef.current = selectedStepIndex
+    const following =
+      selectedStepIndex === null || selectedStepIndex >= steps.length - 1
+    if (!selectionChanged && !following) return
+    const el = stepListRef.current?.children[idx] as HTMLElement | undefined
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [selectedStepIndex, steps.length])
 
   const startComputerRun = useComputerUseStore((s) => s.start)
   const visionProvider = useComputerUseStore((s) => s.provider)
@@ -318,7 +332,7 @@ export function RecorderPanel({ onClose }: { onClose: () => void }) {
                   {t('computerUse.record.hint')}
                 </div>
               ) : (
-                <ol className="flex flex-col gap-2">
+                <ol ref={stepListRef} className="flex flex-col gap-2">
                   {steps.map((step, idx) => {
                     const active = (selectedStepIndex ?? steps.length - 1) === idx
                     return (
@@ -377,10 +391,11 @@ export function RecorderPanel({ onClose }: { onClose: () => void }) {
                     <button
                       type="button"
                       onClick={() => {
-                        startComputerRun({
+                        const ok = startComputerRun({
                           replayRecording: savedRecordingName,
                           smart: hasVisionModel,
                         })
+                        if (!ok) return
                         reset()
                         onClose()
                         void enterMinimalMode('computer')
@@ -408,7 +423,12 @@ export function RecorderPanel({ onClose }: { onClose: () => void }) {
                       <button
                         type="button"
                         onClick={generateSkill}
-                        disabled={isGenerating}
+                        disabled={isGenerating || !hasVisionModel}
+                        title={
+                          hasVisionModel
+                            ? t('computerUse.skills.generateHint')
+                            : t('computerUse.noVisionModels')
+                        }
                         className="flex items-center justify-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-2 text-[12px] font-medium text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-brand)]/50 hover:text-[var(--color-brand)] disabled:opacity-50"
                       >
                         {isGenerating ? (
@@ -463,6 +483,7 @@ export function RecorderPanel({ onClose }: { onClose: () => void }) {
                 <img
                   src={`data:image/jpeg;base64,${selectedStep.screenshotBase64}`}
                   alt={t('computerUse.screenshot')}
+                  decoding="async"
                   className="max-h-full max-w-full rounded-lg border border-[var(--color-border)] object-contain shadow-sm"
                 />
                 {selectedStep.targetXNorm !== undefined &&

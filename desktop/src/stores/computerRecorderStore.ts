@@ -11,7 +11,7 @@ import {
   renameRecording,
   type RecordingSummary,
 } from '../api/computer'
-import { localizeComputerMessage } from '../lib/computerMessages'
+import { computerText, localizeComputerMessage } from '../lib/computerMessages'
 import {
   listMicrophones,
   NarrationCapture,
@@ -80,17 +80,24 @@ type ComputerRecorderStore = {
 
 let socket: WebSocket | null = null
 let narration: NarrationCapture | null = null
-let pendingNarration: NarrationCapture | null = null
+let pendingNarration: Promise<NarrationCapture> | null = null
 
-async function stopNarration(): Promise<void> {
+function stopNarration(): void {
   const capture = narration
   narration = null
   if (capture) {
-    try {
-      await capture.stop()
-    } catch {
-    }
     pendingNarration = capture
+      .stop()
+      .catch(() => {})
+      .then(() => capture)
+  }
+}
+
+function discardPendingNarration(): void {
+  const pending = pendingNarration
+  pendingNarration = null
+  if (pending) {
+    void pending.then((capture) => capture.discard())
   }
 }
 
@@ -175,6 +182,7 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
     const { status } = get()
     if (status === 'recording') return
 
+    discardPendingNarration()
     if (socket && socket.readyState === WebSocket.OPEN) {
       try {
         socket.send(JSON.stringify({ type: 'discard' }))
@@ -201,7 +209,10 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
     } catch (err) {
       set({
         status: 'error',
-        error: err instanceof Error ? err.message : 'failed to open connection',
+        error:
+          err instanceof Error
+            ? err.message
+            : computerText('computerUse.msg.connectionOpenFailed'),
       })
       return
     }
@@ -223,7 +234,10 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
           if (narration !== capture) return
           narration = null
           set({
-            narrationError: err instanceof Error ? err.message : 'microphone unavailable',
+            narrationError:
+              err instanceof Error
+                ? err.message
+                : computerText('computerUse.msg.microphoneUnavailable'),
           })
         })
       }
@@ -249,11 +263,17 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
       socket = null
       const current = get().status
       if (current === 'recording') {
-        set({ status: 'error', error: 'connection lost; the recording was discarded' })
+        set({
+          status: 'error',
+          error: computerText('computerUse.msg.recorderConnectionLost'),
+        })
       } else if (current === 'generating') {
         const name = get().savedRecordingName
         if (!name) {
-          set({ status: 'error', error: 'connection lost during skill generation' })
+          set({
+            status: 'error',
+            error: computerText('computerUse.msg.generateConnectionLost'),
+          })
           return
         }
         void (async () => {
@@ -264,7 +284,7 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
           } else {
             set({
               status: 'error',
-              error: 'connection lost during skill generation; retry from the skill library',
+              error: computerText('computerUse.msg.generateRetryFromLibrary'),
             })
           }
         })()
@@ -273,7 +293,7 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
   },
 
   stopRecording: () => {
-    void stopNarration()
+    stopNarration()
     try {
       socket?.send(JSON.stringify({ type: 'stop' }))
     } catch {
@@ -281,10 +301,13 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
   },
 
   discardRecording: () => {
-    if (narration) {
-      narration.discard()
-      void stopNarration()
+    const capture = narration
+    narration = null
+    if (capture) {
+      capture.discard()
+      void capture.stop().catch(() => {})
     }
+    discardPendingNarration()
     try {
       socket?.send(JSON.stringify({ type: 'discard' }))
     } catch {
@@ -307,6 +330,10 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
     const { savedRecordingName, status } = get()
     if (!savedRecordingName || status === 'generating') return
     const { provider, model } = useComputerUseStore.getState()
+    if (!provider || !model) {
+      set({ error: computerText('computerUse.msg.noVisionModel') })
+      return
+    }
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ status: 'generating', error: null })
       try {
@@ -319,7 +346,10 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
           }),
         )
       } catch {
-        set({ status: 'error', error: 'failed to send generate request' })
+        set({
+          status: 'error',
+          error: computerText('computerUse.msg.generateSendFailed'),
+        })
       }
       return
     }
@@ -332,13 +362,19 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
         if (done) {
           set({ status: 'saved', savedSkillName: savedRecordingName })
         } else {
-          set({ status: 'error', error: 'skill generation timed out; check logs and retry' })
+          set({
+            status: 'error',
+            error: computerText('computerUse.msg.generateTimeout'),
+          })
         }
       } catch (err) {
         if (get().savedRecordingName !== savedRecordingName) return
         set({
           status: 'error',
-          error: err instanceof Error ? err.message : 'failed to start skill generation',
+          error:
+            err instanceof Error
+              ? err.message
+              : computerText('computerUse.msg.generateStartFailed'),
         })
       }
     })()
@@ -348,12 +384,24 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
     const { generatingNames } = get()
     if (generatingNames.includes(name)) return
     const { provider, model } = useComputerUseStore.getState()
+    if (!provider || !model) {
+      set({ error: computerText('computerUse.msg.noVisionModel') })
+      return
+    }
     set({ generatingNames: [...get().generatingNames, name], error: null })
     try {
       await generateRecordingSkill(name, provider ?? undefined, model ?? undefined)
-      await pollSkillGenerated(name, get)
+      const done = await pollSkillGenerated(name, get)
+      if (!done) {
+        set({ error: computerText('computerUse.msg.generateTimeout') })
+      }
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : 'failed to start skill generation' })
+      set({
+        error:
+          err instanceof Error
+            ? err.message
+            : computerText('computerUse.msg.generateStartFailed'),
+      })
     } finally {
       set({ generatingNames: get().generatingNames.filter((n) => n !== name) })
       void get().loadRecordings()
@@ -367,7 +415,10 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
     } catch (err) {
       set({
         recordingsLoaded: true,
-        error: err instanceof Error ? err.message : 'failed to load recordings',
+        error:
+          err instanceof Error
+            ? err.message
+            : computerText('computerUse.msg.recordingsLoadFailed'),
       })
     }
   },
@@ -377,7 +428,12 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
       await deleteRecording(name)
       set({ recordings: get().recordings.filter((r) => r.name !== name) })
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : 'failed to delete recording' })
+      set({
+        error:
+          err instanceof Error
+            ? err.message
+            : computerText('computerUse.msg.recordingDeleteFailed'),
+      })
     }
   },
 
@@ -395,13 +451,19 @@ export const useComputerRecorderStore = create<ComputerRecorderStore>((set, get)
       }
       return true
     } catch (err) {
-      set({ error: err instanceof Error ? err.message : 'failed to rename recording' })
+      set({
+        error:
+          err instanceof Error
+            ? err.message
+            : computerText('computerUse.msg.recordingRenameFailed'),
+      })
       return false
     }
   },
 
   reset: () => {
     closeSocket()
+    discardPendingNarration()
     set({
       status: 'idle',
       error: null,
@@ -455,6 +517,9 @@ function handleEvent(
         patch.startedAt = Date.now()
       }
       set(patch)
+      if (status === 'stopped' && !get().savedRecordingName) {
+        discardPendingNarration()
+      }
       break
     }
     case 'step': {
@@ -473,7 +538,11 @@ function handleEvent(
         toXNorm: typeof payload.to_x_norm === 'number' ? payload.to_x_norm : undefined,
         toYNorm: typeof payload.to_y_norm === 'number' ? payload.to_y_norm : undefined,
       }
-      const steps = [...get().steps, step]
+      const state = get()
+      const following =
+        state.selectedStepIndex === null ||
+        state.selectedStepIndex >= state.steps.length - 1
+      const steps = [...state.steps, step]
       const cutoff = steps.length - MAX_FULL_SCREENSHOTS
       for (let i = 0; i < cutoff; i++) {
         const existing = steps[i]
@@ -481,20 +550,27 @@ function handleEvent(
           steps[i] = { ...existing, screenshotBase64: '' }
         }
       }
-      set({ steps, selectedStepIndex: steps.length - 1 })
+      set({
+        steps,
+        selectedStepIndex: following ? steps.length - 1 : state.selectedStepIndex,
+      })
       break
     }
     case 'recording_saved': {
       const name = typeof payload.name === 'string' ? payload.name : null
       set({ savedRecordingName: name })
-      const capture = pendingNarration
+      const pending = pendingNarration
       pendingNarration = null
-      if (capture && name) {
-        void capture.flush(name).finally(() => {
-          void get().loadRecordings()
+      if (pending && name) {
+        void pending.then(async (capture) => {
+          try {
+            await capture.flush(name)
+          } finally {
+            void get().loadRecordings()
+          }
         })
-      } else if (capture) {
-        capture.discard()
+      } else if (pending) {
+        void pending.then((capture) => capture.discard())
       }
       void get().loadRecordings()
       break
@@ -506,9 +582,13 @@ function handleEvent(
       break
     }
     case 'error': {
-      const rawMessage = typeof payload.message === 'string' ? payload.message : 'unknown error'
+      const rawMessage = typeof payload.message === 'string' ? payload.message : null
       const code = typeof payload.code === 'string' ? payload.code : null
-      set({ error: localizeComputerMessage(code, rawMessage) })
+      set({
+        error:
+          localizeComputerMessage(code, rawMessage) ??
+          computerText('computerUse.msg.unknownError'),
+      })
       break
     }
     default:

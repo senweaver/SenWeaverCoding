@@ -44,7 +44,12 @@ impl ThinkTagSplitter {
 
         while cursor < buf.len() {
             let suffix = &buf[cursor..];
-            let lt_pos = suffix.find('<');
+            let lt_pos = match (suffix.find('<'), suffix.find('◁')) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (Some(a), None) => Some(a),
+                (None, Some(b)) => Some(b),
+                (None, None) => None,
+            };
             let plain_end = lt_pos.unwrap_or(suffix.len());
 
             if plain_end > 0 {
@@ -101,12 +106,13 @@ impl ThinkTagSplitter {
                 return (visible, thinking);
             }
 
+            let marker_char = tag_suffix.chars().next().unwrap_or('<');
             if self.inside {
-                thinking.push('<');
+                thinking.push(marker_char);
             } else {
-                visible.push('<');
+                visible.push(marker_char);
             }
-            cursor += 1;
+            cursor += marker_char.len_utf8();
         }
 
         (visible, thinking)

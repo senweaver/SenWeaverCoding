@@ -2094,6 +2094,19 @@ fn message_entry(
                 );
             }
         }
+        if let Some(cid) = msg
+            .metadata
+            .get("client_msg_id")
+            .and_then(|v| v.as_str())
+            .filter(|s| !s.is_empty())
+        {
+            if let Some(obj) = entry.as_object_mut() {
+                obj.insert(
+                    "clientMsgId".to_string(),
+                    serde_json::Value::String(cid.to_string()),
+                );
+            }
+        }
     }
     if let Some(design_ref) = msg
         .metadata
@@ -2962,6 +2975,9 @@ pub async fn handle_api_session_rewind(
         return resp;
     }
     let _rewind_guard = acquire_rewind_lock(&id).await;
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
 
     let Some(ref backend) = state.session_backend else {
         return (
@@ -3254,6 +3270,9 @@ pub async fn handle_api_session_rewind_restore(
         return resp;
     }
     let _rewind_guard = acquire_rewind_lock(&id).await;
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
 
     let Some(ref backend) = state.session_backend else {
         return (
@@ -3374,6 +3393,9 @@ pub async fn handle_api_session_rewind_commit(
         return resp;
     }
     let _rewind_guard = acquire_rewind_lock(&id).await;
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
 
     let Some(ref backend) = state.session_backend else {
         return (
@@ -3440,6 +3462,9 @@ pub async fn handle_api_session_revert_batches(
         return resp;
     }
     let _rewind_guard = acquire_rewind_lock(&id).await;
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
 
     let session_key = format!("{GW_SESSION_PREFIX}{id}");
     let (reverted_paths, failed_batch_ids, skipped_stale_paths) = {
@@ -3922,6 +3947,9 @@ pub async fn handle_api_session_edit_review_apply_hunks(
         return resp;
     }
     let _rewind_guard = acquire_rewind_lock(&id).await;
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
 
     let session_key = format!("{GW_SESSION_PREFIX}{id}");
     let abs_for_guard =
@@ -4117,6 +4145,9 @@ pub async fn handle_api_session_revert_files(
         return resp;
     }
     let _rewind_guard = acquire_rewind_lock(&id).await;
+    if let Some(resp) = reject_if_session_running(&state, &id) {
+        return resp;
+    }
 
     let session_key = format!("{GW_SESSION_PREFIX}{id}");
     let session_id_for_scope = id.clone();

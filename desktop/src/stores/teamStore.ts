@@ -43,6 +43,7 @@ function createMemberSessionState() {
     pendingRewind: null,
     pendingSendAfterRewind: null,
     pendingEdits: [],
+    keptEdits: [],
     subagentTimelines: {},
     activeTaskToolUseId: null,
     stopRequested: false,
@@ -248,7 +249,7 @@ export const useTeamStore = create<TeamStore>((set, get) => ({
         model: msg.model,
         parentToolUseId: msg.parentToolUseId,
       }))
-      const transcriptMessages = mapHistoryMessagesToUiMessages(
+      const transcriptMessages = await mapHistoryMessagesToUiMessages(
         asEntries as Parameters<typeof mapHistoryMessagesToUiMessages>[0],
         { includeTeammateMessages: true },
       )

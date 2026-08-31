@@ -484,7 +484,9 @@ pub(crate) fn find_json_end(input: &str) -> Option<usize> {
     None
 }
 
-pub(crate) fn parse_xml_attribute_tool_calls(response: &str) -> Vec<ParsedToolCall> {
+pub(crate) fn parse_xml_attribute_tool_calls(
+    response: &str,
+) -> Vec<(ParsedToolCall, std::ops::Range<usize>)> {
     let mut calls = Vec::new();
 
     static INVOKE_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -498,6 +500,9 @@ pub(crate) fn parse_xml_attribute_tool_calls(response: &str) -> Vec<ParsedToolCa
     });
 
     for cap in INVOKE_RE.captures_iter(response) {
+        let Some(full_match) = cap.get(0) else {
+            continue;
+        };
         let tool_name = cap.get(1).map(|m| m.as_str()).unwrap_or("");
         let inner = cap.get(2).map(|m| m.as_str()).unwrap_or("");
 
@@ -520,12 +525,15 @@ pub(crate) fn parse_xml_attribute_tool_calls(response: &str) -> Vec<ParsedToolCa
         }
 
         if !arguments.is_empty() {
-            calls.push(ParsedToolCall {
-                name: map_tool_name_alias(tool_name).to_string(),
-                arguments: serde_json::Value::Object(arguments),
-                tool_call_id: None,
-                parse_error: false,
-            });
+            calls.push((
+                ParsedToolCall {
+                    name: map_tool_name_alias(tool_name).to_string(),
+                    arguments: serde_json::Value::Object(arguments),
+                    tool_call_id: None,
+                    parse_error: false,
+                },
+                full_match.range(),
+            ));
         }
     }
 
@@ -1135,19 +1143,23 @@ pub(crate) fn parse_tool_calls_gated(
     if calls.is_empty() {
         let xml_calls = parse_xml_attribute_tool_calls(remaining);
         if !xml_calls.is_empty() {
-            let mut cleaned_text = remaining.to_string();
-            for call in xml_calls {
+            let mut cleaned_text = String::with_capacity(remaining.len());
+            let mut last_end = 0usize;
+            for (call, span) in xml_calls {
                 calls.push(call);
-
-                if let Some(start) = cleaned_text.find("<minimax:toolcall>") {
-                    if let Some(end) = cleaned_text.find("</minimax:toolcall>") {
-                        let end_pos = end + "</minimax:toolcall>".len();
-                        if end_pos <= cleaned_text.len() {
-                            cleaned_text =
-                                format!("{}{}", &cleaned_text[..start], &cleaned_text[end_pos..]);
-                        }
-                    }
+                if span.start >= last_end && span.end <= remaining.len() {
+                    cleaned_text.push_str(&remaining[last_end..span.start]);
+                    last_end = span.end;
                 }
+            }
+            cleaned_text.push_str(&remaining[last_end..]);
+            for wrapper in [
+                "<minimax:toolcall>",
+                "</minimax:toolcall>",
+                "<minimax:tool_call>",
+                "</minimax:tool_call>",
+            ] {
+                cleaned_text = cleaned_text.replace(wrapper, "");
             }
             if !cleaned_text.trim().is_empty() {
                 text_parts.push(cleaned_text.trim().to_string());
@@ -1319,21 +1331,39 @@ pub(crate) fn scan_bare_json_tool_calls(input: &str) -> Vec<(ParsedToolCall, Str
     out
 }
 
+const THINK_TAG_PAIRS: [(&str, &str); 4] = [
+    ("<think>", "</think>"),
+    ("<thinking>", "</thinking>"),
+    ("<reasoning>", "</reasoning>"),
+    ("◁think▷", "◁/think▷"),
+];
+
 pub(crate) fn strip_think_tags(s: &str) -> String {
     let mut result = String::with_capacity(s.len());
     let mut rest = s;
     loop {
-        if let Some(start) = rest.find("<think>") {
-            result.push_str(&rest[..start]);
-            if let Some(end) = rest[start..].find("</think>") {
-                rest = &rest[start + end + "</think>".len()..];
-            } else {
-
-                break;
-            }
-        } else {
+        let earliest = THINK_TAG_PAIRS
+            .iter()
+            .filter_map(|(open, close)| rest.find(open).map(|pos| (pos, *open, *close)))
+            .min_by_key(|(pos, _, _)| *pos);
+        let Some((start, open, close)) = earliest else {
             result.push_str(rest);
             break;
+        };
+        result.push_str(&rest[..start]);
+        let after_open = &rest[start + open.len()..];
+        match after_open.find(close) {
+            Some(end) => {
+                rest = &after_open[end + close.len()..];
+            }
+            None => {
+                if let Some((tool_pos, _)) =
+                    find_first_tag(after_open, &TOOL_CALL_OPEN_TAGS)
+                {
+                    result.push_str(&after_open[tool_pos..]);
+                }
+                break;
+            }
         }
     }
     result.trim().to_string()
@@ -1375,12 +1405,18 @@ pub(crate) fn detect_tool_call_parse_issue(response: &str, parsed_calls: &[Parse
 pub(crate) fn parse_structured_tool_calls(tool_calls: &[ToolCall]) -> Vec<ParsedToolCall> {
     tool_calls
         .iter()
-        .map(|call| ParsedToolCall {
-            name: call.name.clone(),
-            arguments: serde_json::from_str::<serde_json::Value>(&call.arguments)
-                .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new())),
-            tool_call_id: Some(call.id.clone()),
-            parse_error: serde_json::from_str::<serde_json::Value>(&call.arguments).is_err(),
+        .map(|call| {
+            let (arguments, parse_error) =
+                match serde_json::from_str::<serde_json::Value>(&call.arguments) {
+                    Ok(value) => (value, false),
+                    Err(_) => (serde_json::Value::Object(serde_json::Map::new()), true),
+                };
+            ParsedToolCall {
+                name: call.name.clone(),
+                arguments,
+                tool_call_id: Some(call.id.clone()),
+                parse_error,
+            }
         })
         .collect()
 }

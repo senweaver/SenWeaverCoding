@@ -91,6 +91,10 @@ impl Tool for MultiEditTool {
                             "expected_mtime_ms": {
                                 "type": "integer",
                                 "description": "Optional file mtime (ms since epoch, from file_read) for conflict detection; the edit is rejected if the file changed since."
+                            },
+                            "near_line": {
+                                "type": "integer",
+                                "description": "Optional 1-based line number used to pick the nearest match when old_string occurs multiple times."
                             }
                         },
                         "required": ["path", "new_string"]
@@ -267,7 +271,8 @@ impl Tool for MultiEditTool {
                     error: Some(format!(
                         "Edit {i}: refusing to edit '{}': this session has not read the file yet. \
                          Use file_read on it first (the edit needs to be based on the file's \
-                         CURRENT contents), then retry the edit.",
+                         CURRENT contents), then retry the edit. A compacted/Signatures view \
+                         does not count: use level=default, paging large files with offset/limit.",
                         path.display()
                     )),
                 });
@@ -407,34 +412,117 @@ impl Tool for MultiEditTool {
                         )),
                     });
                 };
-                let count = content.matches(old).count();
-                if count == 0 {
-                    let had_read = crate::session::has_read_in_current_session(&path);
-                    let detail = super::super::file::match_diagnostics::failure_message(
+                let near_line = edit.get("near_line").and_then(|v| v.as_u64());
+                let exact_positions: Vec<usize> =
+                    memchr::memmem::Finder::new(old.as_bytes())
+                        .find_iter(content.as_bytes())
+                        .collect();
+                if exact_positions.is_empty() {
+                    let spans = crate::tools::file::eol::find_eol_insensitive_spans(
                         content,
                         old,
-                        &path.display().to_string(),
-                        had_read,
+                        usize::MAX,
                     );
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!("Edit {i}: {detail}")),
+                    if spans.is_empty() {
+                        let had_read = crate::session::has_read_in_current_session(&path);
+                        let detail = super::super::file::match_diagnostics::failure_message(
+                            content,
+                            old,
+                            &path.display().to_string(),
+                            had_read,
+                        );
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!("Edit {i}: {detail}")),
+                        });
+                    }
+                    let chosen = if spans.len() == 1 {
+                        Some(spans[0])
+                    } else if let Some(anchor) = near_line {
+                        spans.iter().copied().min_by_key(|span| {
+                            let (line_no, _) =
+                                super::super::file::match_diagnostics::line_of_offset(
+                                    content, span.start,
+                                );
+                            (line_no as i64 - anchor as i64).unsigned_abs()
+                        })
+                    } else {
+                        None
+                    };
+                    let Some(span) = chosen else {
+                        let positions: Vec<usize> =
+                            spans.iter().map(|s| s.start).collect();
+                        let preview = super::super::file::match_diagnostics::hit_lines_preview(
+                            content, &positions, 3,
+                        );
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "Edit {i}: old_string matches {} times in '{}' after \
+                                 line-ending normalization. Showing first hit locations:\n{preview}Include more surrounding lines (a longer, unique old_string) \
+                                 or pass near_line=<line number> to anchor the intended match.",
+                                spans.len(),
+                                path.display()
+                            )),
+                        });
+                    };
+                    let adapted = crate::tools::file::eol::adapt_new_text_for_span(
+                        new_string,
+                        span.had_crlf,
+                    );
+                    let mut out = String::with_capacity(content.len() + adapted.len());
+                    out.push_str(&content[..span.start]);
+                    out.push_str(&adapted);
+                    out.push_str(&content[span.end..]);
+                    out
+                } else if exact_positions.len() > 1 {
+                    let chosen = near_line.and_then(|anchor| {
+                        exact_positions.iter().copied().min_by_key(|pos| {
+                            let (line_no, _) =
+                                super::super::file::match_diagnostics::line_of_offset(
+                                    content, *pos,
+                                );
+                            (line_no as i64 - anchor as i64).unsigned_abs()
+                        })
                     });
+                    let Some(pos) = chosen else {
+                        let preview = super::super::file::match_diagnostics::hit_lines_preview(
+                            content,
+                            &exact_positions,
+                            3,
+                        );
+                        return Ok(ToolResult {
+                            success: false,
+                            output: String::new(),
+                            error: Some(format!(
+                                "Edit {i}: old_string matches {} times in '{}'. Showing first \
+                                 hit locations:\n{preview}Include more surrounding lines (a longer, unique old_string) \
+                                 or pass near_line=<line number> to anchor the intended match.",
+                                exact_positions.len(),
+                                path.display()
+                            )),
+                        });
+                    };
+                    let adapted = crate::tools::file::eol::adapt_replacement_eol(
+                        old,
+                        new_string,
+                        crate::tools::file::eol::dominant_eol(content),
+                    );
+                    let mut out = String::with_capacity(content.len() + adapted.len());
+                    out.push_str(&content[..pos]);
+                    out.push_str(&adapted);
+                    out.push_str(&content[pos + old.len()..]);
+                    out
+                } else {
+                    let adapted = crate::tools::file::eol::adapt_replacement_eol(
+                        old,
+                        new_string,
+                        crate::tools::file::eol::dominant_eol(content),
+                    );
+                    content.replacen(old, &adapted, 1)
                 }
-                if count > 1 {
-                    return Ok(ToolResult {
-                        success: false,
-                        output: String::new(),
-                        error: Some(format!(
-                            "Edit {i}: old_string matches {count} times in '{}'. Include more \
-                             surrounding lines (a longer, unique old_string) so exactly one \
-                             location is targeted.",
-                            path.display()
-                        )),
-                    });
-                }
-                content.replacen(old, new_string, 1)
             } else {
                 new_string.to_string()
             };

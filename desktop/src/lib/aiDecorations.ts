@@ -6,6 +6,8 @@ import type * as MonacoNs from 'monaco-editor'
 
 const DECORATION_FADE_MS = 5_000
 
+export const AI_DECORATION_CONTENT_LIMIT = 500_000
+
 const decorationState: WeakMap<
   MonacoNs.editor.IStandaloneCodeEditor,
   { ids: string[]; timer: number | null }
@@ -64,11 +66,6 @@ export function applyAiDecorations({
   }
 
   const newIds = editor.deltaDecorations(oldIds, newDecorations)
-
-  const first = ranges[0]
-  if (first) {
-    editor.revealLineInCenterIfOutsideViewport(first.startLine)
-  }
 
   const timer = window.setTimeout(() => {
     editor.deltaDecorations(newIds, [])

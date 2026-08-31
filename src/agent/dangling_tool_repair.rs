@@ -238,6 +238,7 @@ pub fn ensure_assistant_tool_replies_inplace(history: &mut Vec<ConversationMessa
     let mut patches: usize = 0;
     let mut i = 0usize;
     while i < history.len() {
+        let mut minted_ids: Vec<String> = Vec::new();
         if let ConversationMessage::AssistantToolCalls { tool_calls, .. } = &mut history[i] {
             for call in tool_calls.iter_mut() {
                 if call.id.trim().is_empty() {
@@ -245,6 +246,28 @@ pub fn ensure_assistant_tool_replies_inplace(history: &mut Vec<ConversationMessa
                         None,
                         crate::providers::sanitize::ProviderKind::Other,
                     );
+                    minted_ids.push(call.id.clone());
+                }
+            }
+        }
+        if !minted_ids.is_empty() {
+            let mut mint_iter = minted_ids.into_iter();
+            let mut k = i + 1;
+            while k < history.len() {
+                match &mut history[k] {
+                    ConversationMessage::ToolResults(rows) => {
+                        for row in rows.iter_mut() {
+                            if row.tool_call_id.trim().is_empty() {
+                                match mint_iter.next() {
+                                    Some(id) => row.tool_call_id = id,
+                                    None => break,
+                                }
+                            }
+                        }
+                        k += 1;
+                    }
+                    ConversationMessage::Chat(c) if c.role == "tool" => k += 1,
+                    _ => break,
                 }
             }
         }

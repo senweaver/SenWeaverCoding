@@ -942,7 +942,10 @@ pub fn all_tools_with_runtime(
         Arc::new(MovePathTool::new(security.clone())),
         Arc::new(DeletePathTool::new(security.clone())),
         Arc::new(CreateDirectoryTool::new(security.clone())),
-        Arc::new(RestoreFileTool::new(security.clone())),
+        Arc::new(
+            RestoreFileTool::new(security.clone())
+                .with_edit_history(shared_edit_history.clone()),
+        ),
         Arc::new(DiagnosticsTool::new(security.workspace_root_handle())),
         Arc::new(ToolResultExpandTool::new()),
         Arc::new(UpdatePlanTool::with_workspace_root(

@@ -177,11 +177,13 @@ impl UpdatePlanTool {
     }
 }
 
-fn normalize_plan_key(s: &str) -> String {
+pub(crate) fn normalize_plan_key(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_lowercase());
+        if ch.is_alphanumeric() {
+            for lowered in ch.to_lowercase() {
+                out.push(lowered);
+            }
         }
     }
     out
@@ -432,7 +434,12 @@ fn find_step_index(plan: &[PlanStep], step_id: &str, title_hint: &str) -> Option
             }
             return plan.iter().position(|s| {
                 let tk = normalize_plan_key(&s.title);
-                !tk.is_empty() && (tk.contains(&title_key) || title_key.contains(&tk))
+                if tk.is_empty() {
+                    return false;
+                }
+                let shorter = tk.chars().count().min(title_key.chars().count());
+                let min_chars = if tk.is_ascii() && title_key.is_ascii() { 6 } else { 3 };
+                shorter >= min_chars && (tk.contains(&title_key) || title_key.contains(&tk))
             });
         }
     }
@@ -526,11 +533,20 @@ fn slugify(s: &str) -> String {
     while out.ends_with('-') {
         out.pop();
     }
-    if out.is_empty() {
-        "plan".to_string()
-    } else {
-        out
+    let has_non_ascii_alnum = s
+        .chars()
+        .any(|c| c.is_alphanumeric() && !c.is_ascii_alphanumeric());
+    if out.is_empty() || has_non_ascii_alnum {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut hasher);
+        let suffix = format!("{:08x}", (hasher.finish() & 0xffff_ffff) as u32);
+        if out.is_empty() {
+            return format!("plan-{suffix}");
+        }
+        return format!("{out}-{suffix}");
     }
+    out
 }
 
 fn yaml_escape_quoted(s: &str) -> String {
@@ -854,8 +870,20 @@ will."
                             if idx.is_none() {
                                 idx = plan.iter().position(|s| {
                                     let tk = normalize_plan_key(&s.title);
-                                    !tk.is_empty()
-                                        && (tk.contains(&title_key) || title_key.contains(&tk))
+                                    if tk.is_empty() {
+                                        return false;
+                                    }
+                                    let shorter =
+                                        tk.chars().count().min(title_key.chars().count());
+                                    let min_chars =
+                                        if tk.is_ascii() && title_key.is_ascii() {
+                                            6
+                                        } else {
+                                            3
+                                        };
+                                    shorter >= min_chars
+                                        && (tk.contains(&title_key)
+                                            || title_key.contains(&tk))
                                 });
                             }
                         }

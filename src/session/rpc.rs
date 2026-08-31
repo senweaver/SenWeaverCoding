@@ -16,14 +16,22 @@ struct AuthEnvelope {
     remote: RemoteDelta,
 }
 
-fn secret_path_for(socket_path: &Path) -> PathBuf {
-    let mut s = socket_path.as_os_str().to_os_string();
-    s.push(".secret");
-    PathBuf::from(s)
+pub fn process_instance_id() -> &'static str {
+    static INSTANCE: once_cell::sync::Lazy<String> =
+        once_cell::sync::Lazy::new(|| uuid::Uuid::new_v4().simple().to_string());
+    &INSTANCE
 }
 
-fn ensure_session_rpc_secret(socket_path: &Path) -> std::io::Result<String> {
-    let path = secret_path_for(socket_path);
+fn short_instance_id() -> &'static str {
+    &process_instance_id()[..12.min(process_instance_id().len())]
+}
+
+fn session_secret_path(dir: &Path, session_id: &str) -> PathBuf {
+    dir.join(format!("{session_id}.secret"))
+}
+
+fn ensure_session_rpc_secret(dir: &Path, session_id: &str) -> std::io::Result<String> {
+    let path = session_secret_path(dir, session_id);
     if let Ok(existing) = std::fs::read_to_string(&path) {
         let trimmed = existing.trim().to_string();
         if !trimmed.is_empty() {
@@ -61,21 +69,103 @@ pub fn rpc_socket_dir(workspace_root: &Path) -> PathBuf {
 }
 
 pub fn rpc_socket_path(workspace_root: &Path, session_id: &str) -> PathBuf {
-    rpc_socket_dir(workspace_root).join(session_id)
+    rpc_socket_dir(workspace_root).join(format!("{session_id}.{}", short_instance_id()))
 }
 
-static SESSION_SOCKET_REGISTRY: once_cell::sync::Lazy<
+fn peer_endpoint_prefix(session_id: &str) -> String {
+    format!("{session_id}.")
+}
+
+fn instance_from_endpoint(file_name: &str, session_id: &str) -> Option<String> {
+    let rest = file_name.strip_prefix(&peer_endpoint_prefix(session_id))?;
+    let instance = rest.strip_suffix(".pipe").unwrap_or(rest);
+    if instance.is_empty() || instance == "secret" || instance.contains('.') {
+        return None;
+    }
+    Some(instance.to_string())
+}
+
+static SESSION_RPC_DIRS: once_cell::sync::Lazy<
     parking_lot::RwLock<std::collections::HashMap<String, PathBuf>>,
 > = once_cell::sync::Lazy::new(|| parking_lot::RwLock::new(std::collections::HashMap::new()));
 
-fn register_session_socket(session_id: &str, socket_path: PathBuf) {
-    SESSION_SOCKET_REGISTRY
+fn register_session_rpc_dir(session_id: &str, dir: PathBuf) {
+    SESSION_RPC_DIRS
         .write()
-        .insert(session_id.to_string(), socket_path);
+        .insert(session_id.to_string(), dir);
 }
 
-fn lookup_session_socket(session_id: &str) -> Option<PathBuf> {
-    SESSION_SOCKET_REGISTRY.read().get(session_id).cloned()
+fn lookup_session_rpc_dir(session_id: &str) -> Option<PathBuf> {
+    SESSION_RPC_DIRS.read().get(session_id).cloned()
+}
+
+const PEER_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(2);
+
+type PeerList = Vec<(String, PathBuf)>;
+
+static PEER_ENUM_CACHE: once_cell::sync::Lazy<
+    parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, PeerList)>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+fn cached_peer_instances(dir: &Path, session_id: &str) -> PeerList {
+    {
+        let cache = PEER_ENUM_CACHE.lock();
+        if let Some((refreshed_at, peers)) = cache.get(session_id) {
+            if refreshed_at.elapsed() < PEER_CACHE_TTL {
+                return peers.clone();
+            }
+        }
+    }
+    let peers = enumerate_peer_instances(dir, session_id);
+    PEER_ENUM_CACHE.lock().insert(
+        session_id.to_string(),
+        (std::time::Instant::now(), peers.clone()),
+    );
+    peers
+}
+
+fn invalidate_peer_cache(session_id: &str) {
+    PEER_ENUM_CACHE.lock().remove(session_id);
+}
+
+static SESSION_SECRET_CACHE: once_cell::sync::Lazy<
+    parking_lot::Mutex<std::collections::HashMap<String, String>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+fn cached_session_secret(dir: &Path, session_id: &str) -> std::io::Result<String> {
+    if let Some(secret) = SESSION_SECRET_CACHE.lock().get(session_id) {
+        return Ok(secret.clone());
+    }
+    let secret = ensure_session_rpc_secret(dir, session_id)?;
+    SESSION_SECRET_CACHE
+        .lock()
+        .insert(session_id.to_string(), secret.clone());
+    Ok(secret)
+}
+
+fn enumerate_peer_instances(dir: &Path, session_id: &str) -> Vec<(String, PathBuf)> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let own = short_instance_id();
+    let mut peers = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Some(file_name) = path.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if file_name.ends_with(".secret") {
+            continue;
+        }
+        let Some(instance) = instance_from_endpoint(file_name, session_id) else {
+            continue;
+        };
+        if instance == own {
+            continue;
+        }
+        peers.push((instance, path));
+    }
+    peers
 }
 
 pub struct PeerSocketTransport;
@@ -96,10 +186,36 @@ impl Default for PeerSocketTransport {
 #[async_trait::async_trait]
 impl SessionRpcTransport for PeerSocketTransport {
     async fn send(&self, session_id: &str, delta: &SessionDelta) -> std::io::Result<()> {
-        let Some(path) = lookup_session_socket(session_id) else {
+        let Some(dir) = lookup_session_rpc_dir(session_id) else {
             return Ok(());
         };
-        send_delta_to_peer(&path, delta).await
+        let peers = cached_peer_instances(&dir, session_id);
+        if peers.is_empty() {
+            return Ok(());
+        }
+        let remote = RemoteDelta {
+            source_session_id: process_instance_id().to_string(),
+            last_seen_seq: delta.version.saturating_sub(1),
+            delta: delta.clone(),
+        };
+        let auth = cached_session_secret(&dir, session_id)?;
+        for (instance, endpoint) in peers {
+            if let Err(e) =
+                send_remote_delta_to_instance(&endpoint, session_id, &instance, &auth, &remote)
+                    .await
+            {
+                tracing::debug!(
+                    target: "session.rpc",
+                    session_id = %session_id,
+                    peer_instance = %instance,
+                    error = %e,
+                    "peer delta send failed; removing stale endpoint marker"
+                );
+                let _ = std::fs::remove_file(&endpoint);
+                invalidate_peer_cache(session_id);
+            }
+        }
+        Ok(())
     }
 }
 
@@ -110,12 +226,20 @@ pub fn enable_cross_process_sync(
 ) {
     let dir = rpc_socket_dir(workspace_root);
     let _ = std::fs::create_dir_all(&dir);
-    let socket = dir.join(session_id);
-    register_session_socket(session_id, socket.clone());
+    register_session_rpc_dir(session_id, dir.clone());
+    let socket = rpc_socket_path(workspace_root, session_id);
     let actor_clone = Arc::clone(actor);
     let session_for_log = session_id.to_string();
+    let dir_for_listener = dir;
+    let session_for_listener = session_id.to_string();
     crate::runtime::spawn_supervised("session.rpc.bootstrap", async move {
-        let _ = spawn_rpc_listener(actor_clone, socket).await;
+        let _ = spawn_rpc_listener(
+            actor_clone,
+            socket,
+            dir_for_listener,
+            session_for_listener,
+        )
+        .await;
         tracing::debug!(
             target: "session.rpc",
             session_id = %session_for_log,
@@ -151,34 +275,19 @@ impl UdsTransport {
 }
 
 #[cfg(windows)]
-pub struct NamedPipeTransport {
-    pipe_name: String,
-}
-
-#[cfg(windows)]
-impl NamedPipeTransport {
-
-    pub fn new(session_id: &str) -> Self {
-        Self {
-            pipe_name: format!(r"\\.\pipe\sen_session_{}", session_id),
-        }
-    }
-
-    pub fn server(
-        &self,
-    ) -> std::io::Result<tokio::net::windows::named_pipe::NamedPipeServer> {
-        tokio::net::windows::named_pipe::ServerOptions::new()
-            .first_pipe_instance(true)
-            .create(&self.pipe_name)
-    }
+fn windows_pipe_name(session_id: &str, instance: &str) -> String {
+    format!(r"\\.\pipe\sen_session_{session_id}_{instance}")
 }
 
 pub async fn spawn_rpc_listener(
     actor: Arc<SessionActor>,
     socket_path: PathBuf,
+    rpc_dir: PathBuf,
+    session_id: String,
 ) -> tokio::task::JoinHandle<()> {
     crate::runtime::spawn_supervised("session.rpc.listener", async move {
-        let listener_secret = ensure_session_rpc_secret(&socket_path).unwrap_or_default();
+        let listener_secret =
+            ensure_session_rpc_secret(&rpc_dir, &session_id).unwrap_or_default();
         #[cfg(unix)]
         {
 
@@ -228,17 +337,34 @@ pub async fn spawn_rpc_listener(
 
         #[cfg(all(windows, not(unix)))]
         {
-
-            let session_id = socket_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown");
-            let transport = NamedPipeTransport::new(session_id);
-            match transport.server() {
+            let marker_path = {
+                let mut name = socket_path.as_os_str().to_os_string();
+                name.push(".pipe");
+                PathBuf::from(name)
+            };
+            if crate::util::atomic_write(
+                &marker_path,
+                std::process::id().to_string().as_bytes(),
+            )
+            .is_err()
+            {
+                tracing::warn!(
+                    target: "session.rpc",
+                    path = %marker_path.display(),
+                    "failed to write named-pipe endpoint marker; peers cannot discover this listener"
+                );
+            }
+            let pipe_name = windows_pipe_name(&session_id, short_instance_id());
+            let make_server = || {
+                tokio::net::windows::named_pipe::ServerOptions::new()
+                    .first_pipe_instance(true)
+                    .create(&pipe_name)
+            };
+            match make_server() {
                 Ok(mut server) => {
                     tracing::debug!(
                         target: "session.rpc",
-                        pipe = %transport.pipe_name,
+                        pipe = %pipe_name,
                         "named-pipe listener ready"
                     );
                     loop {
@@ -255,7 +381,9 @@ pub async fn spawn_rpc_listener(
                             apply_authenticated_delta(&actor, &buf, &listener_secret);
                         }
 
-                        match transport.server() {
+                        match tokio::net::windows::named_pipe::ServerOptions::new()
+                            .create(&pipe_name)
+                        {
                             Ok(next) => server = next,
                             Err(e) => {
                                 tracing::warn!(
@@ -276,11 +404,12 @@ pub async fn spawn_rpc_listener(
                     );
                 }
             }
+            let _ = std::fs::remove_file(&marker_path);
         }
 
         #[cfg(not(any(unix, windows)))]
         {
-            let _ = (actor, socket_path);
+            let _ = (actor, socket_path, rpc_dir, session_id);
             tracing::debug!(
                 target: "session.rpc",
                 "cross-process session sync not available on this platform"
@@ -290,21 +419,16 @@ pub async fn spawn_rpc_listener(
     .into_inner()
 }
 
-pub async fn send_delta_to_peer(
-    socket_path: &std::path::Path,
-    delta: &SessionDelta,
-) -> std::io::Result<()> {
-    let remote = RemoteDelta {
-        source_session_id: String::new(),
-        last_seen_seq: delta.seq.saturating_sub(1),
-        delta: delta.clone(),
-    };
-    send_remote_delta_to_peer(socket_path, &remote).await
-}
-
 fn apply_authenticated_delta(actor: &Arc<SessionActor>, buf: &[u8], expected: &str) {
     match serde_json::from_slice::<AuthEnvelope>(buf) {
         Ok(env) if !expected.is_empty() && secrets_match(&env.auth, expected) => {
+            if env.remote.source_session_id == process_instance_id() {
+                tracing::debug!(
+                    target: "session.rpc",
+                    "dropping self-originated session delta (loopback)"
+                );
+                return;
+            }
             actor.apply_remote(env.remote);
         }
         Ok(_) => {
@@ -323,13 +447,15 @@ fn apply_authenticated_delta(actor: &Arc<SessionActor>, buf: &[u8], expected: &s
     }
 }
 
-pub async fn send_remote_delta_to_peer(
-    socket_path: &std::path::Path,
+async fn send_remote_delta_to_instance(
+    endpoint: &Path,
+    session_id: &str,
+    instance: &str,
+    auth: &str,
     remote: &RemoteDelta,
 ) -> std::io::Result<()> {
-    let auth = ensure_session_rpc_secret(socket_path)?;
     let envelope = AuthEnvelope {
-        auth,
+        auth: auth.to_string(),
         remote: remote.clone(),
     };
     let payload = serde_json::to_vec(&envelope)
@@ -337,7 +463,8 @@ pub async fn send_remote_delta_to_peer(
 
     #[cfg(unix)]
     {
-        let mut stream = tokio::net::UnixStream::connect(socket_path).await?;
+        let _ = (session_id, instance);
+        let mut stream = tokio::net::UnixStream::connect(endpoint).await?;
         stream.write_all(&payload).await?;
         stream.shutdown().await?;
         session_write_mode_metrics::incr_session_rpc_send();
@@ -345,14 +472,9 @@ pub async fn send_remote_delta_to_peer(
 
     #[cfg(all(windows, not(unix)))]
     {
+        let _ = endpoint;
         use tokio::net::windows::named_pipe::ClientOptions;
-        let pipe_name = format!(
-            r"\\.\pipe\sen_session_{}",
-            socket_path
-                .file_name()
-                .and_then(|n| n.to_str())
-                .unwrap_or("unknown")
-        );
+        let pipe_name = windows_pipe_name(session_id, instance);
         let mut client = ClientOptions::new().open(&pipe_name)?;
         client.write_all(&payload).await?;
         session_write_mode_metrics::incr_session_rpc_send();
@@ -360,7 +482,7 @@ pub async fn send_remote_delta_to_peer(
 
     #[cfg(not(any(unix, windows)))]
     {
-        let _ = (socket_path, payload);
+        let _ = (endpoint, session_id, instance, payload);
     }
 
     Ok(())

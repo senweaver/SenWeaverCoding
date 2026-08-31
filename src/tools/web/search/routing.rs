@@ -3,7 +3,10 @@
 // Licensed under the MIT License.
 
 use super::engine::{ApiKeys, SearchCategory, SearchEngine};
+use super::health;
 use std::sync::{Arc, OnceLock};
+
+const SLOW_ENGINE_DEMOTE_MS: f64 = 3_000.0;
 
 pub struct EngineRegistry {
     engines: Vec<Arc<dyn SearchEngine>>,
@@ -67,8 +70,34 @@ impl EngineRegistry {
                 push_unique(engine.clone(), &mut chain);
             }
         }
-        chain
+        apply_health_ordering(chain, preferred.and_then(|p| self.find(p)).map(|e| e.id()))
     }
+}
+
+fn apply_health_ordering(
+    chain: Vec<Arc<dyn SearchEngine>>,
+    preferred_id: Option<&'static str>,
+) -> Vec<Arc<dyn SearchEngine>> {
+    let healthy: Vec<Arc<dyn SearchEngine>> = chain
+        .iter()
+        .filter(|e| Some(e.id()) == preferred_id || !health::is_cooling_down(e.id()))
+        .cloned()
+        .collect();
+    let effective = if healthy.is_empty() { chain } else { healthy };
+    let mut fast: Vec<Arc<dyn SearchEngine>> = Vec::with_capacity(effective.len());
+    let mut slow: Vec<Arc<dyn SearchEngine>> = Vec::new();
+    for engine in effective {
+        let is_slow = Some(engine.id()) != preferred_id
+            && health::ewma_latency_ms(engine.id())
+                .is_some_and(|ms| ms > SLOW_ENGINE_DEMOTE_MS);
+        if is_slow {
+            slow.push(engine);
+        } else {
+            fast.push(engine);
+        }
+    }
+    fast.extend(slow);
+    fast
 }
 
 fn query_has_cjk(query: &str) -> bool {

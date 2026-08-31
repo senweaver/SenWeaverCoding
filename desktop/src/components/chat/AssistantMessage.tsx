@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { memo, useMemo } from 'react'
+import { memo, useMemo, useRef } from 'react'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import { StreamingMarkdownRenderer } from '../markdown/StreamingMarkdownRenderer'
 import { AssistantMessageActions } from './AssistantMessageActions'
@@ -19,32 +19,74 @@ type Props = {
   disableFork?: boolean
 }
 
-function splitStreamingCommit(content: string): { committed: string; tail: string } {
-  let lastBoundary = 0
-  const fenceRe = /```/g
-  const blankRe = /\n[ \t]*\n/g
-  const fencePositions: number[] = []
-  let fenceMatch: RegExpExecArray | null
-  while ((fenceMatch = fenceRe.exec(content)) !== null) {
-    fencePositions.push(fenceMatch.index)
+type StreamingSplitState = {
+  probeLen: number
+  probe: string
+  pos: number
+  fenceParity: number
+  boundary: number
+}
+
+function scanStreamingCommit(
+  content: string,
+  state: StreamingSplitState | null,
+): StreamingSplitState {
+  let pos = 0
+  let fenceParity = 0
+  let boundary = 0
+  if (
+    state &&
+    content.length >= state.probeLen &&
+    content.slice(state.probeLen - state.probe.length, state.probeLen) === state.probe
+  ) {
+    pos = state.pos
+    fenceParity = state.fenceParity
+    boundary = state.boundary
   }
-  let fenceIdx = 0
-  let blankMatch: RegExpExecArray | null
-  while ((blankMatch = blankRe.exec(content)) !== null) {
-    const pos = blankMatch.index + blankMatch[0].length
-    while (fenceIdx < fencePositions.length && (fencePositions[fenceIdx] ?? Infinity) < pos) {
-      fenceIdx += 1
+  const n = content.length
+  let i = pos
+  while (i < n) {
+    const c = content.charCodeAt(i)
+    if (c === 96) {
+      if (i + 2 < n) {
+        if (content.charCodeAt(i + 1) === 96 && content.charCodeAt(i + 2) === 96) {
+          fenceParity ^= 1
+          i += 3
+          continue
+        }
+        i += 1
+        continue
+      }
+      break
     }
-    if (fenceIdx % 2 === 0) {
-      lastBoundary = pos
+    if (c === 10) {
+      let j = i + 1
+      while (j < n) {
+        const cj = content.charCodeAt(j)
+        if (cj === 32 || cj === 9) {
+          j += 1
+          continue
+        }
+        break
+      }
+      if (j >= n) break
+      if (content.charCodeAt(j) === 10) {
+        if (fenceParity === 0) boundary = j + 1
+        i = j + 1
+        continue
+      }
+      i = j
+      continue
     }
+    i += 1
   }
-  if (lastBoundary <= 0) {
-    return { committed: '', tail: content }
-  }
+  const probeStart = Math.max(0, i - 32)
   return {
-    committed: content.slice(0, lastBoundary),
-    tail: content.slice(lastBoundary),
+    probeLen: i,
+    probe: content.slice(probeStart, i),
+    pos: i,
+    fenceParity,
+    boundary,
   }
 }
 
@@ -58,10 +100,22 @@ export const AssistantMessage = memo(function AssistantMessage({
 }: Props) {
   const safeContent = useMemo(() => sanitizeNarration(content), [content])
   const documentLayout = useMemo(() => shouldUseDocumentLayout(safeContent), [safeContent])
-  const streamingSplit = useMemo(
-    () => (isStreaming ? splitStreamingCommit(safeContent) : null),
-    [isStreaming, safeContent],
-  )
+  const splitStateRef = useRef<StreamingSplitState | null>(null)
+  const streamingSplit = useMemo(() => {
+    if (!isStreaming) {
+      splitStateRef.current = null
+      return null
+    }
+    const nextState = scanStreamingCommit(safeContent, splitStateRef.current)
+    splitStateRef.current = nextState
+    if (nextState.boundary <= 0) {
+      return { committed: '', tail: safeContent }
+    }
+    return {
+      committed: safeContent.slice(0, nextState.boundary),
+      tail: safeContent.slice(nextState.boundary),
+    }
+  }, [isStreaming, safeContent])
   const showActions =
     !isStreaming && Boolean(assistantTurnCopyText?.trim())
 
@@ -79,25 +133,15 @@ export const AssistantMessage = memo(function AssistantMessage({
           }`}
         >
           <div className={`text-[var(--color-text-primary)] ${documentLayout ? 'w-full' : 'max-w-full'}`}>
-            {isStreaming ? (
-              <>
-                {streamingSplit && streamingSplit.committed && (
-                  <MarkdownRenderer
-                    content={streamingSplit.committed}
-                    variant={documentLayout ? 'document' : 'default'}
-                    scale="chat"
-                    streaming
-                  />
-                )}
-                <StreamingMarkdownRenderer
-                  content={streamingSplit ? streamingSplit.tail : safeContent}
-                />
-              </>
-            ) : (
-              <MarkdownRenderer
-                content={safeContent}
-                variant={documentLayout ? 'document' : 'default'}
-                scale="chat"
+            <MarkdownRenderer
+              content={isStreaming ? streamingSplit?.committed ?? '' : safeContent}
+              variant={documentLayout ? 'document' : 'default'}
+              scale="chat"
+              streaming={isStreaming}
+            />
+            {isStreaming && (
+              <StreamingMarkdownRenderer
+                content={streamingSplit ? streamingSplit.tail : safeContent}
               />
             )}
             {!isStreaming && <InlineImageGallery text={content} />}

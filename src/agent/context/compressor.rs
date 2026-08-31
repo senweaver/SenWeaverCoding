@@ -743,7 +743,10 @@ impl ContextCompressor {
         let calibration =
             crate::agent::token::budget::calibration_factor_for(model) * 1.05;
         let mut evicted = 0usize;
-        let last_keep = n.saturating_sub(1);
+        let mut last_keep = n.saturating_sub(1);
+        while last_keep > 0 && history[last_keep].role == "tool" {
+            last_keep -= 1;
+        }
         for idx in start..last_keep {
             if current <= threshold {
                 break;
@@ -954,7 +957,7 @@ pub(crate) fn repair_tool_pairs(messages: &mut Vec<ChatMessage>) {
 
     let mut i = 0;
     while i < messages.len() {
-        if is_compaction_banner(&messages[i].content) {
+        if messages[i].role == "assistant" && is_compaction_banner(&messages[i].content) {
 
             while i + 1 < messages.len() && messages[i + 1].role == "tool" {
                 messages.remove(i + 1);

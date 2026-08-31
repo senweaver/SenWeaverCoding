@@ -5,7 +5,7 @@
 import { create } from 'zustand'
 import { getBaseUrl, withAuthToken } from '../api/client'
 import { listVisionModels, stopComputerRun, type VisionModel } from '../api/computer'
-import { localizeComputerMessage } from '../lib/computerMessages'
+import { computerText, localizeComputerMessage } from '../lib/computerMessages'
 
 const SELECTION_KEY = 'sen-computer-selection'
 const PARAMS_KEY = 'sen-computer-params'
@@ -107,7 +107,7 @@ type ComputerUseStore = {
   setStepDelayMs: (value: number) => void
   setTask: (task: string) => void
   selectStep: (index: number | null) => void
-  start: (options?: StartOptions) => void
+  start: (options?: StartOptions) => boolean
   send: (text: string, attachments?: ComputerAttachment[]) => boolean
   steer: (text: string, attachments?: ComputerAttachment[]) => boolean
   stop: () => void
@@ -184,6 +184,15 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
         const { provider, model } = get()
         const hasSelection =
           provider && model && models.some((m) => m.provider === provider && m.model === model)
+        if (models.length === 0) {
+          if (provider || model) {
+            set({ provider: null, model: null })
+            try {
+              localStorage.removeItem(SELECTION_KEY)
+            } catch {  }
+          }
+          return
+        }
         const preferred = models.find((m) => m.recommended) ?? models[0]
         if (!hasSelection && preferred) {
           set({ provider: preferred.provider, model: preferred.model })
@@ -197,7 +206,10 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
       } catch (err) {
         set({
           modelsLoaded: false,
-          error: err instanceof Error ? err.message : 'failed to load vision models',
+          error:
+            err instanceof Error
+              ? err.message
+              : computerText('computerUse.msg.visionModelsLoadFailed'),
         })
       }
     },
@@ -239,9 +251,9 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
       const { task, provider, model, maxSteps, stepDelayMs, status } = get()
       const isReplay = Boolean(options?.replayRecording)
       const isSkill = Boolean(options?.skill)
-      if (!isReplay && (!provider || !model)) return
-      if (!isReplay && !isSkill && !task.trim()) return
-      if (isBusy(status)) return
+      if (!isReplay && (!provider || !model)) return false
+      if (!isReplay && !isSkill && !task.trim()) return false
+      if (isBusy(status) || status === 'call_user') return false
 
       closeSocket()
       const runId = genRunId()
@@ -262,9 +274,12 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
       } catch (err) {
         set({
           status: 'error',
-          error: err instanceof Error ? err.message : 'failed to open connection',
+          error:
+            err instanceof Error
+              ? err.message
+              : computerText('computerUse.msg.connectionOpenFailed'),
         })
-        return
+        return true
       }
       socket = ws
 
@@ -341,6 +356,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
           set({ status: 'stopped', pendingSteer: null })
         }
       }
+      return true
     },
 
     steer: (text, attachments) => {
@@ -375,7 +391,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
       if (!trimmed && (!attachments || attachments.length === 0)) return false
       if (state.status === 'call_user') {
         if (!socket || socket.readyState !== WebSocket.OPEN) {
-          set({ status: 'stopped', error: 'connection lost; the run was cancelled' })
+          set({ status: 'stopped', error: computerText('computerUse.msg.connectionLostRun') })
           closeSocket()
           return false
         }
@@ -398,8 +414,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
       }
       if (!trimmed) return false
       set({ task: trimmed })
-      get().start({ attachments })
-      return true
+      return get().start({ attachments })
     },
 
     stop: () => {
@@ -418,7 +433,7 @@ export const useComputerUseStore = create<ComputerUseStore>((set, get) => {
       const trimmed = text.trim()
       if (!trimmed) return
       if (!socket || socket.readyState !== WebSocket.OPEN) {
-        set({ status: 'stopped', error: 'connection lost; the run was cancelled' })
+        set({ status: 'stopped', error: computerText('computerUse.msg.connectionLostRun') })
         closeSocket()
         return
       }
@@ -486,7 +501,18 @@ function handleEvent(
         toYNorm: typeof payload.to_y_norm === 'number' ? payload.to_y_norm : undefined,
         confidence: typeof payload.confidence === 'number' ? payload.confidence : undefined,
       }
-      const steps = [...get().steps, step]
+      const state = get()
+      let lastActionIndex = -1
+      for (let i = state.steps.length - 1; i >= 0; i--) {
+        const existing = state.steps[i]
+        if (existing && existing.kind === 'action') {
+          lastActionIndex = i
+          break
+        }
+      }
+      const following =
+        state.selectedStepIndex === null || state.selectedStepIndex >= lastActionIndex
+      const steps = [...state.steps, step]
       let withShots = 0
       for (let i = steps.length - 1; i >= 0; i--) {
         const existing = steps[i]
@@ -496,7 +522,10 @@ function handleEvent(
           steps[i] = { ...existing, screenshotBase64: '' }
         }
       }
-      set({ steps, selectedStepIndex: steps.length - 1 })
+      set({
+        steps,
+        selectedStepIndex: following ? steps.length - 1 : state.selectedStepIndex,
+      })
       break
     }
     case 'user_update': {
@@ -533,9 +562,13 @@ function handleEvent(
       break
     }
     case 'error': {
-      const rawMessage = typeof payload.message === 'string' ? payload.message : 'unknown error'
+      const rawMessage = typeof payload.message === 'string' ? payload.message : null
       const code = typeof payload.code === 'string' ? payload.code : null
-      set({ error: localizeComputerMessage(code, rawMessage) })
+      set({
+        error:
+          localizeComputerMessage(code, rawMessage) ??
+          computerText('computerUse.msg.unknownError'),
+      })
       break
     }
     default:

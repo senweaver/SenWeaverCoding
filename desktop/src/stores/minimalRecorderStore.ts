@@ -16,6 +16,8 @@ type MinimalRecorderStore = {
   savedRecordingName: string | null
   savedSkillName: string | null
   startedAt: number | null
+  narrationEnabled: boolean
+  narrationMuted: boolean
   applyProgress: (progress: MinimalRecorderProgress) => void
   reset: () => void
 }
@@ -30,6 +32,8 @@ const initial = {
   savedRecordingName: null,
   savedSkillName: null,
   startedAt: null,
+  narrationEnabled: false,
+  narrationMuted: false,
 }
 
 export const useMinimalRecorderStore = create<MinimalRecorderStore>((set) => ({
@@ -45,6 +49,8 @@ export const useMinimalRecorderStore = create<MinimalRecorderStore>((set) => ({
       savedRecordingName: progress.savedRecordingName,
       savedSkillName: progress.savedSkillName,
       startedAt: progress.startedAt,
+      narrationEnabled: progress.narrationEnabled ?? false,
+      narrationMuted: progress.narrationMuted ?? false,
     }),
   reset: () => set({ ...initial }),
 }))

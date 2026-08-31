@@ -204,7 +204,12 @@ impl OllamaProvider {
     fn http_client(&self) -> Client {
         crate::services::require_services()
             .proxy_runtime()
-            .build_client_with_timeouts("provider.ollama", self.timeout_secs, 10)
+            .build_llm_chat_client(
+                "provider.ollama",
+                self.timeout_secs,
+                10,
+                &std::collections::HashMap::new(),
+            )
     }
 
     fn resolve_request_details(&self, model: &str) -> anyhow::Result<(String, bool)> {

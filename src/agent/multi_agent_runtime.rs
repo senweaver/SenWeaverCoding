@@ -27,6 +27,8 @@ pub struct MultiAgentRuntime {
     pub blackboard: BlackboardHandle,
 
     pub subagent_limiter: Arc<SubagentLimiter>,
+
+    worker_cancel: tokio_util::sync::CancellationToken,
 }
 
 impl MultiAgentRuntime {
@@ -39,34 +41,54 @@ impl MultiAgentRuntime {
         Self::with_config_and_persistence(supervisor_config, None, "default")
     }
 
+    pub fn ephemeral() -> Self {
+        Self::build(SupervisorConfig::default(), None, "ephemeral", false)
+    }
+
     pub fn with_config_and_persistence(
         supervisor_config: SupervisorConfig,
         journal_dir: Option<std::path::PathBuf>,
         session_id: impl AsRef<str>,
     ) -> Self {
-        let registry = AgentRegistryHandle::new(AgentRegistry::new());
+        Self::build(supervisor_config, journal_dir, session_id, true)
+    }
+
+    fn build(
+        supervisor_config: SupervisorConfig,
+        journal_dir: Option<std::path::PathBuf>,
+        session_id: impl AsRef<str>,
+        attach_event_bridges: bool,
+    ) -> Self {
+        let registry = AgentRegistryHandle::new(AgentRegistry::with_heartbeat_timeout(
+            std::time::Duration::from_secs(supervisor_config.heartbeat_timeout_secs.max(1)),
+        ));
         let supervisor =
             SupervisorHandle::new(Supervisor::new(supervisor_config, registry.clone()));
         {
+            use crate::agent::supervisor::RestartOutcome;
             let reg = registry.clone();
             supervisor.set_restart_callback(Box::new(move |info| {
                 let id = info.id.as_str();
-                if reg.get(id).and_then(|a| a.current_task).is_some() {
+                let holds_work = reg
+                    .get(id)
+                    .map(|a| a.current_load > 0 || a.current_task.is_some())
+                    .unwrap_or(false);
+                if holds_work {
                     let _ = reg.heartbeat(id);
                     tracing::debug!(
                         agent_id = %id,
-                        "Supervisor: agent flagged stale but still holds a task; renewing lease instead of resetting"
+                        "Supervisor: agent flagged stale but still holds work; renewing lease instead of resetting"
                     );
-                    return true;
+                    return RestartOutcome::LeaseRenewed;
                 }
                 if reg.heartbeat(id).is_err() {
-                    return false;
+                    return RestartOutcome::Failed;
                 }
                 if reg.set_state(id, crate::agent::registry::AgentState::Idle).is_err() {
-                    return false;
+                    return RestartOutcome::Failed;
                 }
                 tracing::info!(agent_id = %id, "Supervisor restart: registry agent restored to Idle");
-                true
+                RestartOutcome::Restarted
             }));
         }
         let task_queue = TaskQueueHandle::new(TaskQueue::new());
@@ -79,7 +101,7 @@ impl MultiAgentRuntime {
             &SubagentLimitConfig::default(),
         ));
 
-        if tokio::runtime::Handle::try_current().is_ok() {
+        if attach_event_bridges && tokio::runtime::Handle::try_current().is_ok() {
             if let Some(svc) = crate::services::try_get_services() {
                 let _ = supervisor
                     .inner()
@@ -103,6 +125,7 @@ impl MultiAgentRuntime {
             coordinator,
             blackboard,
             subagent_limiter,
+            worker_cancel: tokio_util::sync::CancellationToken::new(),
         }
     }
 
@@ -184,7 +207,8 @@ impl MultiAgentRuntime {
             executor,
         )
         .with_blackboard(self.blackboard.clone())
-        .with_poll_interval(poll_interval);
+        .with_poll_interval(poll_interval)
+        .with_cancellation(self.worker_cancel.child_token());
 
         info!(agent_id = %worker.agent_id(), "spawning task queue worker");
         worker.spawn()
@@ -221,6 +245,25 @@ impl MultiAgentRuntime {
                         agent_id = %event.agent_id,
                         released,
                         "released region locks held by dead agent"
+                    );
+                }
+            }
+        }
+        for agent in self.registry.all() {
+            if matches!(
+                agent.state,
+                crate::agent::registry::AgentState::Terminated
+                    | crate::agent::registry::AgentState::Failed
+            ) {
+                let released = self
+                    .coordinator
+                    .locks()
+                    .release_all_for_agent(agent.id.as_str());
+                if released > 0 {
+                    debug!(
+                        agent_id = %agent.id,
+                        released,
+                        "released region locks held by terminated/failed agent"
                     );
                 }
             }
@@ -285,6 +328,7 @@ impl MultiAgentRuntime {
 
     pub fn shutdown(&self) {
         info!("Multi-agent runtime shutting down");
+        self.worker_cancel.cancel();
         self.supervisor.shutdown_all();
     }
 
@@ -316,9 +360,6 @@ impl MultiAgentRuntime {
             &uuid::Uuid::new_v4().to_string()[..8]
         );
 
-        let mut scheduler = TaskScheduler::new(max_parallel.max(1));
-        scheduler.add_tasks(tasks.clone())?;
-
         const DELEGATION_RECORD_TTL: std::time::Duration =
             std::time::Duration::from_secs(24 * 60 * 60);
         for t in &tasks {
@@ -340,6 +381,9 @@ impl MultiAgentRuntime {
             );
         }
 
+        let mut scheduler = TaskScheduler::new(max_parallel.max(1));
+        scheduler.add_tasks(tasks)?;
+
         let mut span_ctx = SchedulerSpanContext::new().with_delegation(delegation_id.clone());
         if let Some(pid) = parent_agent_id.as_ref() {
             span_ctx = span_ctx.with_parent_agent(pid.clone());
@@ -351,8 +395,10 @@ impl MultiAgentRuntime {
             crate::runtime::spawn_supervised(
                 "multi_agent_runtime.cancel_bridge",
                 async move {
-                    parent.cancelled().await;
-                    scheduler_token.cancel();
+                    tokio::select! {
+                        () = parent.cancelled() => scheduler_token.cancel(),
+                        () = scheduler_token.cancelled() => {}
+                    }
                 },
             )
         });
@@ -681,7 +727,15 @@ fn ensure_runtime_maintenance_task() {
         return;
     }
     crate::runtime::task_manager::spawn_supervised("multi_agent.maintenance", async move {
-        let mut ticker = tokio::time::interval(RUNTIME_MAINTENANCE_INTERVAL);
+        let interval = MANAGER
+            .get()
+            .map(|rt| {
+                std::time::Duration::from_secs(
+                    rt.supervisor.inner().config().health_check_interval_secs.max(5),
+                )
+            })
+            .unwrap_or(RUNTIME_MAINTENANCE_INTERVAL);
+        let mut ticker = tokio::time::interval(interval);
         ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
         ticker.tick().await;
         loop {
@@ -780,6 +834,12 @@ pub fn register_configured_agents(rt: &MultiAgentRuntime, config: &crate::config
 
     if rt.registry.get("primary").is_none() {
         let mut primary = AgentInfo::new("primary", "Primary Agent", "coder");
+        primary.max_concurrency = config
+            .agent_runtime
+            .subagent_limit
+            .max_concurrent
+            .clamp(1, crate::constants::system::MAX_CONCURRENT_SUBAGENTS as usize)
+            as u32;
         primary.capabilities.push(AgentCapability {
             name: "coding".into(),
             description: "Default single-agent session".into(),

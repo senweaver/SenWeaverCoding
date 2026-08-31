@@ -218,6 +218,49 @@ let toastCounter = 0
 const MAX_TOASTS = 5
 const toastTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
+const SIDEBAR_WIDTH_PERSIST_DEBOUNCE_MS = 300
+let sidebarWidthPersistTimer: ReturnType<typeof setTimeout> | null = null
+
+function schedulePersistRightSidebarWidth(get: () => UIStore) {
+  if (sidebarWidthPersistTimer) clearTimeout(sidebarWidthPersistTimer)
+  sidebarWidthPersistTimer = setTimeout(() => {
+    sidebarWidthPersistTimer = null
+    const state = get()
+    try {
+      localStorage.setItem(RIGHT_SIDEBAR_WIDTH_KEY, String(state.rightSidebarWidth))
+    } catch {  }
+    try {
+      localStorage.setItem(
+        RIGHT_SIDEBAR_WIDTH_AUTO_KEY,
+        state.rightSidebarWidthAuto ? 'true' : 'false',
+      )
+    } catch {  }
+  }, SIDEBAR_WIDTH_PERSIST_DEBOUNCE_MS)
+}
+
+function editorCursorEquals(a: EditorCursor | null, b: EditorCursor | null): boolean {
+  if (a === b) return true
+  if (!a || !b) return false
+  if (
+    a.relPath !== b.relPath ||
+    a.line !== b.line ||
+    a.column !== b.column ||
+    (a.selectedCharCount ?? 0) !== (b.selectedCharCount ?? 0)
+  ) {
+    return false
+  }
+  const sa = a.selection ?? null
+  const sb = b.selection ?? null
+  if (sa === sb) return true
+  if (!sa || !sb) return false
+  return (
+    sa.startLine === sb.startLine &&
+    sa.startColumn === sb.startColumn &&
+    sa.endLine === sb.endLine &&
+    sa.endColumn === sb.endColumn
+  )
+}
+
 function clearToastTimer(id: string) {
   const timer = toastTimers.get(id)
   if (timer) {
@@ -276,14 +319,13 @@ export const useUIStore = create<UIStore>((set, get) => ({
   },
   setRightSidebarWidth: (px) => {
     const clamped = clampRightSidebarWidth(px)
-    try { localStorage.setItem(RIGHT_SIDEBAR_WIDTH_KEY, String(clamped)) } catch {  }
-    try { localStorage.setItem(RIGHT_SIDEBAR_WIDTH_AUTO_KEY, 'false') } catch {  }
     set({ rightSidebarWidth: clamped, rightSidebarWidthAuto: false })
+    schedulePersistRightSidebarWidth(get)
   },
 
   setRightSidebarWidthAuto: (auto) => {
-    try { localStorage.setItem(RIGHT_SIDEBAR_WIDTH_AUTO_KEY, auto ? 'true' : 'false') } catch {  }
     set({ rightSidebarWidthAuto: auto })
+    schedulePersistRightSidebarWidth(get)
   },
 
   setActiveView: (view) => set({ activeView: view }),
@@ -366,7 +408,8 @@ export const useUIStore = create<UIStore>((set, get) => ({
   setClosePromptOpen: (open) => set({ closePromptOpen: open }),
   setSafeExiting: (active) => set({ safeExiting: active }),
 
-  setEditorCursor: (cursor) => set({ editorCursor: cursor }),
+  setEditorCursor: (cursor) =>
+    set((s) => (editorCursorEquals(s.editorCursor, cursor) ? s : { editorCursor: cursor })),
 
   requestEditorTabClose: (relPath) =>
     set((s) => ({

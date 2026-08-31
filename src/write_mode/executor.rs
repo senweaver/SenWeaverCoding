@@ -571,7 +571,7 @@ fn resolve_workspace_path(root: &Path, path: &Path) -> Result<PathBuf, ExecuteEr
             other => normal.push(other.as_os_str()),
         }
     }
-    if !normal.starts_with(root) {
+    if !crate::util::path_is_within(&normal, root) {
         return Err(ExecuteError::PathEscape(normal));
     }
     Ok(normal)

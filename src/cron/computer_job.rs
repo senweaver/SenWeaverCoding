@@ -83,22 +83,27 @@ async fn collect_events(
 }
 
 fn resolve_route(spec: &ComputerJobSpec, config: &Config) -> Option<(String, String)> {
-    let provider = spec
-        .provider
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| config.multimodal.vision_provider.clone())
-        .or_else(|| config.default_provider.clone());
-    let model = spec
-        .model
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| config.multimodal.vision_model.clone())
-        .or_else(|| config.default_model.clone());
-    match (provider, model) {
-        (Some(provider), Some(model)) => Some((provider, model)),
-        _ => None,
+    let explicit_provider = spec.provider.clone().filter(|s| !s.trim().is_empty());
+    let explicit_model = spec.model.clone().filter(|s| !s.trim().is_empty());
+    if let (Some(provider), Some(model)) = (explicit_provider, explicit_model) {
+        return Some((provider, model));
     }
+    if let (Some(provider), Some(model)) = (
+        config.multimodal.vision_provider.as_deref(),
+        config.multimodal.vision_model.as_deref(),
+    ) {
+        let provider = provider.trim();
+        let model = model.trim();
+        if !provider.is_empty() && !model.is_empty() {
+            return Some((provider.to_string(), model.to_string()));
+        }
+    }
+    let models = crate::computer::list_vision_models(config);
+    let pick = models
+        .iter()
+        .find(|m| m.recommended)
+        .or_else(|| models.first())?;
+    Some((pick.provider.clone(), pick.model.clone()))
 }
 
 pub async fn run_computer_job(config: &Config, job: &CronJob) -> (bool, String) {

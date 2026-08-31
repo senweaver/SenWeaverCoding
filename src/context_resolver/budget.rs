@@ -54,18 +54,32 @@ impl ContextBudget {
     }
 
     pub fn reserve_at_most(&self, want: usize) -> usize {
-        let rem = self.remaining();
-        let take = want.min(rem);
-        if take == 0 {
+        if want == 0 {
             return 0;
         }
-        self.used.fetch_add(take, Ordering::AcqRel);
-        take
+        let total = self.total.load(Ordering::Relaxed);
+        loop {
+            let used = self.used.load(Ordering::Acquire);
+            let take = want.min(total.saturating_sub(used));
+            if take == 0 {
+                return 0;
+            }
+            if self
+                .used
+                .compare_exchange(used, used + take, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                return take;
+            }
+        }
     }
 
     pub fn release(&self, amount: usize) {
-        self.used
-            .fetch_sub(amount.min(self.used()), Ordering::AcqRel);
+        let _ = self
+            .used
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+                Some(used.saturating_sub(amount))
+            });
     }
 }
 

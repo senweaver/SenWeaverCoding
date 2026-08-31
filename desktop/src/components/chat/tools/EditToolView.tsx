@@ -63,7 +63,20 @@ function readMultiEditEntries(input: unknown): MultiEditEntry[] {
   return entries
 }
 
+const HEADER_DIFF_MAX_CHARS = 32_768
+
+function countLinesQuick(input: string): number {
+  let n = 1
+  for (let i = 0; i < input.length; i++) {
+    if (input.charCodeAt(i) === 10) n++
+  }
+  return n
+}
+
 function changedLineCount(a: string, b: string): number {
+  if (a.length + b.length > HEADER_DIFF_MAX_CHARS) {
+    return Math.max(countLinesQuick(a), countLinesQuick(b))
+  }
   let changed = 0
   for (const part of diffLines(a, b)) {
     if (part.added || part.removed) changed += part.count ?? 0
@@ -99,9 +112,15 @@ function parseAdditionsDeletions(
   if (/^[+\- ]/m.test(text)) {
     let adds = 0
     let dels = 0
-    for (const line of text.split('\n')) {
-      if (line.startsWith('+') && !line.startsWith('+++')) adds++
-      else if (line.startsWith('-') && !line.startsWith('---')) dels++
+    const len = text.length
+    let cursor = 0
+    while (cursor < len) {
+      let lineEnd = text.indexOf('\n', cursor)
+      if (lineEnd === -1) lineEnd = len
+      const c = text.charCodeAt(cursor)
+      if (c === 43 && !text.startsWith('+++', cursor)) adds++
+      else if (c === 45 && !text.startsWith('---', cursor)) dels++
+      cursor = lineEnd + 1
     }
     if (adds + dels > 0) return { adds, dels }
   }
@@ -139,7 +158,7 @@ export function EditHeader({ toolName, input, result }: ToolViewProps) {
   if (fromResult) {
     badge = `+${fromResult.adds} / -${fromResult.dels}`
   } else if (toolName === 'file_write' || toolName === 'Write' || toolName === 'file_create') {
-    const lines = content ? content.split('\n').length : 0
+    const lines = content ? countLinesQuick(content) : 0
     badge = lines > 0 ? `+${lines}` : ''
   } else if (EDIT_STYLE_NAMES.has(toolName) && oldStr && newStr) {
     const changed = changedLineCount(oldStr, newStr)

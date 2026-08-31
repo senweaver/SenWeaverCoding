@@ -227,6 +227,84 @@ fn is_greeting(trimmed: &str) -> bool {
 
 const CONTINUE_SUBSTRING_MAX_CHARS: usize = 24;
 
+const CONTINUE_NEGATION_MARKERS: &[&str] = &[
+    "不要",
+    "不用",
+    "不需要",
+    "无需",
+    "别",
+    "先别",
+    "先不",
+    "暂停",
+    "停止",
+    "停下",
+    "取消",
+    "don't",
+    "dont",
+    "do not",
+    "stop",
+    "cancel",
+    "no need",
+    "instead of",
+];
+
+fn ascii_word_boundary_contains(lower: &str, kw: &str) -> bool {
+    let bytes = lower.as_bytes();
+    let mut start = 0usize;
+    while start <= lower.len() {
+        let Some(pos) = lower[start..].find(kw) else {
+            return false;
+        };
+        let abs = start + pos;
+        let end = abs + kw.len();
+        let before_ok = abs == 0 || !bytes[abs - 1].is_ascii_alphanumeric();
+        let after_ok = end >= bytes.len() || !bytes[end].is_ascii_alphanumeric();
+        if before_ok && after_ok {
+            return true;
+        }
+        start = abs + 1;
+    }
+    false
+}
+
+fn keyword_hit(lower: &str, kw: &str) -> bool {
+    if kw.is_ascii() {
+        ascii_word_boundary_contains(lower, kw)
+    } else {
+        lower.contains(kw)
+    }
+}
+
+fn continue_marker_prefix_hit(lower: &str, marker: &str) -> bool {
+    if !lower.starts_with(marker) {
+        return false;
+    }
+    if marker.is_ascii() {
+        match lower.as_bytes().get(marker.len()) {
+            Some(b) => !b.is_ascii_alphanumeric(),
+            None => true,
+        }
+    } else {
+        true
+    }
+}
+
+fn continue_is_negated(lower: &str) -> bool {
+    let marker_pos = CONTINUE_MARKERS
+        .iter()
+        .filter_map(|k| lower.find(k))
+        .min();
+    let Some(pos) = marker_pos else {
+        return false;
+    };
+    let prefix = &lower[..pos];
+    CONTINUE_NEGATION_MARKERS.iter().any(|neg| {
+        prefix.rfind(neg).is_some_and(|np| {
+            prefix[np + neg.len()..].chars().count() <= 6
+        })
+    })
+}
+
 pub fn classify_conversation_intent(message: &str) -> ConversationIntent {
     let trimmed = message.trim();
     if trimmed.is_empty() {
@@ -234,10 +312,15 @@ pub fn classify_conversation_intent(message: &str) -> ConversationIntent {
     }
     let lower = trimmed.to_lowercase();
     let is_question = trimmed.ends_with('?') || trimmed.ends_with('？');
-    let prefix_hit = CONTINUE_MARKERS.iter().any(|k| lower.starts_with(k));
-    let short_hit = !is_question
+    let negated = continue_is_negated(&lower);
+    let prefix_hit = !negated
+        && CONTINUE_MARKERS
+            .iter()
+            .any(|k| continue_marker_prefix_hit(&lower, k));
+    let short_hit = !negated
+        && !is_question
         && trimmed.chars().count() <= CONTINUE_SUBSTRING_MAX_CHARS
-        && CONTINUE_MARKERS.iter().any(|k| lower.contains(k));
+        && CONTINUE_MARKERS.iter().any(|k| keyword_hit(&lower, k));
     if prefix_hit || short_hit {
         return ConversationIntent::Continue;
     }
@@ -322,7 +405,7 @@ const QA_PREFIXES: &[&str] = &[
 ];
 
 fn count_hits(lower: &str, keywords: &[&str]) -> usize {
-    keywords.iter().filter(|kw| lower.contains(**kw)).count()
+    keywords.iter().filter(|kw| keyword_hit(lower, kw)).count()
 }
 
 pub fn analyze_intent(message: &str) -> IntentAnalysis {
@@ -352,11 +435,12 @@ pub fn analyze_intent(message: &str) -> IntentAnalysis {
         (TaskIntent::Plan, plan_hits),
     ];
 
-    let best = scored
-        .iter()
-        .copied()
-        .max_by_key(|(_, hits)| *hits)
-        .filter(|(_, hits)| *hits > 0);
+    let mut best: Option<(TaskIntent, usize)> = None;
+    for (intent, hits) in scored {
+        if hits > 0 && best.map_or(true, |(_, top)| hits > top) {
+            best = Some((intent, hits));
+        }
+    }
 
     let plan_worthy = plan_hits >= 2
         || (matches!(complexity, ComplexityTier::Complex) && coding_hits > 0 && plan_hits > 0);
@@ -364,17 +448,19 @@ pub fn analyze_intent(message: &str) -> IntentAnalysis {
     let (intent, base) = match best {
         Some((TaskIntent::Plan, hits)) if plan_worthy => (TaskIntent::Plan, hits),
         Some((TaskIntent::Plan, _)) => {
-            let coding_like = [
+            let mut coding_like: Option<(TaskIntent, usize)> = None;
+            for (intent, hits) in [
                 (TaskIntent::Debug, debug_hits),
                 (TaskIntent::Coding, coding_hits),
                 (TaskIntent::Tdd, tdd_hits),
                 (TaskIntent::Design, design_hits),
                 (TaskIntent::UiDesign, ui_hits),
                 (TaskIntent::Curate, curator_hits),
-            ]
-            .into_iter()
-            .filter(|(_, h)| *h > 0)
-            .max_by_key(|(_, h)| *h);
+            ] {
+                if hits > 0 && coding_like.map_or(true, |(_, top)| hits > top) {
+                    coding_like = Some((intent, hits));
+                }
+            }
             match coding_like {
                 Some((intent, hits)) => (intent, hits),
                 None if is_question => (TaskIntent::Qa, 1),

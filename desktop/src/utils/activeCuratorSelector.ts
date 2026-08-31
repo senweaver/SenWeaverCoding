@@ -46,7 +46,7 @@ function findFollowingCuratorSwitchCard(
   return latest
 }
 
-function hasNewUserTurnAfter(
+export function hasNewUserTurnAfter(
   messages: UIMessage[],
   switchMessageId: string,
 ): boolean {
@@ -94,6 +94,29 @@ export function selectCuratorCardExecutionState(
   }
 
   return 'executing'
+}
+
+const curatorExecStateCache = new WeakMap<
+  UIMessage[],
+  Map<string, CuratorExecutionState>
+>()
+
+export function selectCuratorCardExecutionStateCached(
+  messages: UIMessage[],
+  curatorCardId: string,
+  chatState?: ChatState,
+): CuratorExecutionState {
+  const key = `${curatorCardId}:${chatState ?? '__undef__'}`
+  let inner = curatorExecStateCache.get(messages)
+  if (!inner) {
+    inner = new Map()
+    curatorExecStateCache.set(messages, inner)
+  }
+  const hit = inner.get(key)
+  if (hit !== undefined) return hit
+  const computed = selectCuratorCardExecutionState(messages, curatorCardId, chatState)
+  inner.set(key, computed)
+  return computed
 }
 
 type ActiveCuratorResult = { card: CuratorCardMsg; state: CuratorExecutionState } | null

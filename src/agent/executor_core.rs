@@ -155,6 +155,20 @@ impl PacingGovernor {
         self.token_soft_warned = false;
     }
 
+    pub fn total_timeout_exceeded(&self) -> Option<Duration> {
+        let total = self.budget.total_timeout?;
+        if self.turn_started.elapsed() > total {
+            Some(total)
+        } else {
+            None
+        }
+    }
+
+    pub fn note_token_progress(&mut self) {
+        self.tokens_since_progress = 0;
+        self.token_soft_warned = false;
+    }
+
     pub fn record_generated_tokens(&mut self, tokens: u64) {
         self.tokens_since_progress = self.tokens_since_progress.saturating_add(tokens);
         self.total_generated_tokens = self.total_generated_tokens.saturating_add(tokens);

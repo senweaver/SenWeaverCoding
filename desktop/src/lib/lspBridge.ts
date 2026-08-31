@@ -22,7 +22,10 @@ function normalizeUri(input: string): string {
 
 const openCounts = new Map<string, number>()
 const changeTimers = new Map<string, ReturnType<typeof setTimeout>>()
+const lastSentText = new Map<string, string>()
 const DEBOUNCE_MS = 300
+const LARGE_DOC_DEBOUNCE_MS = 500
+const LARGE_DOC_CHAR_THRESHOLD = 262_144
 
 const langSupportCache = new Map<string, boolean>()
 let langSupportCacheVersion = 0
@@ -76,6 +79,7 @@ export const lspBridge = {
     const next = (openCounts.get(uri) ?? 0) + 1
     openCounts.set(uri, next)
     if (next === 1) {
+      lastSentText.set(uri, params.text)
       try {
         await lspApi.notify({
           method: 'didOpen',
@@ -92,9 +96,16 @@ export const lspBridge = {
   didChange(params: DocumentParams) {
     const uri = normalizeUri(params.uri)
     const previous = changeTimers.get(uri)
+    if (!previous && lastSentText.get(uri) === params.text) return
     if (previous) clearTimeout(previous)
+    const delay =
+      params.text.length > LARGE_DOC_CHAR_THRESHOLD
+        ? LARGE_DOC_DEBOUNCE_MS
+        : DEBOUNCE_MS
     const timer = setTimeout(async () => {
       changeTimers.delete(uri)
+      if (lastSentText.get(uri) === params.text) return
+      lastSentText.set(uri, params.text)
       try {
         await lspApi.notify({
           method: 'didChange',
@@ -105,7 +116,7 @@ export const lspBridge = {
       } catch (err) {
         console.warn('[lsp] didChange failed', err)
       }
-    }, DEBOUNCE_MS)
+    }, delay)
     changeTimers.set(uri, timer)
   },
 
@@ -117,6 +128,7 @@ export const lspBridge = {
       clearTimeout(pending)
       changeTimers.delete(uri)
     }
+    lastSentText.set(uri, params.text)
     try {
       await lspApi.notify({
         method: 'didSave',
@@ -142,6 +154,7 @@ export const lspBridge = {
       clearTimeout(pending)
       changeTimers.delete(normalized)
     }
+    lastSentText.delete(normalized)
     try {
       await lspApi.notify({ method: 'didClose', uri: normalized })
     } catch (err) {
@@ -667,6 +680,7 @@ export const lspBridge = {
       clearTimeout(pending)
       changeTimers.delete(uri)
     }
+    lastSentText.set(uri, params.text)
     try {
       await lspApi.notify({
         method: 'didChange',

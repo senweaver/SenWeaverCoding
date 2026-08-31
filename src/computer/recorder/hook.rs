@@ -117,6 +117,18 @@ mod imp {
         }
     }
 
+    pub fn foreground_in_own_process() -> bool {
+        unsafe {
+            let hwnd = GetForegroundWindow();
+            if hwnd.is_null() {
+                return false;
+            }
+            let mut pid: u32 = 0;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            pid == GetCurrentProcessId()
+        }
+    }
+
     pub fn translate_vk(vk: u16, scan: u32, shift: bool, caps: bool) -> Option<char> {
         let mut keystate = [0u8; 256];
         if shift {
@@ -386,7 +398,9 @@ mod imp {
 }
 
 #[cfg(windows)]
-pub use imp::{point_in_own_process, start_capture, translate_vk, HookHandle};
+pub use imp::{
+    foreground_in_own_process, point_in_own_process, start_capture, translate_vk, HookHandle,
+};
 
 #[cfg(not(windows))]
 pub struct HookHandle;
@@ -403,6 +417,11 @@ pub fn start_capture() -> anyhow::Result<(HookHandle, UnboundedReceiver<RawInput
 
 #[cfg(not(windows))]
 pub fn point_in_own_process(_x: i32, _y: i32) -> bool {
+    false
+}
+
+#[cfg(not(windows))]
+pub fn foreground_in_own_process() -> bool {
     false
 }
 

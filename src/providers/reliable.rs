@@ -341,7 +341,7 @@ impl FailureClass {
     }
 }
 
-fn is_non_retryable_rate_limit(err: &anyhow::Error) -> bool {
+pub fn is_non_retryable_rate_limit(err: &anyhow::Error) -> bool {
     if !is_rate_limited(err) {
         return false;
     }
@@ -1756,7 +1756,6 @@ impl Provider for ReliableProvider {
                                                 | StreamEvent::ToolCall(_)
                                                 | StreamEvent::PreExecutedToolCall { .. }
                                                 | StreamEvent::PreExecutedToolResult { .. }
-                                                | StreamEvent::Usage(_)
                                         ) {
                                             made_progress = true;
                                         }
@@ -1961,22 +1960,46 @@ impl Provider for ReliableProvider {
                                 return;
                             }
 
-                            let sleep_dur = Duration::from_millis(wait_ms);
-                            if let Some(token) = cancel_token.as_ref() {
-                                tokio::select! {
-                                    biased;
-                                    () = token.cancelled() => {
-                                        let _ = tx
-                                            .send(Err(StreamError::Provider(
-                                                "stream cancelled by user during retry wait".to_string(),
-                                            )))
-                                            .await;
-                                        return;
+                            const RETRY_WAIT_HEARTBEAT_MS: u64 = 60_000;
+                            let mut remaining_ms = wait_ms;
+                            loop {
+                                let slice_ms = remaining_ms.min(RETRY_WAIT_HEARTBEAT_MS);
+                                let slice = Duration::from_millis(slice_ms);
+                                if let Some(token) = cancel_token.as_ref() {
+                                    tokio::select! {
+                                        biased;
+                                        () = token.cancelled() => {
+                                            let _ = tx
+                                                .send(Err(StreamError::Provider(
+                                                    "stream cancelled by user during retry wait".to_string(),
+                                                )))
+                                                .await;
+                                            return;
+                                        }
+                                        () = tokio::time::sleep(slice) => {}
                                     }
-                                    () = tokio::time::sleep(sleep_dur) => {}
+                                } else {
+                                    tokio::time::sleep(slice).await;
                                 }
-                            } else {
-                                tokio::time::sleep(sleep_dur).await;
+                                remaining_ms = remaining_ms.saturating_sub(slice_ms);
+                                if remaining_ms == 0 {
+                                    break;
+                                }
+                                let heartbeat = RetryNotice {
+                                    attempt: class_attempts,
+                                    max_attempts: cap_for_class,
+                                    wait_ms: remaining_ms,
+                                    failure_class: retry_class,
+                                    provider: provider_label.clone(),
+                                    model: current_model.clone(),
+                                    last_error_summary: format!(
+                                        "waiting out upstream backoff; {}s remaining",
+                                        remaining_ms.div_ceil(1000)
+                                    ),
+                                };
+                                if tx.send(Ok(StreamEvent::Retry(heartbeat))).await.is_err() {
+                                    return;
+                                }
                             }
                         };
 

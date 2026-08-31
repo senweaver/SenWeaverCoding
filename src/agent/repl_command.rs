@@ -13,8 +13,6 @@ pub enum ReplCommand {
 
     Clear,
 
-    ContinuePlan,
-
     Slash { name: String, args: Vec<String> },
 
     Chat { raw: String },
@@ -35,7 +33,6 @@ impl ReplCommand {
             ReplCommand::Empty => "empty",
             ReplCommand::Quit => "quit",
             ReplCommand::Clear => "clear",
-            ReplCommand::ContinuePlan => "continue_plan",
             ReplCommand::Slash { .. } => "slash",
             ReplCommand::Chat { .. } => "chat",
         }
@@ -54,10 +51,6 @@ pub fn parse_repl_input(raw: &str, registry: &CommandRegistry) -> ReplCommand {
     }
     if lower == "/clear" {
         return ReplCommand::Clear;
-    }
-
-    if lower == "continue" || lower == "continue plan" {
-        return ReplCommand::ContinuePlan;
     }
 
     if let Some((name, args)) = parse_slash_line(trimmed) {

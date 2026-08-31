@@ -934,6 +934,9 @@ impl Consumer {
         if !down {
             return;
         }
+        if hook::foreground_in_own_process() {
+            return;
+        }
         if let Some(c) = ch {
             if !ctrl && !alt && !win {
                 if self.type_buffer.is_empty() && self.type_baseline.is_none() {
@@ -1067,6 +1070,9 @@ impl Consumer {
     }
 
     async fn handle_wheel(&mut self, delta: i32, horizontal: bool, x: i32, y: i32) {
+        if hook::point_in_own_process(x, y) {
+            return;
+        }
         self.flush_type().await;
         self.flush_pending_click().await;
         let dir = if horizontal {

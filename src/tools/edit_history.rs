@@ -181,7 +181,7 @@ impl EditHistory {
                 files: state.index.files.clone(),
                 timeline: state.timeline[start..].to_vec(),
             };
-            serde_json::to_string_pretty(&snapshot)
+            serde_json::to_string(&snapshot)
         };
         if let Ok(json) = serialized {
             if let Err(e) = crate::util::atomic_write(&index_path, json.as_bytes()) {

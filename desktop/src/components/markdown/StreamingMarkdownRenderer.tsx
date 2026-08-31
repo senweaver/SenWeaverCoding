@@ -68,11 +68,11 @@ type StreamCache = {
   content: string
   committedHtml: string
   committedLen: number
-  html: string
+  pendingHtml: string
 }
 
 function emptyCache(): StreamCache {
-  return { content: '', committedHtml: '', committedLen: 0, html: '' }
+  return { content: '', committedHtml: '', committedLen: 0, pendingHtml: '' }
 }
 
 function buildIncremental(cache: StreamCache, content: string): StreamCache {
@@ -88,22 +88,34 @@ function buildIncremental(cache: StreamCache, content: string): StreamCache {
     committedHtml += renderSegment(content.slice(cursor, seg.end))
     cursor = seg.end
   }
-  const pending = content.slice(cursor)
+  if (!content.startsWith('```', cursor)) {
+    const pendingSlice = content.slice(cursor)
+    const lastBreak = pendingSlice.lastIndexOf('\n\n')
+    if (lastBreak > 0) {
+      committedHtml += renderSegment(pendingSlice.slice(0, lastBreak + 2))
+      cursor += lastBreak + 2
+    }
+  }
   return {
     content,
     committedHtml,
     committedLen: cursor,
-    html: committedHtml + renderSegment(pending),
+    pendingHtml: renderSegment(content.slice(cursor)),
   }
 }
 
 export function StreamingMarkdownRenderer({ content, className }: Props) {
   const cacheRef = useRef<StreamCache>(emptyCache())
   cacheRef.current = buildIncremental(cacheRef.current, content)
+  const { committedHtml, pendingHtml } = cacheRef.current
   return (
-    <div
-      className={`streaming-markdown ${className ?? ''}`.trim()}
-      dangerouslySetInnerHTML={{ __html: cacheRef.current.html }}
-    />
+    <div className={`streaming-markdown ${className ?? ''}`.trim()}>
+      {committedHtml ? (
+        <div dangerouslySetInnerHTML={{ __html: committedHtml }} />
+      ) : null}
+      {pendingHtml ? (
+        <div dangerouslySetInnerHTML={{ __html: pendingHtml }} />
+      ) : null}
+    </div>
   )
 }

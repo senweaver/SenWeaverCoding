@@ -22,10 +22,18 @@ pub fn classify_with_decision(
     }
 
     let lower = message.to_lowercase();
-    let len = message.len();
+    let len = message.chars().count();
 
     let mut rules: Vec<_> = config.rules.iter().collect();
-    rules.sort_by(|a, b| b.priority.cmp(&a.priority));
+    rules.sort_unstable_by(|a, b| b.priority.cmp(&a.priority));
+
+    let contains_ci = |haystack_lower: &str, needle: &str| -> bool {
+        if needle.chars().any(char::is_uppercase) {
+            haystack_lower.contains(&needle.to_lowercase())
+        } else {
+            haystack_lower.contains(needle)
+        }
+    };
 
     for rule in rules {
 
@@ -43,11 +51,11 @@ pub fn classify_with_decision(
         let keyword_hit = rule
             .keywords
             .iter()
-            .any(|kw: &String| lower.contains(&kw.to_lowercase()));
+            .any(|kw: &String| contains_ci(&lower, kw));
         let pattern_hit = rule
             .patterns
             .iter()
-            .any(|pat: &String| message.contains(pat.as_str()));
+            .any(|pat: &String| contains_ci(&lower, pat));
 
         if keyword_hit || pattern_hit {
             return Some(ClassificationDecision {

@@ -15,6 +15,117 @@ const FIRECRAWL_MIN_BODY_LEN: usize = 100;
 
 const JINA_READER_BASE: &str = "https://r.jina.ai/";
 
+const FETCH_TOTAL_BUDGET_MIN_SECS: u64 = 10;
+
+const FETCH_TOTAL_BUDGET_MAX_SECS: u64 = 40;
+
+const FETCH_HTTP_BUDGET_SECS: u64 = 8;
+
+const FETCH_WEBVIEW_BUDGET_SECS: u64 = 15;
+
+const FETCH_JINA_BUDGET_SECS: u64 = 10;
+
+const FETCH_FIRECRAWL_BUDGET_SECS: u64 = 20;
+
+const JINA_COOLDOWN: Duration = Duration::from_secs(300);
+
+const URL_CACHE_TTL: Duration = Duration::from_secs(600);
+
+const URL_CACHE_MAX_ENTRIES: usize = 32;
+
+const URL_CACHE_MAX_ENTRY_BYTES: usize = 256 * 1024;
+
+const DNS_VERDICT_TTL: Duration = Duration::from_secs(60);
+
+const DNS_CACHE_MAX_ENTRIES: usize = 256;
+
+static JINA_COOLDOWN_UNTIL: once_cell::sync::Lazy<parking_lot::Mutex<Option<std::time::Instant>>> =
+    once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(None));
+
+fn jina_cooling_down() -> bool {
+    JINA_COOLDOWN_UNTIL
+        .lock()
+        .is_some_and(|until| std::time::Instant::now() < until)
+}
+
+fn set_jina_cooldown() {
+    *JINA_COOLDOWN_UNTIL.lock() = Some(std::time::Instant::now() + JINA_COOLDOWN);
+    tracing::info!(
+        target: "tools.web_fetch",
+        cooldown_secs = JINA_COOLDOWN.as_secs(),
+        "Jina Reader unreachable; cooling down"
+    );
+}
+
+static URL_RESULT_CACHE: once_cell::sync::Lazy<
+    parking_lot::Mutex<std::collections::HashMap<String, (std::time::Instant, String)>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+fn cached_fetch_output(url: &str) -> Option<String> {
+    let cache = URL_RESULT_CACHE.lock();
+    cache.get(url).and_then(|(stored_at, output)| {
+        if stored_at.elapsed() < URL_CACHE_TTL {
+            Some(output.clone())
+        } else {
+            None
+        }
+    })
+}
+
+fn store_fetch_output(url: &str, output: &str) {
+    if output.len() > URL_CACHE_MAX_ENTRY_BYTES || output.trim().is_empty() {
+        return;
+    }
+    let mut cache = URL_RESULT_CACHE.lock();
+    if cache.len() >= URL_CACHE_MAX_ENTRIES && !cache.contains_key(url) {
+        cache.retain(|_, (stored_at, _)| stored_at.elapsed() < URL_CACHE_TTL);
+        if cache.len() >= URL_CACHE_MAX_ENTRIES {
+            if let Some(oldest) = cache
+                .iter()
+                .min_by_key(|(_, (stored_at, _))| *stored_at)
+                .map(|(k, _)| k.clone())
+            {
+                cache.remove(&oldest);
+            }
+        }
+    }
+    cache.insert(url.to_string(), (std::time::Instant::now(), output.to_string()));
+}
+
+static DNS_VERDICT_CACHE: once_cell::sync::Lazy<
+    parking_lot::Mutex<
+        std::collections::HashMap<String, (std::time::Instant, Result<(), String>)>,
+    >,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+fn cached_validate_resolved_host_is_public(host: &str) -> anyhow::Result<()> {
+    {
+        let cache = DNS_VERDICT_CACHE.lock();
+        if let Some((checked_at, verdict)) = cache.get(host) {
+            if checked_at.elapsed() < DNS_VERDICT_TTL {
+                return verdict
+                    .clone()
+                    .map_err(|e| anyhow::anyhow!(e));
+            }
+        }
+    }
+    let verdict = validate_resolved_host_is_public(host).map_err(|e| e.to_string());
+    {
+        let mut cache = DNS_VERDICT_CACHE.lock();
+        if cache.len() >= DNS_CACHE_MAX_ENTRIES && !cache.contains_key(host) {
+            cache.retain(|_, (checked_at, _)| checked_at.elapsed() < DNS_VERDICT_TTL);
+            if cache.len() >= DNS_CACHE_MAX_ENTRIES {
+                cache.clear();
+            }
+        }
+        cache.insert(
+            host.to_string(),
+            (std::time::Instant::now(), verdict.clone()),
+        );
+    }
+    verdict.map_err(|e| anyhow::anyhow!(e))
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct FetchedPage {
     pub url: String,
@@ -72,6 +183,16 @@ pub fn looks_like_anti_bot_page(text: &str) -> bool {
         "Captcha",
         "CAPTCHA",
         "Forbidden",
+
+
+        "enable JavaScript",
+        "JavaScript is required",
+        "JavaScript is disabled",
+        "requires JavaScript",
+        "启用JavaScript",
+        "启用 JavaScript",
+        "开启JavaScript",
+        "开启 JavaScript",
     ];
     let lower = text.to_lowercase();
     NEEDLES.iter().any(|n| {
@@ -145,7 +266,7 @@ impl WebFetchTool {
         });
         let builder = reqwest::Client::builder()
             .timeout(Duration::from_secs(timeout_secs))
-            .connect_timeout(Duration::from_secs(10))
+            .connect_timeout(Duration::from_secs(5))
             .redirect(redirect_policy)
             .cookie_store(true)
             .user_agent(BROWSER_USER_AGENT);
@@ -163,16 +284,6 @@ impl WebFetchTool {
         };
         let _ = self.client.set(built.clone());
         Ok(self.client.get().cloned().unwrap_or(built))
-    }
-
-    fn validate_url(&self, raw_url: &str) -> anyhow::Result<String> {
-        validate_target_url(
-            raw_url,
-            &self.allowed_domains,
-            &self.blocked_domains,
-            &self.allowed_private_hosts,
-            "web_fetch",
-        )
     }
 
     fn truncate_response(&self, text: &str) -> String {
@@ -240,7 +351,7 @@ impl WebFetchTool {
                 anyhow::anyhow!("web_fetch blocked: service container unavailable (fail-closed)")
             })?
             .proxy_runtime()
-            .build_client_with_timeouts("tool.web_fetch", 30, 10);
+            .build_client_with_timeouts("tool.web_fetch", FETCH_JINA_BUDGET_SECS, 5);
 
         let response = client
             .get(&jina_url)
@@ -248,14 +359,21 @@ impl WebFetchTool {
             .header("User-Agent", "SenWeaverCoding/1.0")
             .send()
             .await
-            .map_err(|e| anyhow::anyhow!("Jina Reader request failed: {e}"))?;
+            .map_err(|e| {
+                set_jina_cooldown();
+                anyhow::anyhow!("Jina Reader request failed: {e}")
+            })?;
 
         let status = response.status();
         if !status.is_success() {
+            let code = status.as_u16();
+            if status.is_server_error() || code == 429 || code == 402 {
+                set_jina_cooldown();
+            }
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("Jina Reader error: HTTP {}", status.as_u16())),
+                error: Some(format!("Jina Reader error: HTTP {code}")),
             });
         }
 
@@ -293,7 +411,7 @@ impl WebFetchTool {
                 anyhow::anyhow!("web_fetch blocked: service container unavailable (fail-closed)")
             })?
             .proxy_runtime()
-            .build_client_with_timeouts("tool.web_fetch", 60, 10);
+            .build_client_with_timeouts("tool.web_fetch", FETCH_FIRECRAWL_BUDGET_SECS, 8);
 
         let body = json!({
             "url": url,
@@ -363,7 +481,6 @@ impl WebFetchTool {
                 reqwest::header::ACCEPT_LANGUAGE,
                 "zh-CN,zh;q=0.9,en-US;q=0.8,en;q=0.7",
             )
-            .header(reqwest::header::ACCEPT_ENCODING, "gzip, deflate, br")
             .header(reqwest::header::CACHE_CONTROL, "no-cache")
             .header(reqwest::header::PRAGMA, "no-cache")
             .header("Sec-Fetch-Dest", "document")
@@ -535,10 +652,14 @@ impl Tool for WebFetchTool {
 
     fn description(&self) -> &str {
         "Fetch a web page and return its content as clean plain text. \
-         HTML pages are automatically converted to readable text. \
-         JSON and plain text responses are returned as-is. \
-         Only GET requests; follows redirects. \
-         Falls back to Jina Reader (free) then Firecrawl for JS-heavy/bot-blocked sites. \
+         HTML pages are automatically converted to readable text; JSON and plain text \
+         responses are returned as-is. Only GET requests; follows redirects. \
+         Fast by design: a direct HTTP fetch (8s budget) races a desktop webview fetch \
+         (15s budget, JS-capable) and the first good result wins, typically in 1-3s for \
+         static pages; Jina Reader (10s) and Firecrawl (20s, requires API key) run only \
+         as fallbacks within a 10-40s total deadline. Recently fetched URLs are served \
+         from a 10-minute cache. If the result reports a connectivity problem (network/\
+         proxy), do NOT retry immediately - inform the user instead. \
          Security: allowlist-only domains, no local/private hosts."
     }
 
@@ -585,12 +706,19 @@ impl Tool for WebFetchTool {
     }
 }
 
+enum WebviewRace {
+    Unavailable,
+    Fetched(ToolResult),
+    Failed(String),
+}
+
 impl WebFetchTool {
     async fn fetch_to_result(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-        let url = args
+        let raw_url = args
             .get("url")
             .and_then(|v| v.as_str())
-            .ok_or_else(|| anyhow::anyhow!("Missing 'url' parameter"))?;
+            .ok_or_else(|| anyhow::anyhow!("Missing 'url' parameter"))?
+            .to_string();
 
         if !self.security.can_act() {
             return Ok(ToolResult {
@@ -608,98 +736,205 @@ impl WebFetchTool {
             });
         }
 
-        let url = match self.validate_url(url) {
-            Ok(v) => v,
-            Err(e) => {
-                return Ok(ToolResult {
-                    success: false,
-                    output: String::new(),
-                    error: Some(e.to_string()),
-                });
+        let url = {
+            let allowed = self.allowed_domains.clone();
+            let blocked = self.blocked_domains.clone();
+            let private_hosts = self.allowed_private_hosts.clone();
+            let candidate = raw_url.clone();
+            match tokio::task::spawn_blocking(move || {
+                validate_target_url(&candidate, &allowed, &blocked, &private_hosts, "web_fetch")
+            })
+            .await
+            {
+                Ok(Ok(validated)) => validated,
+                Ok(Err(e)) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(e.to_string()),
+                    });
+                }
+                Err(join_err) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("URL validation task failed: {join_err}")),
+                    });
+                }
             }
         };
 
-        let timeout_secs = if self.timeout_secs == 0 {
-            tracing::warn!("web_fetch: timeout_secs is 0, using safe default of 60s");
-            60
-        } else {
-            self.timeout_secs
-        };
-
-        let mut webview_candidate: Option<ToolResult> = None;
-        let mut webview_error: Option<String> = None;
-        if let Some(controller) = fetch_controller() {
-            let webview_timeout = Duration::from_secs(timeout_secs.max(30));
-            match controller.fetch(&url, webview_timeout).await {
-                Ok(page) => {
-                    let candidate = ToolResult {
-                        success: true,
-                        output: self.truncate_response(&page.text),
-                        error: None,
-                    };
-                    if !self.should_fallback_to_jina(&candidate) {
-                        return Ok(candidate);
-                    }
-                    tracing::info!(
-                        "web_fetch: webview fetch returned likely anti-bot or empty content for {url}, falling back"
-                    );
-                    webview_candidate = Some(candidate);
-                }
-                Err(err) => {
-                    let msg = err.to_string();
-                    tracing::warn!(
-                        "web_fetch: webview fetch failed for {url}: {msg}; falling back to HTTP path"
-                    );
-                    webview_error = Some(msg);
-                }
-            }
+        if let Some(cached) = cached_fetch_output(&url) {
+            tracing::debug!(
+                target: "tools.web_fetch",
+                url = %url,
+                "returning cached fetch result"
+            );
+            return Ok(ToolResult {
+                success: true,
+                output: cached,
+                error: None,
+            });
         }
+
+        let total_secs = if self.timeout_secs == 0 { 30 } else { self.timeout_secs }
+            .clamp(FETCH_TOTAL_BUDGET_MIN_SECS, FETCH_TOTAL_BUDGET_MAX_SECS);
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(total_secs);
+        let budget_capped = |cap_secs: u64| -> Duration {
+            Duration::from_secs(cap_secs)
+                .min(deadline.saturating_duration_since(tokio::time::Instant::now()))
+        };
 
         let client = self.http_client()?;
 
-        let standard_result = self.standard_fetch(&client, &url).await;
+        let http_fut = async {
+            let budget = budget_capped(FETCH_HTTP_BUDGET_SECS);
+            match tokio::time::timeout(budget, self.standard_fetch(&client, &url)).await {
+                Ok(res) => res,
+                Err(_) => ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "standard fetch timeout after {:.1}s",
+                        budget.as_secs_f32()
+                    )),
+                },
+            }
+        };
+        let webview_fut = async {
+            let Some(controller) = fetch_controller() else {
+                return WebviewRace::Unavailable;
+            };
+            let budget = budget_capped(FETCH_WEBVIEW_BUDGET_SECS);
+            match tokio::time::timeout(budget, controller.fetch(&url, budget)).await {
+                Ok(Ok(page)) => WebviewRace::Fetched(ToolResult {
+                    success: true,
+                    output: self.truncate_response(&page.text),
+                    error: None,
+                }),
+                Ok(Err(e)) => WebviewRace::Failed(e.to_string()),
+                Err(_) => WebviewRace::Failed(format!(
+                    "webview fetch timeout after {:.1}s",
+                    budget.as_secs_f32()
+                )),
+            }
+        };
+        tokio::pin!(http_fut);
+        tokio::pin!(webview_fut);
 
-        if self.should_fallback_to_jina(&standard_result) {
+        let mut standard_result: Option<ToolResult> = None;
+        let mut webview_candidate: Option<ToolResult> = None;
+        let mut webview_error: Option<String> = None;
+        let mut webview_finished = false;
+
+        loop {
+            tokio::select! {
+                res = &mut http_fut, if standard_result.is_none() => {
+                    if !self.should_fallback_to_jina(&res) {
+                        store_fetch_output(&url, &res.output);
+                        return Ok(res);
+                    }
+                    standard_result = Some(res);
+                    if webview_finished {
+                        break;
+                    }
+                }
+                race = &mut webview_fut, if !webview_finished => {
+                    webview_finished = true;
+                    match race {
+                        WebviewRace::Unavailable => {}
+                        WebviewRace::Fetched(candidate) => {
+                            if !self.should_fallback_to_jina(&candidate) {
+                                store_fetch_output(&url, &candidate.output);
+                                return Ok(candidate);
+                            }
+                            tracing::info!(
+                                "web_fetch: webview fetch returned likely anti-bot or empty content for {url}"
+                            );
+                            webview_candidate = Some(candidate);
+                        }
+                        WebviewRace::Failed(msg) => {
+                            tracing::warn!(
+                                "web_fetch: webview fetch failed for {url}: {msg}; relying on HTTP path"
+                            );
+                            webview_error = Some(msg);
+                        }
+                    }
+                    if standard_result.is_some() {
+                        break;
+                    }
+                }
+            }
+        }
+        let standard_result = standard_result.unwrap_or_else(|| ToolResult {
+            success: false,
+            output: String::new(),
+            error: Some("standard fetch did not complete".into()),
+        });
+
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining >= Duration::from_secs(2) && !jina_cooling_down() {
             tracing::info!(
-                "web_fetch: standard fetch insufficient for {url}, attempting Jina Reader fallback"
+                "web_fetch: direct paths insufficient for {url}, attempting Jina Reader fallback"
             );
-            match Box::pin(self.fetch_via_jina_reader(&url)).await {
-                Ok(jina_result) if jina_result.success => {
+            let budget = budget_capped(FETCH_JINA_BUDGET_SECS);
+            match tokio::time::timeout(budget, Box::pin(self.fetch_via_jina_reader(&url))).await {
+                Ok(Ok(jina_result)) if jina_result.success => {
+                    store_fetch_output(&url, &jina_result.output);
                     return Ok(jina_result);
                 }
-                Ok(jina_result) => {
+                Ok(Ok(jina_result)) => {
                     tracing::warn!(
                         "web_fetch: Jina Reader fallback failed: {:?}",
                         jina_result.error
                     );
                 }
-                Err(e) => {
+                Ok(Err(e)) => {
                     tracing::warn!("web_fetch: Jina Reader fallback error: {e}");
                 }
+                Err(_) => {
+                    set_jina_cooldown();
+                    tracing::warn!(
+                        "web_fetch: Jina Reader timed out after {:.1}s",
+                        budget.as_secs_f32()
+                    );
+                }
             }
+        }
 
-            if self.firecrawl.enabled {
-                tracing::info!(
-                    "web_fetch: Jina Reader also insufficient, attempting Firecrawl fallback"
-                );
-                match Box::pin(self.fetch_via_firecrawl(&url)).await {
-                    Ok(firecrawl_result) if firecrawl_result.success => {
-                        return Ok(firecrawl_result);
-                    }
-                    Ok(firecrawl_result) => {
-                        tracing::warn!(
-                            "web_fetch: Firecrawl fallback also failed: {:?}",
-                            firecrawl_result.error
-                        );
-                    }
-                    Err(e) => {
-                        tracing::warn!("web_fetch: Firecrawl fallback error: {e}");
-                    }
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if self.firecrawl.enabled && remaining >= Duration::from_secs(3) {
+            tracing::info!(
+                "web_fetch: attempting Firecrawl fallback for {url}"
+            );
+            let budget = budget_capped(FETCH_FIRECRAWL_BUDGET_SECS);
+            match tokio::time::timeout(budget, Box::pin(self.fetch_via_firecrawl(&url))).await {
+                Ok(Ok(firecrawl_result)) if firecrawl_result.success => {
+                    store_fetch_output(&url, &firecrawl_result.output);
+                    return Ok(firecrawl_result);
+                }
+                Ok(Ok(firecrawl_result)) => {
+                    tracing::warn!(
+                        "web_fetch: Firecrawl fallback also failed: {:?}",
+                        firecrawl_result.error
+                    );
+                }
+                Ok(Err(e)) => {
+                    tracing::warn!("web_fetch: Firecrawl fallback error: {e}");
+                }
+                Err(_) => {
+                    tracing::warn!(
+                        "web_fetch: Firecrawl timed out after {:.1}s",
+                        budget.as_secs_f32()
+                    );
                 }
             }
         }
 
         let best = pick_best_result(webview_candidate, standard_result, webview_error);
+        if best.success {
+            store_fetch_output(&url, &best.output);
+        }
         Ok(best)
     }
 }
@@ -743,7 +978,8 @@ fn pick_best_result(
             output: String::new(),
             error: Some(format!(
                 "All fetch paths returned an anti-bot or empty page. \
-                 Snippet of last response: {head}"
+                 Snippet of last response: {head}\n\
+                 目标站点触发了反爬/人机验证,无法获取正文;请稍后重试或改用其它来源链接。"
             )),
         };
     }
@@ -753,7 +989,8 @@ fn pick_best_result(
             output: String::new(),
             error: Some(
                 "All fetch paths returned an empty or near-empty page. \
-                 The target may be deleted, paywalled, or login-required."
+                 The target may be deleted, paywalled, or login-required.\n\
+                 页面为空或近乎为空:可能已被删除、需要登录或付费;请更换来源链接。"
                     .into(),
             ),
         };
@@ -769,19 +1006,52 @@ fn pick_best_result(
             parts.push(format!("webview fetch: {err}"));
         }
         if !parts.is_empty() {
+            let all_network = parts.iter().all(|p| is_network_error_text(p));
+            let error = if all_network {
+                format!(
+                    "Unable to reach the target site: {}. This is a CONNECTIVITY problem \
+                     (network, proxy or firewall), not a problem with the URL itself — do \
+                     not retry immediately; inform the user and check the proxy settings \
+                     (services.proxy_runtime / HTTP(S)_PROXY).\n\
+                     网络连接异常:无法访问目标网址,请检查网络连接或代理设置;这不是 URL 本身的问题。",
+                    parts.join("; ")
+                )
+            } else {
+                format!(
+                    "All fetch paths failed. {}. \
+                     If your network requires a proxy, configure it via the proxy runtime \
+                     settings (services.proxy_runtime / HTTP(S)_PROXY) and retry.\n\
+                     抓取失败:所有获取路径均未成功;可稍后重试或更换来源链接。",
+                    parts.join("; ")
+                )
+            };
             return ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!(
-                    "All fetch paths failed. {}. \
-                     If your network requires a proxy, configure it via the proxy runtime \
-                     settings (services.proxy_runtime / HTTP(S)_PROXY) and retry.",
-                    parts.join("; ")
-                )),
+                error: Some(error),
             };
         }
     }
     best
+}
+
+fn is_network_error_text(msg: &str) -> bool {
+    let lower = msg.to_ascii_lowercase();
+    [
+        "timeout",
+        "timed out",
+        "error sending request",
+        "connection refused",
+        "connection reset",
+        "connection closed",
+        "dns",
+        "tls",
+        "handshake",
+        "unreachable",
+        "broken pipe",
+    ]
+    .iter()
+    .any(|needle| lower.contains(needle))
 }
 
 const BROWSER_USER_AGENT: &str = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) \
@@ -843,7 +1113,7 @@ fn validate_target_url(
     }
 
     if !private_host_allowed {
-        validate_resolved_host_is_public(&host)?;
+        cached_validate_resolved_host_is_public(&host)?;
     }
 
     Ok(url.to_string())

@@ -4,7 +4,6 @@
 
 use std::collections::hash_map::Entry;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 
 pub type LoopDetectionCallback = Box<dyn Fn(&str) + Send + Sync>;
 
@@ -123,8 +122,12 @@ impl LoopControlState {
     }
 
     pub fn invalidate_read_signatures(&mut self) {
-        self.seen_tool_signatures
-            .retain(|(name, _), _| name != "file_read" && name != "content_search");
+        self.seen_tool_signatures.retain(|(name, _), _| {
+            !matches!(
+                name.as_str(),
+                "file_read" | "content_search" | "dir_list" | "file_list" | "codebase_search"
+            )
+        });
     }
 
     pub fn peek_window_repeat_count(&self, name: &str, canonical_args: &str) -> usize {
@@ -140,120 +143,6 @@ impl LoopControlState {
 
     pub fn loop_detection_enabled(&self) -> bool {
         self.loop_detector.is_enabled()
-    }
-
-    pub fn record_tool_results_with_args(
-        &mut self,
-        results: &[(String, serde_json::Value, String)],
-    ) -> Result<Option<String>, String> {
-        let mut has_payload = false;
-        let mut fingerprint_hasher = std::collections::hash_map::DefaultHasher::new();
-        let mut notification: Option<String> = None;
-
-        for (name, args, output) in results {
-            has_payload = true;
-            let canonical_args =
-                crate::agent::loop_::detector::canonicalise_args_string(args);
-            name.hash(&mut fingerprint_hasher);
-            canonical_args.hash(&mut fingerprint_hasher);
-            output.hash(&mut fingerprint_hasher);
-            let det = self.loop_detector.record_with_failure_hashed(
-                name,
-                crate::agent::loop_::detector::hash_canonical_str(&canonical_args),
-                output,
-                false,
-            );
-            match det {
-                crate::agent::loop_::detector::LoopDetectionResult::Warning(msg) => {
-                    tracing::warn!("[Loop Detection] {msg}");
-                    self.notify(&msg);
-                    notification = Some(msg);
-                }
-                crate::agent::loop_::detector::LoopDetectionResult::Block(msg) => {
-                    tracing::warn!("[Loop Detection  - BLOCKED] {msg}");
-                    let formatted = format!("[Loop Detection  - BLOCKED] {msg}");
-                    self.notify(&formatted);
-                    notification = Some(formatted);
-                }
-                crate::agent::loop_::detector::LoopDetectionResult::Break(msg) => {
-                    let formatted = format!("Agent loop aborted by loop detector: {msg}");
-                    self.notify(&formatted);
-                    return Err(formatted);
-                }
-                _ => {}
-            }
-        }
-
-        if has_payload {
-            let current_hash = fingerprint_hasher.finish();
-            if self.last_tool_output_hash == Some(current_hash) {
-                self.consecutive_identical_outputs += 1;
-            } else {
-                self.consecutive_identical_outputs = 0;
-                self.last_tool_output_hash = Some(current_hash);
-            }
-            if self.consecutive_identical_outputs >= self.identical_output_threshold {
-                return Err(format!(
-                    "Agent loop aborted: identical tool call (name + arguments + output) detected {} consecutive times",
-                    self.consecutive_identical_outputs
-                ));
-            }
-        }
-        Ok(notification)
-    }
-
-    pub fn record_tool_results(
-        &mut self,
-        results: &[(String, String)],
-    ) -> Result<Option<String>, String> {
-        let mut has_payload = false;
-        let mut fingerprint_hasher = std::collections::hash_map::DefaultHasher::new();
-        let mut notification: Option<String> = None;
-
-        for (name, output) in results {
-            has_payload = true;
-            name.hash(&mut fingerprint_hasher);
-            output.hash(&mut fingerprint_hasher);
-            let det = self
-                .loop_detector
-                .record(name, &serde_json::Value::Null, output);
-            match det {
-                crate::agent::loop_::detector::LoopDetectionResult::Warning(msg) => {
-                    tracing::warn!("[Loop Detection] {msg}");
-                    self.notify(&msg);
-                    notification = Some(msg);
-                }
-                crate::agent::loop_::detector::LoopDetectionResult::Block(msg) => {
-                    tracing::warn!("[Loop Detection  - BLOCKED] {msg}");
-                    let formatted = format!("[Loop Detection  - BLOCKED] {msg}");
-                    self.notify(&formatted);
-                    notification = Some(formatted);
-                }
-                crate::agent::loop_::detector::LoopDetectionResult::Break(msg) => {
-                    let formatted = format!("Agent loop aborted by loop detector: {msg}");
-                    self.notify(&formatted);
-                    return Err(formatted);
-                }
-                _ => {}
-            }
-        }
-
-        if has_payload {
-            let current_hash = fingerprint_hasher.finish();
-            if self.last_tool_output_hash == Some(current_hash) {
-                self.consecutive_identical_outputs += 1;
-            } else {
-                self.consecutive_identical_outputs = 0;
-                self.last_tool_output_hash = Some(current_hash);
-            }
-            if self.consecutive_identical_outputs >= self.identical_output_threshold {
-                return Err(format!(
-                    "Agent loop aborted: identical tool call (name + output) detected {} consecutive times",
-                    self.consecutive_identical_outputs
-                ));
-            }
-        }
-        Ok(notification)
     }
 
     pub fn reset(&mut self) {

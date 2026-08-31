@@ -3,6 +3,7 @@
 // Licensed under the MIT License.
 
 import { useEffect, useMemo, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
 import { useSettingsStore } from '../../stores/settingsStore'
 import { DRAFT_RUNTIME_SELECTION_KEY, useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useProviderStore } from '../../stores/providerStore'
@@ -20,26 +21,36 @@ import { CODING_MODE_ACCENT } from '../../types/codingMode'
 import { useTranslation, useCodingModeText } from '../../i18n'
 import { PythonEnvPicker } from '../workspace/PythonEnvPicker'
 
+const INDENT_SCAN_MAX_CHARS = 16_384
+const INDENT_SCAN_MAX_LINES = 200
+
 function detectIndentSpec(text: string): string {
   if (!text) return 'Spaces: 2'
-  const lines = text.split('\n').slice(0, 200)
   let tabCount = 0
   let spaceCount = 0
   const spaceWidthVotes: Record<number, number> = {}
-  for (const line of lines) {
-    if (!line.length) continue
-    if (line.startsWith('\t')) {
-      tabCount += 1
-      continue
-    }
-    const m = line.match(/^( +)/)
-    if (m && m[1]) {
-      spaceCount += 1
-      const w = m[1].length
-      if (w === 2 || w === 4 || w === 8) {
-        spaceWidthVotes[w] = (spaceWidthVotes[w] ?? 0) + 1
+  const limit = Math.min(text.length, INDENT_SCAN_MAX_CHARS)
+  let lineStart = 0
+  let lineCount = 0
+  while (lineStart < limit && lineCount < INDENT_SCAN_MAX_LINES) {
+    let lineEnd = text.indexOf('\n', lineStart)
+    if (lineEnd === -1 || lineEnd > limit) lineEnd = limit
+    if (lineEnd > lineStart) {
+      const first = text.charCodeAt(lineStart)
+      if (first === 9) {
+        tabCount += 1
+      } else if (first === 32) {
+        let cursor = lineStart
+        while (cursor < lineEnd && text.charCodeAt(cursor) === 32) cursor += 1
+        spaceCount += 1
+        const w = cursor - lineStart
+        if (w === 2 || w === 4 || w === 8) {
+          spaceWidthVotes[w] = (spaceWidthVotes[w] ?? 0) + 1
+        }
       }
     }
+    lineCount += 1
+    lineStart = lineEnd + 1
   }
   if (tabCount > spaceCount && tabCount > 0) return 'Tabs'
   if (spaceCount === 0) return 'Spaces: 2'
@@ -189,10 +200,17 @@ export function StatusBar() {
 
   const editorCursor = useUIStore((s) => s.editorCursor)
   const activeWorkspaceTab = useWorkspaceFilesStore((s) => s.activeTab)
-  const activeBuffer = useWorkspaceFilesStore((s) => {
-    if (!s.root || !s.activeTab) return null
-    return s.files[`${s.root}::${s.activeTab}`] ?? null
-  })
+  const activeBufferMeta = useWorkspaceFilesStore(
+    useShallow((s) => {
+      if (!s.root || !s.activeTab) return null
+      const buf = s.files[`${s.root}::${s.activeTab}`]
+      if (!buf) return null
+      return {
+        encoding: buf.encoding,
+        modifiedAt: buf.modifiedAt,
+      }
+    }),
+  )
 
   const languageId = useMemo(() => {
     if (!activeWorkspaceTab) return null
@@ -200,15 +218,19 @@ export function StatusBar() {
   }, [activeWorkspaceTab])
 
   const encodingLabel = useMemo(() => {
-    if (!activeBuffer) return null
-    if (activeBuffer.encoding === 'base64') return 'binary'
+    if (!activeBufferMeta) return null
+    if (activeBufferMeta.encoding === 'base64') return 'binary'
     return 'UTF-8'
-  }, [activeBuffer])
+  }, [activeBufferMeta])
 
   const indentLabel = useMemo(() => {
-    if (!activeBuffer || activeBuffer.encoding === 'base64') return null
-    return detectIndentSpec(activeBuffer.draft ?? activeBuffer.original ?? '')
-  }, [activeBuffer])
+    if (!activeBufferMeta || activeBufferMeta.encoding === 'base64') return null
+    const s = useWorkspaceFilesStore.getState()
+    if (!s.root || !s.activeTab) return null
+    const buf = s.files[`${s.root}::${s.activeTab}`]
+    if (!buf) return null
+    return detectIndentSpec(buf.draft ?? buf.original ?? '')
+  }, [activeBufferMeta?.encoding, activeBufferMeta?.modifiedAt, activeWorkspaceTab])
 
   const cursorLabel = useMemo(() => {
     if (!editorCursor || editorCursor.relPath !== activeWorkspaceTab) return null

@@ -23,11 +23,19 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
   const generateForRecording = useComputerRecorderStore((s) => s.generateForRecording)
   const generatingNames = useComputerRecorderStore((s) => s.generatingNames)
   const recorderStatus = useComputerRecorderStore((s) => s.status)
+  const recorderError = useComputerRecorderStore((s) => s.error)
   const recorderBusy = recorderStatus === 'recording'
 
   const provider = useComputerUseStore((s) => s.provider)
   const model = useComputerUseStore((s) => s.model)
   const start = useComputerUseStore((s) => s.start)
+  const computerStatus = useComputerUseStore((s) => s.status)
+  const computerBusy =
+    computerStatus === 'running' ||
+    computerStatus === 'thinking' ||
+    computerStatus === 'connecting' ||
+    computerStatus === 'call_user'
+  const replayBlocked = recorderBusy || computerBusy
 
   const [expanded, setExpanded] = useState<string | null>(null)
   const [inputs, setInputs] = useState('')
@@ -57,8 +65,8 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
   const hasModel = Boolean(provider && model)
 
   const smartReplay = (name: string) => {
-    if (!hasModel || recorderBusy) return
-    start({ replayRecording: name, smart: true })
+    if (!hasModel || replayBlocked) return
+    if (!start({ replayRecording: name, smart: true })) return
     setInputs('')
     setExpanded(null)
     onClose()
@@ -66,8 +74,8 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
   }
 
   const skillReplay = (name: string) => {
-    if (!hasModel || recorderBusy) return
-    start({ skill: name, taskOverride: inputs })
+    if (!hasModel || replayBlocked) return
+    if (!start({ skill: name, taskOverride: inputs })) return
     setInputs('')
     setExpanded(null)
     onClose()
@@ -75,8 +83,8 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
   }
 
   const exactReplay = (name: string) => {
-    if (recorderBusy) return
-    start({ replayRecording: name })
+    if (replayBlocked) return
+    if (!start({ replayRecording: name })) return
     onClose()
     void enterMinimalMode('computer')
   }
@@ -255,7 +263,7 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
                       <button
                         type="button"
                         onClick={() => smartReplay(rec.name)}
-                        disabled={!hasModel || rec.step_count === 0 || recorderBusy}
+                        disabled={!hasModel || rec.step_count === 0 || replayBlocked}
                         title={t('computerUse.skills.smartReplayHint')}
                         className="inline-flex items-center gap-1 rounded-md bg-[var(--color-brand)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
                       >
@@ -267,7 +275,7 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
                       <button
                         type="button"
                         onClick={() => exactReplay(rec.name)}
-                        disabled={rec.step_count === 0 || recorderBusy}
+                        disabled={rec.step_count === 0 || replayBlocked}
                         title={t('computerUse.skills.exactReplayHint')}
                         className="inline-flex items-center gap-1 rounded-md border border-[var(--color-border)] px-2.5 py-1.5 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:bg-black/[0.06] disabled:opacity-50 dark:hover:bg-white/[0.08]"
                       >
@@ -354,7 +362,7 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
                         <button
                           type="button"
                           onClick={() => skillReplay(rec.name)}
-                          disabled={!hasModel || recorderBusy}
+                          disabled={!hasModel || replayBlocked}
                           className="inline-flex items-center justify-center gap-1 rounded-md bg-[var(--color-brand)] px-2.5 py-1.5 text-[11px] font-semibold text-[var(--color-on-primary)] transition-opacity hover:opacity-90 disabled:opacity-50"
                         >
                           <span className="material-symbols-outlined text-[14px]">play_arrow</span>
@@ -368,6 +376,12 @@ export function SkillLibrary({ onClose }: { onClose: () => void }) {
             </ul>
           )}
         </div>
+
+        {recorderError && (
+          <div className="mx-3 mb-3 shrink-0 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-600 dark:text-red-400">
+            {recorderError}
+          </div>
+        )}
       </div>
       {editingSteps && (
         <StepEditor

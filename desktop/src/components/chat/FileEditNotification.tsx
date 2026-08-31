@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useState } from 'react'
+import { useMemo, useState } from 'react'
 import { useTranslation } from '../../i18n'
 import {
   isWorkspaceRootPath,
@@ -108,7 +108,7 @@ const DIFF_PREVIEW_LINES = 200
 
 function DiffLines({ diff }: { diff: string }) {
   const [showAll, setShowAll] = useState(false)
-  const allLines = diff.replace(/\n$/, '').split('\n')
+  const allLines = useMemo(() => diff.replace(/\n$/, '').split('\n'), [diff])
   const truncated = !showAll && allLines.length > DIFF_PREVIEW_LINES
   const lines = truncated ? allLines.slice(0, DIFF_PREVIEW_LINES) : allLines
   return (

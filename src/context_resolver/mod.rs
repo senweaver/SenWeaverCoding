@@ -11,6 +11,6 @@ pub mod resolver;
 pub mod types;
 
 pub use budget::{ContextBudget, Priority};
-pub use parser::{parse_context_tags, strip_context_tags};
+pub use parser::{parse_context_tags, parse_context_tags_with_spans, strip_context_tags, strip_spans};
 pub use resolver::{ContextResolver, DefaultResolver};
 pub use types::{ContextItem, ContextResolveError, ContextTag};

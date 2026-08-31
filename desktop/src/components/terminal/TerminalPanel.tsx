@@ -52,22 +52,33 @@ export function TerminalPanel() {
   }, [openNewTab, activeTabWorkDir])
 
   const dragStateRef = useRef<{ startY: number; startH: number } | null>(null)
+  const dragFrameRef = useRef<number | null>(null)
 
   const handleDragStart = useCallback(
     (e: React.MouseEvent) => {
       e.preventDefault()
       dragStateRef.current = { startY: e.clientY, startH: heightPx }
+      let lastNext = heightPx
       const onMove = (ev: MouseEvent) => {
         const ds = dragStateRef.current
         if (!ds) return
         const delta = ds.startY - ev.clientY
-        const next = Math.max(HEIGHT_MIN, Math.min(HEIGHT_MAX, ds.startH + delta))
-        setHeight(next)
+        lastNext = Math.max(HEIGHT_MIN, Math.min(HEIGHT_MAX, ds.startH + delta))
+        if (dragFrameRef.current !== null) cancelAnimationFrame(dragFrameRef.current)
+        dragFrameRef.current = requestAnimationFrame(() => {
+          dragFrameRef.current = null
+          setHeight(lastNext)
+        })
       }
       const onUp = () => {
         dragStateRef.current = null
         window.removeEventListener('mousemove', onMove)
         window.removeEventListener('mouseup', onUp)
+        if (dragFrameRef.current !== null) {
+          cancelAnimationFrame(dragFrameRef.current)
+          dragFrameRef.current = null
+        }
+        setHeight(lastNext)
       }
       window.addEventListener('mousemove', onMove)
       window.addEventListener('mouseup', onUp)

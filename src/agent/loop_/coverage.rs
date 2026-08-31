@@ -102,6 +102,14 @@ impl CoverageLedger {
         }
     }
 
+    pub fn invalidate_all_reads(&mut self) {
+        self.file_ranges.clear();
+        self.unpaged_files.clear();
+        self.file_blobs.clear();
+        self.search_ranges.clear();
+        self.search_blobs.clear();
+    }
+
     pub fn invalidate_after_mutation(&mut self, tool: &str, args: &Value, output: &str) {
         let keys = mutation_path_keys(tool, args, output);
         if keys.is_empty()

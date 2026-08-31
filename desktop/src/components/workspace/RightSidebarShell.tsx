@@ -41,12 +41,22 @@ export function RightSidebarShell({
   const requestNavigation = useWorkspaceFilesStore((s) => s.requestNavigation)
   const addToast = useUIStore((s) => s.addToast)
 
+  const sidebarOpen = useUIStore((s) => s.rightSidebarOpen)
+
   useEffect(() => {
     setRoot(workDir)
   }, [setRoot, workDir])
 
   useEffect(() => {
-    useWorkspaceFilesStore.getState().resumeWatcher()
+    const store = useWorkspaceFilesStore.getState()
+    if (sidebarOpen) {
+      store.resumeWatcher()
+    } else {
+      store.suspendWatcher()
+    }
+  }, [sidebarOpen, workDir])
+
+  useEffect(() => {
     return () => {
       useWorkspaceFilesStore.getState().suspendWatcher()
     }

@@ -674,6 +674,33 @@ impl OpsApplier {
                         super::validator::validate_edit(before_text.as_deref(), &text, Some(path));
                     if report.is_confident_failure() {
                         if batch.atomic {
+                            let issue_line = report.issues.first().and_then(|issue| {
+                                match &issue.kind {
+                                    super::validator::ValidationKind::TreeSitterError {
+                                        line,
+                                        ..
+                                    }
+                                    | super::validator::ValidationKind::BracketUnbalanced {
+                                        line,
+                                        ..
+                                    } => Some(*line as usize),
+                                    _ => None,
+                                }
+                            });
+                            let snippet = issue_line
+                                .map(|line| {
+                                    let start = line.saturating_sub(3);
+                                    let body = text
+                                        .lines()
+                                        .enumerate()
+                                        .skip(start)
+                                        .take(5)
+                                        .map(|(idx, l)| format!("{:>6}|{}", idx + 1, l))
+                                        .collect::<Vec<_>>()
+                                        .join("\n");
+                                    format!("\nContext around the failure:\n{body}")
+                                })
+                                .unwrap_or_default();
                             torn_guard.disarm();
                             let _ = restore_pre_images_async(&pre_images).await;
                             self.finalize_journal_async(
@@ -684,7 +711,11 @@ impl OpsApplier {
                             .await;
                             return Err(ApplyBatchError::Validator(
                                 BatchValidatorError::Rejected(format!(
-                                    "{}: {}",
+                                    "post-edit syntax validation failed for {} ({}); the \
+                                     atomic batch was rolled back and no files were changed.{snippet}\n\
+                                     Re-issue the edit so the whole file stays parseable \
+                                     (include the complete fixed block), or split the change \
+                                     into steps that each leave the file syntactically valid.",
                                     path.display(),
                                     report.advisory_summary()
                                 )),

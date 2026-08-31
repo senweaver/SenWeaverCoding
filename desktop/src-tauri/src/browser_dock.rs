@@ -191,6 +191,31 @@ const BRIDGE_JS: &str = r#"
 
   const ringMax = 256;
   const consoleRing = [];
+  const consolePending = [];
+  const netErrorPending = [];
+  let batchFlushTimer = null;
+  function drainBatch(pending, kind) {
+    while (pending.length) {
+      const entries = pending.splice(0, 32);
+      send(kind, { entries });
+    }
+  }
+  function flushEventBatches() {
+    batchFlushTimer = null;
+    drainBatch(consolePending, 'console_batch');
+    drainBatch(netErrorPending, 'network_error_batch');
+  }
+  function scheduleBatchFlush() {
+    if (batchFlushTimer !== null) return;
+    batchFlushTimer = setTimeout(flushEventBatches, 200);
+  }
+  function queueConsoleEntry(entry) {
+    consoleRing.push(entry);
+    while (consoleRing.length > ringMax) consoleRing.shift();
+    consolePending.push(entry);
+    while (consolePending.length > ringMax) consolePending.shift();
+    scheduleBatchFlush();
+  }
   const wrapConsole = (level) => {
     const orig = console[level] && console[level].bind(console);
     if (!orig) return;
@@ -200,9 +225,7 @@ const BRIDGE_JS: &str = r#"
           if (typeof a === 'string') return a;
           try { return JSON.stringify(a); } catch (_) { return String(a); }
         }).join(' ');
-        consoleRing.push({ level, message, ts: Date.now() });
-        while (consoleRing.length > ringMax) consoleRing.shift();
-        send('console', { level, message, ts: Date.now() });
+        queueConsoleEntry({ level, message, ts: Date.now() });
       } catch (_) {}
       return orig(...args);
     };
@@ -211,19 +234,13 @@ const BRIDGE_JS: &str = r#"
 
   window.addEventListener('error', (ev) => {
     try {
-      const entry = { level: 'error', message: `[uncaught] ${ev.message} (${ev.filename}:${ev.lineno})`, ts: Date.now() };
-      consoleRing.push(entry);
-      while (consoleRing.length > ringMax) consoleRing.shift();
-      send('console', entry);
+      queueConsoleEntry({ level: 'error', message: `[uncaught] ${ev.message} (${ev.filename}:${ev.lineno})`, ts: Date.now() });
     } catch (_) {}
   });
   window.addEventListener('unhandledrejection', (ev) => {
     try {
       const reason = ev.reason && (ev.reason.stack || ev.reason.message || String(ev.reason));
-      const entry = { level: 'error', message: `[unhandledrejection] ${reason}`, ts: Date.now() };
-      consoleRing.push(entry);
-      while (consoleRing.length > ringMax) consoleRing.shift();
-      send('console', entry);
+      queueConsoleEntry({ level: 'error', message: `[unhandledrejection] ${reason}`, ts: Date.now() });
     } catch (_) {}
   });
 
@@ -244,7 +261,9 @@ const BRIDGE_JS: &str = r#"
       if (!safe.url) return;
       netErrors.push(safe);
       while (netErrors.length > netErrorsMax) netErrors.shift();
-      send('network_error', safe);
+      netErrorPending.push(safe);
+      while (netErrorPending.length > netErrorsMax) netErrorPending.shift();
+      scheduleBatchFlush();
     } catch (_) {}
   }
   function normaliseFetchUrl(input) {
@@ -1349,6 +1368,7 @@ struct TabRecord {
 #[derive(Default)]
 struct TabsState {
     last_rect: Option<DockRect>,
+    last_applied_dock_geometry: Option<(f64, f64, f64, f64)>,
     tabs: HashMap<TabId, TabRecord>,
     order: Vec<TabId>,
     active: Option<TabId>,
@@ -1443,6 +1463,14 @@ impl DockSharedState {
     }
     fn set_rect(&self, rect: DockRect) {
         self.0.lock().last_rect = Some(rect);
+    }
+
+    fn last_applied_dock_geometry(&self) -> Option<(f64, f64, f64, f64)> {
+        self.0.lock().last_applied_dock_geometry
+    }
+
+    fn set_last_applied_dock_geometry(&self, geometry: Option<(f64, f64, f64, f64)>) {
+        self.0.lock().last_applied_dock_geometry = geometry;
     }
 
     fn reset(&self) {
@@ -2197,7 +2225,7 @@ fn dispatch_bridge_event(
         "data": parsed_data,
     });
 
-    if let Err(err) = app.emit("browser_dock_event", payload) {
+    if let Err(err) = app.emit_to("main", "browser_dock_event", payload) {
         tracing::warn!("[browser_dock] emit browser_dock_event failed: {err}");
     }
 }
@@ -2287,7 +2315,7 @@ fn emit_dock_error(
             "ts": now_millis(),
         },
     });
-    if let Err(err) = app.emit("browser_dock_event", payload) {
+    if let Err(err) = app.emit_to("main", "browser_dock_event", payload) {
         tracing::warn!("[browser_dock] emit dock error event failed: {err}");
     }
 }
@@ -2296,7 +2324,8 @@ fn emit_tabs_event(app: &AppHandle, state: &DockSharedState) {
     let tabs = state.list();
     let active = state.active();
     let active_session = state.foreground_session_id().or_else(|| state.active_session_id());
-    if let Err(err) = app.emit(
+    if let Err(err) = app.emit_to(
+        "main",
         "browser_dock_event",
         serde_json::json!({
             "kind": "tabs",
@@ -2426,6 +2455,7 @@ fn ensure_dock_webview(
     blocking_recv_without_starving_runtime(&add_rx, Duration::from_secs(15))
         .map_err(|e| format!("await add_child({DOCK_WEBVIEW_LABEL}) result failed: {e}"))??;
 
+    state.set_last_applied_dock_geometry(None);
     state.set_dock_visible(true);
 
     dock_webview(app)
@@ -2560,16 +2590,25 @@ fn update_dock_layout(app: &AppHandle, state: &DockSharedState) -> Result<(), St
     let was_visible = state.dock_visible();
     let toggle_visible = want_visible != was_visible;
     let pos_size = rect.map(|r| (r.position_logical(), r.size_logical()));
+    let geometry_key = pos_size.map(|(pos, size)| (pos.x, pos.y, size.width, size.height));
+    let geometry_unchanged =
+        geometry_key.is_some() && state.last_applied_dock_geometry() == geometry_key;
+
+    if !toggle_visible && geometry_unchanged {
+        return Ok(());
+    }
 
     with_dock_on_main_thread(app, "dock layout", move |app| {
         let Some(wv) = dock_webview(app) else {
             return Ok(());
         };
         if let Some((pos, size)) = pos_size {
-            wv.set_position(pos)
-                .map_err(|e| format!("set_position(dock) failed: {e}"))?;
-            wv.set_size(size)
-                .map_err(|e| format!("set_size(dock) failed: {e}"))?;
+            if !geometry_unchanged {
+                wv.set_position(pos)
+                    .map_err(|e| format!("set_position(dock) failed: {e}"))?;
+                wv.set_size(size)
+                    .map_err(|e| format!("set_size(dock) failed: {e}"))?;
+            }
         }
         if toggle_visible {
             if want_visible {
@@ -2580,6 +2619,10 @@ fn update_dock_layout(app: &AppHandle, state: &DockSharedState) -> Result<(), St
         }
         Ok(())
     })?;
+
+    if geometry_key.is_some() {
+        state.set_last_applied_dock_geometry(geometry_key);
+    }
 
     if toggle_visible {
         if want_visible {
@@ -2717,6 +2760,7 @@ pub(crate) mod cdp {
     pub struct NetLog {
         pub tabs: HashMap<TabId, TabNetLog>,
         pub subscribed: HashSet<usize>,
+        pub event_tokens: HashMap<usize, Vec<(String, i64)>>,
         pub active_capture: Option<TabId>,
     }
 
@@ -2732,6 +2776,7 @@ pub(crate) mod cdp {
             Mutex::new(NetLog {
                 tabs: HashMap::new(),
                 subscribed: HashSet::new(),
+                event_tokens: HashMap::new(),
                 active_capture: None,
             })
         })
@@ -2805,6 +2850,7 @@ pub(crate) mod cdp {
                             return Ok(());
                         }
                     }
+                    let mut tokens: Vec<(String, i64)> = Vec::with_capacity(4);
                     for event in [
                         "Network.requestWillBeSent",
                         "Network.responseReceived",
@@ -2834,7 +2880,9 @@ pub(crate) mod cdp {
                         unsafe {
                             receiver.add_DevToolsProtocolEventReceived(&handler, &mut token)
                         }?;
+                        tokens.push((event.to_string(), token));
                     }
+                    net_log().lock().event_tokens.insert(key, tokens);
                     Ok(())
                 })();
                 if let Err(err) = outcome {
@@ -2844,6 +2892,45 @@ pub(crate) mod cdp {
             .map_err(|e| format!("with_webview: {e}"))
         })
         .map_err(|e| anyhow::anyhow!(e))
+    }
+
+    pub fn unsubscribe_network(app: &tauri::AppHandle) {
+        let Some(webview) = app.get_webview(super::DOCK_WEBVIEW_LABEL) else {
+            let mut log = net_log().lock();
+            log.subscribed.clear();
+            log.event_tokens.clear();
+            return;
+        };
+        let _ = super::with_dock_on_main_thread(app, "cdp unsubscribe network", move |_app| {
+            let _ = webview.with_webview(|platform| {
+                use windows::core::Interface;
+                let outcome: windows::core::Result<()> = (|| {
+                    let controller = platform.controller();
+                    let core = unsafe { controller.CoreWebView2() }?;
+                    let key = core.as_raw() as usize;
+                    let tokens = {
+                        let mut log = net_log().lock();
+                        log.subscribed.remove(&key);
+                        log.event_tokens.remove(&key).unwrap_or_default()
+                    };
+                    for (event, token) in tokens {
+                        let event_h = HSTRING::from(event.as_str());
+                        if let Ok(receiver) =
+                            unsafe { core.GetDevToolsProtocolEventReceiver(&event_h) }
+                        {
+                            let _ = unsafe {
+                                receiver.remove_DevToolsProtocolEventReceived(token)
+                            };
+                        }
+                    }
+                    Ok(())
+                })();
+                if let Err(err) = outcome {
+                    tracing::warn!("[browser_dock] cdp network unsubscribe failed: {err}");
+                }
+            });
+            Ok(())
+        });
     }
 
     fn record_net_event(event: &str, body: &str) {
@@ -3316,7 +3403,14 @@ pub async fn browser_dock_set_rect(
 ) -> Result<(), String> {
     state.set_rect(rect);
     state.set_parked(false);
-    update_dock_layout(&app, state.inner())?;
+    let state_for_layout = state.inner().clone();
+    let app_for_layout = app.clone();
+    app.run_on_main_thread(move || {
+        if let Err(err) = update_dock_layout(&app_for_layout, &state_for_layout) {
+            tracing::warn!("[browser_dock] set_rect dock layout failed: {err}");
+        }
+    })
+    .map_err(|e| format!("schedule dock layout on the main thread failed: {e}"))?;
     Ok(())
 }
 
@@ -3368,12 +3462,22 @@ pub async fn browser_dock_close(
     app: AppHandle,
     state: tauri::State<'_, DockSharedState>,
 ) -> Result<(), String> {
+    #[cfg(windows)]
+    cdp::unsubscribe_network(&app);
     let _ = with_dock_on_main_thread(&app, "dock close webview", |app| {
         if let Some(webview) = dock_webview(app) {
             let _ = webview.close();
         }
         Ok(())
     });
+    #[cfg(windows)]
+    {
+        let mut log = cdp::net_log().lock();
+        log.tabs.clear();
+        log.subscribed.clear();
+        log.event_tokens.clear();
+        log.active_capture = None;
+    }
     state.reset();
     if let Some(controller) = app.try_state::<TauriDockController>() {
         controller.drain_pending("dock closed");
@@ -3482,7 +3586,6 @@ fn open_url_in_new_tab(
             ensure_dock_webview(app, state)?;
             dock_navigate_active(app, state)?;
             let _ = update_dock_layout(app, state);
-            focus_dock_webview(app);
             emit_tabs_event(app, state);
             return Ok(existing);
         }
@@ -3498,7 +3601,6 @@ fn open_url_in_new_tab(
     ensure_dock_webview(app, state)?;
     dock_navigate_active(app, state)?;
     let _ = update_dock_layout(app, state);
-    focus_dock_webview(app);
     emit_tabs_event(app, state);
     Ok(id)
 }
@@ -4099,7 +4201,7 @@ impl TauriDockController {
                     });
                     static TAKEOVER_END_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
                     if let Err(err) =
-                        inner_for_task.app.emit("browser_dock_event", payload)
+                        inner_for_task.app.emit_to("main", "browser_dock_event", payload)
                     {
                         crate::warn_emit_failure(
                             &TAKEOVER_END_EMIT_FAILURES,
@@ -4134,7 +4236,7 @@ impl TauriDockController {
                 },
             });
             static TAKEOVER_START_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
-            if let Err(err) = self.0.app.emit("browser_dock_event", payload) {
+            if let Err(err) = self.0.app.emit_to("main", "browser_dock_event", payload) {
                 crate::warn_emit_failure(
                     &TAKEOVER_START_EMIT_FAILURES,
                     "browser_dock takeover-start",
@@ -4428,7 +4530,7 @@ impl DockController for TauriDockController {
             "sessionId": session_hint,
             "data": { "session": session_hint, "source": "agent", "agentTabId": agent_tab },
         });
-        if let Err(err) = self.0.app.emit("browser_dock_event", payload) {
+        if let Err(err) = self.0.app.emit_to("main", "browser_dock_event", payload) {
             tracing::warn!("[browser_dock] emit visible failed: {err}");
         }
         Ok(())
@@ -4488,7 +4590,8 @@ impl DockController for TauriDockController {
         let preview_id = self.0.next_req_id.load(Ordering::SeqCst);
         let preview_session = state.tab_session_of(tab_id);
         static EXEC_PREVIEW_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
-        if let Err(err) = self.0.app.emit(
+        if let Err(err) = self.0.app.emit_to(
+            "main",
             "browser_dock_event",
             serde_json::json!({
                 "kind": "agent_action",
@@ -4819,7 +4922,6 @@ impl DockController for TauriDockController {
             state.set_parked(false);
             let _ = dock_navigate_active(&self.0.app, &state);
             let _ = update_dock_layout(&self.0.app, &state);
-            focus_dock_webview(&self.0.app);
             emit_tabs_event(&self.0.app, &state);
         } else {
             {
@@ -4963,7 +5065,8 @@ impl TauriDockController {
         let preview_id = self.0.next_req_id.load(Ordering::SeqCst);
         let preview_session = state.tab_session_of(tab_id);
         static NAVIGATE_PREVIEW_EMIT_FAILURES: AtomicU64 = AtomicU64::new(0);
-        if let Err(err) = self.0.app.emit(
+        if let Err(err) = self.0.app.emit_to(
+            "main",
             "browser_dock_event",
             serde_json::json!({
                 "kind": "agent_action",
@@ -5225,35 +5328,41 @@ pub fn install_into(app: &AppHandle) {
     app.manage(controller.clone());
     senweavercoding::tools::browser::install_dock_controller(Arc::new(controller));
 
-    if let Some(window) = app.get_window("main") {
-        let app_for_resize = app.clone();
-        let resize_scheduled = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        window.on_window_event(move |event| match event {
-            tauri::WindowEvent::ScaleFactorChanged { .. } => {
-                if let Some(state) = app_for_resize.try_state::<DockSharedState>() {
-                    let _ = update_dock_layout(&app_for_resize, state.inner());
-                }
+    install_main_window_dock_layout_events(app);
+}
+
+pub(crate) fn install_main_window_dock_layout_events(app: &AppHandle) {
+    let Some(window) = app.get_window("main") else {
+        return;
+    };
+    let app_for_resize = app.clone();
+    let resize_scheduled = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    window.on_window_event(move |event| match event {
+        tauri::WindowEvent::ScaleFactorChanged { .. } => {
+            if let Some(state) = app_for_resize.try_state::<DockSharedState>() {
+                state.set_last_applied_dock_geometry(None);
+                let _ = update_dock_layout(&app_for_resize, state.inner());
             }
-            tauri::WindowEvent::Resized(_) => {
-                if resize_scheduled
-                    .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-                {
-                    let app_throttled = app_for_resize.clone();
-                    let scheduled = resize_scheduled.clone();
-                    tauri::async_runtime::spawn(async move {
-                        tokio::time::sleep(std::time::Duration::from_millis(60)).await;
-                        let app_main = app_throttled.clone();
-                        let _ = app_throttled.run_on_main_thread(move || {
-                            if let Some(state) = app_main.try_state::<DockSharedState>() {
-                                let _ = update_dock_layout(&app_main, state.inner());
-                            }
-                        });
-                        scheduled.store(false, Ordering::Release);
+        }
+        tauri::WindowEvent::Resized(_) => {
+            if resize_scheduled
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                let app_throttled = app_for_resize.clone();
+                let scheduled = resize_scheduled.clone();
+                tauri::async_runtime::spawn(async move {
+                    tokio::time::sleep(std::time::Duration::from_millis(60)).await;
+                    let app_main = app_throttled.clone();
+                    let _ = app_throttled.run_on_main_thread(move || {
+                        if let Some(state) = app_main.try_state::<DockSharedState>() {
+                            let _ = update_dock_layout(&app_main, state.inner());
+                        }
                     });
-                }
+                    scheduled.store(false, Ordering::Release);
+                });
             }
-            _ => {}
-        });
-    }
+        }
+        _ => {}
+    });
 }

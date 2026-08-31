@@ -65,9 +65,22 @@ export type BrowserDockTabInfo = {
   sessionId?: string | null
 }
 
+export type BrowserDockConsoleEntry = { level: string; message: string; ts: number }
+
+export type BrowserDockNetworkErrorEntry = {
+  ts: number
+  method: string
+  url: string
+  status: number
+  duration_ms: number
+  page_url: string
+}
+
 export type BrowserDockEvent =
   | { kind: 'state'; tabId?: number; sessionId?: string | null; data: { url: string; title: string; canBack: boolean; ts: number } }
-  | { kind: 'console'; tabId?: number; sessionId?: string | null; data: { level: string; message: string; ts: number } }
+  | { kind: 'console'; tabId?: number; sessionId?: string | null; data: BrowserDockConsoleEntry }
+  | { kind: 'console_batch'; tabId?: number; sessionId?: string | null; data: { entries: BrowserDockConsoleEntry[] } }
+  | { kind: 'network_error_batch'; tabId?: number; sessionId?: string | null; data: { entries: BrowserDockNetworkErrorEntry[] } }
   | { kind: 'pick'; tabId?: number; sessionId?: string | null; data: { selector: string; text: string; props: Record<string, string> } }
   | { kind: 'inspect'; tabId?: number; sessionId?: string | null; data: { selector: string; props?: Record<string, string>; error?: string } }
   | { kind: 'zoom'; tabId?: number; sessionId?: string | null; data: { factor: number } }

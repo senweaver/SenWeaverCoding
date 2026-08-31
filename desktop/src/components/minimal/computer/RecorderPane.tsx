@@ -34,6 +34,8 @@ export function RecorderPane() {
   const savedRecordingName = useMinimalRecorderStore((s) => s.savedRecordingName)
   const savedSkillName = useMinimalRecorderStore((s) => s.savedSkillName)
   const startedAt = useMinimalRecorderStore((s) => s.startedAt)
+  const narrationEnabled = useMinimalRecorderStore((s) => s.narrationEnabled)
+  const narrationMuted = useMinimalRecorderStore((s) => s.narrationMuted)
 
   const computerStatus = useMinimalComputerStore((s) => s.status)
   const computerBusy = isComputerBusy(computerStatus) || computerStatus === 'call_user'
@@ -46,7 +48,6 @@ export function RecorderPane() {
   const [task, setTask] = useState('')
   const [now, setNow] = useState(() => Date.now())
   const [narrate, setNarrate] = useState(false)
-  const [muted, setMuted] = useState(false)
 
   useEffect(() => {
     void loadModels()
@@ -107,10 +108,7 @@ export function RecorderPane() {
           </label>
           <button
             type="button"
-            onClick={() => {
-              setMuted(false)
-              send({ action: 'start', task: task.trim(), narrationEnabled: narrate })
-            }}
+            onClick={() => send({ action: 'start', task: task.trim(), narrationEnabled: narrate })}
             disabled={computerBusy}
             title={computerBusy ? t('minimal.computer.record.busy') : undefined}
             className="inline-flex items-center justify-center gap-1.5 rounded-lg bg-red-500 px-3 py-1.5 text-[12px] font-semibold text-white transition-opacity hover:opacity-90 disabled:opacity-50"
@@ -152,18 +150,19 @@ export function RecorderPane() {
               <span className="material-symbols-outlined text-[15px]">stop</span>
               {t('computerUse.record.stop')}
             </button>
-            {narrate && (
+            {narrationEnabled && (
               <button
                 type="button"
-                onClick={() => {
-                  setMuted((m) => !m)
-                  send({ action: 'toggle-mute' })
-                }}
-                title={muted ? t('computerUse.narration.unmute') : t('computerUse.narration.mute')}
+                onClick={() => send({ action: 'toggle-mute' })}
+                title={
+                  narrationMuted
+                    ? t('computerUse.narration.unmute')
+                    : t('computerUse.narration.mute')
+                }
                 className="inline-flex items-center justify-center rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-black/[0.06] dark:hover:bg-white/[0.08]"
               >
                 <span className="material-symbols-outlined text-[15px]">
-                  {muted ? 'mic_off' : 'mic'}
+                  {narrationMuted ? 'mic_off' : 'mic'}
                 </span>
               </button>
             )}
@@ -215,7 +214,12 @@ export function RecorderPane() {
               <button
                 type="button"
                 onClick={() => send({ action: 'generate' })}
-                disabled={isGenerating}
+                disabled={isGenerating || !hasModel}
+                title={
+                  hasModel
+                    ? t('computerUse.skills.generateHint')
+                    : t('computerUse.noVisionModels')
+                }
                 className="inline-flex flex-1 items-center justify-center gap-1.5 rounded-lg border border-[var(--color-border)] px-3 py-1.5 text-[12px] font-medium text-[var(--color-text-primary)] transition-colors hover:border-[var(--color-brand)]/50 hover:text-[var(--color-brand)] disabled:opacity-50"
               >
                 {isGenerating && (

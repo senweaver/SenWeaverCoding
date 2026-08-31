@@ -153,6 +153,24 @@ const aiRefreshBatch = new Set<string>()
 
 let aiRefreshFlushTimer: ReturnType<typeof setTimeout> | null = null
 
+const WATCH_DIR_REFRESH_DEBOUNCE_MS = 300
+
+const watchDirRefreshBatch = new Set<string>()
+
+let watchDirRefreshTimer: ReturnType<typeof setTimeout> | null = null
+
+const dirRefreshInFlight = new Set<string>()
+
+const dirRefreshQueued = new Set<string>()
+
+const dirRefreshedAt: Record<string, number> = {}
+
+const DIR_EXPAND_REVALIDATE_MS = 60_000
+
+const WATCHER_RESUME_STALE_MS = 30_000
+
+let watcherSuspendedAt: number | null = null
+
 export const AI_FRESH_WINDOW_MS = 8_000
 
 export type TabViewState = {
@@ -681,6 +699,20 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       aiRefreshFlushTimer = null
     }
     aiRefreshBatch.clear()
+    if (watchDirRefreshTimer) {
+      clearTimeout(watchDirRefreshTimer)
+      watchDirRefreshTimer = null
+    }
+    watchDirRefreshBatch.clear()
+    dirRefreshInFlight.clear()
+    dirRefreshQueued.clear()
+    watcherSuspendedAt = null
+    if (current) {
+      const oldPrefix = `${current}::`
+      for (const key of Object.keys(dirRefreshedAt)) {
+        if (key.startsWith(oldPrefix)) delete dirRefreshedAt[key]
+      }
+    }
     if (copyAbortController) {
       copyAbortController.abort()
       copyAbortController = null
@@ -754,6 +786,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     if (watcherDispose) {
       watcherDispose()
       watcherDispose = null
+      watcherSuspendedAt = Date.now()
     }
   },
 
@@ -761,7 +794,11 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     const root = get().root
     if (!root || watcherDispose) return
     watcherDispose = startWatcherForRoot(get, root)
-    void get().refreshAll()
+    const suspendedAt = watcherSuspendedAt
+    watcherSuspendedAt = null
+    if (suspendedAt !== null && Date.now() - suspendedAt > WATCHER_RESUME_STALE_MS) {
+      void get().refreshAll()
+    }
     useGitStatusStore.getState().scheduleRefresh(root)
     useFileHistoryStore.getState().scheduleRefresh(root)
   },
@@ -777,13 +814,14 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         showHidden: get().showHidden,
       })
       if (get().root !== root) return
-      set({
-        rootEntries: tree.entries,
+      dirRefreshedAt[k(root, '')] = Date.now()
+      set((s) => ({
+        rootEntries: reconcileChildren(s.rootEntries, tree.entries),
         rootLoaded: true,
         rootLoading: false,
         truncated: tree.truncated,
         rootError: undefined,
-      })
+      }))
     } catch (err) {
       if (get().root !== root) return
       set({
@@ -857,6 +895,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       })
       if (get().root !== root) return
       if (dirLoadEpoch[key] !== epoch) return
+      dirRefreshedAt[key] = Date.now()
       set((s) => {
         const current = s.dirs[key] ?? emptyDir
         const nextDirs = {
@@ -865,7 +904,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
             loaded: true,
             loading: false,
             expanded: current.expanded,
-            children: tree.entries,
+            children: reconcileChildren(current.children, tree.entries),
             error: undefined,
           },
         }
@@ -928,7 +967,9 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       return { dirs: nextDirs }
     })
     if (expanded && prev?.loaded && !prev.loading) {
-      void reloadLoadedDir(get, set, root, relPath)
+      if (Date.now() - (dirRefreshedAt[key] ?? 0) > DIR_EXPAND_REVALIDATE_MS) {
+        void reloadLoadedDir(get, set, root, relPath)
+      }
     } else if (expanded && !prev?.loaded && !prev?.loading) {
       void get().loadDirectory(relPath)
     }
@@ -969,7 +1010,11 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     })
     if (willExpand) {
       const after = get().dirs[key]
-      if (after?.loaded && !after.loading) {
+      if (
+        after?.loaded &&
+        !after.loading &&
+        Date.now() - (dirRefreshedAt[key] ?? 0) > DIR_EXPAND_REVALIDATE_MS
+      ) {
         void reloadLoadedDir(get, set, root, relPath)
       }
     }
@@ -1239,10 +1284,10 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
 
     if (event.kind === 'renamed' && event.fromRelPath && event.fromRelPath !== relPath) {
       migrateRename(get, set, root, event.fromRelPath, relPath)
-      void refreshDir(get, set, parentOf(event.fromRelPath))
+      scheduleWatchDirRefresh(parentOf(event.fromRelPath), get, set)
       const newParent = parentOf(relPath)
       if (newParent !== parentOf(event.fromRelPath)) {
-        void refreshDir(get, set, newParent)
+        scheduleWatchDirRefresh(newParent, get, set)
       }
       useGitStatusStore.getState().scheduleRefresh(root)
       return
@@ -1309,8 +1354,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
       const parentKey = k(root, parent)
       const parentDir = get().dirs[parentKey]
       if (parent === '' || parentDir?.loaded) {
-
-        void refreshDir(get, set, parent)
+        scheduleWatchDirRefresh(parent, get, set)
       }
     }
 
@@ -1331,6 +1375,9 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
         return
       }
       if (buf && !buf.isDirty) {
+        if (isAi) {
+          aiRefreshBatch.delete(relPath)
+        }
         void reloadBuffer(get, set, relPath).then(() => {
 
           if (isAi) {
@@ -1394,6 +1441,7 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
     set((s) => {
       const buf = s.files[key]
       if (!buf) return {}
+      if (buf.draft === content) return {}
       return {
         files: {
           ...s.files,
@@ -1464,12 +1512,16 @@ export const useWorkspaceFilesStore = create<WorkspaceFilesState>((set, get) => 
             showHidden: get().showHidden,
           })
           if (get().root !== root) return
+          dirRefreshedAt[parentKey] = Date.now()
           set((s) => ({
             dirs: {
               ...s.dirs,
               [parentKey]: {
                 ...(s.dirs[parentKey] ?? emptyDir),
-                children: tree.entries,
+                children: reconcileChildren(
+                  s.dirs[parentKey]?.children,
+                  tree.entries,
+                ),
                 loaded: true,
                 loading: false,
               },
@@ -2020,6 +2072,53 @@ function prunePendingMap(
   return next
 }
 
+function reconcileChildren(
+  prev: FileTreeNode[] | undefined,
+  next: FileTreeNode[],
+): FileTreeNode[] {
+  if (!prev || prev.length === 0) return next
+  const byPath = new Map<string, FileTreeNode>()
+  for (const node of prev) byPath.set(node.relPath, node)
+  let reusedAll = prev.length === next.length
+  const out = next.map((node, idx) => {
+    const old = byPath.get(node.relPath)
+    if (
+      old &&
+      old.name === node.name &&
+      old.isDir === node.isDir &&
+      old.sizeBytes === node.sizeBytes &&
+      old.modifiedAt === node.modifiedAt
+    ) {
+      if (reusedAll && prev[idx] !== old) reusedAll = false
+      return old
+    }
+    reusedAll = false
+    return node
+  })
+  return reusedAll ? prev : out
+}
+
+function scheduleWatchDirRefresh(
+  parentRelPath: string,
+  get: () => WorkspaceFilesState,
+  set: (
+    partial:
+      | Partial<WorkspaceFilesState>
+      | ((s: WorkspaceFilesState) => Partial<WorkspaceFilesState>),
+  ) => void,
+) {
+  watchDirRefreshBatch.add(parentRelPath)
+  if (watchDirRefreshTimer) return
+  watchDirRefreshTimer = setTimeout(() => {
+    watchDirRefreshTimer = null
+    const parents = [...watchDirRefreshBatch]
+    watchDirRefreshBatch.clear()
+    for (const parent of parents) {
+      void refreshDir(get, set, parent)
+    }
+  }, WATCH_DIR_REFRESH_DEBOUNCE_MS)
+}
+
 function scheduleAiFileRefresh(
   relPath: string,
   get: () => WorkspaceFilesState,
@@ -2131,57 +2230,82 @@ async function refreshDir(
 ) {
   const root = get().root
   if (!root) return
-  if (relPath === '') {
-    await get().refreshRoot()
+  const key = k(root, relPath)
+  if (dirRefreshInFlight.has(key)) {
+    dirRefreshQueued.add(key)
     return
   }
-  const key = k(root, relPath)
-  const existing = get().dirs[key]
-  if (existing?.loading) return
-  const epoch = dirLoadEpoch[key] ?? 0
+  dirRefreshInFlight.add(key)
   try {
-    const tree = await workspaceFilesApi.tree({
-      root,
-      path: relPath,
-      depth: 1,
-      showHidden: get().showHidden,
-    })
-    if (get().root !== root) return
-    if ((dirLoadEpoch[key] ?? 0) !== epoch) return
-    set((s) => {
-      const current = s.dirs[key]
-      if (current?.loading) return {}
-      return {
-        dirs: {
-          ...s.dirs,
-          [key]: {
-            ...(current ?? emptyDir),
-            children: tree.entries,
-            loaded: true,
-            loading: false,
-            expanded: current?.expanded ?? true,
-            error: undefined,
-          },
-        },
+    if (relPath === '') {
+      await get().refreshRoot()
+      if (get().root === root) {
+        dirRefreshedAt[key] = Date.now()
       }
-    })
-  } catch (err) {
-    if (get().root !== root) return
-    if ((dirLoadEpoch[key] ?? 0) !== epoch) return
-    set((s) => {
-      const current = s.dirs[key]
-      if (!current || current.loading) return {}
-      return {
-        dirs: {
-          ...s.dirs,
-          [key]: {
-            ...current,
-            error: err instanceof Error ? err.message : String(err),
-            loading: false,
+      return
+    }
+    const existing = get().dirs[key]
+    if (existing?.loading) return
+    const epoch = dirLoadEpoch[key] ?? 0
+    try {
+      const tree = await workspaceFilesApi.tree({
+        root,
+        path: relPath,
+        depth: 1,
+        showHidden: get().showHidden,
+      })
+      if (get().root !== root) return
+      if ((dirLoadEpoch[key] ?? 0) !== epoch) return
+      dirRefreshedAt[key] = Date.now()
+      set((s) => {
+        const current = s.dirs[key]
+        if (current?.loading) return {}
+        const children = reconcileChildren(current?.children, tree.entries)
+        if (
+          current &&
+          children === current.children &&
+          current.loaded &&
+          current.error === undefined
+        ) {
+          return {}
+        }
+        return {
+          dirs: {
+            ...s.dirs,
+            [key]: {
+              ...(current ?? emptyDir),
+              children,
+              loaded: true,
+              loading: false,
+              expanded: current?.expanded ?? true,
+              error: undefined,
+            },
           },
-        },
-      }
-    })
+        }
+      })
+    } catch (err) {
+      if (get().root !== root) return
+      if ((dirLoadEpoch[key] ?? 0) !== epoch) return
+      set((s) => {
+        const current = s.dirs[key]
+        if (!current || current.loading) return {}
+        return {
+          dirs: {
+            ...s.dirs,
+            [key]: {
+              ...current,
+              error: err instanceof Error ? err.message : String(err),
+              loading: false,
+            },
+          },
+        }
+      })
+    }
+  } finally {
+    dirRefreshInFlight.delete(key)
+    if (dirRefreshQueued.delete(key) && get().root === root) {
+      void refreshDir(get, set, relPath)
+    }
   }
 }
 
@@ -2198,6 +2322,8 @@ async function reloadLoadedDir(
   const key = k(root, relPath)
   const existing = get().dirs[key]
   if (!existing || existing.loading) return
+  if (dirRefreshInFlight.has(key)) return
+  dirRefreshInFlight.add(key)
   const epoch = dirLoadEpoch[key] ?? 0
   try {
     const tree = await workspaceFilesApi.tree({
@@ -2208,15 +2334,20 @@ async function reloadLoadedDir(
     })
     if (get().root !== root) return
     if ((dirLoadEpoch[key] ?? 0) !== epoch) return
+    dirRefreshedAt[key] = Date.now()
     set((s) => {
       const current = s.dirs[key]
       if (!current || current.loading) return {}
+      const children = reconcileChildren(current.children, tree.entries)
+      if (children === current.children && current.loaded && current.error === undefined) {
+        return {}
+      }
       return {
         dirs: {
           ...s.dirs,
           [key]: {
             ...current,
-            children: tree.entries,
+            children,
             loaded: true,
             loading: false,
             error: undefined,
@@ -2241,6 +2372,8 @@ async function reloadLoadedDir(
         },
       }
     })
+  } finally {
+    dirRefreshInFlight.delete(key)
   }
 }
 

@@ -140,12 +140,6 @@ impl TaskScheduler {
         self.events.subscribe()
     }
 
-    pub fn ready_snapshot(&self) -> Vec<TaskId> {
-        let mut entries: Vec<ReadyEntry> = self.ready_queue.iter().cloned().collect();
-        entries.sort_by(|a, b| b.cmp(a));
-        entries.into_iter().map(|e| e.task_id).collect()
-    }
-
     fn push_ready(&mut self, task_id: TaskId, priority: TaskPriority) {
         let seq = self.seq.fetch_add(1, Ordering::Relaxed);
         self.ready_queue.push(ReadyEntry {
@@ -284,36 +278,15 @@ impl TaskScheduler {
         None
     }
 
-    pub fn try_claim(&mut self, task_id: &str) -> Option<SchedulableTask> {
-        let claimed = self.try_claim_inner(task_id);
-        if claimed.is_none() {
-            scheduler_metrics::incr_try_claim_miss();
-        } else {
-
-            self.remove_from_heap(task_id);
-        }
-        claimed
-    }
-
     fn try_claim_inner(&mut self, task_id: &str) -> Option<SchedulableTask> {
         let node = self.nodes.get_mut(task_id)?;
         if node.status != TaskStatus::Queued {
+            scheduler_metrics::incr_try_claim_miss();
             return None;
         }
         node.status = TaskStatus::Running;
         scheduler_metrics::incr_task_started(priority_label(node.task.priority));
         Some(node.task.clone())
-    }
-
-    fn remove_from_heap(&mut self, task_id: &str) {
-
-        let drained: Vec<ReadyEntry> = self
-            .ready_queue
-            .drain()
-            .filter(|e| e.task_id != task_id)
-            .collect();
-        self.ready_queue = drained.into_iter().collect();
-        scheduler_metrics::set_ready_queue_depth(self.ready_queue.len() as i64);
     }
 
     pub fn complete(&mut self, task_id: &str, result: String) {
@@ -326,8 +299,25 @@ impl TaskScheduler {
         result: String,
         assigned_agent: Option<String>,
     ) {
-        if let Some(node) = self.nodes.get_mut(task_id) {
-            node.status = TaskStatus::Completed;
+        match self.nodes.get_mut(task_id) {
+            Some(node) if node.status == TaskStatus::Running => {
+                node.status = TaskStatus::Completed;
+            }
+            Some(node) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    status = ?node.status,
+                    "ignoring completion for a task that is not running"
+                );
+                return;
+            }
+            None => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "ignoring completion for an unknown task id"
+                );
+                return;
+            }
         }
 
         self.outcomes.lock().push(TaskOutcome {
@@ -368,8 +358,25 @@ impl TaskScheduler {
         error: String,
         assigned_agent: Option<String>,
     ) {
-        if let Some(node) = self.nodes.get_mut(task_id) {
-            node.status = TaskStatus::Failed;
+        match self.nodes.get_mut(task_id) {
+            Some(node) if node.status == TaskStatus::Running => {
+                node.status = TaskStatus::Failed;
+            }
+            Some(node) => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    status = ?node.status,
+                    "ignoring failure report for a task that is not running"
+                );
+                return;
+            }
+            None => {
+                tracing::warn!(
+                    task_id = %task_id,
+                    "ignoring failure report for an unknown task id"
+                );
+                return;
+            }
         }
 
         self.outcomes.lock().push(TaskOutcome {
@@ -397,7 +404,6 @@ impl TaskScheduler {
             if let Some(node) = self.nodes.get_mut(&id) {
                 if node.status == TaskStatus::Queued {
                     node.status = TaskStatus::Cancelled;
-                    self.remove_from_heap(&id);
                     self.outcomes.lock().push(TaskOutcome {
                         task_id: id.clone(),
                         success: false,
@@ -441,13 +447,46 @@ impl TaskScheduler {
     }
 
     pub fn is_finished(&self) -> bool {
-        !self.nodes.is_empty()
-            && self.nodes.values().all(|n| {
-                matches!(
+        self.nodes.values().all(|n| {
+            matches!(
+                n.status,
+                TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
+            )
+        })
+    }
+
+    pub fn synthesize_missing_outcomes(&mut self, reason: &str) -> usize {
+        let pending: Vec<TaskId> = self
+            .nodes
+            .iter()
+            .filter(|(_, n)| {
+                !matches!(
                     n.status,
                     TaskStatus::Completed | TaskStatus::Failed | TaskStatus::Cancelled
                 )
             })
+            .map(|(id, _)| id.clone())
+            .collect();
+        let synthesized = pending.len();
+        for id in pending {
+            if let Some(node) = self.nodes.get_mut(&id) {
+                node.status = TaskStatus::Failed;
+            }
+            self.outcomes.lock().push(TaskOutcome {
+                task_id: id.clone(),
+                success: false,
+                result: format!("aborted: {reason}"),
+                assigned_agent: None,
+            });
+            let _ = self.events.send(SchedulerEvent::TaskFailed {
+                id,
+                error: reason.to_string(),
+            });
+        }
+        if synthesized > 0 {
+            self.maybe_emit_graph_completed();
+        }
+        synthesized
     }
 
     pub fn outcomes(&self) -> Vec<TaskOutcome> {

@@ -87,12 +87,65 @@ fn archive_tool_output_blob(output: &str) -> Option<String> {
     if output.len() < TOOL_OUTPUT_BLOB_MIN_BYTES {
         return None;
     }
-    crate::agent::history::blob_store::put(output)
+    crate::agent::history::blob_store::put_offloaded(output)
 }
 
 const STREAM_TOOL_MARKER_WINDOW_CHARS: usize = 512;
 
 const MAX_STREAM_RESPONSE_BYTES: usize = 24 * 1024 * 1024;
+
+struct JsonEnvelopeScan {
+    depth: i64,
+    in_string: bool,
+    escape: bool,
+}
+
+fn scan_json_envelope_close(state: &mut JsonEnvelopeScan, text: &str) -> Option<usize> {
+    for (i, ch) in text.char_indices() {
+        if state.escape {
+            state.escape = false;
+            continue;
+        }
+        if state.in_string {
+            match ch {
+                '\\' => state.escape = true,
+                '"' => state.in_string = false,
+                _ => {}
+            }
+            continue;
+        }
+        match ch {
+            '"' => state.in_string = true,
+            '{' => state.depth += 1,
+            '}' => {
+                state.depth -= 1;
+                if state.depth <= 0 {
+                    return Some(i + 1);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn has_unmatched_open_brace_before(window: &str, marker_start: usize) -> bool {
+    let mut close_pending = 0usize;
+    for ch in window[..marker_start].chars().rev() {
+        match ch {
+            '}' => close_pending += 1,
+            '{' => {
+                if close_pending == 0 {
+                    return true;
+                }
+                close_pending -= 1;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 
 const DEFAULT_MAX_TOOL_ITERATIONS: usize = 2000;
 
@@ -930,12 +983,13 @@ async fn auto_finalize_incomplete_plan_steps(
     if let Some(tx) = on_delta {
         let notice = if assume_completed {
             format!(
-                "\n\u{2139}\u{fe0f} Plan auto-finalized: {} step(s) inferred as \
-                 `completed` (and {} previously `in_progress`) based on your final \
-                 summary. If any of these were actually unfinished, edit the .plan.md \
-                 directly or open a new turn to fix the tracker.\n",
-                applied.saturating_sub(in_progress_count),
-                in_progress_count
+                "\n\u{2139}\u{fe0f} Plan auto-finalized: {} in-progress step(s) inferred as \
+                 `completed` from your final summary; {} never-started step(s) marked \
+                 `skipped` because the completion claim was not trusted for them. If any \
+                 of these are wrong, edit the .plan.md directly or open a new turn to fix \
+                 the tracker.\n",
+                in_progress_count.min(applied),
+                applied.saturating_sub(in_progress_count.min(applied))
             )
         } else {
             format!(
@@ -1143,7 +1197,7 @@ fn decide_auto_finalize_status(
     was_in_progress: bool,
     aggregate_text: &str,
 ) -> (&'static str, String) {
-    if assume_completed {
+    if assume_completed && was_in_progress {
         let quote = first_completion_quote(aggregate_text).unwrap_or_default();
         let note = if quote.is_empty() {
             "Auto-completed: agent's final summary declared the work done but did \
@@ -1159,6 +1213,14 @@ fn decide_auto_finalize_status(
             )
         };
         ("completed", note)
+    } else if assume_completed {
+        (
+            "skipped",
+            "Auto-skipped: agent's final summary claimed completion, but this step \
+             was never started (still pending), so the claim was not trusted for it. \
+             Resume the plan if the step still applies."
+                .to_string(),
+        )
     } else if was_in_progress {
         (
             "skipped",
@@ -1389,17 +1451,18 @@ fn llm_resilience_backoff_ms(attempt: u32) -> u64 {
     ((capped as f64 * jitter_ratio).max(0.0) as u64).min(LLM_RESILIENCE_BACKOFF_CAP_MS)
 }
 
-fn llm_error_is_terminal(err: &anyhow::Error) -> bool {
+fn llm_error_is_terminal(err: &anyhow::Error, interrupted_after_progress: bool) -> bool {
+    if crate::providers::reliable::is_context_window_exceeded(err) {
+        return true;
+    }
     if crate::providers::reliable::is_non_retryable(err) {
         return true;
     }
-    if crate::providers::reliable::is_rate_limited(err)
-        || crate::providers::reliable::is_engine_overloaded(err)
-    {
+    if crate::providers::reliable::is_non_retryable_rate_limit(err) {
         return true;
     }
-    if crate::providers::reliable::is_context_window_exceeded(err) {
-        return true;
+    if interrupted_after_progress {
+        return false;
     }
     let lower = err.to_string().to_lowercase();
     const TERMINAL_HINTS: &[&str] = &[
@@ -1505,6 +1568,11 @@ async fn consume_provider_streaming_response(
     let mut suppress_forwarding = false;
     let mut tool_suppress_kind: Option<crate::agent::streaming_markers::ToolMarkerKind> = None;
     let mut marker_window = String::new();
+    let mut json_envelope_scan = JsonEnvelopeScan {
+        depth: 0,
+        in_string: false,
+        escape: false,
+    };
     let mut think_splitter = crate::agent::think_extractor::ThinkTagSplitter::new();
 
     let stream_idle_err = |idle: Duration| {
@@ -1644,7 +1712,6 @@ async fn consume_provider_streaming_response(
                 }
             }
             StreamEvent::Usage(usage) => {
-                progress.made_progress = true;
                 progress.partial_usage = Some(usage.clone());
                 outcome.usage = Some(usage);
             }
@@ -1787,31 +1854,133 @@ async fn consume_provider_streaming_response(
                     marker_window.drain(..boundary);
                 }
 
+                let mut forward_slice: Option<String> = None;
+
                 if !suppress_forwarding {
-                    if let Some(kind) =
-                        crate::agent::streaming_markers::classify_tool_marker(&marker_window)
-                    {
-                        suppress_forwarding = true;
-                        tool_suppress_kind = Some(kind);
-                        if outcome.forwarded_live_deltas {
-                            if let Some(tx) = delta_sender {
-                                let _ = tx.send(DraftEvent::Clear).await;
+                    match crate::agent::streaming_markers::find_tool_marker(&marker_window) {
+                        Some(m) => {
+                            let kind = if m.pattern().as_usize() == 2 {
+                                crate::agent::streaming_markers::ToolMarkerKind::Json
+                            } else {
+                                crate::agent::streaming_markers::ToolMarkerKind::Xml
+                            };
+                            let json_kind = matches!(
+                                kind,
+                                crate::agent::streaming_markers::ToolMarkerKind::Json
+                            );
+                            let genuine = !json_kind
+                                || has_unmatched_open_brace_before(&marker_window, m.start());
+                            if !genuine {
+                                marker_window.drain(..m.end());
+                                forward_slice = Some(visible_delta.clone());
+                            } else {
+                                suppress_forwarding = true;
+                                tool_suppress_kind = Some(kind);
+                                let marker_pre_len = marker_window.len() - m.start();
+                                let marker_in_current_chunk =
+                                    marker_pre_len <= visible_delta.len();
+                                if marker_in_current_chunk {
+                                    let cut = crate::util::floor_char_boundary(
+                                        &visible_delta,
+                                        visible_delta.len() - marker_pre_len,
+                                    );
+                                    if cut > 0 {
+                                        forward_slice =
+                                            Some(visible_delta[..cut].to_string());
+                                    }
+                                } else if outcome.forwarded_live_deltas {
+                                    if let Some(tx) = delta_sender {
+                                        let _ = tx.send(DraftEvent::Clear).await;
+                                    }
+                                    outcome.forwarded_live_deltas = false;
+                                }
+                                if json_kind {
+                                    json_envelope_scan = JsonEnvelopeScan {
+                                        depth: 1,
+                                        in_string: false,
+                                        escape: false,
+                                    };
+                                    let post_marker_len = marker_window.len() - m.end();
+                                    let scan_start = crate::util::ceil_char_boundary(
+                                        &visible_delta,
+                                        visible_delta
+                                            .len()
+                                            .saturating_sub(post_marker_len),
+                                    );
+                                    if let Some(rel) = scan_json_envelope_close(
+                                        &mut json_envelope_scan,
+                                        &visible_delta[scan_start..],
+                                    ) {
+                                        suppress_forwarding = false;
+                                        tool_suppress_kind = None;
+                                        let release = scan_start + rel;
+                                        let drain_to = marker_window.len().saturating_sub(
+                                            visible_delta.len() - release,
+                                        );
+                                        marker_window.drain(..drain_to);
+                                        let rem = &visible_delta[release..];
+                                        if !rem.is_empty() {
+                                            let combined = match forward_slice.take() {
+                                                Some(pre) => format!("{pre}{rem}"),
+                                                None => rem.to_string(),
+                                            };
+                                            forward_slice = Some(combined);
+                                        }
+                                    }
+                                }
                             }
-                            outcome.forwarded_live_deltas = false;
+                        }
+                        None => {
+                            forward_slice = Some(visible_delta.clone());
                         }
                     }
                 } else if matches!(
                     tool_suppress_kind,
                     Some(crate::agent::streaming_markers::ToolMarkerKind::Xml)
-                ) && crate::agent::streaming_markers::find_tool_close_marker(&marker_window)
-                    .is_some()
-                {
-                    suppress_forwarding = false;
-                    tool_suppress_kind = None;
-                    marker_window.clear();
+                ) {
+                    if let Some(m) =
+                        crate::agent::streaming_markers::find_tool_close_marker(&marker_window)
+                    {
+                        suppress_forwarding = false;
+                        tool_suppress_kind = None;
+                        let after_len = marker_window.len() - m.end();
+                        let rem_start = crate::util::ceil_char_boundary(
+                            &visible_delta,
+                            visible_delta.len().saturating_sub(after_len),
+                        );
+                        let mut rem = &visible_delta[rem_start..];
+                        if let Some(stripped) = rem.strip_prefix('>') {
+                            rem = stripped;
+                        }
+                        if !rem.is_empty() {
+                            forward_slice = Some(rem.to_string());
+                        }
+                        marker_window.drain(..m.end());
+                    }
+                } else if matches!(
+                    tool_suppress_kind,
+                    Some(crate::agent::streaming_markers::ToolMarkerKind::Json)
+                ) {
+                    if let Some(rel) =
+                        scan_json_envelope_close(&mut json_envelope_scan, &visible_delta)
+                    {
+                        suppress_forwarding = false;
+                        tool_suppress_kind = None;
+                        let drain_to = marker_window
+                            .len()
+                            .saturating_sub(visible_delta.len() - rel);
+                        marker_window.drain(..drain_to);
+                        let rem = &visible_delta[rel..];
+                        if !rem.is_empty() {
+                            forward_slice = Some(rem.to_string());
+                        }
+                    }
                 }
 
-                if suppress_forwarding {
+                let Some(forward_text) = forward_slice else {
+                    continue;
+                };
+                if forward_text.is_empty() {
                     continue;
                 }
 
@@ -1820,7 +1989,7 @@ async fn consume_provider_streaming_response(
                         let _ = tx.send(DraftEvent::Clear).await;
                         outcome.forwarded_live_deltas = true;
                     }
-                    if tx.send(DraftEvent::Content(visible_delta)).await.is_err() {
+                    if tx.send(DraftEvent::Content(forward_text)).await.is_err() {
                         delta_sender = None;
                     }
                 }
@@ -2390,9 +2559,11 @@ async fn execute_one_tool(
         }
     }
 
-    if let Some(obj) = call_arguments.as_object_mut() {
-        if call_name == "shell" || obj.contains_key("approved") {
-            obj.insert("approved".to_string(), serde_json::Value::Bool(true));
+    if current_tool_runtime_approved() {
+        if let Some(obj) = call_arguments.as_object_mut() {
+            if obj.contains_key("approved") {
+                obj.insert("approved".to_string(), serde_json::Value::Bool(true));
+            }
         }
     }
 
@@ -2611,9 +2782,25 @@ async fn execute_one_tool(
                 success: false,
             });
 
-            let _class =
+            let class =
                 crate::agent::turn_engine::recovery_bind::classify_and_trace(call_name, &e);
-            let reason = format!("Error executing {call_name}: {e}");
+            let hint = match class {
+                crate::agent::recovery::ErrorClass::Permanent => {
+                    " [error-class: permanent] Do NOT retry this exact call; the failure is \
+                     auth/permission/configuration class. Change the arguments, credentials, \
+                     or approach instead."
+                }
+                crate::agent::recovery::ErrorClass::RateLimited => {
+                    " [error-class: rate-limited] The upstream is rate limiting; wait before \
+                     retrying or reduce call frequency."
+                }
+                crate::agent::recovery::ErrorClass::Transient => {
+                    " [error-class: transient] This looks like a network/timeout hiccup; a \
+                     single retry of the same call may succeed."
+                }
+                crate::agent::recovery::ErrorClass::Unknown => "",
+            };
+            let reason = format!("Error executing {call_name}: {e}{hint}");
             Ok(ToolExecutionOutcome {
                 output: reason.clone(),
                 success: false,
@@ -3317,7 +3504,14 @@ pub(crate) async fn run_unified_loop_impl(
 
     let mut cached_tool_specs: Option<std::sync::Arc<Vec<crate::tools::ToolSpec>>> = None;
     let mut cached_mode_key: (u64, bool) = (0, false);
-    let mut prepared_history_cache: Option<(u8, Vec<u64>, multimodal::PreparedMessages)> = None;
+    let mut cached_base_overhead_tokens: usize = 0;
+    let mut cached_overhead_model = String::new();
+    let mut base_overhead_dirty = true;
+    let mut prepared_history_cache: Option<(
+        u8,
+        Vec<u64>,
+        std::sync::Arc<multimodal::PreparedMessages>,
+    )> = None;
 
     let mut _turn_metrics = crate::agent::executor_core::TurnMetricsGuard::start();
 
@@ -3426,6 +3620,7 @@ pub(crate) async fn run_unified_loop_impl(
     let mut turn_modified_files = false;
     let mut evaluator_retries = 0u32;
     let mut verify_retries = 0u32;
+    let mut verify_gate_pending = false;
 
     let mut llm_resilience_attempt: u32 = 0;
     let mut llm_resilience_spent = Duration::ZERO;
@@ -3642,6 +3837,7 @@ pub(crate) async fn run_unified_loop_impl(
                 .collect();
             specs.sort_by(|a, b| a.name.cmp(&b.name));
             cached_tool_specs = Some(std::sync::Arc::new(specs));
+            base_overhead_dirty = true;
         }
 
         let tool_specs_arc = cached_tool_specs
@@ -3667,6 +3863,15 @@ pub(crate) async fn run_unified_loop_impl(
                 }
             }
         }
+        let activated_overhead_tokens = if activated_specs.is_empty() {
+            0
+        } else {
+            serde_json::to_string(&activated_specs)
+                .map(|serialized| {
+                    crate::agent::token::budget::estimate_tokens_calibrated(&serialized, model)
+                })
+                .unwrap_or(0)
+        };
         let tool_specs_extended: Option<Vec<crate::tools::ToolSpec>> =
             if activated_specs.is_empty() {
                 None
@@ -3796,11 +4001,19 @@ pub(crate) async fn run_unified_loop_impl(
             };
 
         let tools_overhead_tokens = if use_native_tools {
-            serde_json::to_string(tool_specs)
-                .map(|serialized| {
-                    crate::agent::token::budget::estimate_tokens_calibrated(&serialized, model)
-                })
-                .unwrap_or(0)
+            if base_overhead_dirty || cached_overhead_model != model {
+                base_overhead_dirty = false;
+                cached_overhead_model = model.to_string();
+                cached_base_overhead_tokens = serde_json::to_string(tool_specs_arc.as_slice())
+                    .map(|serialized| {
+                        crate::agent::token::budget::estimate_tokens_calibrated(
+                            &serialized,
+                            model,
+                        )
+                    })
+                    .unwrap_or(0);
+            }
+            cached_base_overhead_tokens + activated_overhead_tokens
         } else {
             0
         };
@@ -4100,10 +4313,13 @@ pub(crate) async fn run_unified_loop_impl(
                                     .await;
                             }
                         }
-                        let mut combined = cached_prep;
+                        let mut combined = match std::sync::Arc::try_unwrap(cached_prep) {
+                            Ok(inner) => inner,
+                            Err(shared) => (*shared).clone(),
+                        };
                         combined.messages.extend(suffix_messages);
                         combined.contains_images |= suffix.contains_images;
-                        break 'prepared combined;
+                        break 'prepared std::sync::Arc::new(combined);
                     }
                 }
             }
@@ -4127,12 +4343,12 @@ pub(crate) async fn run_unified_loop_impl(
                         .await;
                 }
             }
-            prepared
+            std::sync::Arc::new(prepared)
         };
         prepared_history_cache = Some((
             mode_key,
             per_message_fingerprints,
-            prepared_messages.clone(),
+            std::sync::Arc::clone(&prepared_messages),
         ));
 
         emit_planning_phase(
@@ -4390,7 +4606,20 @@ pub(crate) async fn run_unified_loop_impl(
                     if stream_err.to_string().contains("exceeded max response size") {
                         return Err(stream_err);
                     }
-                    if crate::providers::reliable::is_rate_limited(&stream_err)
+                    if stream_probe.made_progress
+                        && llm_resilience_attempt < LLM_RESILIENCE_MAX_RETRIES
+                    {
+                        tracing::warn!(
+                            provider = active_provider_name,
+                            model = active_model,
+                            iteration = iteration + 1,
+                            "provider stream broke after partial output; retrying the streaming call: {stream_err}"
+                        );
+                        if let Some(ref tx) = on_delta {
+                            let _ = tx.send(DraftEvent::Clear).await;
+                        }
+                        Err(stream_err)
+                    } else if crate::providers::reliable::is_rate_limited(&stream_err)
                         || crate::providers::reliable::is_engine_overloaded(&stream_err)
                     {
                         Err(stream_err)
@@ -4403,19 +4632,6 @@ pub(crate) async fn run_unified_loop_impl(
                             iteration = iteration + 1,
                             "provider stream idle timeout; retrying streaming call instead of degrading to non-streaming: {stream_err}"
                         );
-                        Err(stream_err)
-                    } else if stream_probe.made_progress
-                        && llm_resilience_attempt < LLM_RESILIENCE_MAX_RETRIES
-                    {
-                        tracing::warn!(
-                            provider = active_provider_name,
-                            model = active_model,
-                            iteration = iteration + 1,
-                            "provider stream broke after partial output; retrying the streaming call: {stream_err}"
-                        );
-                        if let Some(ref tx) = on_delta {
-                            let _ = tx.send(DraftEvent::Clear).await;
-                        }
                         Err(stream_err)
                     } else {
                     tracing::warn!(
@@ -4509,7 +4725,7 @@ pub(crate) async fn run_unified_loop_impl(
                     {
                         break 'llm_attempt Err(tool_loop_cancelled());
                     }
-                    if llm_error_is_terminal(&e) {
+                    if llm_error_is_terminal(&e, stream_probe.made_progress) {
                         if crate::providers::reliable::is_context_window_exceeded(&e)
                             && emergency_compress_attempts < MAX_EMERGENCY_COMPRESS_ATTEMPTS
                         {
@@ -4553,7 +4769,7 @@ pub(crate) async fn run_unified_loop_impl(
                                         Some(emergency_compressor.context_window());
                                     if compressed {
                                         emergency_compress_attempts += 1;
-                                        prepared_messages =
+                                        let mut fresh =
                                             multimodal::prepare_messages_for_provider(
                                                 history,
                                                 multimodal_config,
@@ -4561,8 +4777,9 @@ pub(crate) async fn run_unified_loop_impl(
                                             .await?;
                                         let _ = apply_outgoing_pii_sanitization(
                                             Some(active_mode),
-                                            &mut prepared_messages.messages,
+                                            &mut fresh.messages,
                                         );
+                                        prepared_messages = std::sync::Arc::new(fresh);
                                         if let Some(ref tx) = on_delta {
                                             let _ = tx.send(DraftEvent::Clear).await;
                                         }
@@ -4583,6 +4800,15 @@ pub(crate) async fn run_unified_loop_impl(
                     if llm_resilience_attempt > LLM_RESILIENCE_MAX_RETRIES
                         || llm_resilience_spent >= LLM_RESILIENCE_MAX_TOTAL
                     {
+                        break 'llm_attempt Err(e);
+                    }
+                    if let Some(limit) = _pacing_gov.total_timeout_exceeded() {
+                        tracing::warn!(
+                            target: "agent.loop.resilience",
+                            turn_id = %turn_id,
+                            limit_secs = limit.as_secs(),
+                            "total turn timeout exceeded during provider retries; aborting retry loop"
+                        );
                         break 'llm_attempt Err(e);
                     }
                     let rate_limited = crate::providers::reliable::is_rate_limited(&e);
@@ -5158,31 +5384,52 @@ pub(crate) async fn run_unified_loop_impl(
                 }
             }
 
-            if turn_modified_files && !awaiting_user_input {
-                if let Some((feedback, retry_budget_left)) = run_auto_verify_gate(
-                    verify_retries,
-                    cancellation_token.as_ref(),
-                )
-                .await
-                {
-                    if retry_budget_left {
-                        verify_retries += 1;
-                        turn_modified_files = false;
+            if (turn_modified_files || verify_gate_pending) && !awaiting_user_input {
+                match run_auto_verify_gate(verify_retries, cancellation_token.as_ref()).await {
+                    Some((feedback, retry_budget_left)) => {
+                        if retry_budget_left {
+                            verify_retries += 1;
+                            turn_modified_files = false;
+                            verify_gate_pending = true;
+                            runtime_trace::record_event(
+                                "auto_verify_gate_retry",
+                                Some(channel_name),
+                                Some(provider_name),
+                                Some(model),
+                                Some(&turn_id),
+                                Some(false),
+                                None,
+                                serde_json::json!({ "retry": verify_retries }),
+                            );
+                            if !response_text.trim().is_empty() {
+                                history.push(ChatMessage::assistant(&response_text));
+                            }
+                            history.push(ChatMessage::system(feedback));
+                            continue;
+                        }
+                        verify_gate_pending = false;
                         runtime_trace::record_event(
-                            "auto_verify_gate_retry",
+                            "auto_verify_gate_exhausted",
                             Some(channel_name),
                             Some(provider_name),
                             Some(model),
                             Some(&turn_id),
                             Some(false),
-                            None,
-                            serde_json::json!({ "retry": verify_retries }),
+                            Some(&feedback),
+                            serde_json::json!({ "retries": verify_retries }),
                         );
-                        if !response_text.trim().is_empty() {
-                            history.push(ChatMessage::assistant(&response_text));
+                        history.push(ChatMessage::system(feedback.clone()));
+                        if let Some(ref tx) = on_delta {
+                            let _ = tx
+                                .send(DraftEvent::Progress(format!(
+                                    "\n\u{26a0}\u{fe0f} {}\n",
+                                    truncate_with_ellipsis(&feedback, 1_500)
+                                )))
+                                .await;
                         }
-                        history.push(ChatMessage::system(feedback));
-                        continue;
+                    }
+                    None => {
+                        verify_gate_pending = false;
                     }
                 }
             }
@@ -5284,19 +5531,21 @@ pub(crate) async fn run_unified_loop_impl(
                 format!("{truncation_prefix}{display_text}")
             };
 
-            runtime_trace::record_event(
-                "turn_final_response",
-                Some(channel_name),
-                Some(provider_name),
-                Some(model),
-                Some(&turn_id),
-                Some(true),
-                None,
-                serde_json::json!({
-                    "iteration": iteration + 1,
-                    "text": scrub_credentials(&display_text),
-                }),
-            );
+            if runtime_trace::is_enabled() {
+                runtime_trace::record_event(
+                    "turn_final_response",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(model),
+                    Some(&turn_id),
+                    Some(true),
+                    None,
+                    serde_json::json!({
+                        "iteration": iteration + 1,
+                        "text": scrub_credentials(&display_text),
+                    }),
+                );
+            }
 
             if let Some(ref tx) = on_delta {
                 let should_emit_post_hoc_chunks = !response_streamed_live;
@@ -5448,7 +5697,7 @@ pub(crate) async fn run_unified_loop_impl(
         }
 
         if !display_text.is_empty() {
-            if !native_tool_calls.is_empty() && !response_streamed_live {
+            if !tool_calls.is_empty() && !response_streamed_live {
                 if let Some(ref tx) = on_delta {
                     let mut narration = display_text.clone();
                     if !narration.ends_with('\n') {
@@ -6268,9 +6517,11 @@ pub(crate) async fn run_unified_loop_impl(
                 && !dedup_exempt
                 && loop_state.claim_signature(&tool_name, &canonical_tool_args)
             {
-                skip_reason = Some(format_dedup_skip_message(
-                    &tool_name,
-                    loop_state.completed_signature_blob(&tool_name, &canonical_tool_args),
+                skip_reason = Some(format!(
+                    "{DEDUP_RESULT_MARKER}{tool_name}' with identical arguments appears more \
+                     than once in this batch; this duplicate was skipped before execution. \
+                     Use the result of the other identical call in this same batch once it \
+                     completes; if that call fails, re-issue this one afterwards."
                 ));
             }
             if let Some(skipped) = skip_reason {
@@ -6323,20 +6574,22 @@ pub(crate) async fn run_unified_loop_impl(
                 continue;
             }
 
-            runtime_trace::record_event(
-                "tool_call_start",
-                Some(channel_name),
-                Some(provider_name),
-                Some(model),
-                Some(&turn_id),
-                None,
-                None,
-                serde_json::json!({
-                    "iteration": iteration + 1,
-                    "tool": tool_name.clone(),
-                    "arguments": scrub_credentials(&tool_args.to_string()),
-                }),
-            );
+            if runtime_trace::is_enabled() {
+                runtime_trace::record_event(
+                    "tool_call_start",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(model),
+                    Some(&turn_id),
+                    None,
+                    None,
+                    serde_json::json!({
+                        "iteration": iteration + 1,
+                        "tool": tool_name.clone(),
+                        "arguments": scrub_credentials(&tool_args.to_string()),
+                    }),
+                );
+            }
 
             if let Some(ref tx) = on_delta {
                 let hint = truncate_tool_args_for_progress(&tool_name, &tool_args, 60);
@@ -6429,21 +6682,23 @@ pub(crate) async fn run_unified_loop_impl(
             };
 
         for (idx, call, outcome) in executed_outcomes {
-            runtime_trace::record_event(
-                "tool_call_result",
-                Some(channel_name),
-                Some(provider_name),
-                Some(model),
-                Some(&turn_id),
-                Some(outcome.success),
-                outcome.error_reason.as_deref(),
-                serde_json::json!({
-                    "iteration": iteration + 1,
-                    "tool": call.name.clone(),
-                    "duration_ms": outcome.duration.as_millis(),
-                    "output": scrub_credentials(&outcome.output),
-                }),
-            );
+            if runtime_trace::is_enabled() {
+                runtime_trace::record_event(
+                    "tool_call_result",
+                    Some(channel_name),
+                    Some(provider_name),
+                    Some(model),
+                    Some(&turn_id),
+                    Some(outcome.success),
+                    outcome.error_reason.as_deref(),
+                    serde_json::json!({
+                        "iteration": iteration + 1,
+                        "tool": call.name.clone(),
+                        "duration_ms": outcome.duration.as_millis(),
+                        "output": scrub_credentials(&outcome.output),
+                    }),
+                );
+            }
 
             if let Some(ref tx) = on_delta {
                 let secs = outcome.duration.as_secs();
@@ -6539,6 +6794,13 @@ pub(crate) async fn run_unified_loop_impl(
                         &call.arguments,
                         &outcome.output,
                     );
+                    loop_state.invalidate_read_signatures();
+                } else if outcome.success
+                    && crate::agent::tool_handler::outcome::is_command_execution_tool(
+                        call.name.as_str(),
+                    )
+                {
+                    loop_state.coverage.invalidate_all_reads();
                     loop_state.invalidate_read_signatures();
                 }
                 loop_state.coverage.record_success(
@@ -6761,12 +7023,14 @@ pub(crate) async fn run_unified_loop_impl(
 
             let safe_output =
                 crate::services::governance::credential_vault::redact_for_audit_optional(&outcome.output);
-            individual_results.push((tool_call_id, safe_output.clone()));
-            let _ = writeln!(
-                tool_results,
-                "<tool_result name=\"{}\">\n{}\n</tool_result>",
-                tool_name, safe_output
-            );
+            if native_tool_calls.is_empty() {
+                let _ = writeln!(
+                    tool_results,
+                    "<tool_result name=\"{}\">\n{}\n</tool_result>",
+                    tool_name, safe_output
+                );
+            }
+            individual_results.push((tool_call_id, safe_output));
         }
 
         if let Some(msg) = circuit_break_abort {
@@ -6785,8 +7049,12 @@ pub(crate) async fn run_unified_loop_impl(
             return Ok(finalize_loop_recovery(&msg, history, on_delta.as_ref()).await);
         }
 
-        if batch_had_success && !batch_edit_diagnostics_dirty {
-            _pacing_gov.note_progress();
+        if batch_had_success {
+            if batch_edit_diagnostics_dirty {
+                _pacing_gov.note_token_progress();
+            } else {
+                _pacing_gov.note_progress();
+            }
         }
 
         if plan_exec_nudge_state.inline_progress_reminder_due(iteration + 1) {
@@ -6972,6 +7240,7 @@ pub(crate) async fn run_unified_loop_impl(
                     .await);
                 }
                 loop_recovery_used += 1;
+                truncation_prefix.clear();
                 history.push(ChatMessage::system(loop_recovery_nudge(&abort_text)));
                 continue;
             }
@@ -6985,6 +7254,7 @@ pub(crate) async fn run_unified_loop_impl(
             use_native_tools,
             &tool_results,
         );
+        truncation_prefix.clear();
 
         for body in deferred_system_after_tool_batch {
             history.push(ChatMessage::system(body));
@@ -8596,11 +8866,40 @@ async fn run_impl(
                 if !content_was_streamed.load(std::sync::atomic::Ordering::Relaxed) {
                     println!("{response}");
                 }
-                let already_in_history = history.last().is_some_and(|m| {
-                    m.role == "assistant"
-                        && !crate::agent::dangling_tool_repair::is_turn_close_note(&m.content)
-                        && !m.content.trim().is_empty()
-                });
+                let already_in_history = history
+                    .iter()
+                    .rev()
+                    .find_map(|m| match m.role.as_str() {
+                        "tool" => None,
+                        "assistant" => {
+                            if crate::agent::dangling_tool_repair::is_turn_close_note(&m.content) {
+                                return None;
+                            }
+                            let trimmed = m.content.trim();
+                            if trimmed.starts_with('{') {
+                                if let Ok(serde_json::Value::Object(obj)) =
+                                    serde_json::from_str::<serde_json::Value>(trimmed)
+                                {
+                                    let has_tool_calls = obj
+                                        .get("tool_calls")
+                                        .and_then(|v| v.as_array())
+                                        .map(|a| !a.is_empty())
+                                        .unwrap_or(false);
+                                    let body_empty = obj
+                                        .get("content")
+                                        .and_then(|v| v.as_str())
+                                        .map(|s| s.trim().is_empty())
+                                        .unwrap_or(true);
+                                    if has_tool_calls && body_empty {
+                                        return None;
+                                    }
+                                }
+                            }
+                            Some(!trimmed.is_empty())
+                        }
+                        _ => Some(false),
+                    })
+                    .unwrap_or(false);
                 if !already_in_history {
                     history.push(ChatMessage::assistant(&response));
                 }

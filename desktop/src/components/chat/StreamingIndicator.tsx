@@ -4,6 +4,8 @@
 
 import { useTranslation } from '../../i18n'
 import type { TranslationKey } from '../../i18n'
+import { useChatStore } from '../../stores/chatStore'
+import { formatElapsed } from './tools/RunningToolTimer'
 
 type Translate = (
   key: TranslationKey,
@@ -17,9 +19,18 @@ export function formatPlanningLabel(action: string, t: Translate): string {
   return 'Planning next moves'
 }
 
-export function StreamingIndicator({ action = '' }: { action?: string }) {
+export function StreamingIndicator({
+  action = '',
+  sessionId,
+}: {
+  action?: string
+  sessionId?: string | null
+}) {
   const t = useTranslation()
   const label = formatPlanningLabel(action, t)
+  const elapsedSeconds = useChatStore((s) =>
+    sessionId ? s.sessions[sessionId]?.elapsedSeconds ?? 0 : 0,
+  )
 
   return (
     <div
@@ -33,6 +44,11 @@ export function StreamingIndicator({ action = '' }: { action?: string }) {
         className="size-1.5 flex-shrink-0 rounded-full bg-[var(--color-text-tertiary)] animate-pulse"
       />
       <span className="text-sm italic">{label}</span>
+      {elapsedSeconds > 0 && (
+        <span className="font-[var(--font-mono)] text-[11px] tabular-nums">
+          {formatElapsed(elapsedSeconds * 1000)}
+        </span>
+      )}
     </div>
   )
 }

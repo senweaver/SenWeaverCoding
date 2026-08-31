@@ -2,11 +2,65 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
+use std::ops::Range;
 use std::path::PathBuf;
 
 use super::types::ContextTag;
 
-pub fn parse_context_tags(text: &str) -> Vec<ContextTag> {
+fn is_tag_terminator(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            ',' | ';'
+                | '!'
+                | '?'
+                | ')'
+                | ']'
+                | '}'
+                | '<'
+                | '>'
+                | '"'
+                | '\''
+                | '`'
+                | '，'
+                | '。'
+                | '、'
+                | '；'
+                | '：'
+                | '！'
+                | '？'
+                | '（'
+                | '）'
+                | '【'
+                | '】'
+                | '《'
+                | '》'
+                | '「'
+                | '」'
+                | '『'
+                | '』'
+                | '\u{201c}'
+                | '\u{201d}'
+                | '\u{2018}'
+                | '\u{2019}'
+                | '…'
+                | '～'
+        )
+}
+
+const TRAILING_TAG_PUNCT: &[char] = &['.', ',', ';', ':', '!', '?', '\'', '"', '`'];
+
+fn tag_body_span(text: &str, start: usize) -> Range<usize> {
+    let scan_end = text[start..]
+        .find(is_tag_terminator)
+        .map(|p| start + p)
+        .unwrap_or(text.len());
+    let body = &text[start..scan_end];
+    let trimmed = body.trim_end_matches(TRAILING_TAG_PUNCT);
+    start..start + trimmed.len()
+}
+
+pub fn parse_context_tags_with_spans(text: &str) -> Vec<(ContextTag, Range<usize>)> {
     let mut out = Vec::new();
     let mut chars = text.char_indices().peekable();
     while let Some((i, c)) = chars.next() {
@@ -24,20 +78,17 @@ pub fn parse_context_tags(text: &str) -> Vec<ContextTag> {
         }
 
         let start = i + 1;
-        let end = text[start..]
-            .find(|ch: char| ch.is_whitespace())
-            .map(|p| start + p)
-            .unwrap_or(text.len());
-        let body = &text[start..end];
+        let span = tag_body_span(text, start);
+        let body = &text[span.clone()];
         if body.is_empty() {
             continue;
         }
         if let Some(tag) = classify(body) {
-            out.push(tag);
+            out.push((tag, i..span.end));
         }
 
         while let Some(&(pos, _)) = chars.peek() {
-            if pos >= end {
+            if pos >= span.end {
                 break;
             }
             chars.next();
@@ -46,41 +97,33 @@ pub fn parse_context_tags(text: &str) -> Vec<ContextTag> {
     out
 }
 
-pub fn strip_context_tags(text: &str) -> String {
+pub fn parse_context_tags(text: &str) -> Vec<ContextTag> {
+    parse_context_tags_with_spans(text)
+        .into_iter()
+        .map(|(tag, _)| tag)
+        .collect()
+}
+
+pub fn strip_spans(text: &str, spans: &[Range<usize>]) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut chars = text.char_indices().peekable();
     let mut last = 0usize;
-    while let Some((i, c)) = chars.next() {
-        if c != '@' {
+    for span in spans {
+        if span.start < last || span.end > text.len() {
             continue;
         }
-        let prev = if i == 0 {
-            None
-        } else {
-            text[..i].chars().next_back()
-        };
-        if matches!(prev, Some(p) if !p.is_whitespace() && !matches!(p, '(' | '[' | '{' | ',')) {
-            continue;
-        }
-        let start = i + 1;
-        let end = text[start..]
-            .find(|ch: char| ch.is_whitespace())
-            .map(|p| start + p)
-            .unwrap_or(text.len());
-        let body = &text[start..end];
-        if classify(body).is_some() {
-            out.push_str(&text[last..i]);
-            last = end;
-            while let Some(&(pos, _)) = chars.peek() {
-                if pos >= end {
-                    break;
-                }
-                chars.next();
-            }
-        }
+        out.push_str(&text[last..span.start]);
+        last = span.end;
     }
     out.push_str(&text[last..]);
     out
+}
+
+pub fn strip_context_tags(text: &str) -> String {
+    let spans: Vec<Range<usize>> = parse_context_tags_with_spans(text)
+        .into_iter()
+        .map(|(_, span)| span)
+        .collect();
+    strip_spans(text, &spans)
 }
 
 fn classify(body: &str) -> Option<ContextTag> {

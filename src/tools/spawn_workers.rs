@@ -372,6 +372,8 @@ impl Tool for SpawnWorkersTool {
             let allow_shared_fallback = parsed.allow_shared_fallback;
             match base_workspace.as_ref() {
                 Some(base) => {
+                    let base_lock = crate::workers::worktree::base_merge_lock(base);
+                    let _base_guard = base_lock.lock().await;
                     for idx in 0..parsed.tasks.len() {
                         match create_worker_worktree(base, idx).await {
                             Ok(info) => worktrees[idx] = Some(info),
@@ -382,14 +384,8 @@ impl Tool for SpawnWorkersTool {
                                          running in the shared workspace instead"
                                     ));
                                 } else {
-                                    if let Some(first) = worktrees.iter().flatten().next() {
-                                        let base_lock = crate::workers::worktree::base_merge_lock(
-                                            &first.base,
-                                        );
-                                        let _base_guard = base_lock.lock().await;
-                                        for created in worktrees.iter().flatten() {
-                                            let _ = remove_worker_worktree(created).await;
-                                        }
+                                    for created in worktrees.iter().flatten() {
+                                        let _ = remove_worker_worktree(created).await;
                                     }
                                     return Ok(ToolResult {
                                         success: false,

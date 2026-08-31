@@ -45,7 +45,11 @@ fn load_file_body(root: &Path, path: &PathBuf) -> Result<String, ContextResolveE
         reason: e.to_string(),
     })?;
     let body_slice = if bytes.len() > MAX_FILE_BYTES {
-        &bytes[..MAX_FILE_BYTES]
+        let mut end = MAX_FILE_BYTES;
+        while end > 0 && (bytes[end] & 0b1100_0000) == 0b1000_0000 {
+            end -= 1;
+        }
+        &bytes[..end]
     } else {
         &bytes[..]
     };

@@ -40,47 +40,73 @@ export function MonacoDiffOverlay({
     modified: MonacoNs.editor.ITextModel
   } | null>(null)
   const [dirty, setDirty] = useState(false)
+  const currentContentRef = useRef(currentContent)
+  currentContentRef.current = currentContent
+  const initialPropsRef = useRef({ previousContent, currentContent, languageId, editable, theme })
 
   useEffect(() => {
     const host = containerRef.current
     if (!host) return
 
-    const original = monaco.editor.createModel(previousContent, languageId)
-    const modified = monaco.editor.createModel(currentContent, languageId)
+    const initial = initialPropsRef.current
+    const original = monaco.editor.createModel(initial.previousContent, initial.languageId)
+    const modified = monaco.editor.createModel(initial.currentContent, initial.languageId)
     modelsRef.current = { original, modified }
 
     const diffEditor = monaco.editor.createDiffEditor(host, {
       automaticLayout: true,
-      readOnly: !editable,
+      readOnly: !initial.editable,
       originalEditable: false,
       renderSideBySide: true,
-      renderMarginRevertIcon: editable,
+      renderMarginRevertIcon: initial.editable,
       fontSize: 13,
       minimap: { enabled: false },
       scrollBeyondLastLine: false,
       renderOverviewRuler: false,
-      theme: theme === 'dark' ? 'vs-dark' : 'vs',
+      theme: initial.theme === 'dark' ? 'vs-dark' : 'vs',
     })
     diffEditor.setModel({ original, modified })
     editorRef.current = diffEditor
 
-    const changeSub = editable
-      ? modified.onDidChangeContent(() => {
-          setDirty(modified.getValue() !== currentContent)
-        })
-      : null
+    const changeSub = modified.onDidChangeContent(() => {
+      setDirty(modified.getValue() !== currentContentRef.current)
+    })
 
     return () => {
-      changeSub?.dispose()
+      changeSub.dispose()
       diffEditor.dispose()
       original.dispose()
       modified.dispose()
       editorRef.current = null
       modelsRef.current = null
     }
+  }, [])
 
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [previousContent, currentContent, languageId, editable])
+  useEffect(() => {
+    const models = modelsRef.current
+    if (!models) return
+    if (models.original.getValue() !== previousContent) {
+      models.original.setValue(previousContent)
+    }
+    if (models.modified.getValue() !== currentContent) {
+      models.modified.setValue(currentContent)
+    }
+    setDirty(false)
+  }, [previousContent, currentContent])
+
+  useEffect(() => {
+    const models = modelsRef.current
+    if (!models) return
+    monaco.editor.setModelLanguage(models.original, languageId)
+    monaco.editor.setModelLanguage(models.modified, languageId)
+  }, [languageId])
+
+  useEffect(() => {
+    editorRef.current?.updateOptions({
+      readOnly: !editable,
+      renderMarginRevertIcon: editable,
+    })
+  }, [editable])
 
   useEffect(() => {
     monaco.editor.setTheme(theme === 'dark' ? 'vs-dark' : 'vs')

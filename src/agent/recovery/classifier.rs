@@ -30,6 +30,9 @@ fn classify_message(m: &str) -> ErrorClass {
         || m.contains("rate_limit_error")
         || m.contains("rate_limit_exceeded")
         || m.contains("too_many_requests")
+        || m.contains("rate limit")
+        || m.contains("too many requests")
+        || m.contains("quota exceeded")
     {
         return ErrorClass::RateLimited;
     }

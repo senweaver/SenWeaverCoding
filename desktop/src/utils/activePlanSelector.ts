@@ -5,6 +5,7 @@
 
 
 import type { ChatState, UIMessage } from '../types/chat'
+import { hasNewUserTurnAfter } from './activeCuratorSelector'
 
 export type PlanExecutionState =
 
@@ -68,11 +69,33 @@ export function selectPlanCardExecutionState(
 
   if (allTodosTerminal(card)) return 'completed_run'
 
+  if (hasNewUserTurnAfter(messages, switchCard.id)) return 'completed_run'
+
   if (chatState !== undefined && chatState === 'idle') {
     const hasTodos = card.todos.length > 0
     return hasTodos ? 'incomplete_run' : 'completed_run'
   }
   return 'executing'
+}
+
+const planExecStateCache = new WeakMap<UIMessage[], Map<string, PlanExecutionState>>()
+
+export function selectPlanCardExecutionStateCached(
+  messages: UIMessage[],
+  planCardId: string,
+  chatState?: ChatState,
+): PlanExecutionState {
+  const key = `${planCardId}:${chatState ?? '__undef__'}`
+  let inner = planExecStateCache.get(messages)
+  if (!inner) {
+    inner = new Map()
+    planExecStateCache.set(messages, inner)
+  }
+  const hit = inner.get(key)
+  if (hit !== undefined) return hit
+  const computed = selectPlanCardExecutionState(messages, planCardId, chatState)
+  inner.set(key, computed)
+  return computed
 }
 
 type ActivePlanResult = { card: PlanCardMsg; state: PlanExecutionState } | null

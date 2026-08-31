@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { Icon } from '@iconify/react/dist/offline'
 import { useShallow } from 'zustand/react/shallow'
 import { useTranslation } from '../../i18n'
@@ -15,6 +15,7 @@ import {
 import { ensureVscodeIcons, getFileIconId, isVscodeIconsReady } from '../../lib/fileIcons'
 import { UnsavedChangesDialog } from '../shared/UnsavedChangesDialog'
 import { useUIStore } from '../../stores/uiStore'
+import { useFreshnessNow } from '../../hooks/useFreshnessTicker'
 
 const DRAG_MIME = 'application/x-sen-editor-tab'
 
@@ -28,8 +29,26 @@ export function EditorTabs() {
   const t = useTranslation()
   const openTabs = useWorkspaceFilesStore((s) => s.openTabs)
   const activeTab = useWorkspaceFilesStore((s) => s.activeTab)
-  const aiModifiedAt = useWorkspaceFilesStore((s) => s.aiModifiedAt)
-  const externalChanged = useWorkspaceFilesStore((s) => s.externalChanged)
+  const aiModifiedAt = useWorkspaceFilesStore(
+    useShallow((s) => {
+      const out: Record<string, number> = {}
+      for (const tab of s.openTabs) {
+        const ts = s.aiModifiedAt[tab]
+        if (ts !== undefined) out[tab] = ts
+      }
+      return out
+    }),
+  )
+  const externalChanged = useWorkspaceFilesStore(
+    useShallow((s) => {
+      const out: Record<string, number> = {}
+      for (const tab of s.openTabs) {
+        const ts = s.externalChanged[tab]
+        if (ts !== undefined) out[tab] = ts
+      }
+      return out
+    }),
+  )
   const closeTab = useWorkspaceFilesStore((s) => s.closeTab)
   const closeAllTabs = useWorkspaceFilesStore((s) => s.closeAllTabs)
   const closeOtherTabs = useWorkspaceFilesStore((s) => s.closeOtherTabs)
@@ -62,21 +81,10 @@ export function EditorTabs() {
     }
   }, [iconsReady])
 
-  const [now, setNow] = useState(() => Date.now())
-
-  const hasFreshAi = useMemo(() => {
-    return Object.values(aiModifiedAt).some(
-      (ts) => now - ts < AI_FRESH_WINDOW_MS,
-    )
-  }, [aiModifiedAt, now])
-
-  useEffect(() => {
-    if (!hasFreshAi) return
-    const interval = window.setInterval(() => {
-      setNow(Date.now())
-    }, 1_000)
-    return () => window.clearInterval(interval)
-  }, [hasFreshAi])
+  const hasFreshAi = Object.values(aiModifiedAt).some(
+    (ts) => Date.now() - ts < AI_FRESH_WINDOW_MS,
+  )
+  const now = useFreshnessNow(hasFreshAi)
 
   const [menu, setMenu] = useState<ContextMenu | null>(null)
   const dragOverIdx = useRef<number | null>(null)

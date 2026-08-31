@@ -81,6 +81,10 @@ pub fn spawn_bridge_client(gateway_url: String, token: String, generation: u64) 
     });
 }
 
+const BRIDGE_PING_INTERVAL: Duration = Duration::from_secs(30);
+
+const BRIDGE_IDLE_TIMEOUT: Duration = Duration::from_secs(90);
+
 async fn run_bridge_session(
     stream: tokio_tungstenite::WebSocketStream<
         tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
@@ -88,25 +92,54 @@ async fn run_bridge_session(
     generation: u64,
 ) {
     let (sink, mut reader) = stream.split();
-    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<String>(256);
+    let (out_tx, mut out_rx) = tokio::sync::mpsc::channel::<Message>(256);
 
     let writer = tauri::async_runtime::spawn(async move {
         let mut sink = sink;
         while let Some(frame) = out_rx.recv().await {
-            if sink.send(Message::Text(frame.into())).await.is_err() {
+            if sink.send(frame).await.is_err() {
                 break;
             }
         }
+        let _ = sink.close().await;
     });
 
     let dispatch_gate = std::sync::Arc::new(tokio::sync::Semaphore::new(
         DISPATCH_MAX_CONCURRENCY,
     ));
 
-    while let Some(message) = reader.next().await {
+    let mut ping_interval = tokio::time::interval(BRIDGE_PING_INTERVAL);
+    ping_interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+    ping_interval.reset();
+    let mut last_rx = std::time::Instant::now();
+
+    loop {
+        let message = tokio::select! {
+            message = reader.next() => {
+                let Some(message) = message else { break };
+                message
+            }
+            _ = ping_interval.tick() => {
+                if current_bridge_generation() != generation {
+                    break;
+                }
+                if last_rx.elapsed() > BRIDGE_IDLE_TIMEOUT {
+                    tracing::warn!(
+                        "[gateway_bridge] no inbound traffic for {}s; dropping stale connection",
+                        BRIDGE_IDLE_TIMEOUT.as_secs()
+                    );
+                    break;
+                }
+                if out_tx.send(Message::Ping(Vec::new().into())).await.is_err() {
+                    break;
+                }
+                continue;
+            }
+        };
         if current_bridge_generation() != generation {
             break;
         }
+        last_rx = std::time::Instant::now();
         let text = match message {
             Ok(Message::Text(t)) => t.to_string(),
             Ok(Message::Close(_)) | Err(_) => break,
@@ -135,7 +168,11 @@ async fn run_bridge_session(
             .map(ToString::to_string);
         let (Some(target), Some(method)) = (target, method) else {
             let response = json!({ "id": id, "ok": false, "error": "malformed frame" });
-            if out_tx.send(response.to_string()).await.is_err() {
+            if out_tx
+                .send(Message::Text(response.to_string().into()))
+                .await
+                .is_err()
+            {
                 tracing::error!(
                     "[gateway_bridge] failed to queue malformed-frame response for request {id}: outbound channel closed"
                 );
@@ -164,7 +201,11 @@ async fn run_bridge_session(
                 Ok(value) => json!({ "id": id, "ok": true, "value": value }),
                 Err(err) => json!({ "id": id, "ok": false, "error": err }),
             };
-            if out_tx.send(response.to_string()).await.is_err() {
+            if out_tx
+                .send(Message::Text(response.to_string().into()))
+                .await
+                .is_err()
+            {
                 tracing::error!(
                     "[gateway_bridge] failed to queue bridge response for request {id}: outbound channel closed"
                 );
@@ -172,7 +213,8 @@ async fn run_bridge_session(
         });
     }
 
-    writer.abort();
+    drop(out_tx);
+    let _ = writer;
 }
 
 async fn dispatch(target: &str, method: &str, args: Value) -> Result<Value, String> {

@@ -155,7 +155,9 @@ mod singleton {
         CloseHandle, GetLastError, SetLastError, ERROR_ALREADY_EXISTS, HANDLE, WAIT_ABANDONED,
         WAIT_OBJECT_0, WIN32_ERROR,
     };
-    use windows::Win32::System::Threading::{CreateMutexW, WaitForSingleObject};
+    use windows::Win32::System::Threading::{
+        CreateEventW, CreateMutexW, SetEvent, WaitForSingleObject, INFINITE,
+    };
 
     struct MutexOwner(HANDLE);
 
@@ -172,6 +174,19 @@ mod singleton {
 
     static MUTEX: OnceLock<MutexOwner> = OnceLock::new();
 
+    fn signal_primary_instance_wake() {
+        unsafe {
+            if let Ok(event) =
+                CreateEventW(None, false, false, w!("Local\\com.senweaver.desktop.wake-main"))
+            {
+                if !event.is_invalid() {
+                    let _ = SetEvent(event);
+                    let _ = CloseHandle(event);
+                }
+            }
+        }
+    }
+
     pub fn claim_or_exit() {
         unsafe {
             SetLastError(WIN32_ERROR(0));
@@ -181,19 +196,52 @@ mod singleton {
             };
             if GetLastError() == ERROR_ALREADY_EXISTS {
                 tracing::info!(
-                    "[sen-desktop] another desktop process still holds the runtime lock; waiting to take over"
+                    "[sen-desktop] another desktop process still holds the runtime lock; attempting a quick takeover"
                 );
-                let wait = WaitForSingleObject(handle, 12_000);
+                let wait = WaitForSingleObject(handle, 2_000);
                 if wait != WAIT_OBJECT_0 && wait != WAIT_ABANDONED {
                     tracing::warn!(
-                        "[sen-desktop] another desktop process is still running; exiting this duplicate instance"
+                        "[sen-desktop] another desktop process is still running; waking it and exiting this duplicate instance"
                     );
+                    signal_primary_instance_wake();
                     let _ = CloseHandle(handle);
                     std::process::exit(0);
                 }
             }
             let _ = MUTEX.set(MutexOwner(handle));
         }
+    }
+
+    pub fn spawn_wake_watcher(app: tauri::AppHandle) {
+        std::thread::spawn(move || unsafe {
+            let event = match CreateEventW(
+                None,
+                false,
+                false,
+                w!("Local\\com.senweaver.desktop.wake-main"),
+            ) {
+                Ok(h) if !h.is_invalid() => h,
+                _ => {
+                    tracing::warn!(
+                        "[sen-desktop] could not create the singleton wake event; duplicate launches will not focus the main window"
+                    );
+                    return;
+                }
+            };
+            loop {
+                if WaitForSingleObject(event, INFINITE) != WAIT_OBJECT_0 {
+                    break;
+                }
+                if super::is_shutting_down() {
+                    break;
+                }
+                tracing::info!(
+                    "[sen-desktop] duplicate launch detected; revealing the main window"
+                );
+                crate::show_and_focus_main_window(&app);
+            }
+            let _ = CloseHandle(event);
+        });
     }
 }
 
@@ -216,7 +264,7 @@ mod singleton {
             }
         };
         let fd = file.as_raw_fd();
-        let deadline = Instant::now() + Duration::from_secs(12);
+        let deadline = Instant::now() + Duration::from_secs(2);
         loop {
             let rc = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
             if rc == 0 {
@@ -242,6 +290,14 @@ mod singleton {
 pub fn claim_singleton_or_exit() {
     singleton::claim_or_exit();
 }
+
+#[cfg(target_os = "windows")]
+pub fn spawn_singleton_wake_watcher(app: AppHandle) {
+    singleton::spawn_wake_watcher(app);
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn spawn_singleton_wake_watcher(_app: AppHandle) {}
 
 static SHUTDOWN_LATCH: AtomicBool = AtomicBool::new(false);
 

@@ -2,11 +2,12 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useMemo, useState } from 'react'
+import { useMemo, useRef, useState, type ReactNode } from 'react'
 import { EMPTY_WORKERS, useWorkersStore } from '../../stores/workersStore'
 import { useTabStore } from '../../stores/tabStore'
 import { useTranslation } from '../../i18n'
 import { truncate } from '../../utils/toolFormatters'
+import { Collapse } from '../shared/Collapse'
 import type { WorkerSnapshot } from '../../types/chat'
 
 type Props = {
@@ -37,6 +38,7 @@ export function WorkersStrip({ sessionId }: Props) {
   )
   const openWorkerTab = useTabStore((s) => s.openWorkerTab)
   const stopWorker = useWorkersStore((s) => s.stopWorker)
+  const lastContentRef = useRef<ReactNode>(null)
 
   const running = useMemo(
     () =>
@@ -46,9 +48,9 @@ export function WorkersStrip({ sessionId }: Props) {
     [workers],
   )
 
-  if (!sessionId || running.length === 0) return null
+  const open = !!sessionId && running.length > 0
 
-  return (
+  const content = open ? (
     <div className="mx-auto w-full max-w-[860px] px-8 pb-1">
       <div className="overflow-hidden rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)]">
         <button
@@ -109,5 +111,9 @@ export function WorkersStrip({ sessionId }: Props) {
         )}
       </div>
     </div>
+  ) : null
+  if (open) lastContentRef.current = content
+  return (
+    <Collapse open={open}>{open ? content : lastContentRef.current}</Collapse>
   )
 }

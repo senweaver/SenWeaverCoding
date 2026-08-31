@@ -309,19 +309,35 @@ impl SubagentLimiter {
         let mut lineage = self.lineage.lock();
         let parent = lineage.parents.remove(agent_id).flatten();
         lineage.tokens.remove(agent_id);
-        if let Some(parent) = parent
-            && let Some(set) = lineage.children.get_mut(&parent)
+        if let Some(ref parent) = parent
+            && let Some(set) = lineage.children.get_mut(parent)
         {
             set.remove(agent_id);
             if set.is_empty() {
-                lineage.children.remove(&parent);
+                lineage.children.remove(parent);
             }
         }
 
         if let Some(orphans) = lineage.children.remove(agent_id) {
-            for o in orphans {
-                if let Some(slot) = lineage.parents.get_mut(&o) {
-                    *slot = None;
+            match parent {
+                Some(grandparent) => {
+                    for o in &orphans {
+                        if let Some(slot) = lineage.parents.get_mut(o) {
+                            *slot = Some(grandparent.clone());
+                        }
+                    }
+                    lineage
+                        .children
+                        .entry(grandparent)
+                        .or_default()
+                        .extend(orphans);
+                }
+                None => {
+                    for o in orphans {
+                        if let Some(slot) = lineage.parents.get_mut(&o) {
+                            *slot = None;
+                        }
+                    }
                 }
             }
         }

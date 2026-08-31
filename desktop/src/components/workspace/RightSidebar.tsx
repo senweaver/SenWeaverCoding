@@ -10,14 +10,11 @@ import { RightSidebarShell } from './RightSidebarShell'
 
 export function RightSidebar() {
   const t = useTranslation()
-  const open = useUIStore((s) => s.rightSidebarOpen)
   const width = useUIStore((s) => s.rightSidebarWidth)
   const widthAuto = useUIStore((s) => s.rightSidebarWidthAuto)
   const setOpen = useUIStore((s) => s.setRightSidebarOpen)
   const activeTabId = useTabStore((s) => s.activeTabId)
   const sessions = useSessionStore((s) => s.sessions)
-
-  if (!open) return null
 
   const activeSession = activeTabId ? sessions.find((entry) => entry.id === activeTabId) : null
   const workDir = activeSession?.workDir ?? null

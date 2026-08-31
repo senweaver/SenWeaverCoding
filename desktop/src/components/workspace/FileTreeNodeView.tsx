@@ -21,6 +21,7 @@ import { useFileHistoryStore } from '../../stores/fileHistoryStore'
 import { ensureVscodeIcons, getFileIconId, isVscodeIconsReady } from '../../lib/fileIcons'
 import { formatBytes } from '../../lib/formatBytes'
 import { formatAbsoluteTime, formatRelativeTime } from '../../lib/formatRelativeTime'
+import { useFreshnessNow } from '../../hooks/useFreshnessTicker'
 import { InlineNamePrompt } from './InlineNamePrompt'
 
 const GIT_BADGE_COLORS: Record<GitStatusSeverity, string> = {
@@ -174,18 +175,14 @@ export const FileTreeNodeView = memo(function FileTreeNodeView({
     return s.byRoot[workspaceRoot]?.files[node.relPath]?.count ?? 0
   })
 
-  const [now, setNow] = useState(() => Date.now())
+  const aiFreshCandidate =
+    aiModifiedTs !== undefined && Date.now() - aiModifiedTs < AI_FRESH_WINDOW_MS
+  const now = useFreshnessNow(aiFreshCandidate)
   const aiAge = aiModifiedTs !== undefined ? now - aiModifiedTs : Number.POSITIVE_INFINITY
   const aiFresh = aiAge < AI_FRESH_WINDOW_MS
   const aiOpacity = aiFresh
     ? Math.max(0, Math.min(1, 1 - (aiAge - AI_FRESH_WINDOW_MS / 2) / (AI_FRESH_WINDOW_MS / 2)))
     : 0
-
-  useEffect(() => {
-    if (!aiFresh) return
-    const interval = window.setInterval(() => setNow(Date.now()), 1_000)
-    return () => window.clearInterval(interval)
-  }, [aiFresh])
 
   const filterActive = filter?.active ?? false
   const isAncestorMatch = filterActive ? (filter?.ancestors.has(node.relPath) ?? false) : false

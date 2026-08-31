@@ -105,9 +105,11 @@ pub fn diagnose(content: &str, old_string: &str) -> Option<MatchDiagnosis> {
         return Some(MatchDiagnosis {
             kind: MismatchKind::LineEndingOnly,
             message:
-                "The text exists but the line endings differ (the file uses \
-                 CRLF/LF differently than your old_string). Re-read the file and copy the \
-                 exact bytes, or supply old_string with matching line endings."
+                "The text exists but the line endings differ (CRLF vs LF). This difference is \
+                 normally reconciled automatically; seeing this error means the match sits \
+                 outside the requested scope or the file mixes unusual line endings. Include \
+                 more surrounding context in old_string, adjust the scope, or pass near_line \
+                 to anchor the intended match."
                     .to_string(),
         });
     }
@@ -258,7 +260,11 @@ pub fn find_whitespace_insensitive_unique(
     } else {
         0
     };
-    let byte_end = byte_start + matched_len - trailing_nl;
+    let byte_end = if old_lf.ends_with('\n') {
+        byte_start + matched_len
+    } else {
+        byte_start + matched_len - trailing_nl
+    };
 
     let file_indent = leading_ws(source_lines[start_line]);
     let old_indent = leading_ws(old_lines[0]);
@@ -296,6 +302,26 @@ fn reindent_line(line: &str, from_indent: &str, to_indent: &str) -> String {
     } else {
         line.to_string()
     }
+}
+
+pub fn line_of_offset(content: &str, byte_pos: usize) -> (usize, &str) {
+    let clamped = byte_pos.min(content.len());
+    let line_no = content[..clamped].matches('\n').count() + 1;
+    let line_start = content[..clamped].rfind('\n').map(|p| p + 1).unwrap_or(0);
+    let line_end = content[line_start..]
+        .find('\n')
+        .map(|p| line_start + p)
+        .unwrap_or(content.len());
+    (line_no, content[line_start..line_end].trim_end_matches('\r'))
+}
+
+pub fn hit_lines_preview(content: &str, positions: &[usize], take: usize) -> String {
+    let mut out = String::new();
+    for pos in positions.iter().take(take) {
+        let (line_no, line) = line_of_offset(content, *pos);
+        out.push_str(&format!("  - line {line_no} : {line}\n"));
+    }
+    out
 }
 
 pub fn failure_message(content: &str, old_string: &str, path_display: &str, had_read: bool) -> String {

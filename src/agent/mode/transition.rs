@@ -4,6 +4,14 @@
 
 use crate::agent::coding_mode::CodingMode;
 
+fn is_read_only_mode(mode: CodingMode) -> bool {
+    matches!(mode, CodingMode::Plan | CodingMode::Ask)
+}
+
+pub fn is_privilege_escalation(from: CodingMode, to: CodingMode) -> bool {
+    is_read_only_mode(from) && !is_read_only_mode(to)
+}
+
 pub fn is_auto_approved(
     whitelist: &[String],
     from: CodingMode,
@@ -13,7 +21,7 @@ pub fn is_auto_approved(
         return true;
     }
     if whitelist.is_empty() {
-        return true;
+        return !is_privilege_escalation(from, to);
     }
     let from_name = from.display_name();
     let to_name = to.display_name();

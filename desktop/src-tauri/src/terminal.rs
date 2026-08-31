@@ -346,7 +346,7 @@ pub(crate) async fn terminal_resize(
 }
 
 #[tauri::command]
-pub(crate) fn terminal_kill(
+pub(crate) async fn terminal_kill(
     state: State<'_, TerminalState>,
     session_id: u32,
 ) -> Result<(), String> {
@@ -357,7 +357,10 @@ pub(crate) fn terminal_kill(
             .map_err(|_| "terminal state is unavailable".to_string())?;
         sessions.remove(&session_id)
     };
-    if let Some(session) = session {
+    let Some(session) = session else {
+        return Ok(());
+    };
+    tauri::async_runtime::spawn_blocking(move || -> Result<(), String> {
         let mut killer = session
             .killer
             .lock()
@@ -365,8 +368,10 @@ pub(crate) fn terminal_kill(
         killer
             .kill()
             .map_err(|err| format!("kill terminal shell: {err}"))?;
-    }
-    Ok(())
+        Ok(())
+    })
+    .await
+    .map_err(|err| format!("terminal kill task failed: {err}"))?
 }
 
 pub(crate) fn shutdown_all(app: &AppHandle) {

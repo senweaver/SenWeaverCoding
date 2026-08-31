@@ -48,13 +48,56 @@ function extractPartialEditArgs(snapshot: string): PartialEditArgs {
   return { path, content, oldString, newString }
 }
 
+const PREVIEW_THROTTLE_MS = 200
+const PREVIEW_DIFF_CHAR_CAP = 24_000
+
 export function StreamingEditPreview({ sessionId }: { sessionId: string }) {
   const t = useTranslation()
-  const streaming = useChatStore(
+  const streamingRaw = useChatStore(
     (s) => s.sessions[sessionId]?.streamingToolArgs ?? null,
   )
   const chatState = useChatStore(
     (s) => s.sessions[sessionId]?.chatState ?? 'idle',
+  )
+  const [streaming, setStreaming] = useState(streamingRaw)
+  const latestStreamingRef = useRef(streamingRaw)
+  latestStreamingRef.current = streamingRaw
+  const lastAppliedAtRef = useRef(0)
+  const throttleTimerRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    if (streamingRaw === null) {
+      if (throttleTimerRef.current !== null) {
+        clearTimeout(throttleTimerRef.current)
+        throttleTimerRef.current = null
+      }
+      setStreaming(null)
+      return
+    }
+    const now = Date.now()
+    const since = now - lastAppliedAtRef.current
+    if (since >= PREVIEW_THROTTLE_MS) {
+      lastAppliedAtRef.current = now
+      setStreaming(streamingRaw)
+      return
+    }
+    if (throttleTimerRef.current === null) {
+      throttleTimerRef.current = window.setTimeout(() => {
+        throttleTimerRef.current = null
+        lastAppliedAtRef.current = Date.now()
+        setStreaming(latestStreamingRef.current)
+      }, PREVIEW_THROTTLE_MS - since)
+    }
+  }, [streamingRaw])
+
+  useEffect(
+    () => () => {
+      if (throttleTimerRef.current !== null) {
+        clearTimeout(throttleTimerRef.current)
+        throttleTimerRef.current = null
+      }
+    },
+    [],
   )
   const workDir = useSessionStore(
     (s) => s.sessions.find((session) => session.id === sessionId)?.workDir ?? '',
@@ -119,10 +162,20 @@ export function StreamingEditPreview({ sessionId }: { sessionId: string }) {
     }
   }
 
-  const tail =
-    diffOld === null && parsed?.content
-      ? parsed.content.split('\n').slice(-PREVIEW_TAIL_LINES).join('\n')
-      : null
+  if (
+    diffOld !== null &&
+    diffNew !== null &&
+    diffOld.length + diffNew.length > PREVIEW_DIFF_CHAR_CAP
+  ) {
+    diffOld = null
+    diffNew = null
+  }
+
+  const tailSource =
+    diffOld === null ? parsed?.content ?? parsed?.newString ?? null : null
+  const tail = tailSource
+    ? tailSource.split('\n').slice(-PREVIEW_TAIL_LINES).join('\n')
+    : null
 
   return (
     <div className="mx-auto w-full max-w-3xl px-4 pb-1">

@@ -58,6 +58,15 @@ impl XmlToolDispatcher {
                             .unwrap_or("")
                             .to_string();
                         if name.is_empty() {
+                            tracing::warn!(
+                                "XML tool call is missing a tool name; surfacing as a parse error"
+                            );
+                            calls.push(ParsedToolCall {
+                                name: "unknown".to_string(),
+                                arguments: Value::Object(serde_json::Map::new()),
+                                tool_call_id: None,
+                                parse_error: true,
+                            });
                             remaining = &remaining[start + end + 12..];
                             continue;
                         }
@@ -77,6 +86,13 @@ impl XmlToolDispatcher {
                     }
                     Err(e) => {
                         tracing::warn!("Malformed <tool_call> JSON: {e}");
+                        let name = extract_loose_tool_name(inner).unwrap_or_else(|| "unknown".to_string());
+                        calls.push(ParsedToolCall {
+                            name,
+                            arguments: Value::Object(serde_json::Map::new()),
+                            tool_call_id: None,
+                            parse_error: true,
+                        });
                     }
                 }
                 remaining = &remaining[start + end + 12..];
@@ -93,26 +109,26 @@ impl XmlToolDispatcher {
     }
 
     fn strip_think_tags(s: &str) -> String {
-        let mut result = String::with_capacity(s.len());
-        let mut rest = s;
-        loop {
-            if let Some(start) = rest.find("<think>") {
-                result.push_str(&rest[..start]);
-                if let Some(end) = rest[start..].find("</think>") {
-                    rest = &rest[start + end + "</think>".len()..];
-                } else {
-                    break;
-                }
-            } else {
-                result.push_str(rest);
-                break;
-            }
-        }
-        result
+        crate::agent::tool_handler::call_parser::strip_think_tags(s)
     }
 
     pub fn tool_specs(tools: &[Box<dyn Tool>]) -> Vec<ToolSpec> {
         tools.iter().map(|tool| tool.spec()).collect()
+    }
+}
+
+fn extract_loose_tool_name(inner: &str) -> Option<String> {
+    let key_pos = inner.find("\"name\"")?;
+    let after = &inner[key_pos + "\"name\"".len()..];
+    let colon = after.find(':')?;
+    let rest = after[colon + 1..].trim_start();
+    let rest = rest.strip_prefix('"')?;
+    let end = rest.find('"')?;
+    let name = rest[..end].trim();
+    if name.is_empty() {
+        None
+    } else {
+        Some(name.to_string())
     }
 }
 
@@ -153,8 +169,26 @@ impl ToolDispatcher for XmlToolDispatcher {
             .iter()
             .flat_map(|msg| match msg {
                 ConversationMessage::Chat(chat) => vec![chat.clone()],
-                ConversationMessage::AssistantToolCalls { text, .. } => {
-                    vec![ChatMessage::assistant(text.clone().unwrap_or_default())]
+                ConversationMessage::AssistantToolCalls { text, tool_calls, .. } => {
+                    let mut content = text.clone().unwrap_or_default();
+                    for call in tool_calls {
+                        let args_value =
+                            serde_json::from_str::<serde_json::Value>(&call.arguments)
+                                .unwrap_or_else(|_| {
+                                    serde_json::Value::String(call.arguments.clone())
+                                });
+                        let payload = serde_json::json!({
+                            "name": call.name,
+                            "arguments": args_value,
+                        });
+                        if !content.is_empty() {
+                            content.push('\n');
+                        }
+                        content.push_str("<tool_call>\n");
+                        content.push_str(&payload.to_string());
+                        content.push_str("\n</tool_call>");
+                    }
+                    vec![ChatMessage::assistant(content)]
                 }
                 ConversationMessage::ToolResults(results) => {
                     let mut content = String::new();
@@ -199,18 +233,24 @@ impl ToolDispatcher for NativeToolDispatcher {
         let calls = response
             .tool_calls
             .iter()
-            .map(|tc| ParsedToolCall {
-                name: tc.name.clone(),
-                arguments: serde_json::from_str(&tc.arguments).unwrap_or_else(|e| {
-                    tracing::warn!(
-                        tool = %tc.name,
-                        error = %e,
-                        "Failed to parse native tool call arguments as JSON"
-                    );
-                    Value::Object(serde_json::Map::new())
-                }),
-                tool_call_id: Some(tc.id.clone()),
-                parse_error: serde_json::from_str::<Value>(&tc.arguments).is_err(),
+            .map(|tc| {
+                let (arguments, parse_error) = match serde_json::from_str::<Value>(&tc.arguments) {
+                    Ok(value) => (value, false),
+                    Err(e) => {
+                        tracing::warn!(
+                            tool = %tc.name,
+                            error = %e,
+                            "Failed to parse native tool call arguments as JSON"
+                        );
+                        (Value::Object(serde_json::Map::new()), true)
+                    }
+                };
+                ParsedToolCall {
+                    name: tc.name.clone(),
+                    arguments,
+                    tool_call_id: Some(tc.id.clone()),
+                    parse_error,
+                }
             })
             .collect();
         (text, calls)

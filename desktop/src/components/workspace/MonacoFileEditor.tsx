@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import Editor, { type OnMount } from '@monaco-editor/react'
+import { diffLines } from 'diff'
 import type * as MonacoNs from 'monaco-editor'
 import { useTranslation } from '../../i18n'
 import { useUIStore } from '../../stores/uiStore'
@@ -17,7 +18,7 @@ import {
   type MonacoEditOperation,
   type MonacoModelHandle,
 } from '../../stores/workspaceFilesStore'
-import { applyAiDecorations } from '../../lib/aiDecorations'
+import { AI_DECORATION_CONTENT_LIMIT, applyAiDecorations } from '../../lib/aiDecorations'
 import { editorAssistApi, type InlineEditResult } from '../../api/editorAssist'
 import { formatBytes } from '../../lib/formatBytes'
 import { isTauriRuntime } from '../../lib/desktopRuntime'
@@ -43,6 +44,65 @@ const SELECTION_MENU_WIDTH_PX = 250
 const SELECTION_MENU_HEIGHT_PX = 30
 
 const lspProvidersRegistered = new Set<string>()
+
+const restoredViewStatePaths = new Set<string>()
+
+const modelTextCache = new WeakMap<
+  MonacoNs.editor.ITextModel,
+  { versionId: number; text: string }
+>()
+
+function cachedModelText(model: MonacoNs.editor.ITextModel): string {
+  const versionId = model.getVersionId()
+  const cached = modelTextCache.get(model)
+  if (cached && cached.versionId === versionId) return cached.text
+  const text = model.getValue()
+  modelTextCache.set(model, { versionId, text })
+  return text
+}
+
+function buildExternalEditOperations(
+  model: MonacoNs.editor.ITextModel,
+  previous: string,
+  next: string,
+): MonacoNs.editor.IIdentifiedSingleEditOperation[] {
+  const chunks = diffLines(previous, next)
+  const ops: MonacoNs.editor.IIdentifiedSingleEditOperation[] = []
+  let offset = 0
+  for (const chunk of chunks) {
+    const value = chunk.value
+    if (chunk.added) {
+      const pos = model.getPositionAt(offset)
+      ops.push({
+        range: {
+          startLineNumber: pos.lineNumber,
+          startColumn: pos.column,
+          endLineNumber: pos.lineNumber,
+          endColumn: pos.column,
+        },
+        text: value,
+        forceMoveMarkers: false,
+      })
+    } else if (chunk.removed) {
+      const start = model.getPositionAt(offset)
+      const end = model.getPositionAt(offset + value.length)
+      ops.push({
+        range: {
+          startLineNumber: start.lineNumber,
+          startColumn: start.column,
+          endLineNumber: end.lineNumber,
+          endColumn: end.column,
+        },
+        text: '',
+        forceMoveMarkers: false,
+      })
+      offset += value.length
+    } else {
+      offset += value.length
+    }
+  }
+  return ops
+}
 
 const sharedLspCtx: {
   uri: string | null
@@ -1077,6 +1137,61 @@ export function MonacoFileEditor({ workDir }: Props) {
   const editorRef = useRef<MonacoNs.editor.IStandaloneCodeEditor | null>(null)
   const monacoRef = useRef<typeof MonacoNs | null>(null)
 
+  const lastEmittedRef = useRef<{ relPath: string; value: string } | null>(null)
+
+  const editorDisplayRef = useRef<{
+    path: string
+    value: string
+    languageId: string
+    lossy: boolean
+  } | null>(null)
+  const bufferReady =
+    !!buffer && !buffer.loading && !buffer.error && !buffer.isBinary
+  if (bufferReady && activeTab && !showLargeFileGuard && !truncated) {
+    editorDisplayRef.current = {
+      path: fileUri ?? activeTab,
+      value: editorValue,
+      languageId,
+      lossy: buffer?.lossy === true,
+    }
+  }
+  const editorDisplay = editorDisplayRef.current
+
+  useEffect(() => {
+    if (!activeTab || !buffer || buffer.isBinary || buffer.loading) return
+    if (truncated || showLargeFileGuard) return
+    const editor = editorRef.current
+    const monaco = monacoRef.current
+    if (!editor || !monaco) return
+    const model = editor.getModel()
+    if (!model || model.isDisposed()) return
+    let expectedUri: string
+    try {
+      expectedUri = monaco.Uri.parse(fileUri ?? activeTab).toString()
+    } catch {
+      return
+    }
+    if (model.uri.toString() !== expectedUri) return
+    const target = buffer.draft ?? ''
+    const pending = pendingDraftRef.current
+    if (pending && pending.relPath === activeTab) return
+    const emitted = lastEmittedRef.current
+    if (emitted && emitted.relPath === activeTab && emitted.value === target) return
+    const current = model.getValue()
+    if (current === target) return
+    const ops = buildExternalEditOperations(model, current, target)
+    if (ops.length === 0) return
+    const viewState = editor.saveViewState()
+    lastEmittedRef.current = { relPath: activeTab, value: target }
+    model.pushEditOperations(null, ops, () => null)
+    if (viewState) {
+      try {
+        editor.restoreViewState(viewState)
+      } catch {
+      }
+    }
+  }, [activeTab, buffer, fileUri, showLargeFileGuard, truncated])
+
   const ctxRef = useRef(sharedLspCtx)
   ctxRef.current.uri = fileUri
   ctxRef.current.languageId = languageId
@@ -1114,7 +1229,7 @@ export function MonacoFileEditor({ workDir }: Props) {
       const result = await lspBridge.formatting({
         uri,
         languageId: ctxRef.current.languageId,
-        text: model.getValue(),
+        text: cachedModelText(model),
         options: {
           tabSize: model.getOptions().tabSize,
           insertSpaces: model.getOptions().insertSpaces,
@@ -1401,29 +1516,57 @@ export function MonacoFileEditor({ workDir }: Props) {
   }, [now, pendingDiff, diffOverlayOpen])
 
   useEffect(() => {
-    const editor = editorRef.current
-    const monaco = monacoRef.current
-    if (!editor || !monaco || !aiModifiedTs || !activeTab) return
+    if (!aiModifiedTs || !activeTab) return
     if (!buffer || buffer.isBinary) return
     if (lastSeen === undefined) return
     const currentContent = buffer.original
     if (currentContent === lastSeen) return
-    const result = applyAiDecorations({
-      monaco,
-      editor,
-      previousContent: lastSeen,
-      currentContent,
-    })
-    if (result.changedLineCount > 0) {
+    const rel = activeTab
+    const previousContent = lastSeen
+    useWorkspaceFilesStore.getState().snapshotLastSeen(rel, currentContent)
+    if (
+      previousContent.length > AI_DECORATION_CONTENT_LIMIT ||
+      currentContent.length > AI_DECORATION_CONTENT_LIMIT
+    ) {
+      const approx = Math.max(
+        1,
+        Math.abs(countLines(currentContent) - countLines(previousContent)),
+      )
       setPendingDiff({
-        relPath: activeTab,
-        previousContent: lastSeen,
+        relPath: rel,
+        previousContent,
         currentContent,
-        lineCount: result.changedLineCount,
+        lineCount: approx,
         landedAt: Date.now(),
       })
+      return
     }
-    useWorkspaceFilesStore.getState().snapshotLastSeen(activeTab, currentContent)
+    const run = () => {
+      if (useWorkspaceFilesStore.getState().activeTab !== rel) return
+      const editor = editorRef.current
+      const monaco = monacoRef.current
+      if (!editor || !monaco) return
+      const result = applyAiDecorations({
+        monaco,
+        editor,
+        previousContent,
+        currentContent,
+      })
+      if (result.changedLineCount > 0) {
+        setPendingDiff({
+          relPath: rel,
+          previousContent,
+          currentContent,
+          lineCount: result.changedLineCount,
+          landedAt: Date.now(),
+        })
+      }
+    }
+    if (typeof window.requestIdleCallback === 'function') {
+      window.requestIdleCallback(() => run(), { timeout: 1_000 })
+    } else {
+      window.setTimeout(run, 50)
+    }
   }, [aiModifiedTs, buffer, lastSeen, activeTab])
 
   useEffect(() => {
@@ -1748,7 +1891,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               languageId: ctxRef.current.languageId,
               line: lspPos.line,
               character: lspPos.character,
-              text: model.getValue(),
+              text: cachedModelText(model),
               signal: tokenToSignal(token),
             })
             const { text, range } = flattenHover(result)
@@ -1780,7 +1923,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               languageId: ctxRef.current.languageId,
               line: lspPos.line,
               character: lspPos.character,
-              text: model.getValue(),
+              text: cachedModelText(model),
               triggerKind: context.triggerKind + 1,
               triggerCharacter: context.triggerCharacter,
               signal: tokenToSignal(token),
@@ -1908,7 +2051,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               languageId: ctxRef.current.languageId,
               line: lspPos.line,
               character: lspPos.character,
-              text: model.getValue(),
+              text: cachedModelText(model),
               signal: tokenToSignal(token),
             })
             const locations = flattenLocations(result)
@@ -1966,7 +2109,7 @@ export function MonacoFileEditor({ workDir }: Props) {
                 languageId: ctxRef.current.languageId,
                 line: lspPos.line,
                 character: lspPos.character,
-                text: model.getValue(),
+                text: cachedModelText(model),
                 signal: tokenToSignal(token),
               })
               const locations = flattenLocations(result)
@@ -2073,7 +2216,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             const result = (await lspBridge.documentLink({
               uri,
               languageId: ctxRef.current.languageId,
-              text: model.getValue(),
+              text: cachedModelText(model),
               signal: tokenToSignal(token),
             })) as Array<{
               range: {
@@ -2114,7 +2257,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             const result = (await lspBridge.semanticTokensFull({
               uri,
               languageId: ctxRef.current.languageId,
-              text: model.getValue(),
+              text: cachedModelText(model),
               signal: tokenToSignal(token),
             })) as { data?: number[]; resultId?: string } | null
             if (!result || !Array.isArray(result.data)) return null
@@ -2147,7 +2290,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               languageId: ctxRef.current.languageId,
               line: lspPos.line,
               character: lspPos.character,
-              text: model.getValue(),
+              text: cachedModelText(model),
               signal: tokenToSignal(token),
             })
             const locations = flattenLocations(result)
@@ -2190,7 +2333,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             const result = await lspBridge.inlayHint({
               uri,
               languageId: ctxRef.current.languageId,
-              text: model.getValue(),
+              text: cachedModelText(model),
               range: {
                 start: {
                   line: range.startLineNumber - 1,
@@ -2243,7 +2386,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               languageId: ctxRef.current.languageId,
               line: lspPos.line,
               character: lspPos.character,
-              text: model.getValue(),
+              text: cachedModelText(model),
             })
             if (!result || typeof result !== 'object') return null
             const help = result as LspSignatureHelp
@@ -2286,7 +2429,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             const result = await lspBridge.documentSymbol({
               uri,
               languageId: ctxRef.current.languageId,
-              text: model.getValue(),
+              text: cachedModelText(model),
             })
             if (!Array.isArray(result)) return []
             const toMonaco = (
@@ -2356,7 +2499,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             const result = await lspBridge.codeAction({
               uri,
               languageId: ctxRef.current.languageId,
-              text: model.getValue(),
+              text: cachedModelText(model),
               range: {
                 start: {
                   line: range.startLineNumber - 1,
@@ -2401,7 +2544,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             const result = await lspBridge.formatting({
               uri,
               languageId: ctxRef.current.languageId,
-              text: model.getValue(),
+              text: cachedModelText(model),
               options: {
                 tabSize: options.tabSize,
                 insertSpaces: options.insertSpaces,
@@ -2435,7 +2578,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             const result = await lspBridge.rangeFormatting({
               uri,
               languageId: ctxRef.current.languageId,
-              text: model.getValue(),
+              text: cachedModelText(model),
               range: {
                 start: {
                   line: range.startLineNumber - 1,
@@ -2481,7 +2624,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               languageId: ctxRef.current.languageId,
               line: lspPos.line,
               character: lspPos.character,
-              text: model.getValue(),
+              text: cachedModelText(model),
             })
             if (!Array.isArray(result)) return null
             const out: MonacoNs.languages.DocumentHighlight[] = []
@@ -2523,7 +2666,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               languageId: ctxRef.current.languageId,
               line: lspPos.line,
               character: lspPos.character,
-              text: model.getValue(),
+              text: cachedModelText(model),
             })
             const locations = flattenLocations(result)
             if (locations.length === 0) return null
@@ -2562,7 +2705,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               languageId: ctxRef.current.languageId,
               line: lspPos.line,
               character: lspPos.character,
-              text: model.getValue(),
+              text: cachedModelText(model),
             })
             const locations = flattenLocations(result)
             if (locations.length === 0) return null
@@ -2603,7 +2746,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               line: lspPos.line,
               character: lspPos.character,
               newName,
-              text: model.getValue(),
+              text: cachedModelText(model),
             })) as LspWorkspaceEdit | null
             if (!result || typeof result !== 'object') return null
             const editsByUri = collectWorkspaceEditsByUri(result)
@@ -2645,7 +2788,7 @@ export function MonacoFileEditor({ workDir }: Props) {
               languageId: ctxRef.current.languageId,
               line: lspPos.line,
               character: lspPos.character,
-              text: model.getValue(),
+              text: cachedModelText(model),
             })
             if (!result) return null
             const word = model.getWordAtPosition(position)
@@ -2697,7 +2840,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             const result = await lspBridge.foldingRange({
               uri,
               languageId: ctxRef.current.languageId,
-              text: model.getValue(),
+              text: cachedModelText(model),
             })
             if (!Array.isArray(result)) return null
             const out: MonacoNs.languages.FoldingRange[] = []
@@ -2740,7 +2883,7 @@ export function MonacoFileEditor({ workDir }: Props) {
             const result = await lspBridge.selectionRange({
               uri,
               languageId: ctxRef.current.languageId,
-              text: model.getValue(),
+              text: cachedModelText(model),
               positions: positions.map((p) => ({
                 line: p.lineNumber - 1,
                 character: p.column - 1,
@@ -2886,9 +3029,18 @@ export function MonacoFileEditor({ workDir }: Props) {
       setSelectionMenu(null)
     }
 
+    let cursorFrame: number | null = null
+    const schedulePushEditorCursor = () => {
+      if (cursorFrame !== null) return
+      cursorFrame = window.requestAnimationFrame(() => {
+        cursorFrame = null
+        pushEditorCursor()
+      })
+    }
+
     editor.onDidChangeCursorSelection((e) => {
       saveViewState(useWorkspaceFilesStore.getState().activeTab)
-      pushEditorCursor()
+      schedulePushEditorCursor()
       if (e.source === 'mouse' || e.source === 'keyboard') {
         scheduleSelectionMenu()
       } else {
@@ -2896,7 +3048,7 @@ export function MonacoFileEditor({ workDir }: Props) {
       }
     })
     editor.onDidChangeCursorPosition(() => {
-      pushEditorCursor()
+      schedulePushEditorCursor()
     })
     editor.onDidScrollChange(() => {
       saveViewState(useWorkspaceFilesStore.getState().activeTab)
@@ -2909,6 +3061,13 @@ export function MonacoFileEditor({ workDir }: Props) {
     })
     editor.onDidDispose(() => {
       cancelSelectionMenu()
+      if (cursorFrame !== null) {
+        window.cancelAnimationFrame(cursorFrame)
+        cursorFrame = null
+      }
+      if (editorRef.current === editor) {
+        editorRef.current = null
+      }
     })
 
     pushEditorCursor()
@@ -2933,18 +3092,23 @@ export function MonacoFileEditor({ workDir }: Props) {
       }
     }
 
+    const maybeRestorePersistedViewState = (rel: string | null) => {
+      if (!rel) return
+      const rootNow = useWorkspaceFilesStore.getState().root ?? ''
+      const key = `${rootNow}::${rel}`
+      if (restoredViewStatePaths.has(key)) return
+      restoredViewStatePaths.add(key)
+      window.setTimeout(() => restoreViewStateFor(rel), 0)
+    }
+
     editor.onDidChangeModel(() => {
       const model = editor.getModel()
       if (model) ensureProviders(model.getLanguageId())
       registerCurrentModel()
-      const rel = useWorkspaceFilesStore.getState().activeTab
-      window.setTimeout(() => restoreViewStateFor(rel), 0)
+      maybeRestorePersistedViewState(useWorkspaceFilesStore.getState().activeTab)
     })
 
-    {
-      const rel = useWorkspaceFilesStore.getState().activeTab
-      window.setTimeout(() => restoreViewStateFor(rel), 0)
-    }
+    maybeRestorePersistedViewState(useWorkspaceFilesStore.getState().activeTab)
   }, [addToast, t])
 
   useEffect(() => {
@@ -3009,7 +3173,7 @@ export function MonacoFileEditor({ workDir }: Props) {
     )
   }
 
-  if (!buffer || buffer.loading) {
+  if (!buffer) {
     return (
       <div className="flex h-full items-center justify-center px-4 text-xs text-[var(--color-text-tertiary)]">
         {t('rightSidebar.loading')}
@@ -3017,7 +3181,7 @@ export function MonacoFileEditor({ workDir }: Props) {
     )
   }
 
-  if (buffer.error) {
+  if (buffer.error && !buffer.loading) {
     const errorKind = classifyMedia(nameOf(activeTab), buffer.mimeType)
     if (/too large/i.test(buffer.error) && errorKind !== 'unknown') {
       return (
@@ -3040,7 +3204,15 @@ export function MonacoFileEditor({ workDir }: Props) {
     )
   }
 
-  if (buffer.isBinary) {
+  if (buffer.loading && !editorDisplay) {
+    return (
+      <div className="flex h-full items-center justify-center px-4 text-xs text-[var(--color-text-tertiary)]">
+        {t('rightSidebar.loading')}
+      </div>
+    )
+  }
+
+  if (buffer.isBinary && !buffer.loading) {
     const kind = classifyMedia(nameOf(activeTab), buffer.mimeType)
     if (kind !== 'unknown') {
       return (
@@ -3222,17 +3394,19 @@ export function MonacoFileEditor({ workDir }: Props) {
             maxLines={LARGE_FILE_TRUNCATE_LINES}
             initialLines={LARGE_FILE_TRUNCATE_LINES}
           />
-        ) : (
+        ) : editorDisplay ? (
           <Editor
-            path={fileUri ?? activeTab}
+            path={editorDisplay.path}
             theme={theme === 'dark' ? 'vs-dark' : 'vs'}
-            language={languageId}
-            value={editorValue}
+            language={editorDisplay.languageId}
+            defaultValue={editorDisplay.value}
             onMount={onMount}
             onChange={(value) => {
-              if (typeof value === 'string' && !truncated) {
-                scheduleDraftUpdate(activeTab, value)
-              }
+              if (typeof value !== 'string' || truncated) return
+              const display = editorDisplayRef.current
+              if (!display || display.path !== (fileUri ?? activeTab)) return
+              lastEmittedRef.current = { relPath: activeTab, value }
+              scheduleDraftUpdate(activeTab, value)
             }}
             options={{
               automaticLayout: true,
@@ -3258,13 +3432,18 @@ export function MonacoFileEditor({ workDir }: Props) {
               renderLineHighlight: 'all',
               folding: true,
               showFoldingControls: 'mouseover',
-              readOnly: truncated || buffer?.lossy === true,
+              readOnly: truncated || editorDisplay.lossy,
               formatOnPaste: true,
               formatOnType: true,
               inlayHints: { enabled: inlayHintsEnabled ? 'on' : 'off' },
               lightbulb: { enabled: 'on' as MonacoNs.editor.ShowLightbulbIconMode },
             }}
           />
+        ) : null}
+        {buffer.loading && (
+          <div className="absolute inset-0 z-20 flex items-center justify-center bg-[var(--color-surface)]/70 text-xs text-[var(--color-text-tertiary)]">
+            {t('rightSidebar.loading')}
+          </div>
         )}
         {diffOverlayOpen && pendingDiff && pendingDiff.relPath === activeTab && (
           <MonacoDiffOverlay

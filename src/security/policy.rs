@@ -1487,7 +1487,10 @@ impl SecurityPolicy {
             expanded
         } else if let Some(workspace_hint) = rootless_path(&base) {
             if let Ok(stripped) = expanded.strip_prefix(&workspace_hint) {
-                if stripped.as_os_str().is_empty() {
+                let literal = base.join(&expanded);
+                if literal.exists() {
+                    literal
+                } else if stripped.as_os_str().is_empty() {
                     base
                 } else {
                     base.join(stripped)

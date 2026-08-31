@@ -55,9 +55,9 @@ enum OutboundFrame {
     Text(String),
     Pong(Vec<u8>),
 
-    ContentDelta(String),
+    ContentDelta(String, u64),
 
-    Thinking(String),
+    Thinking(String, u64),
 }
 
 fn with_frame_seq(frame: &str, out_seq: &mut u64) -> String {
@@ -156,6 +156,8 @@ async fn handle_socket(
         }
         let mut delta_buf = String::new();
         let mut thinking_buf = String::new();
+        let mut delta_turn_seq: u64 = 0;
+        let mut thinking_turn_seq: u64 = 0;
         let mut out_seq: u64 = 0;
         loop {
             let frame = tokio::select! {
@@ -166,7 +168,7 @@ async fn handle_socket(
                             Message::Text(with_frame_seq(&s, &mut out_seq).into())
                         }
                         OutboundFrame::Pong(p) => Message::Pong(p.into()),
-                        OutboundFrame::ContentDelta(t) | OutboundFrame::Thinking(t) => {
+                        OutboundFrame::ContentDelta(t, _) | OutboundFrame::Thinking(t, _) => {
                             Message::Text(with_frame_seq(&t, &mut out_seq).into())
                         }
                     };
@@ -195,14 +197,23 @@ async fn handle_socket(
             let mut send_failed = false;
 
             macro_rules! flush_buf {
-                ($kind:expr, $buf:expr) => {{
+                ($kind:expr, $buf:expr, $turn_seq:expr) => {{
                     if !$buf.is_empty() {
                         out_seq += 1;
-                        let coalesced = serde_json::json!({
-                            "seq": out_seq,
-                            "type": $kind,
-                            "text": $buf.clone(),
-                        })
+                        let coalesced = if $turn_seq > 0 {
+                            serde_json::json!({
+                                "seq": out_seq,
+                                "type": $kind,
+                                "text": $buf.clone(),
+                                "turnSeq": $turn_seq,
+                            })
+                        } else {
+                            serde_json::json!({
+                                "seq": out_seq,
+                                "type": $kind,
+                                "text": $buf.clone(),
+                            })
+                        }
                         .to_string();
                         $buf.clear();
                         if send_frame!(Message::Text(coalesced.into())) {
@@ -214,26 +225,40 @@ async fn handle_socket(
 
             for f in frames.drain(..) {
                 match f {
-                    OutboundFrame::ContentDelta(text) => {
-                        flush_buf!("thinking", thinking_buf);
+                    OutboundFrame::ContentDelta(text, tseq) => {
+                        flush_buf!("thinking", thinking_buf, thinking_turn_seq);
                         if send_failed {
                             break;
                         }
+                        if !delta_buf.is_empty() && delta_turn_seq != tseq {
+                            flush_buf!("content_delta", delta_buf, delta_turn_seq);
+                            if send_failed {
+                                break;
+                            }
+                        }
+                        delta_turn_seq = tseq;
                         delta_buf.push_str(&text);
                     }
-                    OutboundFrame::Thinking(text) => {
-                        flush_buf!("content_delta", delta_buf);
+                    OutboundFrame::Thinking(text, tseq) => {
+                        flush_buf!("content_delta", delta_buf, delta_turn_seq);
                         if send_failed {
                             break;
                         }
+                        if !thinking_buf.is_empty() && thinking_turn_seq != tseq {
+                            flush_buf!("thinking", thinking_buf, thinking_turn_seq);
+                            if send_failed {
+                                break;
+                            }
+                        }
+                        thinking_turn_seq = tseq;
                         thinking_buf.push_str(&text);
                     }
                     OutboundFrame::Text(s) => {
-                        flush_buf!("content_delta", delta_buf);
+                        flush_buf!("content_delta", delta_buf, delta_turn_seq);
                         if send_failed {
                             break;
                         }
-                        flush_buf!("thinking", thinking_buf);
+                        flush_buf!("thinking", thinking_buf, thinking_turn_seq);
                         if send_failed {
                             break;
                         }
@@ -243,11 +268,11 @@ async fn handle_socket(
                         }
                     }
                     OutboundFrame::Pong(p) => {
-                        flush_buf!("content_delta", delta_buf);
+                        flush_buf!("content_delta", delta_buf, delta_turn_seq);
                         if send_failed {
                             break;
                         }
-                        flush_buf!("thinking", thinking_buf);
+                        flush_buf!("thinking", thinking_buf, thinking_turn_seq);
                         if send_failed {
                             break;
                         }
@@ -259,10 +284,10 @@ async fn handle_socket(
                 }
             }
             if !send_failed {
-                flush_buf!("content_delta", delta_buf);
+                flush_buf!("content_delta", delta_buf, delta_turn_seq);
             }
             if !send_failed {
-                flush_buf!("thinking", thinking_buf);
+                flush_buf!("thinking", thinking_buf, thinking_turn_seq);
             }
             if send_failed {
                 break;
@@ -385,24 +410,27 @@ async fn handle_socket(
         const SEED_HISTORY_WINDOW: usize = 400;
         let backend_arc = std::sync::Arc::clone(backend);
         let session_key_owned = session_key.clone();
-        let messages = match tokio::task::spawn_blocking(move || {
-            backend_arc.load_tail(&session_key_owned, SEED_HISTORY_WINDOW)
+        let (messages, persisted_user_msgs) = match tokio::task::spawn_blocking(move || {
+            let messages = backend_arc.load_tail(&session_key_owned, SEED_HISTORY_WINDOW);
+            let count = backend_arc.count_user_messages(&session_key_owned) as u64;
+            (messages, count)
         })
         .await
         {
-            Ok(messages) => messages,
+            Ok(loaded) => loaded,
             Err(e) => {
                 tracing::warn!(
                     target: "ws_desktop_persist",
                     error = %e,
                     "session history load task panicked; starting with empty history"
                 );
-                Vec::new()
+                (Vec::new(), 0)
             }
         };
         if !messages.is_empty() {
             agent.seed_history(&messages);
         }
+        agent.set_gateway_sync_marker(persisted_user_msgs);
     }
 
     if let Some(svc) = crate::services::try_get_services() {
@@ -912,14 +940,28 @@ async fn handle_socket(
                     );
                 }
                 _ = tokio::time::sleep(std::time::Duration::from_secs(grace_secs)) => {
-                    cancelled_atomic_for_reader
-                        .store(true, std::sync::atomic::Ordering::Relaxed);
-                    cancel_signal_for_reader.load_full().cancel();
-                    tracing::info!(
-                        target: "agent_cancel",
-                        session = %session_id_for_reader,
-                        "reconnect grace window elapsed: firing cancel to stop any orphaned in-flight turn"
-                    );
+                    let live_connections = session_live_connections()
+                        .lock()
+                        .get(&session_id_for_reader)
+                        .copied()
+                        .unwrap_or(0);
+                    if live_connections > 0 {
+                        tracing::info!(
+                            target: "agent_cancel",
+                            session = %session_id_for_reader,
+                            live_connections,
+                            "reconnect grace window elapsed but the session has live connections (client already reconnected); leaving the in-flight turn untouched"
+                        );
+                    } else {
+                        cancelled_atomic_for_reader
+                            .store(true, std::sync::atomic::Ordering::Relaxed);
+                        cancel_signal_for_reader.load_full().cancel();
+                        tracing::info!(
+                            target: "agent_cancel",
+                            session = %session_id_for_reader,
+                            "reconnect grace window elapsed: firing cancel to stop any orphaned in-flight turn"
+                        );
+                    }
                     clear_disconnect_grace_slot(&session_id_for_reader, &grace_token);
                 }
             }
@@ -1697,6 +1739,19 @@ async fn handle_socket(
                     continue;
                 }
 
+                let client_msg_id = parsed
+                    .get("clientMsgId")
+                    .and_then(|v| v.as_str())
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .map(|s| s.to_string());
+                if let Some(ref cid) = client_msg_id {
+                    if client_msg_id_is_duplicate(&session_key, cid) {
+                        send_user_message_ack(&outbound_tx, &session_id, cid).await;
+                        continue;
+                    }
+                }
+
                 let is_ask_response = parsed
                     .get("source")
                     .and_then(|v| v.as_str())
@@ -1778,6 +1833,28 @@ async fn handle_socket(
                     }
                 }
 
+                if !is_ask_response && state.session_run_state.is_running(&session_id) {
+                    let workspace_key = crate::session::workspace_key_from_path(
+                        agent.current_workspace_dir(),
+                        &session_id,
+                    );
+                    tracing::warn!(
+                        session_id = %session_id,
+                        workspace_key = %workspace_key,
+                        "user_message rejected before persist: session already running",
+                    );
+                    let _ = send_json(
+                        &outbound_tx,
+                        &serde_json::json!({
+                            "type": "workspace_busy",
+                            "workspaceKey": workspace_key,
+                            "currentSessionId": session_id,
+                        }),
+                    )
+                    .await;
+                    continue;
+                }
+
                 let content = if attachments.is_empty() {
                     raw_content
                 } else {
@@ -1808,7 +1885,17 @@ async fn handle_socket(
                             serde_json::Value::String(display.clone()),
                         );
                     }
+                    if let Some(ref cid) = client_msg_id {
+                        user_msg.metadata.insert(
+                            "client_msg_id".to_string(),
+                            serde_json::Value::String(cid.clone()),
+                        );
+                    }
                     enqueue_persist(&state, &session_key, vec![user_msg]).await;
+                }
+                if let Some(ref cid) = client_msg_id {
+                    note_client_msg_id(&session_key, cid);
+                    send_user_message_ack(&outbound_tx, &session_id, cid).await;
                 }
 
                 if let Some(svc) = crate::services::try_get_services() {
@@ -2496,7 +2583,6 @@ async fn handle_socket(
     }
 
     if let Some(svc) = crate::services::try_get_services() {
-        svc.clear_session_coding_mode(&session_key);
         svc.clear_session_designer(&session_key);
         svc.clear_session_debug(&session_key);
     }
@@ -3028,6 +3114,45 @@ async fn send_error(outbound: &OutboundSender, message: &str, code: &str) {
     send_json(
         outbound,
         &crate::agent::error_classify::user_facing_error_json(message, code),
+    )
+    .await;
+}
+
+static SESSION_SEEN_CLIENT_MSG_IDS: once_cell::sync::Lazy<
+    parking_lot::Mutex<std::collections::HashMap<String, std::collections::VecDeque<String>>>,
+> = once_cell::sync::Lazy::new(|| parking_lot::Mutex::new(std::collections::HashMap::new()));
+
+fn client_msg_id_is_duplicate(session_key: &str, client_msg_id: &str) -> bool {
+    let map = SESSION_SEEN_CLIENT_MSG_IDS.lock();
+    map.get(session_key)
+        .is_some_and(|seen| seen.iter().any(|id| id == client_msg_id))
+}
+
+fn note_client_msg_id(session_key: &str, client_msg_id: &str) {
+    const MAX_TRACKED_CLIENT_MSG_IDS: usize = 64;
+    let mut map = SESSION_SEEN_CLIENT_MSG_IDS.lock();
+    let seen = map.entry(session_key.to_string()).or_default();
+    if seen.iter().any(|id| id == client_msg_id) {
+        return;
+    }
+    seen.push_back(client_msg_id.to_string());
+    while seen.len() > MAX_TRACKED_CLIENT_MSG_IDS {
+        seen.pop_front();
+    }
+}
+
+async fn send_user_message_ack(
+    outbound: &OutboundSender,
+    session_id: &str,
+    client_msg_id: &str,
+) {
+    send_json(
+        outbound,
+        &serde_json::json!({
+            "type": "user_message_ack",
+            "sessionId": session_id,
+            "clientMsgId": client_msg_id,
+        }),
     )
     .await;
 }
@@ -3922,24 +4047,47 @@ async fn run_turn(
         std::sync::Arc::clone(&feed_for_pump),
     );
 
+    static NEXT_TURN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    let turn_seq =
+        NEXT_TURN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let (tee_tx, mut tee_rx) = mpsc::channel::<OutboundFrame>(1024);
     let real_outbound = outbound.clone();
     let _tee_pump = crate::runtime::spawn_supervised("ws_desktop.turn_tee", async move {
         while let Some(frame) = tee_rx.recv().await {
-            match &frame {
-                OutboundFrame::Text(text) => feed_for_pump.publish(text),
-                OutboundFrame::ContentDelta(t) => {
-                    feed_for_pump.publish(
-                        &serde_json::json!({ "type": "content_delta", "text": t }).to_string(),
-                    );
+            let frame = match frame {
+                OutboundFrame::Text(text) => {
+                    let stamped = match serde_json::from_str::<serde_json::Value>(&text) {
+                        Ok(mut value) => match value.as_object_mut() {
+                            Some(obj) => {
+                                obj.insert(
+                                    "turnSeq".to_string(),
+                                    serde_json::json!(turn_seq),
+                                );
+                                value.to_string()
+                            }
+                            None => text,
+                        },
+                        Err(_) => text,
+                    };
+                    feed_for_pump.publish(&stamped);
+                    OutboundFrame::Text(stamped)
                 }
-                OutboundFrame::Thinking(t) => {
+                OutboundFrame::ContentDelta(t, tseq) => {
                     feed_for_pump.publish(
-                        &serde_json::json!({ "type": "thinking", "text": t }).to_string(),
+                        &serde_json::json!({ "type": "content_delta", "text": t, "turnSeq": tseq })
+                            .to_string(),
                     );
+                    OutboundFrame::ContentDelta(t, tseq)
                 }
-                _ => {}
-            }
+                OutboundFrame::Thinking(t, tseq) => {
+                    feed_for_pump.publish(
+                        &serde_json::json!({ "type": "thinking", "text": t, "turnSeq": tseq })
+                            .to_string(),
+                    );
+                    OutboundFrame::Thinking(t, tseq)
+                }
+                other => other,
+            };
             let _ = real_outbound.send(frame).await;
         }
     });
@@ -3958,8 +4106,7 @@ async fn run_turn(
     let content_owned = content.to_string();
     let mut text_block_open = false;
     let mut current_tool_use_id: Option<String> = None;
-    let mut tool_use_id_for_name: std::collections::HashMap<String, String> =
-        std::collections::HashMap::new();
+    let mut tool_id_pairer = crate::session::FallbackToolIdPairer::default();
     let mut last_tool_use_id_for_name: std::collections::HashMap<String, String> =
         std::collections::HashMap::new();
     let mut streaming_tool_args: std::collections::HashMap<u32, (String, usize, bool)> =
@@ -3987,24 +4134,69 @@ async fn run_turn(
         } else {
             let backend_arc = std::sync::Arc::clone(backend);
             let session_key_owned = session_key.to_string();
-            match tokio::task::spawn_blocking(move || {
-                let total = backend_arc.count_user_messages(&session_key_owned);
-                #[allow(clippy::cast_possible_wrap)]
-                {
-                    (total.saturating_sub(1)) as i64
-                }
+            let persisted_total: Option<u64> = match tokio::task::spawn_blocking(move || {
+                backend_arc.count_user_messages(&session_key_owned) as u64
             })
             .await
             {
-                Ok(idx) => idx,
+                Ok(total) => Some(total),
                 Err(e) => {
                     tracing::warn!(
                         target: "ws_desktop_persist",
                         error = %e,
                         "failed to compute user_message_index; disabling rewind attribution for this turn"
                     );
-                    -1
+                    None
                 }
+            };
+            match persisted_total {
+                Some(total) => {
+                    let persisted_before = total.saturating_sub(1);
+                    let marker = agent.gateway_sync_marker();
+                    if persisted_before > marker {
+                        tracing::info!(
+                            target: "ws_desktop_persist",
+                            session_key,
+                            persisted_before,
+                            marker,
+                            "session transcript advanced by another connection; \
+                             re-seeding this connection's agent history from the persisted tail"
+                        );
+                        const SEED_HISTORY_WINDOW: usize = 400;
+                        let backend_reseed = std::sync::Arc::clone(backend);
+                        let key_reseed = session_key.to_string();
+                        match tokio::task::spawn_blocking(move || {
+                            backend_reseed.load_tail(&key_reseed, SEED_HISTORY_WINDOW)
+                        })
+                        .await
+                        {
+                            Ok(mut tail) => {
+                                if let Some(last) = tail.last() {
+                                    if last.role == "user" && last.content == content {
+                                        tail.pop();
+                                    }
+                                }
+                                agent.clear_history();
+                                if !tail.is_empty() {
+                                    agent.seed_history(&tail);
+                                }
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    target: "ws_desktop_persist",
+                                    error = %e,
+                                    "failed to re-seed agent history after cross-connection drift"
+                                );
+                            }
+                        }
+                    }
+                    agent.set_gateway_sync_marker(total);
+                    #[allow(clippy::cast_possible_wrap)]
+                    {
+                        (total.saturating_sub(1)) as i64
+                    }
+                }
+                None => -1,
             }
         }
     } else {
@@ -4146,34 +4338,48 @@ async fn run_turn(
                     None => break,
                 },
                 bus_event = approval_bus_rx.recv() => {
-                    if let Ok(evt) = bus_event {
-                        if let crate::session::SessionEventKind::ApprovalRequested {
-                            id: request_id,
-                            tool_name,
-                            arguments,
-                            ..
-                        } = &evt.kind
-                        {
-                            let belongs_here = crate::approval::pending_gateway_approval_session(
-                                request_id,
-                            )
-                            .is_some_and(|owner| owner.as_deref() == Some(session_id));
-                            if belongs_here {
-                                let _ = send_json(
-                                    outbound,
-                                    &serde_json::json!({
-                                        "type": "permission_request",
-                                        "requestId": request_id,
-                                        "toolName": tool_name,
-                                        "input": arguments,
-                                        "description": arguments
-                                            .get("reason")
-                                            .and_then(|v| v.as_str()),
-                                    }),
+                    match bus_event {
+                        Ok(evt) => {
+                            if let crate::session::SessionEventKind::ApprovalRequested {
+                                id: request_id,
+                                tool_name,
+                                arguments,
+                                ..
+                            } = &evt.kind
+                            {
+                                let belongs_here = crate::approval::pending_gateway_approval_session(
+                                    request_id,
                                 )
-                                .await;
+                                .is_some_and(|owner| owner.as_deref() == Some(session_id));
+                                if belongs_here {
+                                    let _ = send_json(
+                                        outbound,
+                                        &serde_json::json!({
+                                            "type": "permission_request",
+                                            "requestId": request_id,
+                                            "toolName": tool_name,
+                                            "input": arguments,
+                                            "description": arguments
+                                                .get("reason")
+                                                .and_then(|v| v.as_str()),
+                                        }),
+                                    )
+                                    .await;
+                                }
                             }
                         }
+                        Err(tokio::sync::broadcast::error::RecvError::Lagged(skipped)) => {
+                            tracing::warn!(
+                                target: "gateway.approval",
+                                skipped,
+                                session_id = %session_id,
+                                "approval bus lagged; replaying pending approval requests for this session"
+                            );
+                            for replay in crate::approval::pending_replays_for_session(session_id) {
+                                let _ = send_json(outbound, &replay).await;
+                            }
+                        }
+                        Err(tokio::sync::broadcast::error::RecvError::Closed) => {}
                     }
                     continue;
                 }
@@ -4209,7 +4415,7 @@ async fn run_turn(
                             accumulated_text.push_str(&delta[..take_bytes]);
                         }
                     }
-                    let _ = outbound.send(OutboundFrame::ContentDelta(delta)).await;
+                    let _ = outbound.send(OutboundFrame::ContentDelta(delta, turn_seq)).await;
                 }
                 TurnEvent::StreamReset => {
                     accumulated_text.clear();
@@ -4231,7 +4437,7 @@ async fn run_turn(
                         if let Ok(mut pg) = sqlite_persist_forward.lock() {
                             pg.on_thinking(&delta);
                         }
-                        let _ = outbound.send(OutboundFrame::Thinking(delta)).await;
+                        let _ = outbound.send(OutboundFrame::Thinking(delta, turn_seq)).await;
                     }
                 }
                 TurnEvent::ToolCall {
@@ -4245,7 +4451,7 @@ async fn run_turn(
                         .filter(|s| !s.is_empty())
                         .unwrap_or_else(next_tool_use_id);
                     current_tool_use_id = Some(id.clone());
-                    tool_use_id_for_name.insert(name.clone(), id.clone());
+                    tool_id_pairer.push_call_id(&name, id.clone());
                     last_tool_use_id_for_name.insert(name.clone(), id.clone());
                     let safe_args = crate::services::governance::credential_vault::redact_args_optional(&args);
                     if let Ok(mut pg) = sqlite_persist_forward.lock() {
@@ -4340,11 +4546,17 @@ async fn run_turn(
                     success,
                     tool_call_id,
                 } => {
-                    let id = tool_call_id
-                        .filter(|s| !s.is_empty())
-                        .or_else(|| tool_use_id_for_name.remove(&name))
-                        .or_else(|| current_tool_use_id.clone())
-                        .unwrap_or_else(next_tool_use_id);
+                    let explicit_id = tool_call_id.filter(|s| !s.is_empty());
+                    let id = match explicit_id {
+                        Some(id) => {
+                            tool_id_pairer.remove_id(&name, &id);
+                            id
+                        }
+                        None => tool_id_pairer
+                            .pop_result_id(&name)
+                            .or_else(|| current_tool_use_id.clone())
+                            .unwrap_or_else(next_tool_use_id),
+                    };
                     current_tool_use_id = None;
                     let is_error = crate::agent::tool_handler::event_status::tool_result_is_error(
                         &name,
@@ -4629,9 +4841,8 @@ async fn run_turn(
                         pending_ask_request_id = Some(request_id.clone());
                     }
 
-                    let tool_use_id = tool_use_id_for_name
-                        .get(&tool_name)
-                        .cloned()
+                    let tool_use_id = tool_id_pairer
+                        .peek_last(&tool_name)
                         .or_else(|| current_tool_use_id.clone())
                         .or_else(|| last_tool_use_id_for_name.get(&tool_name).cloned());
                     let mut frame = serde_json::json!({

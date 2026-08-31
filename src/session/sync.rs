@@ -13,6 +13,7 @@ use crate::observability::session_write_mode_metrics;
 use crate::session::state::{SessionDelta, SessionId};
 
 const CHANNEL_CAPACITY: usize = 1024;
+const TRANSPORT_QUEUE_CAPACITY: usize = 2048;
 
 static GLOBAL: Lazy<Arc<SessionSyncHub>> = Lazy::new(|| Arc::new(SessionSyncHub::new()));
 
@@ -21,7 +22,7 @@ pub struct SessionSyncHub {
 
     transport: RwLock<Option<Arc<dyn super::rpc::SessionRpcTransport>>>,
 
-    transport_queues: RwLock<HashMap<SessionId, tokio::sync::mpsc::UnboundedSender<SessionDelta>>>,
+    transport_queues: RwLock<HashMap<SessionId, tokio::sync::mpsc::Sender<SessionDelta>>>,
 }
 
 impl SessionSyncHub {
@@ -87,7 +88,7 @@ impl SessionSyncHub {
                     std::collections::hash_map::Entry::Occupied(entry) => entry.get().clone(),
                     std::collections::hash_map::Entry::Vacant(slot) => {
                         let (tx, mut rx) =
-                            tokio::sync::mpsc::unbounded_channel::<SessionDelta>();
+                            tokio::sync::mpsc::channel::<SessionDelta>(TRANSPORT_QUEUE_CAPACITY);
                         let session_id = id.to_string();
                         let transport_for_task = Arc::clone(&transport);
                         crate::runtime::spawn_supervised(
@@ -113,8 +114,19 @@ impl SessionSyncHub {
                 }
             }
         };
-        if tx.send(delta).is_err() {
-            self.transport_queues.write().remove(id);
+        match tx.try_send(delta) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                tracing::warn!(
+                    target: "session.sync",
+                    session_id = %id,
+                    capacity = TRANSPORT_QUEUE_CAPACITY,
+                    "cross-process sync queue is full; dropping session delta (transport lagging, local state unaffected)"
+                );
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
+                self.transport_queues.write().remove(id);
+            }
         }
     }
 

@@ -25,8 +25,10 @@ type FileHistoryState = {
 }
 
 const REFRESH_DEBOUNCE_MS = 800
+const REFRESH_MAX_WAIT_MS = 3_000
 
 const refreshTimers: Record<string, ReturnType<typeof setTimeout>> = {}
+const refreshFirstScheduledAt: Record<string, number> = {}
 
 export const useFileHistoryStore = create<FileHistoryState>((set, get) => ({
   byRoot: {},
@@ -87,12 +89,20 @@ export const useFileHistoryStore = create<FileHistoryState>((set, get) => ({
 
   scheduleRefresh: (root: string) => {
     if (!root) return
+    const now = Date.now()
+    const first = refreshFirstScheduledAt[root] ?? now
+    refreshFirstScheduledAt[root] = first
+    const delay = Math.min(
+      REFRESH_DEBOUNCE_MS,
+      Math.max(0, first + REFRESH_MAX_WAIT_MS - now),
+    )
     const existing = refreshTimers[root]
     if (existing) clearTimeout(existing)
     refreshTimers[root] = setTimeout(() => {
       delete refreshTimers[root]
+      delete refreshFirstScheduledAt[root]
       void get().fetchFiles(root)
-    }, REFRESH_DEBOUNCE_MS)
+    }, delay)
   },
 
   clearRoot: (root: string) => {
@@ -100,6 +110,7 @@ export const useFileHistoryStore = create<FileHistoryState>((set, get) => ({
       clearTimeout(refreshTimers[root])
       delete refreshTimers[root]
     }
+    delete refreshFirstScheduledAt[root]
     set((s) => {
       if (!(root in s.byRoot)) return {}
       const next = { ...s.byRoot }

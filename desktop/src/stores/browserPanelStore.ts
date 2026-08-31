@@ -234,6 +234,10 @@ type StoreState = {
   setInspectorOpen: (sessionId: string, open: boolean) => void
   setPickMode: (sessionId: string, enabled: boolean) => void
   appendConsole: (sessionId: string, entry: { level: string; message: string; ts: number }) => void
+  appendConsoleBatch: (
+    sessionId: string,
+    entries: Array<{ level: string; message: string; ts: number }>,
+  ) => void
   setInspector: (sessionId: string, snap: BrowserInspectorSnapshot | null) => void
   clearConsole: (sessionId: string) => void
   reset: (sessionId: string) => void
@@ -615,6 +619,17 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
       while (next.length > CONSOLE_RING_MAX) next.shift()
       return { panels: patchPanel(state.panels, sessionId, { consoleLog: next }) }
     }),
+
+  appendConsoleBatch: (sessionId, entries) => {
+    if (entries.length === 0) return
+    set((state) => {
+      const prev = state.panels[sessionId] ?? DEFAULT_STATE
+      const appended = entries.map((entry) => ({ id: ++consoleSeq, ...entry }))
+      const next = [...prev.consoleLog, ...appended]
+      while (next.length > CONSOLE_RING_MAX) next.shift()
+      return { panels: patchPanel(state.panels, sessionId, { consoleLog: next }) }
+    })
+  },
 
   setInspector: (sessionId, snap) =>
     set((state) => ({
@@ -1230,6 +1245,18 @@ export const useBrowserPanelStore = create<StoreState>((set, get) => ({
     if (event.kind === 'console') {
       const data = event.data as { level: string; message: string; ts: number }
       get().appendConsole(sessionId, data)
+      return
+    }
+    if (event.kind === 'console_batch') {
+      const data = event.data as {
+        entries?: Array<{ level: string; message: string; ts: number }>
+      }
+      if (Array.isArray(data.entries) && data.entries.length > 0) {
+        get().appendConsoleBatch(sessionId, data.entries)
+      }
+      return
+    }
+    if (event.kind === 'network_error_batch') {
       return
     }
     if (event.kind === 'pick') {

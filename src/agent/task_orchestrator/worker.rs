@@ -7,6 +7,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio_util::sync::CancellationToken;
+
 use super::queue::{Task, TaskQueue};
 use crate::memory::blackboard::BlackboardHandle;
 use crate::runtime::task_manager::TaskHandle;
@@ -15,6 +17,8 @@ pub type TaskWorkerExecutor = Arc<
     dyn Fn(Task) -> Pin<Box<dyn Future<Output = Result<String, String>> + Send>> + Send + Sync,
 >;
 
+const LEASE_RENEW_INTERVAL: Duration = Duration::from_secs(60);
+
 pub struct TaskQueueWorker {
     queue: Arc<TaskQueue>,
     blackboard: Option<BlackboardHandle>,
@@ -22,6 +26,7 @@ pub struct TaskQueueWorker {
     capabilities: Vec<String>,
     poll_interval: Duration,
     executor: TaskWorkerExecutor,
+    cancel: CancellationToken,
 }
 
 impl TaskQueueWorker {
@@ -42,11 +47,17 @@ impl TaskQueueWorker {
             capabilities,
             poll_interval: Duration::from_secs(2),
             executor,
+            cancel: CancellationToken::new(),
         }
     }
 
     pub fn with_blackboard(mut self, blackboard: BlackboardHandle) -> Self {
         self.blackboard = Some(blackboard);
+        self
+    }
+
+    pub fn with_cancellation(mut self, cancel: CancellationToken) -> Self {
+        self.cancel = cancel;
         self
     }
 
@@ -80,6 +91,14 @@ impl TaskQueueWorker {
         );
 
         loop {
+            if self.cancel.is_cancelled() {
+                tracing::info!(
+                    target: "agent.task_orchestrator.worker",
+                    agent_id = %self.agent_id,
+                    "cancellation requested; task worker exiting",
+                );
+                return;
+            }
             if crate::security::estop::is_kill_all() {
                 tracing::warn!(
                     target: "agent.task_orchestrator.worker",
@@ -94,14 +113,18 @@ impl TaskQueueWorker {
                 if let Some(task) = self.queue.claim(&self.agent_id, capability) {
                     claimed_any = true;
                     self.run_task(task).await;
-                    if crate::security::estop::is_kill_all() {
+                    if self.cancel.is_cancelled() || crate::security::estop::is_kill_all() {
                         return;
                     }
                 }
             }
 
             if !claimed_any {
-                tokio::time::sleep(self.poll_interval).await;
+                tokio::select! {
+                    biased;
+                    () = self.cancel.cancelled() => return,
+                    () = tokio::time::sleep(self.poll_interval) => {}
+                }
             }
         }
     }
@@ -109,6 +132,7 @@ impl TaskQueueWorker {
     async fn run_task(&self, task: Task) {
         let task_id = task.id.clone();
         let description = task.description.clone();
+        let attempt = task.attempts;
 
         self.write_blackboard(
             &task_id,
@@ -122,20 +146,47 @@ impl TaskQueueWorker {
         );
 
         use futures_util::FutureExt as _;
-        let result = match std::panic::AssertUnwindSafe((self.executor)(task))
-            .catch_unwind()
-            .await
-        {
-            Ok(result) => result,
-            Err(panic) => Err(format!(
-                "task executor panicked: {}",
-                crate::util::describe_panic(&*panic)
-            )),
+        let result = {
+            let exec_fut = std::panic::AssertUnwindSafe((self.executor)(task)).catch_unwind();
+            tokio::pin!(exec_fut);
+            let mut renew_ticker = tokio::time::interval(LEASE_RENEW_INTERVAL);
+            renew_ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+            renew_ticker.tick().await;
+            loop {
+                tokio::select! {
+                    outcome = &mut exec_fut => {
+                        break match outcome {
+                            Ok(result) => result,
+                            Err(panic) => Err(format!(
+                                "task executor panicked: {}",
+                                crate::util::describe_panic(&*panic)
+                            )),
+                        };
+                    }
+                    _ = renew_ticker.tick() => {
+                        if !self.queue.renew_lease(&task_id, &self.agent_id, attempt) {
+                            tracing::warn!(
+                                target: "agent.task_orchestrator.worker",
+                                task_id = %task_id,
+                                agent_id = %self.agent_id,
+                                "lease renewal rejected (task reclaimed or reassigned); abandoning execution",
+                            );
+                            break Err(
+                                "task lease lost: the queue reclaimed this task while it was running"
+                                    .to_string(),
+                            );
+                        }
+                    }
+                }
+            }
         };
 
         match result {
             Ok(output) => {
-                if let Err(e) = self.queue.complete(&task_id, output.clone()) {
+                if let Err(e) =
+                    self.queue
+                        .complete(&task_id, &self.agent_id, attempt, output.clone())
+                {
                     tracing::warn!(
                         target: "agent.task_orchestrator.worker",
                         task_id = %task_id,
@@ -156,7 +207,7 @@ impl TaskQueueWorker {
                 );
             }
             Err(err) => {
-                if let Err(e) = self.queue.fail(&task_id, err.clone()) {
+                if let Err(e) = self.queue.fail(&task_id, &self.agent_id, attempt, err.clone()) {
                     tracing::warn!(
                         target: "agent.task_orchestrator.worker",
                         task_id = %task_id,

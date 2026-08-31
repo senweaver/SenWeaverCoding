@@ -28,6 +28,7 @@ import { useDebugStore } from './debugStore'
 import { useUIStore } from './uiStore'
 import { t } from '../i18n'
 import { isWindowBusy, onWindowIdle } from '../lib/windowBusy'
+import { waitForScrollQuiet } from '../lib/scrollActivity'
 import type { LspBroadcastEvent } from '../types/lsp'
 import { randomSpinnerVerb } from '../config/spinnerVerbs'
 import {
@@ -119,6 +120,8 @@ export type PerSessionState = {
   } | null
 
   pendingEdits: PendingEdit[]
+
+  keptEdits: PendingEdit[]
 
   subagentTimelines: Record<string, SubagentTimelineBucket>
 
@@ -214,6 +217,7 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   pendingRewind: null,
   pendingSendAfterRewind: null,
   pendingEdits: [],
+  keptEdits: [],
   subagentTimelines: {},
   activeTaskToolUseId: null,
   stopRequested: false,
@@ -232,10 +236,17 @@ function createDefaultSessionState(): PerSessionState {
     pendingRewind: null,
     pendingSendAfterRewind: null,
     pendingEdits: [],
+    keptEdits: [],
     subagentTimelines: {},
     activeTaskToolUseId: null,
     pendingResourceWaits: [],
   }
+}
+
+function mergeKeptEdits(kept: PendingEdit[], incoming: PendingEdit[]): PendingEdit[] {
+  if (incoming.length === 0) return kept
+  const incomingPaths = new Set(incoming.map((e) => e.path))
+  return [...kept.filter((e) => !incomingPaths.has(e.path)), ...incoming]
 }
 
 function mergePendingEdit(
@@ -368,6 +379,8 @@ type ChatStore = {
   dismissModeSwitch: (sessionId: string, messageId: string) => void
 
   clearPendingEdits: (sessionId: string) => void
+
+  clearKeptEdits: (sessionId: string) => void
 
   undoAllPendingEdits: (sessionId: string) => Promise<void>
 
@@ -1181,45 +1194,79 @@ function subagentChunkToEntry(
   }
 }
 
+type PendingWorkerTimelineEvent = {
+  parentToolUseId: string
+  workerId: string
+  action: string
+  detail: string
+  at: number
+}
+
+const pendingWorkerEventsBySession = new Map<string, PendingWorkerTimelineEvent[]>()
+const workerEventFlushTimerBySession = new Map<string, ReturnType<typeof setTimeout>>()
+
+function flushWorkerTimelineEvents(sessionId: string): void {
+  workerEventFlushTimerBySession.delete(sessionId)
+  const events = pendingWorkerEventsBySession.get(sessionId)
+  pendingWorkerEventsBySession.delete(sessionId)
+  if (!events || events.length === 0) return
+  useChatStore.setState((state) => ({
+    sessions: updateSessionIn(state.sessions, sessionId, (s) => {
+      let timelines = s.subagentTimelines
+      for (const ev of events) {
+        const bucket = timelines[ev.parentToolUseId] ?? {
+          parentToolUseId: ev.parentToolUseId,
+          parentToolName: 'spawn_workers',
+          agents: {},
+        }
+        const prevTimeline: AgentTimeline = bucket.agents[ev.workerId] ?? {
+          agentId: ev.workerId,
+          status: 'running',
+          entries: [],
+          startedAt: ev.at,
+          updatedAt: ev.at,
+        }
+        const delta = ev.detail.trim() ? `${ev.action}: ${ev.detail}` : ev.action
+        const entry = subagentChunkToEntry('Status', delta)
+        const nextTimeline = appendTimelineEntry(prevTimeline, entry, ev.at)
+        timelines = {
+          ...timelines,
+          [ev.parentToolUseId]: {
+            ...bucket,
+            agents: {
+              ...bucket.agents,
+              [ev.workerId]: nextTimeline,
+            },
+          },
+        }
+      }
+      return { subagentTimelines: timelines }
+    }),
+  }))
+}
+
 function updateWorkerSubagentTimeline(
-  update: (
-    fn: (s: PerSessionState) => Partial<PerSessionState> | Record<string, never>,
-  ) => void,
+  sessionId: string,
   parentToolUseId: string,
   workerId: string,
   action: string,
   detail: string,
 ) {
-  const now = Date.now()
-  const delta = detail.trim() ? `${action}: ${detail}` : action
-  update((s) => {
-    const bucket = s.subagentTimelines[parentToolUseId] ?? {
-      parentToolUseId,
-      parentToolName: 'spawn_workers',
-      agents: {},
-    }
-    const prevTimeline: AgentTimeline = bucket.agents[workerId] ?? {
-      agentId: workerId,
-      status: 'running',
-      entries: [],
-      startedAt: now,
-      updatedAt: now,
-    }
-    const entry = subagentChunkToEntry('Status', delta)
-    const nextTimeline = appendTimelineEntry(prevTimeline, entry, now)
-    return {
-      subagentTimelines: {
-        ...s.subagentTimelines,
-        [parentToolUseId]: {
-          ...bucket,
-          agents: {
-            ...bucket.agents,
-            [workerId]: nextTimeline,
-          },
-        },
-      },
-    }
-  })
+  const ev: PendingWorkerTimelineEvent = {
+    parentToolUseId,
+    workerId,
+    action,
+    detail,
+    at: Date.now(),
+  }
+  const list = pendingWorkerEventsBySession.get(sessionId)
+  if (list) list.push(ev)
+  else pendingWorkerEventsBySession.set(sessionId, [ev])
+  if (workerEventFlushTimerBySession.has(sessionId)) return
+  workerEventFlushTimerBySession.set(
+    sessionId,
+    setTimeout(() => flushWorkerTimelineEvents(sessionId), 80),
+  )
 }
 
 const MAX_TIMELINE_ENTRY_CHARS = 100_000
@@ -1263,24 +1310,34 @@ function appendTimelineEntry(
   }
 }
 
+const MAX_TIMELINE_FINAL_OUTPUT_CHARS = 20_000
+
+function capFinalOutputText(text: string | undefined): string | undefined {
+  if (text === undefined) return undefined
+  if (text.length <= MAX_TIMELINE_FINAL_OUTPUT_CHARS) return text
+  return `${text.slice(0, MAX_TIMELINE_FINAL_OUTPUT_CHARS)}\n… [truncated ${text.length - MAX_TIMELINE_FINAL_OUTPUT_CHARS} chars]`
+}
+
 function extractToolResultText(content: unknown): string | undefined {
-  if (typeof content === 'string') return content
+  if (typeof content === 'string') return capFinalOutputText(content)
   if (Array.isArray(content)) {
-    return content
-      .map((chunk) => {
-        if (typeof chunk === 'string') return chunk
-        if (chunk && typeof chunk === 'object' && 'text' in chunk) {
-          const t = (chunk as { text?: unknown }).text
-          return typeof t === 'string' ? t : ''
-        }
-        return ''
-      })
-      .filter(Boolean)
-      .join('\n') || undefined
+    return capFinalOutputText(
+      content
+        .map((chunk) => {
+          if (typeof chunk === 'string') return chunk
+          if (chunk && typeof chunk === 'object' && 'text' in chunk) {
+            const t = (chunk as { text?: unknown }).text
+            return typeof t === 'string' ? t : ''
+          }
+          return ''
+        })
+        .filter(Boolean)
+        .join('\n') || undefined,
+    )
   }
   if (content && typeof content === 'object') {
     try {
-      return JSON.stringify(content)
+      return capFinalOutputText(JSON.stringify(content))
     } catch {
       return undefined
     }
@@ -1411,6 +1468,8 @@ const runtimeSyncRetrySessions = new Set<string>()
 const STUCK_RECONCILE_QUIET_MS = 2000
 const stuckReconcileDeferTimers = new Map<string, ReturnType<typeof setTimeout>>()
 
+const activeTurnSeqBySession = new Map<string, number>()
+
 const resyncingSessions = new Set<string>()
 
 const historyChangedReloadAt = new Map<string, number>()
@@ -1447,6 +1506,45 @@ function handleRuntimeSyncFailure(sessionId: string, err: unknown): void {
       duration: 6000,
       sessionId,
     })
+  }
+}
+
+const HISTORY_RETRY_DELAYS_MS = [2000, 5000]
+const historyLoadRetryAttempts = new Map<string, number>()
+const historyLoadRetryTimers = new Map<string, ReturnType<typeof setTimeout>>()
+
+function scheduleHistoryLoadRetry(
+  sessionId: string,
+  retry: () => void | Promise<void>,
+): void {
+  const attempt = historyLoadRetryAttempts.get(sessionId) ?? 0
+  if (attempt >= HISTORY_RETRY_DELAYS_MS.length) {
+    historyLoadRetryAttempts.delete(sessionId)
+    useUIStore.getState().addToast({
+      type: 'error',
+      message: t('chat.loadHistoryFailed'),
+      duration: 5000,
+    })
+    return
+  }
+  historyLoadRetryAttempts.set(sessionId, attempt + 1)
+  const existing = historyLoadRetryTimers.get(sessionId)
+  if (existing) clearTimeout(existing)
+  historyLoadRetryTimers.set(
+    sessionId,
+    setTimeout(() => {
+      historyLoadRetryTimers.delete(sessionId)
+      void retry()
+    }, HISTORY_RETRY_DELAYS_MS[attempt]),
+  )
+}
+
+function clearHistoryLoadRetry(sessionId: string): void {
+  historyLoadRetryAttempts.delete(sessionId)
+  const timer = historyLoadRetryTimers.get(sessionId)
+  if (timer) {
+    clearTimeout(timer)
+    historyLoadRetryTimers.delete(sessionId)
   }
 }
 
@@ -1684,6 +1782,155 @@ function clearSessionStreamBuffers(sessionId: string): void {
   pendingThinkingBySession.delete(sessionId)
   pendingThinkingFirstAt.delete(sessionId)
   lastStreamActivityAtBySession.delete(sessionId)
+  clearPendingToolArgs(sessionId)
+}
+
+const pendingToolArgsBySession = new Map<
+  string,
+  { toolName: string; callIndex: number; argsSnapshot: string }
+>()
+const toolArgsFlushTimerBySession = new Map<string, ScheduledFlushHandle>()
+
+type PendingSubagentChunk = {
+  agentId: string
+  chunkKind: string
+  taskId?: string
+  parentFromFrame?: string
+  delta: string
+}
+const pendingSubagentChunksBySession = new Map<string, PendingSubagentChunk[]>()
+const subagentChunkFlushTimerBySession = new Map<string, ReturnType<typeof setTimeout>>()
+const SUBAGENT_CHUNK_FLUSH_MS = 80
+
+function applySubagentChunkNow(sessionId: string, chunk: PendingSubagentChunk): void {
+  const now = Date.now()
+  useChatStore.setState((s) => {
+    const session = s.sessions[sessionId]
+    if (!session) return s
+    const parentId = chunk.parentFromFrame ?? session.activeTaskToolUseId
+    const bucketExists = parentId
+      ? Boolean(session.subagentTimelines[parentId])
+      : false
+
+    let nextTimelines = session.subagentTimelines
+    if (parentId && bucketExists) {
+      const bucket = session.subagentTimelines[parentId]!
+      const prevTimeline: AgentTimeline = bucket.agents[chunk.agentId] ?? {
+        agentId: chunk.agentId,
+        taskId: chunk.taskId,
+        status: 'running',
+        entries: [],
+        startedAt: now,
+        updatedAt: now,
+      }
+      const entry = subagentChunkToEntry(chunk.chunkKind, chunk.delta)
+      const nextTimeline = appendTimelineEntry(prevTimeline, entry, now)
+      nextTimelines = {
+        ...session.subagentTimelines,
+        [parentId]: {
+          ...bucket,
+          agents: {
+            ...bucket.agents,
+            [chunk.agentId]: {
+              ...nextTimeline,
+              taskId: chunk.taskId ?? prevTimeline.taskId,
+            },
+          },
+        },
+      }
+    }
+    const sealed = sealThinkingForSession(sessionId, session)
+    let nextMessages: UIMessage[]
+    if (parentId && bucketExists) {
+      nextMessages = sealed
+    } else {
+      const last = sealed[sealed.length - 1]
+      if (
+        last &&
+        last.type === 'subagent_chunk' &&
+        last.agentId === chunk.agentId &&
+        last.parentToolUseId === (parentId ?? undefined) &&
+        last.chunkKind === chunk.chunkKind
+      ) {
+        const merged: UIMessage = {
+          ...last,
+          delta: `${last.delta}${chunk.delta}`,
+          timestamp: now,
+        }
+        nextMessages = [...sealed.slice(0, -1), merged]
+      } else {
+        nextMessages = [
+          ...sealed,
+          {
+            id: nextId(),
+            type: 'subagent_chunk' as const,
+            agentId: chunk.agentId,
+            delta: chunk.delta,
+            chunkKind: chunk.chunkKind,
+            taskId: chunk.taskId,
+            parentToolUseId: parentId ?? undefined,
+            timestamp: now,
+          },
+        ]
+      }
+    }
+    return {
+      sessions: updateSessionIn(s.sessions, sessionId, () => ({
+        messages: nextMessages,
+        subagentTimelines: nextTimelines,
+      })),
+    }
+  })
+}
+
+function flushPendingSubagentChunks(sessionId: string): void {
+  const timer = subagentChunkFlushTimerBySession.get(sessionId)
+  if (timer !== undefined) {
+    clearTimeout(timer)
+    subagentChunkFlushTimerBySession.delete(sessionId)
+  }
+  const chunks = pendingSubagentChunksBySession.get(sessionId)
+  pendingSubagentChunksBySession.delete(sessionId)
+  if (!chunks || chunks.length === 0) return
+  for (const chunk of chunks) {
+    applySubagentChunkNow(sessionId, chunk)
+  }
+}
+
+function enqueueSubagentChunk(sessionId: string, chunk: PendingSubagentChunk): void {
+  const list = pendingSubagentChunksBySession.get(sessionId) ?? []
+  const last = list[list.length - 1]
+  if (
+    last &&
+    last.agentId === chunk.agentId &&
+    last.chunkKind === chunk.chunkKind &&
+    last.parentFromFrame === chunk.parentFromFrame &&
+    last.taskId === chunk.taskId
+  ) {
+    last.delta += chunk.delta
+  } else {
+    list.push(chunk)
+  }
+  pendingSubagentChunksBySession.set(sessionId, list)
+  if (!subagentChunkFlushTimerBySession.has(sessionId)) {
+    subagentChunkFlushTimerBySession.set(
+      sessionId,
+      setTimeout(() => {
+        subagentChunkFlushTimerBySession.delete(sessionId)
+        flushPendingSubagentChunks(sessionId)
+      }, SUBAGENT_CHUNK_FLUSH_MS),
+    )
+  }
+}
+
+function clearPendingToolArgs(sessionId: string): void {
+  const timer = toolArgsFlushTimerBySession.get(sessionId)
+  if (timer !== undefined) {
+    cancelScheduledFlush(timer)
+    toolArgsFlushTimerBySession.delete(sessionId)
+  }
+  pendingToolArgsBySession.delete(sessionId)
+  deferredDeltaFlush.delete(`${sessionId}::toolArgs`)
 }
 
 function purgeSessionEphemera(sessionId: string): void {
@@ -1699,6 +1946,20 @@ function purgeSessionEphemera(sessionId: string): void {
   historyGenerationBySession.delete(sessionId)
   capReloadInFlight.delete(sessionId)
   dirtyMidTurnSessions.delete(sessionId)
+  activeTurnSeqBySession.delete(sessionId)
+  clearHistoryLoadRetry(sessionId)
+  pendingSubagentChunksBySession.delete(sessionId)
+  const subagentTimer = subagentChunkFlushTimerBySession.get(sessionId)
+  if (subagentTimer !== undefined) {
+    clearTimeout(subagentTimer)
+    subagentChunkFlushTimerBySession.delete(sessionId)
+  }
+  pendingWorkerEventsBySession.delete(sessionId)
+  const workerEventTimer = workerEventFlushTimerBySession.get(sessionId)
+  if (workerEventTimer !== undefined) {
+    clearTimeout(workerEventTimer)
+    workerEventFlushTimerBySession.delete(sessionId)
+  }
   void import('./reviewPanelStore').then((m) => {
     m.useReviewPanelStore.getState().purgeSession(sessionId)
   })
@@ -1854,7 +2115,14 @@ function assistantTextAlreadyIncludes(prev: string, next: string): boolean {
   return false
 }
 
-function mergeAssistantTextContent(prev: string, next: string): string | null {
+function mergeAssistantTextContent(
+  prev: string,
+  next: string,
+  dedupEcho: boolean,
+): string | null {
+  if (!dedupEcho) {
+    return next ? prev + next : null
+  }
   const collapsedPrev = collapseRepeatedAssistantText(prev)
   const collapsedNext = collapseRepeatedAssistantText(next)
   if (assistantTextAlreadyIncludes(collapsedPrev, collapsedNext)) {
@@ -1869,18 +2137,33 @@ function mergeAssistantTextContent(prev: string, next: string): string | null {
   return collapseRepeatedAssistantText(collapsedPrev + collapsedNext)
 }
 
+const MARKDOWN_SYNC_PARSE_MAX_CHARS = 3072
+
+function warmAssistantMarkdownCache(content: string): void {
+  if (content.length <= MARKDOWN_SYNC_PARSE_MAX_CHARS) return
+  void Promise.all([
+    import('../utils/sanitizeNarration'),
+    import('../lib/markdownWorkerClient'),
+  ])
+    .then(([{ sanitizeNarration }, { parseMarkdownAsync }]) =>
+      parseMarkdownAsync(sanitizeNarration(content), { cacheWrite: true }),
+    )
+    .catch(() => {})
+}
+
 function appendAssistantTextMessage(
   messages: UIMessage[],
   content: string,
   timestamp: number,
   model?: string,
-  _options?: { dedupEcho?: boolean },
+  options?: { dedupEcho?: boolean },
 ): UIMessage[] {
   if (!content.trim()) return messages
+  const dedupEcho = options?.dedupEcho === true
 
   const last = messages[messages.length - 1]
   if (last?.type === 'assistant_text') {
-    const mergedContent = mergeAssistantTextContent(last.content, content)
+    const mergedContent = mergeAssistantTextContent(last.content, content, dedupEcho)
     if (mergedContent === null) {
       if (!(model ?? last.model)) return messages
       const touched: UIMessage = {
@@ -1889,6 +2172,7 @@ function appendAssistantTextMessage(
       }
       return [...messages.slice(0, -1), touched]
     }
+    warmAssistantMarkdownCache(mergedContent)
     const merged: UIMessage = {
       ...last,
       content: mergedContent,
@@ -1897,12 +2181,14 @@ function appendAssistantTextMessage(
     return [...messages.slice(0, -1), merged]
   }
 
+  const storedContent = dedupEcho ? collapseRepeatedAssistantText(content) : content
+  warmAssistantMarkdownCache(storedContent)
   return [
     ...messages,
     {
       id: nextId(),
       type: 'assistant_text',
-      content: collapseRepeatedAssistantText(content),
+      content: storedContent,
       timestamp,
       ...(model ? { model } : {}),
     },
@@ -2023,9 +2309,9 @@ function transcriptFingerprint(m: UIMessage): string | null {
     case 'error':
       return `error:${m.code}:${m.message}`
     case 'plan_card':
-      return `plan_card:${m.sourceToolUseId || m.planPath || m.id}`
+      return `plan_card:${m.sourceToolUseId || m.planPath || m.title || m.id}`
     case 'curator_card':
-      return `curator_card:${m.sourceToolUseId || m.implBlueprintPath || m.id}`
+      return `curator_card:${m.sourceToolUseId || m.implBlueprintPath || m.title || m.id}`
     case 'mode_switch_card':
       return `mode_switch:${m.planPath}:${m.status}:${m.handoffKind ?? ''}`
     case 'plan_progress':
@@ -2073,36 +2359,75 @@ function pickThinkingTimes(
 }
 
 function mergeMatchedLiveMessage(hydrated: UIMessage, live: UIMessage): UIMessage {
+  const stableId = live.id
+  const rawId = hydrated.rawId ?? hydrated.id
   if (hydrated.type === 'thinking' && live.type === 'thinking') {
     const content =
       live.content.trim().length > hydrated.content.trim().length ? live.content : hydrated.content
     return {
       ...hydrated,
+      id: stableId,
+      rawId,
       content,
       ...pickThinkingTimes(hydrated, live),
     }
   }
   if (hydrated.type === 'assistant_text' && live.type === 'assistant_text') {
+    const model = hydrated.model ?? live.model
     if (live.content.trim().length > hydrated.content.trim().length) {
-      return { ...hydrated, content: live.content }
+      return {
+        ...hydrated,
+        id: stableId,
+        rawId,
+        content: live.content,
+        ...(model ? { model } : {}),
+      }
     }
-    return hydrated
+    return { ...hydrated, id: stableId, rawId, ...(model ? { model } : {}) }
   }
   if (hydrated.type === 'file_edit' && live.type === 'file_edit') {
     return {
       ...hydrated,
+      id: stableId,
+      rawId,
       additions: Math.max(hydrated.additions, live.additions),
       deletions: Math.max(hydrated.deletions, live.deletions),
       diff: live.diff || hydrated.diff,
+      ...(live.reverted === true ? { reverted: true } : {}),
     }
   }
   if (hydrated.type === 'plan_card' && live.type === 'plan_card') {
-    return live.status === 'completed' || live.todos.length >= hydrated.todos.length ? live : hydrated
+    return live.status === 'completed' || live.todos.length >= hydrated.todos.length
+      ? { ...live, rawId }
+      : { ...hydrated, id: stableId, rawId }
   }
   if (hydrated.type === 'curator_card' && live.type === 'curator_card') {
-    return live.status === 'completed' || live.body.length >= hydrated.body.length ? live : hydrated
+    return live.status === 'completed' || live.body.length >= hydrated.body.length
+      ? { ...live, rawId }
+      : { ...hydrated, id: stableId, rawId }
   }
-  return hydrated
+  if (hydrated.type === 'user_text' && live.type === 'user_text') {
+    return {
+      ...hydrated,
+      id: stableId,
+      rawId,
+      ...(live.attachments && live.attachments.length > 0
+        ? { attachments: live.attachments }
+        : {}),
+      ...(live.clientMsgId && !hydrated.clientMsgId
+        ? { clientMsgId: live.clientMsgId }
+        : {}),
+    }
+  }
+  if (hydrated.type === 'tool_result') {
+    return {
+      ...hydrated,
+      id: stableId,
+      rawId,
+      content: capToolResultContent(hydrated.content),
+    }
+  }
+  return { ...hydrated, id: stableId, rawId }
 }
 
 function isPendingUserText(m: UIMessage): boolean {
@@ -2118,13 +2443,34 @@ function mergeHydratedHistoryWithLiveUi(hydrated: UIMessage[], live: UIMessage[]
   const used = new Set<UIMessage>()
   const findHydrated = (pred: (m: UIMessage) => boolean): UIMessage | undefined =>
     result.find((m) => !used.has(m) && pred(m))
+  const fpIndex = new Map<string, UIMessage[]>()
+  for (const h of hydrated) {
+    const hfp = transcriptFingerprint(h)
+    if (!hfp) continue
+    const bucket = fpIndex.get(hfp)
+    if (bucket) bucket.push(h)
+    else fpIndex.set(hfp, [h])
+  }
+  const takeByFingerprint = (fp: string): UIMessage | undefined => {
+    const bucket = fpIndex.get(fp)
+    if (!bucket) return undefined
+    while (bucket.length > 0) {
+      const candidate = bucket[0]!
+      if (used.has(candidate)) {
+        bucket.shift()
+        continue
+      }
+      return candidate
+    }
+    return undefined
+  }
   let lastPlaceIdx = -1
 
   for (const liveMsg of live) {
     const fp = transcriptFingerprint(liveMsg)
     let match: UIMessage | undefined
     if (fp) {
-      match = findHydrated((h) => transcriptFingerprint(h) === fp)
+      match = takeByFingerprint(fp)
     }
     if (!match && liveMsg.type === 'assistant_text') {
       match = findHydrated(
@@ -2137,16 +2483,28 @@ function mergeHydratedHistoryWithLiveUi(hydrated: UIMessage[], live: UIMessage[]
       )
     }
     if (!match && liveMsg.type === 'user_text') {
-      match = findHydrated((h) => {
-        if (h.type !== 'user_text') return false
-        if (
-          typeof liveMsg.userMessageIndex === 'number' &&
-          h.userMessageIndex === liveMsg.userMessageIndex
-        ) {
-          return true
-        }
-        return h.content.trim() === liveMsg.content.trim()
-      })
+      if (liveMsg.clientMsgId) {
+        match = findHydrated(
+          (h) => h.type === 'user_text' && h.clientMsgId === liveMsg.clientMsgId,
+        )
+      }
+      if (!match && typeof liveMsg.userMessageIndex === 'number') {
+        match = findHydrated(
+          (h) =>
+            h.type === 'user_text' &&
+            h.userMessageIndex === liveMsg.userMessageIndex,
+        )
+      }
+      if (!match) {
+        const fromIdx = lastPlaceIdx + 1
+        match = result.find(
+          (m, idx) =>
+            idx >= fromIdx &&
+            !used.has(m) &&
+            m.type === 'user_text' &&
+            m.content.trim() === liveMsg.content.trim(),
+        )
+      }
     }
     if (match) {
       used.add(match)
@@ -2363,10 +2721,44 @@ function capToolResultContent(content: unknown): unknown {
     const dropped = content.length - MAX_TOOL_RESULT_CHARS
     return `${content.slice(0, MAX_TOOL_RESULT_CHARS)}\n… [truncated ${dropped} chars]`
   }
+  if (Array.isArray(content)) {
+    let mutated = false
+    const capped = content.map((item) => {
+      if (
+        item &&
+        typeof item === 'object' &&
+        typeof (item as { text?: unknown }).text === 'string' &&
+        ((item as { text: string }).text.length > MAX_TOOL_RESULT_CHARS)
+      ) {
+        mutated = true
+        const text = (item as { text: string }).text
+        const dropped = text.length - MAX_TOOL_RESULT_CHARS
+        return {
+          ...(item as Record<string, unknown>),
+          text: `${text.slice(0, MAX_TOOL_RESULT_CHARS)}\n… [truncated ${dropped} chars]`,
+        }
+      }
+      return item
+    })
+    return mutated ? capped : content
+  }
+  if (
+    content &&
+    typeof content === 'object' &&
+    typeof (content as { text?: unknown }).text === 'string' &&
+    ((content as { text: string }).text.length > MAX_TOOL_RESULT_CHARS)
+  ) {
+    const text = (content as { text: string }).text
+    const dropped = text.length - MAX_TOOL_RESULT_CHARS
+    return {
+      ...(content as Record<string, unknown>),
+      text: `${text.slice(0, MAX_TOOL_RESULT_CHARS)}\n… [truncated ${dropped} chars]`,
+    }
+  }
   return content
 }
 
-function stripAttachmentMarkersForDisplay(content: string): string {
+function stripAttachmentMarkersForDisplay(content: string, allowEmpty = false): string {
   if (!content.includes('[IMAGE:') && !content.includes('[Attached file:')) return content
   const kept = content.split('\n').filter((line) => {
     const t = line.trim()
@@ -2375,7 +2767,8 @@ function stripAttachmentMarkersForDisplay(content: string): string {
     return true
   })
   const result = kept.join('\n').replace(/\n{3,}/g, '\n\n').trim()
-  return result.length > 0 ? result : content
+  if (result.length > 0) return result
+  return allowEmpty ? '' : content
 }
 
 function mapPersistedAttachments(entry: MessageEntry): UIAttachment[] | undefined {
@@ -2384,9 +2777,10 @@ function mapPersistedAttachments(entry: MessageEntry): UIAttachment[] | undefine
   for (const att of entry.attachments) {
     if (!att) continue
     const type = att.type === 'image' ? 'image' : 'file'
+    const rawName = att.name || att.path || type
     mapped.push({
       type,
-      name: att.name || att.path || type,
+      name: rawName.replace(/^[0-9a-f]{8}-(?=.)/i, ''),
       ...(att.path ? { path: att.path } : {}),
       data: att.data,
       mimeType: att.mimeType,
@@ -2417,18 +2811,33 @@ function extractDisplayBriefFromTaskEnvelope(content: string): string | null {
   return brief.length > 0 ? brief : null
 }
 
+const yieldToMainThread = () => new Promise<void>((resolve) => setTimeout(resolve, 0))
+
 async function fetchAndMapSessionHistory(sessionId: string) {
   const { messages, pendingRewind, firstIndex, hasMore } = await sessionsApi.getMessages(
     sessionId,
     { limit: HISTORY_PAGE_SIZE },
   )
+  const large = messages.length > 60
+  const uiMessages = await mapHistoryMessagesToUiMessages(messages)
+  for (const m of uiMessages) {
+    if (m.type === 'user_text' && m.clientMsgId) {
+      wsManager.confirmUserMessage(sessionId, m.clientMsgId)
+    }
+  }
+  if (large) await yieldToMainThread()
+  const restoredNotifications = reconstructAgentNotifications(messages)
+  const lastTodos = extractLastTodoWriteFromHistory(messages)
+  if (large) await yieldToMainThread()
+  const hasMessagesAfterTaskCompletion = hasUserMessagesAfterTaskCompletion(messages)
+  const restoredSubagentTimelines = reconstructSubagentTimelines(messages)
   return {
     rawMessages: messages,
-    uiMessages: mapHistoryMessagesToUiMessages(messages),
-    restoredNotifications: reconstructAgentNotifications(messages),
-    lastTodos: extractLastTodoWriteFromHistory(messages),
-    hasMessagesAfterTaskCompletion: hasUserMessagesAfterTaskCompletion(messages),
-    restoredSubagentTimelines: reconstructSubagentTimelines(messages),
+    uiMessages,
+    restoredNotifications,
+    lastTodos,
+    hasMessagesAfterTaskCompletion,
+    restoredSubagentTimelines,
     pendingRewind: pendingRewind ?? null,
     historyFirstIndex: firstIndex ?? 0,
     historyHasMore: hasMore === true,
@@ -2686,6 +3095,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               .running.has(sessionId)
             if (stillRunning) {
               dirtyMidTurnSessions.add(sessionId)
+              void get().reloadHistory(sessionId)
               get().reconcileStuckSession(sessionId)
             } else {
               resyncingSessions.add(sessionId)
@@ -2845,9 +3255,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const sealedMessages = sealThinkingForSession(sessionId, current)
     clearSessionStreamBuffers(sessionId)
     wsManager.disconnect(sessionId)
+    const SUSPENDED_MESSAGE_WINDOW = 200
+    let trimmed = sealedMessages
+    if (sealedMessages.length > SUSPENDED_MESSAGE_WINDOW) {
+      const cut = sealedMessages.length - SUSPENDED_MESSAGE_WINDOW
+      const unackedHead = sealedMessages
+        .slice(0, cut)
+        .filter((m) => m.type === 'user_text' && m.pending === true && !!m.clientMsgId)
+      trimmed = [...unackedHead, ...sealedMessages.slice(cut)]
+    }
     set((s) => ({
       sessions: updateSessionIn(s.sessions, sessionId, () => ({
-        messages: sealedMessages,
+        messages: trimmed,
+        ...(trimmed !== sealedMessages ? { historyLoaded: false } : {}),
         connectionState: 'disconnected',
         chatState: 'idle',
         activeThinkingId: null,
@@ -2948,6 +3368,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
 
     consumePendingThinking(sessionId)
+    clearPendingToolArgs(sessionId)
     const taskStore = useCLITaskStore.getState()
     const sessionTasks = taskStore.tasksBySessionId[sessionId] ?? []
     const allTasksDone = sessionTasks.length > 0 && sessionTasks.every((t) => t.status === 'completed')
@@ -2958,6 +3379,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     if (!isMemberSession && allTasksDone) {
       void taskStore.resetCompletedTasks(sessionId)
     }
+
+    const clientMsgId =
+      !isMemberSession && !options?.designGeneration ? crypto.randomUUID() : null
 
     set((s) => {
       const session = s.sessions[sessionId] ?? createDefaultSessionState()
@@ -2983,6 +3407,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         timestamp: Date.now(),
         ...designRefFieldsFrom(options?.designGeneration),
         ...(isMemberSession ? { pending: true } : {}),
+        ...(clientMsgId ? { pending: true, clientMsgId } : {}),
       }
       newMessages.push(userMessage)
 
@@ -3004,6 +3429,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeThinkingStartedAt: null,
             activeThinkingLastChunkAt: null,
             pendingPermission: null,
+            streamingToolArgs: null,
             connectionState: isMemberSession ? 'connected' : session.connectionState,
           },
         },
@@ -3083,6 +3509,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         type: 'user_message',
         content,
         attachments,
+        ...(clientMsgId ? { clientMsgId } : {}),
         ...(options?.displayContent?.trim()
           ? { displayContent: options.displayContent.trim() }
           : {}),
@@ -3145,7 +3572,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return {
         sessions: updateSessionIn(s.sessions, sessionId, () => ({
           pendingPermission: null,
-          chatState: allowed ? 'tool_executing' : 'idle',
+          chatState: allowed ? 'tool_executing' : 'thinking',
           messages: allowed ? messages : resolveDanglingCuratorCards(messages),
         })),
       }
@@ -3210,7 +3637,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const isStuckActive =
       session.chatState === 'thinking' ||
       session.chatState === 'tool_executing' ||
-      session.chatState === 'streaming'
+      session.chatState === 'streaming' ||
+      session.chatState === 'awaiting_workers'
     if (!isStuckActive) {
       const deferTimer = stuckReconcileDeferTimers.get(sessionId)
       if (deferTimer) {
@@ -3258,6 +3686,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       clearTimeout(deferTimer)
       stuckReconcileDeferTimers.delete(sessionId)
     }
+    clearPendingToolArgs(sessionId)
     set((s) => {
       const cur = s.sessions[sessionId]
       if (!cur) return s
@@ -3271,13 +3700,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           messages: baseMessages,
           streamingText: '',
           stopRequested: false,
+          chatState: 'idle',
+          statusVerb: '',
+          activeToolUseId: null,
+          activeToolName: null,
+          activeTaskToolUseId: null,
           activeThinkingId: null,
           activeThinkingContent: '',
           activeThinkingStartedAt: null,
           activeThinkingLastChunkAt: null,
+          streamingToolArgs: null,
         })),
       }
     })
+    useTabStore.getState().updateTabStatus(sessionId, 'idle')
     void get().reloadHistory(sessionId)
   },
 
@@ -3294,6 +3730,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     }
     wsManager.send(sessionId, { type: 'stop_generation' })
     const pendingDelta = consumePendingDelta(sessionId)
+    clearPendingToolArgs(sessionId)
     set((s) => {
       const session = s.sessions[sessionId]
       if (!session) return s
@@ -3323,6 +3760,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             activeTaskToolUseId: null,
             pendingResourceWaits: [],
             providerRetry: null,
+            streamingToolArgs: null,
           },
         },
       }
@@ -3405,12 +3843,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         useCLITaskStore.getState().markCompletedAndDismissed(sessionId)
       }
       void useWorkersStore.getState().fetchByParent(sessionId)
+      clearHistoryLoadRetry(sessionId)
     } catch {
-      useUIStore.getState().addToast({
-        type: 'error',
-        message: t('chat.loadHistoryFailed'),
-        duration: 5000,
-      })
+      scheduleHistoryLoadRetry(sessionId, () => get().loadHistory(sessionId))
     }
   },
 
@@ -3447,13 +3882,76 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                   activeThinkingStartedAt: null as number | null,
                   activeThinkingLastChunkAt: null as number | null,
                 }
+            const localMessages = absorbed.messages
+            let overlapStart = -1
+            if (!pendingRewind) {
+              const hydratedKeys = new Set(
+                taggedMessages.map((m) => m.rawId ?? m.id),
+              )
+              for (let i = 0; i < localMessages.length; i++) {
+                const m = localMessages[i]!
+                if (hydratedKeys.has(m.rawId ?? m.id)) {
+                  overlapStart = i
+                  break
+                }
+              }
+            }
+            let stitchCut = overlapStart
+            while (stitchCut > 0) {
+              const prevRow = localMessages[stitchCut - 1]!
+              if (rawIndexFromMessageId(prevRow.rawId ?? prevRow.id) !== null) break
+              stitchCut--
+            }
+            let prefix: UIMessage[] = []
+            let liveWindow: UIMessage[] = localMessages
+            if (stitchCut > 0) {
+              prefix = localMessages.slice(0, stitchCut)
+              liveWindow = localMessages.slice(stitchCut)
+            } else if (overlapStart < 0) {
+              let liveTailStart = localMessages.length
+              while (liveTailStart > 0) {
+                const row = localMessages[liveTailStart - 1]!
+                if (rawIndexFromMessageId(row.rawId ?? row.id) !== null) break
+                liveTailStart--
+              }
+              if (pendingRewind) {
+                liveWindow = localMessages.slice(liveTailStart)
+              } else if (liveTailStart > 0) {
+                let maxLocalRaw = -1
+                for (let i = 0; i < liveTailStart; i++) {
+                  const row = localMessages[i]!
+                  const idx = rawIndexFromMessageId(row.rawId ?? row.id)
+                  if (idx !== null && idx > maxLocalRaw) maxLocalRaw = idx
+                }
+                if (
+                  maxLocalRaw >= 0 &&
+                  typeof historyFirstIndex === 'number' &&
+                  maxLocalRaw < historyFirstIndex &&
+                  historyFirstIndex - maxLocalRaw <= 1
+                ) {
+                  prefix = localMessages.slice(0, liveTailStart)
+                }
+                liveWindow = localMessages.slice(liveTailStart)
+              }
+            }
             const mergedRaw = dropHydratedBlockedToolUses(
               sessionId,
-              mergeHydratedHistoryWithLiveUi(taggedMessages, absorbed.messages),
+              mergeHydratedHistoryWithLiveUi(taggedMessages, liveWindow),
             )
-            const rebuiltMessages = keepPermission
+            const mergedTail = keepPermission
               ? mergedRaw
               : resolveDanglingCuratorCards(mergedRaw)
+            const rebuiltMessages =
+              prefix.length > 0 ? [...prefix, ...mergedTail] : mergedTail
+            let prefixStable = rebuiltMessages.length >= s.messages.length
+            if (prefixStable) {
+              for (let i = 0; i < s.messages.length; i++) {
+                if (rebuiltMessages[i]!.id !== s.messages[i]!.id) {
+                  prefixStable = false
+                  break
+                }
+              }
+            }
             return {
               messages: rebuiltMessages,
               agentTaskNotifications: mergeAgentNotifications(
@@ -3484,9 +3982,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               planningPhaseDetail: keepPermission || uiBusy ? s.planningPhaseDetail : '',
               pendingRewind,
               historyLoaded: true,
-              historyFirstIndex,
-              historyHasMore,
-              historyReloadNonce: (s.historyReloadNonce ?? 0) + 1,
+              historyFirstIndex:
+                prefix.length > 0 ? s.historyFirstIndex : historyFirstIndex,
+              historyHasMore:
+                prefix.length > 0 ? s.historyHasMore : historyHasMore,
+              historyReloadNonce: prefixStable
+                ? s.historyReloadNonce ?? 0
+                : (s.historyReloadNonce ?? 0) + 1,
             }
           }),
         }
@@ -3501,12 +4003,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         useCLITaskStore.getState().markCompletedAndDismissed(sessionId)
       }
       void useWorkersStore.getState().fetchByParent(sessionId)
+      clearHistoryLoadRetry(sessionId)
     } catch {
-      useUIStore.getState().addToast({
-        type: 'error',
-        message: t('chat.loadHistoryFailed'),
-        duration: 5000,
-      })
+      scheduleHistoryLoadRetry(sessionId, () => get().reloadHistory(sessionId))
     }
   },
 
@@ -3516,7 +4015,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       if (!session || session.historyLoadingOlder === true) return
       if (session.messages.length > MAX_IN_MEMORY_MESSAGES) {
         const hasRawIndexEvidence = session.messages.some(
-          (m) => rawIndexFromMessageId(m.id) !== null,
+          (m) => rawIndexFromMessageId(m.rawId ?? m.id) !== null,
         )
         if (!hasRawIndexEvidence) {
           if (
@@ -3542,15 +4041,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       const dropCount = len - (MAX_IN_MEMORY_MESSAGES - MESSAGE_TRIM_CHUNK)
       if (dropCount <= 0) return state
       const dropped = session.messages.slice(0, dropCount)
-      const trimmed = session.messages.slice(dropCount)
+      const unackedHead = dropped.filter(
+        (m) => m.type === 'user_text' && m.pending === true && !!m.clientMsgId,
+      )
+      const trimmed = [...unackedHead, ...session.messages.slice(dropCount)]
       const prevFirst = session.historyFirstIndex ?? 0
       const minRetainedRawIndex = trimmed.reduce<number | null>((acc, m) => {
-        const idx = rawIndexFromMessageId(m.id)
+        const idx = rawIndexFromMessageId(m.rawId ?? m.id)
         if (idx === null) return acc
         return acc === null ? idx : Math.min(acc, idx)
       }, null)
       const maxDroppedRawIndex = dropped.reduce<number | null>((acc, m) => {
-        const idx = rawIndexFromMessageId(m.id)
+        const idx = rawIndexFromMessageId(m.rawId ?? m.id)
         if (idx === null) return acc
         return acc === null ? idx : Math.max(acc, idx)
       }, null)
@@ -3584,7 +4086,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         limit: HISTORY_PAGE_SIZE,
         before,
       })
-      const olderUi = mapHistoryMessagesToUiMessages(messages)
+      const olderUi = await mapHistoryMessagesToUiMessages(messages)
+      for (const m of olderUi) {
+        if (m.type === 'user_text' && m.clientMsgId) {
+          wsManager.confirmUserMessage(sessionId, m.clientMsgId)
+        }
+      }
+      await waitForScrollQuiet(1200)
       set((state) => {
         const current = state.sessions[sessionId]
         if (!current) return state
@@ -3598,12 +4106,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const knownIds = new Set(current.messages.map((m) => m.id))
         const prepend = olderUi.filter((m) => !knownIds.has(m.id))
         return {
-          sessions: updateSessionIn(state.sessions, sessionId, (s) => ({
-            messages: prepend.length === 0 ? s.messages : [...prepend, ...s.messages],
-            historyFirstIndex: firstIndex ?? 0,
-            historyHasMore: hasMore === true,
-            historyLoadingOlder: false,
-          })),
+          sessions: updateSessionIn(state.sessions, sessionId, (s) => {
+            const combined =
+              prepend.length === 0 ? s.messages : [...prepend, ...s.messages]
+            const withSuperseded =
+              prepend.length > 0 && s.pendingRewind
+                ? applySupersededFromPendingRewind(combined, s.pendingRewind)
+                : combined
+            return {
+              messages: withSuperseded,
+              historyFirstIndex: firstIndex ?? 0,
+              historyHasMore: hasMore === true,
+              historyLoadingOlder: false,
+            }
+          }),
         }
       })
     } catch {
@@ -3685,6 +4201,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         pendingRewind: null,
 
         pendingEdits: [],
+        keptEdits: [],
 
         subagentTimelines: {},
         activeTaskToolUseId: null,
@@ -3728,6 +4245,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         pendingRewind: null,
         pendingSendAfterRewind: null,
         pendingEdits: [],
+        keptEdits: [],
         subagentTimelines: {},
         activeTaskToolUseId: null,
         messages: sess.messages.filter((m) => !m.superseded),
@@ -3737,11 +4255,25 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   },
 
   cancelSendAfterRewind: (sessionId) => {
+    const pending = get().sessions[sessionId]?.pendingSendAfterRewind
     set((s) => ({
       sessions: updateSessionIn(s.sessions, sessionId, () => ({
         pendingSendAfterRewind: null,
       })),
     }))
+    if (pending && (pending.content.trim() || (pending.attachments?.length ?? 0) > 0)) {
+      const attachments = (pending.attachments ?? []).map((a) => ({
+        type: a.type,
+        name: a.name || a.path || a.mimeType || a.type,
+        ...(a.path ? { path: a.path } : {}),
+        data: a.data,
+        mimeType: a.mimeType,
+      }))
+      get().queueComposerPrefill(sessionId, {
+        text: pending.options?.displayContent?.trim() || pending.content,
+        ...(attachments.length > 0 ? { attachments } : {}),
+      })
+    }
   },
 
   requestModeSwitch: (sessionId, planPath) => {
@@ -3850,7 +4382,16 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
   clearPendingEdits: (sessionId) => {
     set((s) => ({
-      sessions: updateSessionIn(s.sessions, sessionId, () => ({ pendingEdits: [] })),
+      sessions: updateSessionIn(s.sessions, sessionId, (sc) => ({
+        pendingEdits: [],
+        keptEdits: mergeKeptEdits(sc.keptEdits, sc.pendingEdits),
+      })),
+    }))
+  },
+
+  clearKeptEdits: (sessionId) => {
+    set((s) => ({
+      sessions: updateSessionIn(s.sessions, sessionId, () => ({ keptEdits: [] })),
     }))
   },
 
@@ -3982,8 +4523,14 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       return
     }
     await sessionsApi.revertBatches(sessionId, batchIds)
+    const revertedSet = new Set(batchIds)
     set((s) => ({
-      sessions: updateSessionIn(s.sessions, sessionId, () => ({ pendingEdits: [] })),
+      sessions: updateSessionIn(s.sessions, sessionId, (sc) => ({
+        pendingEdits: [],
+        keptEdits: sc.keptEdits.filter(
+          (e) => !e.editBatchIds.some((id) => revertedSet.has(id)),
+        ),
+      })),
     }))
   },
 
@@ -4002,6 +4549,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             : m,
         ),
         pendingEdits: sc.pendingEdits.filter(
+          (e) => !e.editBatchIds.some((id) => revertedSet.has(id)),
+        ),
+        keptEdits: sc.keptEdits.filter(
           (e) => !e.editBatchIds.some((id) => revertedSet.has(id)),
         ),
       })),
@@ -4024,15 +4574,25 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           if (revertedBatchIds.size === 0) return true
           return !e.editBatchIds.some((id) => revertedBatchIds.has(id))
         }),
+        keptEdits:
+          revertedBatchIds.size === 0
+            ? sc.keptEdits
+            : sc.keptEdits.filter(
+                (e) => !e.editBatchIds.some((id) => revertedBatchIds.has(id)),
+              ),
       })),
     }))
   },
 
   keepPendingEditFile: (sessionId, path) => {
     set((s) => ({
-      sessions: updateSessionIn(s.sessions, sessionId, (sc) => ({
-        pendingEdits: sc.pendingEdits.filter((e) => e.path !== path),
-      })),
+      sessions: updateSessionIn(s.sessions, sessionId, (sc) => {
+        const target = sc.pendingEdits.find((e) => e.path === path)
+        return {
+          pendingEdits: sc.pendingEdits.filter((e) => e.path !== path),
+          ...(target ? { keptEdits: mergeKeptEdits(sc.keptEdits, [target]) } : {}),
+        }
+      }),
     }))
   },
 
@@ -4048,6 +4608,18 @@ export const useChatStore = create<ChatStore>((set, get) => ({
   handleServerMessage: (sessionId, msg) => {
     const update = (updater: (session: PerSessionState) => Partial<PerSessionState>) => {
       set((s) => ({ sessions: updateSessionIn(s.sessions, sessionId, updater) }))
+    }
+
+    {
+      const frameTurnSeq = (msg as { turnSeq?: unknown }).turnSeq
+      if (typeof frameTurnSeq === 'number' && Number.isFinite(frameTurnSeq)) {
+        const active = activeTurnSeqBySession.get(sessionId) ?? 0
+        if (frameTurnSeq > active) {
+          activeTurnSeqBySession.set(sessionId, frameTurnSeq)
+        } else if (frameTurnSeq < active) {
+          return
+        }
+      }
     }
 
     const turnWasStopped = get().sessions[sessionId]?.stopRequested === true
@@ -4101,6 +4673,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     switch (msg.type) {
       case 'connected':
 
+        activeTurnSeqBySession.delete(sessionId)
         void hydrateCumulativeTokensFromUsage(sessionId)
         set((s) => {
           const session = s.sessions[sessionId]
@@ -4148,6 +4721,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               statusVerb: '',
               planningPhaseAction: '',
               planningPhaseDetail: '',
+              streamingToolArgs: null,
             } : {
               planningPhaseAction: resolvePlanningPhaseAction(
                 msg.verb,
@@ -4168,6 +4742,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
         })
         if (msg.state === 'idle') {
+          clearPendingToolArgs(sessionId)
           syncTasksAfterTurnEnd(sessionId, turnWasStopped)
           revealDesignCanvasIfPending(sessionId)
           if (dirtyMidTurnSessions.delete(sessionId)) {
@@ -4280,6 +4855,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       case 'content_reset': {
         consumePendingDelta(sessionId)
+        clearPendingToolArgs(sessionId)
         update((s) => {
           const patch = mergePendingThinkingIntoActive(s, sessionId)
           return {
@@ -4311,6 +4887,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const flushThinking = () => {
             thinkingFlushTimerBySession.delete(sessionId)
             deferredThinkingFlush.delete(sessionId)
+            if (isWindowBusy()) {
+              deferredThinkingFlush.set(sessionId, flushThinking)
+              ensureBusyIdleFlush()
+              return
+            }
             const buffered = pendingThinkingBySession.get(sessionId) ?? ''
             pendingThinkingBySession.delete(sessionId)
             pendingThinkingFirstAt.delete(sessionId)
@@ -4339,8 +4920,13 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               }
               const prevContent = hasActive ? s.activeThinkingContent : ''
               const nextContent = prevContent + buffered
+              const hasThinkingRow =
+                hasActive &&
+                baseMessages.some((m) => m.id === id && m.type === 'thinking')
               return {
-                messages: commitActiveThinking(baseMessages, id, nextContent, startedAt, false),
+                messages: hasThinkingRow
+                  ? baseMessages
+                  : commitActiveThinking(baseMessages, id, nextContent, startedAt, false),
                 chatState: 'thinking',
                 activeThinkingId: id,
                 activeThinkingContent: nextContent,
@@ -4372,14 +4958,29 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const argsSnapshot = typeof msg.argsSnapshot === 'string' ? msg.argsSnapshot : ''
         const callIndex = typeof msg.callIndex === 'number' ? msg.callIndex : 0
         if (toolName && argsSnapshot) {
-          update(() => ({
-            streamingToolArgs: { toolName, callIndex, argsSnapshot },
-          }))
+          pendingToolArgsBySession.set(sessionId, { toolName, callIndex, argsSnapshot })
+          if (!toolArgsFlushTimerBySession.has(sessionId)) {
+            const flushToolArgs = () => {
+              toolArgsFlushTimerBySession.delete(sessionId)
+              if (isWindowBusy()) {
+                deferredDeltaFlush.set(`${sessionId}::toolArgs`, flushToolArgs)
+                ensureBusyIdleFlush()
+                return
+              }
+              const latest = pendingToolArgsBySession.get(sessionId)
+              pendingToolArgsBySession.delete(sessionId)
+              if (latest) {
+                update(() => ({ streamingToolArgs: latest }))
+              }
+            }
+            toolArgsFlushTimerBySession.set(sessionId, scheduleRafCallback(flushToolArgs))
+          }
         }
         break
       }
 
       case 'tool_use_complete': {
+        clearPendingToolArgs(sessionId)
         const session = get().sessions[sessionId]
         const toolName = msg.toolName || session?.activeToolName || 'unknown'
         const toolUseId = msg.toolUseId || session?.activeToolUseId || ''
@@ -4746,15 +5347,8 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               msg.content,
               msg.isError,
             )
-            const relocated: UIMessage = {
-              ...upgraded,
-              timestamp: Date.now(),
-            }
-            const next = [
-              ...sealed.slice(0, curatorIdx),
-              ...sealed.slice(curatorIdx + 1),
-              relocated,
-            ]
+            const next = [...sealed]
+            next[curatorIdx] = upgraded
             return {
               messages: next,
               chatState: 'thinking',
@@ -4873,6 +5467,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           const baseMessages = merged.trim()
             ? appendAssistantTextMessage(sealed, merged, Date.now(), undefined, echoDedupOptions(sessionId))
             : sealed
+          if (merged.trim()) {
+            dirtyMidTurnSessions.add(sessionId)
+          }
           return {
             messages: baseMessages,
             streamingText: '',
@@ -4934,7 +5531,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const parentIdStatus = workerAfterStatus?.parentToolUseId?.trim()
         if (parentIdStatus && msg.detail) {
           updateWorkerSubagentTimeline(
-            update,
+            sessionId,
             parentIdStatus,
             msg.workerId,
             'status',
@@ -4952,7 +5549,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         const parentIdProgress = workerAfterProgress?.parentToolUseId?.trim()
         if (parentIdProgress) {
           updateWorkerSubagentTimeline(
-            update,
+            sessionId,
             parentIdProgress,
             msg.workerId,
             msg.action,
@@ -5109,6 +5706,26 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         })
         break
       }
+      case 'user_message_ack': {
+        wsManager.confirmUserMessage(sessionId, msg.clientMsgId)
+        update((s) => {
+          let changed = false
+          const messages = s.messages.map((m) => {
+            if (
+              m.type === 'user_text' &&
+              m.clientMsgId === msg.clientMsgId &&
+              m.pending === true
+            ) {
+              changed = true
+              const { pending: _pending, ...rest } = m
+              return rest as UIMessage
+            }
+            return m
+          })
+          return changed ? { messages } : {}
+        })
+        break
+      }
       case 'session_title_updated':
         useSessionStore.getState().updateSessionTitle(msg.sessionId, msg.title)
         useTabStore.getState().updateTabTitle(msg.sessionId, msg.title)
@@ -5120,12 +5737,10 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         historyChangedReloadAt.set(sessionId, now)
         const st = get().sessions[sessionId]
         if (!st || st.historyLoaded !== true) break
-        const busy =
-          st.chatState === 'streaming' ||
-          st.chatState === 'thinking' ||
-          st.chatState === 'tool_executing' ||
-          st.chatState === 'permission_pending'
-        if (busy) break
+        if (isSessionUiBusy(st.chatState)) {
+          dirtyMidTurnSessions.add(sessionId)
+          break
+        }
         void get().reloadHistory(sessionId)
         break
       }
@@ -5179,12 +5794,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         if (msg.subtype === 'ws_handler_error' || msg.subtype === 'ws_frame_gap') {
           const cur = get().sessions[sessionId]
-          const uiActive =
-            cur?.chatState === 'thinking' ||
-            cur?.chatState === 'tool_executing' ||
-            cur?.chatState === 'streaming' ||
-            cur?.chatState === 'permission_pending'
-          if (uiActive) {
+          if (cur && isSessionUiBusy(cur.chatState)) {
             dirtyMidTurnSessions.add(sessionId)
           } else {
             void get().reloadHistory(sessionId)
@@ -5597,75 +6207,12 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             typeof data.parentToolUseId === 'string' && data.parentToolUseId.trim()
               ? data.parentToolUseId
               : undefined
-          const now = Date.now()
-          update((s) => {
-            const parentId = parentFromFrame ?? s.activeTaskToolUseId
-            const bucketExists = parentId
-              ? Boolean(s.subagentTimelines[parentId])
-              : false
-
-            const flatMessage: UIMessage = {
-              id: nextId(),
-              type: 'subagent_chunk' as const,
-              agentId,
-              delta,
-              chunkKind,
-              taskId,
-              parentToolUseId: parentId ?? undefined,
-              timestamp: now,
-            }
-
-            let nextTimelines = s.subagentTimelines
-            if (parentId && bucketExists) {
-              const bucket = s.subagentTimelines[parentId]!
-              const prevTimeline: AgentTimeline = bucket.agents[agentId] ?? {
-                agentId,
-                taskId,
-                status: 'running',
-                entries: [],
-                startedAt: now,
-                updatedAt: now,
-              }
-              const entry = subagentChunkToEntry(chunkKind, delta)
-              const nextTimeline = appendTimelineEntry(prevTimeline, entry, now)
-              nextTimelines = {
-                ...s.subagentTimelines,
-                [parentId]: {
-                  ...bucket,
-                  agents: {
-                    ...bucket.agents,
-                    [agentId]: { ...nextTimeline, taskId: taskId ?? prevTimeline.taskId },
-                  },
-                },
-              }
-            }
-            const sealed = sealThinkingForSession(sessionId, s)
-            let nextMessages: UIMessage[]
-            if (parentId && bucketExists) {
-              nextMessages = sealed
-            } else {
-              const last = sealed[sealed.length - 1]
-              if (
-                last &&
-                last.type === 'subagent_chunk' &&
-                last.agentId === agentId &&
-                last.parentToolUseId === (parentId ?? undefined) &&
-                last.chunkKind === chunkKind
-              ) {
-                const merged: UIMessage = {
-                  ...last,
-                  delta: `${last.delta}${delta}`,
-                  timestamp: now,
-                }
-                nextMessages = [...sealed.slice(0, -1), merged]
-              } else {
-                nextMessages = [...sealed, flatMessage]
-              }
-            }
-            return {
-              messages: nextMessages,
-              subagentTimelines: nextTimelines,
-            }
+          enqueueSubagentChunk(sessionId, {
+            agentId,
+            chunkKind,
+            taskId,
+            parentFromFrame,
+            delta,
           })
         }
 
@@ -5718,6 +6265,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           }
           return null
         })()
+        let fallbackClientMsgId: string | null = null
+        if (!requeuedContent) {
+          const currentMessages = get().sessions[sessionId]?.messages ?? []
+          for (let i = currentMessages.length - 1; i >= 0; i--) {
+            const m = currentMessages[i]
+            if (m && m.type === 'user_text' && m.pending === true && m.clientMsgId) {
+              fallbackClientMsgId = m.clientMsgId
+              useWorkspaceQueueStore
+                .getState()
+                .enqueue(sessionId, m.content, m.attachments as AttachmentRef[] | undefined, {})
+              break
+            }
+          }
+        }
         useUIStore.getState().addToast({
           type: 'warning',
           message: t('wsManager.workspaceBusyToast'),
@@ -5735,15 +6296,19 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               echoDedupOptions(sessionId),
             )
           }
-          if (requeuedContent) {
+          if (requeuedContent || fallbackClientMsgId) {
             for (let i = messages.length - 1; i >= 0; i--) {
               const m = messages[i]
               if (
                 m &&
                 m.type === 'user_text' &&
-                m.content === requeuedContent &&
-                m.pending !== true
+                (fallbackClientMsgId
+                  ? m.clientMsgId === fallbackClientMsgId
+                  : m.content === requeuedContent)
               ) {
+                if (m.clientMsgId) {
+                  wsManager.confirmUserMessage(sessionId, m.clientMsgId)
+                }
                 const next = messages.slice()
                 next.splice(i, 1)
                 messages = next
@@ -5861,9 +6426,15 @@ function userHistoryBlocksFromContent(content: unknown): UserHistoryBlock[] | nu
   return null
 }
 
+const assistantBlocksCache = new WeakMap<object, AssistantHistoryBlock[]>()
+
 function assistantBlocksFromMessage(msg: MessageEntry): AssistantHistoryBlock[] {
   if (msg.type !== 'assistant' && msg.type !== 'tool_use') return []
-  return normalizeAssistantHistoryContent(msg.content) ?? []
+  const cached = assistantBlocksCache.get(msg)
+  if (cached) return cached
+  const blocks = normalizeAssistantHistoryContent(msg.content) ?? []
+  assistantBlocksCache.set(msg, blocks)
+  return blocks
 }
 
 function thinkingTextFromBlock(block: AssistantHistoryBlock): string {
@@ -5970,7 +6541,7 @@ function pushAssistantHistoryText(
 
   const last = messages[messages.length - 1]
   if (last?.type === 'assistant_text' && !!last.superseded === !!superseded) {
-    const merged = mergeAssistantTextContent(last.content, content)
+    const merged = mergeAssistantTextContent(last.content, content, true)
     if (merged === null) {
       if (model && !last.model) last.model = model
       return
@@ -5983,7 +6554,7 @@ function pushAssistantHistoryText(
   messages.push({
     id: nextId(),
     type: 'assistant_text',
-    content: collapseRepeatedAssistantText(content),
+    content,
     timestamp,
     ...(model ? { model } : {}),
     ...(superseded ? { superseded: true } : {}),
@@ -6133,15 +6704,17 @@ export function rawIndexFromMessageId(id: string): number | null {
   return Number.isFinite(n) ? n : null
 }
 
-export function mapHistoryMessagesToUiMessages(
+export async function mapHistoryMessagesToUiMessages(
   messages: MessageEntry[],
   options?: HistoryMappingOptions,
-): UIMessage[] {
+): Promise<UIMessage[]> {
   const includeTeammateMessages = options?.includeTeammateMessages === true
   const uiMessages: UIMessage[] = []
   let liveUserCount = 0
+  let processedEntries = 0
 
   for (const msg of messages) {
+    if (++processedEntries % 60 === 0) await yieldToMainThread()
     const timestamp = new Date(msg.timestamp).getTime()
     const tombstoned = msg.tombstoned === true
     const sup = tombstoned ? { superseded: true } : {}
@@ -6149,7 +6722,7 @@ export function mapHistoryMessagesToUiMessages(
       const coercedUser = coerceHistoryJsonContent(msg.content)
       if (typeof coercedUser === 'string') {
       const userText = typeof msg.content === 'string' ? msg.content : coercedUser
-      if (isTeammateMessage(userText)) {
+      if (isTeammateMessage(userText) && userText.trimStart().startsWith('<teammate-message')) {
         if (!includeTeammateMessages) continue
         const teammateContents = extractVisibleTeammateMessageContents(userText)
         if (teammateContents.length === 0) continue
@@ -6174,6 +6747,7 @@ export function mapHistoryMessagesToUiMessages(
           ...(parsedAsk.details ? { details: parsedAsk.details } : {}),
           ...sup,
         })
+        if (!tombstoned) liveUserCount++
         continue
       }
       const displayOverride = msg.displayContent?.trim()
@@ -6186,9 +6760,14 @@ export function mapHistoryMessagesToUiMessages(
         type: 'user_text',
         content:
           displayOverride ||
-          (legacyBrief ?? stripAttachmentMarkersForDisplay(userText)),
+          (legacyBrief ??
+            stripAttachmentMarkersForDisplay(
+              userText,
+              !!persistedAttachments && persistedAttachments.length > 0,
+            )),
         timestamp,
         ...(persistedAttachments ? { attachments: persistedAttachments } : {}),
+        ...(msg.clientMsgId ? { clientMsgId: msg.clientMsgId } : {}),
         ...(msg.designRef ? { designRef: msg.designRef } : {}),
         ...(msg.designRefName ? { designRefName: msg.designRefName } : {}),
         ...(msg.designRefElement ? { designRefElement: msg.designRefElement } : {}),
@@ -6236,18 +6815,21 @@ export function mapHistoryMessagesToUiMessages(
           if (isPlanSaveCall(blockToolName, blockInput)) {
             uiMessages.push({
               ...makePendingPlanCardFromUpdatePlan(blockInput, blockToolUseId),
+              id: blockId(),
               timestamp,
               ...sup,
             })
           } else if (isExitPlanModeCall(blockToolName)) {
             uiMessages.push({
               ...makePendingPlanCardFromExitPlanMode(blockInput, blockToolUseId),
+              id: blockId(),
               timestamp,
               ...sup,
             })
           } else if (isExitCuratorModeCall(blockToolName)) {
             uiMessages.push({
               ...makePendingCuratorCardFromExitCuratorMode(blockInput, blockToolUseId),
+              id: blockId(),
               timestamp,
               ...sup,
             })
@@ -6256,7 +6838,7 @@ export function mapHistoryMessagesToUiMessages(
               for (let i = uiMessages.length - 1; i >= 0; i--) {
                 if (uiMessages[i]!.type === 'plan_card') return i
                 const t = uiMessages[i]!.type
-                if (t === 'user_text' || t === 'mode_switch_card' || t === 'curator_card' || t === 'plan_question_answers') return -1
+                if (t === 'user_text' || t === 'curator_card' || t === 'plan_question_answers') return -1
               }
               return -1
             })()
@@ -6394,7 +6976,31 @@ export function mapHistoryMessagesToUiMessages(
     }
     if (msg.type === 'user' || msg.type === 'tool_result') {
       const mappedUserBlocks = userHistoryBlocksFromContent(msg.content)
-      if (!mappedUserBlocks) continue
+      if (!mappedUserBlocks) {
+        if (msg.type === 'user') {
+          const fallbackText = (() => {
+            if (typeof msg.content === 'string') return msg.content
+            try {
+              return JSON.stringify(msg.content, null, 2)
+            } catch {
+              return ''
+            }
+          })()
+          if (fallbackText.trim()) {
+            uiMessages.push({
+              id: msg.id || nextId(),
+              type: 'user_text',
+              content: fallbackText,
+              timestamp,
+              ...(msg.clientMsgId ? { clientMsgId: msg.clientMsgId } : {}),
+              ...(tombstoned ? {} : { userMessageIndex: msg.userMessageIndex ?? liveUserCount }),
+              ...sup,
+            })
+            if (!tombstoned) liveUserCount++
+          }
+        }
+        continue
+      }
       let blockSeq = 0
       const blockId = (): string => (msg.id ? `${msg.id}:${blockSeq++}` : nextId())
       const textParts: string[] = []
@@ -6477,7 +7083,7 @@ export function mapHistoryMessagesToUiMessages(
             id: blockId(),
             type: 'tool_result',
             toolUseId,
-            content: block.content,
+            content: capToolResultContent(block.content),
             isError: isErrorResult,
             timestamp,
             parentToolUseId: msg.parentToolUseId,
@@ -6497,6 +7103,7 @@ export function mapHistoryMessagesToUiMessages(
             ...(parsedAsk.details ? { details: parsedAsk.details } : {}),
             ...sup,
           })
+          if (msg.type === 'user' && !tombstoned) liveUserCount++
         } else {
           uiMessages.push({
             id: blockId(),
@@ -6504,6 +7111,35 @@ export function mapHistoryMessagesToUiMessages(
             content: joined,
             attachments: attachments.length > 0 ? attachments : undefined,
             timestamp,
+            ...(msg.clientMsgId ? { clientMsgId: msg.clientMsgId } : {}),
+            ...(tombstoned ? {} : { userMessageIndex: msg.userMessageIndex ?? liveUserCount }),
+            ...sup,
+          })
+          if (!tombstoned) liveUserCount++
+        }
+      } else if (
+        msg.type === 'user' &&
+        mappedUserBlocks.every(
+          (b) =>
+            b?.type !== 'tool_result' &&
+            !(b?.type === 'text' && typeof b.text === 'string' && isTeammateMessage(b.text)),
+        )
+      ) {
+        const fallbackText = (() => {
+          if (typeof msg.content === 'string') return msg.content
+          try {
+            return JSON.stringify(msg.content, null, 2)
+          } catch {
+            return ''
+          }
+        })()
+        if (fallbackText.trim()) {
+          uiMessages.push({
+            id: blockId(),
+            type: 'user_text',
+            content: fallbackText,
+            timestamp,
+            ...(msg.clientMsgId ? { clientMsgId: msg.clientMsgId } : {}),
             ...(tombstoned ? {} : { userMessageIndex: msg.userMessageIndex ?? liveUserCount }),
             ...sup,
           })
@@ -6532,7 +7168,21 @@ function applySupersededFromPendingRewind(
       break
     }
   }
-  if (anchorIdx === -1) return messages
+  if (anchorIdx === -1) {
+    let minUserIndex: number | null = null
+    for (const m of messages) {
+      if (m.type === 'user_text' && typeof m.userMessageIndex === 'number') {
+        if (minUserIndex === null || m.userMessageIndex < minUserIndex) {
+          minUserIndex = m.userMessageIndex
+        }
+      }
+    }
+    if (minUserIndex !== null && pendingRewind.userMessageIndex < minUserIndex) {
+      anchorIdx = 0
+    } else {
+      return messages
+    }
+  }
   return messages.map((m, i) =>
     i >= anchorIdx ? ({ ...(m as UIMessage), superseded: true } as UIMessage) : m,
   )

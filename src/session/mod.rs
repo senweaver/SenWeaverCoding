@@ -349,18 +349,36 @@ pub struct FallbackToolIdPairer {
 impl FallbackToolIdPairer {
     fn on_call(&mut self, name: &str) -> String {
         let id = fallback_tool_call_id(name);
-        self.by_name
-            .entry(name.to_string())
-            .or_default()
-            .push_back(id.clone());
+        self.push_call_id(name, id.clone());
         id
     }
 
     fn on_result(&mut self, name: &str) -> String {
-        self.by_name
-            .get_mut(name)
-            .and_then(|q| q.pop_front())
+        self.pop_result_id(name)
             .unwrap_or_else(|| fallback_tool_call_id(name))
+    }
+
+    pub fn push_call_id(&mut self, name: &str, id: String) {
+        self.by_name
+            .entry(name.to_string())
+            .or_default()
+            .push_back(id);
+    }
+
+    pub fn pop_result_id(&mut self, name: &str) -> Option<String> {
+        self.by_name.get_mut(name).and_then(|q| q.pop_front())
+    }
+
+    pub fn remove_id(&mut self, name: &str, id: &str) {
+        if let Some(q) = self.by_name.get_mut(name) {
+            if let Some(pos) = q.iter().position(|existing| existing == id) {
+                q.remove(pos);
+            }
+        }
+    }
+
+    pub fn peek_last(&self, name: &str) -> Option<String> {
+        self.by_name.get(name).and_then(|q| q.back().cloned())
     }
 }
 
@@ -370,9 +388,7 @@ pub fn turn_event_to_session_event(
 ) -> Option<SessionEvent> {
     let kind = match event {
         TurnEvent::Chunk { delta } => SessionEventKind::Delta { text: delta },
-        TurnEvent::Thinking { delta } => SessionEventKind::Delta {
-            text: format!("[thinking] {}", delta),
-        },
+        TurnEvent::Thinking { delta } => SessionEventKind::Thinking { text: delta },
         TurnEvent::ToolCall {
             name,
             args,
@@ -407,14 +423,11 @@ pub fn turn_event_to_session_event(
             additions,
             deletions,
             ..
-        } => {
-
-            SessionEventKind::ToolResult {
-                tool_call_id: format!("file_edit:{path}"),
-                output: format!("edited {path} (+{additions}/-{deletions})"),
-                is_error: false,
-            }
-        }
+        } => SessionEventKind::FileEdit {
+            path,
+            additions,
+            deletions,
+        },
         TurnEvent::StatusUpdate { action, detail: _ } => {
 
             if action == "compressed" {
@@ -449,13 +462,13 @@ pub fn turn_event_to_session_event(
                 issued_at: chrono::Utc::now(),
             }
         }
+        TurnEvent::StreamReset => SessionEventKind::StreamReset,
         TurnEvent::ProgressTick { .. }
         | TurnEvent::CommandPreview { .. }
         | TurnEvent::Cancelling { .. }
         | TurnEvent::PiiSanitized { .. }
         | TurnEvent::PlanProgressCommitted { .. }
-        | TurnEvent::ToolArgsDelta { .. }
-        | TurnEvent::StreamReset => {
+        | TurnEvent::ToolArgsDelta { .. } => {
 
             return None;
         }

@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 use crate::providers::traits::{
@@ -569,6 +569,22 @@ impl AnthropicProvider {
         Some(blocks)
     }
 
+    fn last_assistant_tool_use_missing_thinking(messages: &[NativeMessage]) -> bool {
+        messages
+            .iter()
+            .rev()
+            .find(|m| m.role == "assistant")
+            .is_some_and(|m| {
+                m.content
+                    .iter()
+                    .any(|block| matches!(block, NativeContentOut::ToolUse { .. }))
+                    && !m
+                        .content
+                        .iter()
+                        .any(|block| matches!(block, NativeContentOut::Thinking { .. }))
+            })
+    }
+
     fn extract_thinking_block(msg: &ChatMessage) -> Option<NativeContentOut> {
         let thinking = msg
             .metadata
@@ -937,7 +953,7 @@ impl AnthropicProvider {
     fn http_client(&self) -> Client {
         crate::services::require_services()
             .proxy_runtime()
-            .build_client_with_timeouts_and_headers(
+            .build_llm_chat_client(
                 "provider.anthropic",
                 self.timeout_secs,
                 10,
@@ -1011,6 +1027,9 @@ impl AnthropicProvider {
                 Some(Ok(bytes)) => {
                     parser.push(&bytes);
                     if parser.overflowed() {
+                        if let Some(usage) = usage_acc.token_usage() {
+                            let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+                        }
                         let _ = tx
                             .send(Err(StreamError::Provider(
                                 "anthropic SSE event exceeded size limit; upstream response malformed or truncated".to_string(),
@@ -1020,6 +1039,9 @@ impl AnthropicProvider {
                     }
                 }
                 Some(Err(e)) => {
+                    if let Some(usage) = usage_acc.token_usage() {
+                        let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+                    }
                     let _ = tx
                         .send(Err(StreamError::Provider(format!(
                             "anthropic stream read failed before completion: {e}"
@@ -1083,6 +1105,10 @@ impl AnthropicProvider {
                                 {
                                     let name = tool_name.take().unwrap_or_default();
                                     if tool_args_overflow {
+                                        if let Some(usage) = usage_acc.token_usage() {
+                                            let _ =
+                                                tx.send(Ok(StreamEvent::Usage(usage))).await;
+                                        }
                                         let _ = tx
                                             .send(Err(StreamError::Provider(format!(
                                                 "anthropic tool_use `{name}` input_json exceeded the stream size limit; truncated arguments are not valid JSON (fail-closed)"
@@ -1256,6 +1282,9 @@ impl AnthropicProvider {
                         {
                             let name = tool_name.take().unwrap_or_default();
                             if std::mem::take(&mut tool_args_overflow) {
+                                if let Some(usage) = usage_acc.token_usage() {
+                                    let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+                                }
                                 let _ = tx
                                     .send(Err(StreamError::Provider(format!(
                                         "anthropic tool_use `{name}` input_json exceeded the stream size limit; truncated arguments are not valid JSON (fail-closed)"
@@ -1290,6 +1319,9 @@ impl AnthropicProvider {
                     "message_stop" => {
                         if std::mem::take(&mut tool_args_overflow) {
                             let name = tool_name.take().unwrap_or_default();
+                            if let Some(usage) = usage_acc.token_usage() {
+                                let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+                            }
                             let _ = tx
                                 .send(Err(StreamError::Provider(format!(
                                     "anthropic tool_use `{name}` input_json exceeded the stream size limit; truncated arguments are not valid JSON (fail-closed)"
@@ -1304,7 +1336,7 @@ impl AnthropicProvider {
                             tx,
                         )
                         .await;
-                        if let Some(usage) = usage_acc.into_token_usage() {
+                        if let Some(usage) = usage_acc.token_usage() {
                             let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
                         }
                         let _ = tx.send(Ok(StreamEvent::Final)).await;
@@ -1327,6 +1359,9 @@ impl AnthropicProvider {
                             Some(code) => format!("anthropic stream error ({code}): {sanitized}"),
                             None => format!("anthropic stream error: {sanitized}"),
                         };
+                        if let Some(usage) = usage_acc.token_usage() {
+                            let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+                        }
                         let _ = tx
                             .send(Err(super::stream_declared_error(
                                 "Anthropic",
@@ -1342,6 +1377,9 @@ impl AnthropicProvider {
         }
 
         if tool_id.is_some() || tool_name.is_some() || !tool_input_json.is_empty() {
+            if let Some(usage) = usage_acc.token_usage() {
+                let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+            }
             let _ = tx
                 .send(Err(StreamError::Provider(
                     "anthropic stream ended before message_stop while a tool_use block was still streaming; connection closed mid-response".to_string(),
@@ -1350,9 +1388,27 @@ impl AnthropicProvider {
             return;
         }
         if !made_progress && !saw_stop_reason {
+            if let Some(usage) = usage_acc.token_usage() {
+                let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+            }
             let _ = tx
                 .send(Err(StreamError::Provider(
                     "anthropic stream reached EOF without message_stop and without any text/tool output; connection closed mid-response (truncated)".to_string(),
+                )))
+                .await;
+            return;
+        }
+        if made_progress && !saw_stop_reason {
+            tracing::warn!(
+                target: "providers.anthropic.stream",
+                "anthropic stream reached EOF without message_stop after partial output; failing closed so the turn is retried instead of presenting truncated output as complete"
+            );
+            if let Some(usage) = usage_acc.token_usage() {
+                let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
+            }
+            let _ = tx
+                .send(Err(StreamError::Provider(
+                    "anthropic stream reached EOF without message_stop after partial output; connection closed mid-response (truncated)".to_string(),
                 )))
                 .await;
             return;
@@ -1363,7 +1419,7 @@ impl AnthropicProvider {
                 "anthropic stream reported a stop_reason but produced no text/tool output; finishing with an empty response"
             );
         }
-        if let Some(usage) = usage_acc.into_token_usage() {
+        if let Some(usage) = usage_acc.token_usage() {
             let _ = tx.send(Ok(StreamEvent::Usage(usage))).await;
         }
         let _ = tx.send(Ok(StreamEvent::Final)).await;
@@ -1400,7 +1456,7 @@ impl AnthropicStreamUsage {
         }
     }
 
-    fn into_token_usage(self) -> Option<TokenUsage> {
+    fn token_usage(&self) -> Option<TokenUsage> {
         if self.input_tokens.is_none()
             && self.output_tokens.is_none()
             && self.cache_read_input_tokens.is_none()
@@ -1587,6 +1643,19 @@ impl Provider for AnthropicProvider {
             .is_some_and(|t| t != "auto");
         let mut messages = messages;
         if forces_tool_use && thinking.is_some() {
+            thinking = None;
+            tuned_temperature = temperature;
+            for msg in messages.iter_mut() {
+                msg.content
+                    .retain(|block| !matches!(block, NativeContentOut::Thinking { .. }));
+            }
+            messages.retain(|m| !m.content.is_empty());
+        }
+        if thinking.is_some() && Self::last_assistant_tool_use_missing_thinking(&messages) {
+            tracing::warn!(
+                target: "providers.anthropic",
+                "disabling extended thinking for this request: the last assistant tool_use turn has no signed thinking block (signature lost via failover/overflow); keeping it enabled would trigger an Anthropic 400"
+            );
             thinking = None;
             tuned_temperature = temperature;
             for msg in messages.iter_mut() {
@@ -1847,6 +1916,19 @@ impl Provider for AnthropicProvider {
                 .and_then(|t| t.as_str())
                 .is_some_and(|t| t != "auto");
             if forces_tool_use && thinking.is_some() {
+                thinking = None;
+                temperature = requested_temperature;
+                for msg in messages.iter_mut() {
+                    msg.content
+                        .retain(|block| !matches!(block, NativeContentOut::Thinking { .. }));
+                }
+                messages.retain(|m| !m.content.is_empty());
+            }
+            if thinking.is_some() && Self::last_assistant_tool_use_missing_thinking(&messages) {
+                tracing::warn!(
+                    target: "providers.anthropic",
+                    "disabling extended thinking for this request: the last assistant tool_use turn has no signed thinking block (signature lost via failover/overflow); keeping it enabled would trigger an Anthropic 400"
+                );
                 thinking = None;
                 temperature = requested_temperature;
                 for msg in messages.iter_mut() {

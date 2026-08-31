@@ -82,15 +82,20 @@ impl FastApplyRefiner {
         edit_snippet: &str,
         instruction: Option<&str>,
     ) -> Result<String, ApplyError> {
+        let source_eol = crate::tools::file::eol::dominant_eol(source);
         if let Some(fast) = self.fast.as_ref() {
             if fast.supports_full_file_merge() {
                 if let Ok(out) = fast.merge_full_file(source, edit_snippet, instruction).await {
-                    return Ok(out);
+                    return Ok(crate::tools::file::eol::adapt_text_to_eol(&out, source_eol));
                 }
             }
         }
         if self.full.supports_full_file_merge() {
-            return self.full.merge_full_file(source, edit_snippet, instruction).await;
+            return self
+                .full
+                .merge_full_file(source, edit_snippet, instruction)
+                .await
+                .map(|out| crate::tools::file::eol::adapt_text_to_eol(&out, source_eol));
         }
         Err(ApplyError::LlmError(
             "no refiner tier supports full-file merge".to_string(),

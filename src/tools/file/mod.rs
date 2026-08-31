@@ -4,6 +4,7 @@
 
 pub mod edit;
 pub mod encoding;
+pub mod eol;
 pub mod match_diagnostics;
 pub mod office;
 pub mod read;

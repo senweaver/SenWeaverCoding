@@ -103,6 +103,30 @@ fn apply_event(entries: &mut VecDeque<ChatEntry>, pending: &mut bool, event: Ses
 
             *pending = false;
         }
+        SessionEventKind::Thinking { .. } => {}
+        SessionEventKind::StreamReset => {
+            if *pending {
+                if let Some(last) = entries.back() {
+                    if last.kind == ChatEntryKind::Assistant {
+                        entries.pop_back();
+                    }
+                }
+                *pending = false;
+            }
+        }
+        SessionEventKind::FileEdit {
+            path,
+            additions,
+            deletions,
+        } => {
+            push_with_cap(
+                entries,
+                ChatEntry {
+                    kind: ChatEntryKind::System,
+                    text: format!("(edited {path} +{additions}/-{deletions})"),
+                },
+            );
+        }
         SessionEventKind::Delta { text } => {
             if *pending {
                 if let Some(last) = entries.back_mut() {
@@ -376,6 +400,17 @@ pub fn apply_session_event<S: ChatViewSink + ?Sized>(sink: &mut S, evt: &Session
         }
         SessionEventKind::Delta { text } => {
             sink.append_assistant_delta(text);
+        }
+        SessionEventKind::Thinking { .. } => {}
+        SessionEventKind::StreamReset => {
+            sink.push_system("stream reset: provider retried; partial output discarded");
+        }
+        SessionEventKind::FileEdit {
+            path,
+            additions,
+            deletions,
+        } => {
+            sink.push_system(&format!("edited {path} (+{additions}/-{deletions})"));
         }
         SessionEventKind::ToolCall {
             tool_name,

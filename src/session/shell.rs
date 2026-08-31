@@ -31,6 +31,15 @@ fn render_cli_pretty(kind: &SessionEventKind) -> (String, bool) {
             (format!("▶ turn started: {}", truncate(input, 80)), true)
         }
         SessionEventKind::Delta { text } => (text.clone(), false),
+        SessionEventKind::Thinking { .. } => (String::new(), false),
+        SessionEventKind::StreamReset => {
+            ("↺ stream reset (provider retried)".to_string(), true)
+        }
+        SessionEventKind::FileEdit {
+            path,
+            additions,
+            deletions,
+        } => (format!("± edited {path} (+{additions}/-{deletions})"), true),
         SessionEventKind::ToolCall {
             tool_name,
             tool_call_id,
@@ -216,6 +225,16 @@ fn render_cli_pretty(kind: &SessionEventKind) -> (String, bool) {
 fn render_cli_plain(kind: &SessionEventKind) -> (String, bool) {
     match kind {
         SessionEventKind::Delta { text } => (text.clone(), false),
+        SessionEventKind::Thinking { .. } => (String::new(), false),
+        SessionEventKind::StreamReset => ("[stream_reset]".to_string(), true),
+        SessionEventKind::FileEdit {
+            path,
+            additions,
+            deletions,
+        } => (
+            format!("[file_edit path={path} additions={additions} deletions={deletions}]"),
+            true,
+        ),
         SessionEventKind::ToolCall { tool_name, .. } => (format!("[tool_call {tool_name}]"), true),
         SessionEventKind::ToolResult { is_error, .. } => {
             (format!("[tool_result is_error={is_error}]"), true)
@@ -385,6 +404,25 @@ pub fn render_tui(event: &SessionEvent) -> TuiLine {
             prefix: "",
             body: text.clone(),
             style_hint: TuiStyle::Normal,
+        },
+        SessionEventKind::Thinking { .. } => TuiLine {
+            prefix: "",
+            body: String::new(),
+            style_hint: TuiStyle::Dim,
+        },
+        SessionEventKind::StreamReset => TuiLine {
+            prefix: "↺",
+            body: "stream reset (provider retried)".to_string(),
+            style_hint: TuiStyle::Dim,
+        },
+        SessionEventKind::FileEdit {
+            path,
+            additions,
+            deletions,
+        } => TuiLine {
+            prefix: "±",
+            body: format!("edited {path} (+{additions}/-{deletions})"),
+            style_hint: TuiStyle::Dim,
         },
         SessionEventKind::ToolCall {
             tool_name,
@@ -598,6 +636,25 @@ pub fn render_gui(event: &SessionEvent) -> GuiEvent {
         SessionEventKind::Delta { text } => GuiEvent {
             kind: "delta",
             body: text.clone(),
+            is_error: false,
+        },
+        SessionEventKind::Thinking { text } => GuiEvent {
+            kind: "thinking",
+            body: text.clone(),
+            is_error: false,
+        },
+        SessionEventKind::StreamReset => GuiEvent {
+            kind: "stream_reset",
+            body: String::new(),
+            is_error: false,
+        },
+        SessionEventKind::FileEdit {
+            path,
+            additions,
+            deletions,
+        } => GuiEvent {
+            kind: "file_edit",
+            body: format!("{path} (+{additions}/-{deletions})"),
             is_error: false,
         },
         SessionEventKind::ToolCall { tool_name, .. } => GuiEvent {

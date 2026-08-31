@@ -40,6 +40,8 @@ export type MessageEntry = {
 
   displayContent?: string
 
+  clientMsgId?: string
+
   designRef?: string
   designRefName?: string
   designRefElement?: string

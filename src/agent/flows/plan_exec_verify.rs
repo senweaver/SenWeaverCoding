@@ -266,11 +266,18 @@ where
                     };
 
                     let mut local_ctx = ctx_handle.lock().await.clone();
+                    let base_transcript_len = local_ctx.transcript.len();
+                    let base_scratchpad = local_ctx.scratchpad.clone();
                     let result = flow_ref
                         .execute_step_with_fix(&mut local_ctx, agent_ref, &step_owned)
                         .await;
                     let mut shared = ctx_handle.lock().await;
-                    merge_context_deltas(&mut shared, &local_ctx);
+                    merge_context_deltas(
+                        &mut shared,
+                        &local_ctx,
+                        base_transcript_len,
+                        &base_scratchpad,
+                    );
                     (global_index, step_owned.id.clone(), result)
                 });
             }
@@ -313,20 +320,23 @@ where
     }
 }
 
-fn merge_context_deltas(shared: &mut FlowContext, local: &FlowContext) {
-    let shared_len = shared.transcript.len();
-    if local.transcript.len() > shared_len {
+fn merge_context_deltas(
+    shared: &mut FlowContext,
+    local: &FlowContext,
+    base_transcript_len: usize,
+    base_scratchpad: &HashMap<String, String>,
+) {
+    if local.transcript.len() > base_transcript_len {
         shared
             .transcript
-            .extend_from_slice(&local.transcript[shared_len..]);
+            .extend_from_slice(&local.transcript[base_transcript_len..]);
     }
-    let mut additions: HashMap<String, String> = HashMap::new();
     for (k, v) in &local.scratchpad {
-        if !shared.scratchpad.contains_key(k) {
-            additions.insert(k.clone(), v.clone());
+        let changed = base_scratchpad.get(k).is_none_or(|old| old != v);
+        if changed {
+            shared.scratchpad.insert(k.clone(), v.clone());
         }
     }
-    shared.scratchpad.extend(additions);
 }
 
 #[async_trait]

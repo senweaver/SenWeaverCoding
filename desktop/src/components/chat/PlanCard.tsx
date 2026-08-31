@@ -15,7 +15,7 @@ import { Button } from '../shared/Button'
 import { UnsavedChangesDialog } from '../shared/UnsavedChangesDialog'
 import { MarkdownRenderer } from '../markdown/MarkdownRenderer'
 import {
-  selectPlanCardExecutionState,
+  selectPlanCardExecutionStateCached,
   type PlanExecutionState,
 } from '../../utils/activePlanSelector'
 
@@ -84,7 +84,7 @@ export function PlanCard({
   const execState = useChatStore((s) => {
     const session = sessionId ? s.sessions[sessionId] : undefined
     if (!session) return 'idle' as PlanExecutionState
-    return selectPlanCardExecutionState(
+    return selectPlanCardExecutionStateCached(
       session.messages,
       messageId,
       session.chatState ?? 'idle',

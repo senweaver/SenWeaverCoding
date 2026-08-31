@@ -36,7 +36,13 @@ export function WorkspaceSplit({ left, right }: Props) {
 
   useEffect(() => {
     if (typeof window === 'undefined' || !window.localStorage) return
-    window.localStorage.setItem(STORAGE_KEY, String(leftWidth))
+    const handle = window.setTimeout(() => {
+      try {
+        window.localStorage.setItem(STORAGE_KEY, String(leftWidth))
+      } catch {
+      }
+    }, 300)
+    return () => window.clearTimeout(handle)
   }, [leftWidth])
 
   const onMouseDown = useCallback((event: React.MouseEvent<HTMLDivElement>) => {

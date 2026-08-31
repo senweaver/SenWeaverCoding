@@ -287,9 +287,12 @@ pub async fn run_worker(
     let result = tokio::select! {
         biased;
         _ = cancel_for_run.cancelled() => Err("worker cancelled by user".to_string()),
-        _ = wall_clock_timeout => Err(format!(
-            "worker exceeded its independent wall-clock budget of {wall_clock_secs}s and was cancelled (orphaned after parent turn ended?)"
-        )),
+        _ = wall_clock_timeout => {
+            handle.cancel();
+            Err(format!(
+                "worker exceeded its independent wall-clock budget of {wall_clock_secs}s and was cancelled (orphaned after parent turn ended?)"
+            ))
+        }
         outcome = std::panic::AssertUnwindSafe(run_future).catch_unwind() => match outcome {
             Ok(inner) => inner.map_err(|e| e.to_string()),
             Err(panic) => Err(format!(

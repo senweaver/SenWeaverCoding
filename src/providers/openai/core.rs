@@ -1,4 +1,4 @@
-// SPDX-License-Identifier: MIT
+﻿// SPDX-License-Identifier: MIT
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 use crate::providers::traits::{
@@ -596,10 +596,19 @@ impl OpenAiProvider {
         }
     }
 
+    fn reserved_output_tokens(&self, model: &str) -> usize {
+        let window = crate::constants::api_limits::context_window_for_model(model) as usize;
+        let configured = self.max_tokens.map(|v| v as usize);
+        let default_reserve = (window / 8).clamp(512, 16384);
+        let raw = configured.unwrap_or(default_reserve);
+        let max_reserve = window.saturating_sub(512).max(512);
+        raw.clamp(256, max_reserve)
+    }
+
     fn http_client(&self) -> Client {
         crate::services::require_services()
             .proxy_runtime()
-            .build_client_with_timeouts_and_headers(
+            .build_llm_chat_client(
                 "provider.openai",
                 self.timeout_secs,
                 10,
@@ -806,7 +815,7 @@ impl Provider for OpenAiProvider {
             crate::providers::sanitize::sanitize_messages_before_send_for_provider(
                 request.messages.to_vec(),
                 model,
-                self.max_tokens.unwrap_or(0) as usize,
+                self.reserved_output_tokens(model),
                 None,
                 crate::providers::sanitize::ProviderKind::OpenAi,
             );
@@ -890,7 +899,7 @@ impl Provider for OpenAiProvider {
             crate::providers::sanitize::sanitize_messages_before_send_for_provider(
                 messages.to_vec(),
                 model,
-                self.max_tokens.unwrap_or(0) as usize,
+                self.reserved_output_tokens(model),
                 None,
                 crate::providers::sanitize::ProviderKind::OpenAi,
             );
@@ -982,7 +991,7 @@ impl Provider for OpenAiProvider {
             crate::providers::sanitize::sanitize_messages_before_send_for_provider(
                 messages.to_vec(),
                 model,
-                self.max_tokens.unwrap_or(0) as usize,
+                self.reserved_output_tokens(model),
                 None,
                 crate::providers::sanitize::ProviderKind::OpenAi,
             );
@@ -1094,7 +1103,7 @@ impl Provider for OpenAiProvider {
             crate::providers::sanitize::sanitize_messages_before_send_for_provider(
                 request.messages.to_vec(),
                 model,
-                self.max_tokens.unwrap_or(0) as usize,
+                self.reserved_output_tokens(model),
                 None,
                 crate::providers::sanitize::ProviderKind::OpenAi,
             );

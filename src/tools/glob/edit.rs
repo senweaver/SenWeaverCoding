@@ -227,7 +227,11 @@ impl Tool for GlobEditTool {
                     if pattern_owned.starts_with('/') || pattern_owned.contains(':') {
                         pattern_owned.clone()
                     } else {
-                        format!("{}/{}", root.display(), pattern_owned)
+                        format!(
+                            "{}/{}",
+                            glob::Pattern::escape(&root.display().to_string()),
+                            pattern_owned
+                        )
                     };
                 let deadline = std::time::Instant::now()
                     + std::time::Duration::from_secs(super::GLOB_WALK_TIMEOUT_SECS);
@@ -267,7 +271,11 @@ impl Tool for GlobEditTool {
                                 return false;
                             }
                             crate::tools::file::encoding::decode_for_edit(&raw)
-                                .map(|(c, _)| c.contains(filter))
+                                .map(|(c, _)| {
+                                    crate::tools::file::eol::count_matches_eol_insensitive(
+                                        &c, filter,
+                                    ) > 0
+                                })
                                 .unwrap_or(false)
                         })
                         .take(max_files)
@@ -425,10 +433,38 @@ impl Tool for GlobEditTool {
                         continue;
                     }
                 };
-            if !content.contains(old_string) {
-                continue;
-            }
-            let new_content = content.replace(old_string, new_string);
+            let exact_count = memchr::memmem::Finder::new(old_string.as_bytes())
+                .find_iter(content.as_bytes())
+                .count();
+            let new_content = if exact_count > 0 {
+                let adapted = crate::tools::file::eol::adapt_replacement_eol(
+                    old_string,
+                    new_string,
+                    crate::tools::file::eol::dominant_eol(&content),
+                );
+                content.replace(old_string, &adapted)
+            } else {
+                let spans = crate::tools::file::eol::find_eol_insensitive_spans(
+                    &content,
+                    old_string,
+                    usize::MAX,
+                );
+                if spans.is_empty() {
+                    continue;
+                }
+                let mut out = String::with_capacity(content.len() + new_string.len());
+                let mut cursor = 0usize;
+                for span in &spans {
+                    out.push_str(&content[cursor..span.start]);
+                    out.push_str(&crate::tools::file::eol::adapt_new_text_for_span(
+                        new_string,
+                        span.had_crlf,
+                    ));
+                    cursor = span.end;
+                }
+                out.push_str(&content[cursor..]);
+                out
+            };
             emit_records.push((
                 content.as_bytes().to_vec(),
                 new_content.as_bytes().to_vec(),

@@ -285,9 +285,11 @@ struct FetchResponse {
 #[derive(Clone)]
 pub struct TauriFetchController(Arc<TauriFetchControllerInner>);
 
+const PENDING_REQUEST_MAX_AGE: Duration = Duration::from_secs(120);
+
 struct TauriFetchControllerInner {
     app: AppHandle,
-    pending: Mutex<HashMap<u64, oneshot::Sender<FetchResponse>>>,
+    pending: Mutex<HashMap<u64, (std::time::Instant, oneshot::Sender<FetchResponse>)>>,
     chunks: Mutex<HashMap<u64, ChunkBuffer>>,
     nav_waiters: Mutex<Vec<oneshot::Sender<()>>>,
     drive_lock: AsyncMutex<()>,
@@ -311,6 +313,16 @@ impl TauriFetchController {
         self.0.chunks.lock().remove(&req_id);
     }
 
+    fn sweep_stale_requests(&self) {
+        let mut pending = self.0.pending.lock();
+        let before = pending.len();
+        pending.retain(|_, (created_at, _)| created_at.elapsed() < PENDING_REQUEST_MAX_AGE);
+        if pending.len() < before {
+            let mut chunks = self.0.chunks.lock();
+            chunks.retain(|req_id, _| pending.contains_key(req_id));
+        }
+    }
+
     pub fn deliver_result(
         &self,
         req_id: u64,
@@ -320,7 +332,7 @@ impl TauriFetchController {
     ) {
         self.0.chunks.lock().remove(&req_id);
         let sender = self.0.pending.lock().remove(&req_id);
-        if let Some(tx) = sender {
+        if let Some((_, tx)) = sender {
             let _ = tx.send(FetchResponse { ok, value, error });
         }
     }
@@ -356,13 +368,13 @@ impl TauriFetchController {
                         .and_then(|v| v.as_str())
                         .map(|s| s.to_string());
                     let sender = self.0.pending.lock().remove(&req_id);
-                    if let Some(tx) = sender {
+                    if let Some((_, tx)) = sender {
                         let _ = tx.send(FetchResponse { ok, value, error });
                     }
                 }
                 Err(err) => {
                     let sender = self.0.pending.lock().remove(&req_id);
-                    if let Some(tx) = sender {
+                    if let Some((_, tx)) = sender {
                         let _ = tx.send(FetchResponse {
                             ok: false,
                             value: Value::Null,
@@ -437,9 +449,13 @@ impl TauriFetchController {
             .app
             .get_webview(FETCH_WORKER_LABEL)
             .ok_or_else(|| anyhow::anyhow!("fetch_worker webview not available"))?;
+        self.sweep_stale_requests();
         let req_id = self.0.next_req_id.fetch_add(1, Ordering::SeqCst);
         let (tx, rx) = oneshot::channel();
-        self.0.pending.lock().insert(req_id, tx);
+        self.0
+            .pending
+            .lock()
+            .insert(req_id, (std::time::Instant::now(), tx));
         let payload = serde_json::json!({
             "reqId": req_id,
             "kind": kind,
@@ -480,10 +496,33 @@ impl TauriFetchController {
     }
 }
 
-#[async_trait]
-impl FetchController for TauriFetchController {
-    async fn fetch(&self, url: &str, timeout: Duration) -> Result<FetchedPage> {
-        let _drive = self.0.drive_lock.lock().await;
+impl TauriFetchController {
+    fn park_worker_to_blank(&self) {
+        let outcome = run_fetch_on_main_thread(
+            &self.0.app,
+            "fetch_worker park",
+            move |app| {
+                let Some(webview) = app.get_webview(FETCH_WORKER_LABEL) else {
+                    return Ok(());
+                };
+                if let Ok(current) = webview.url() {
+                    if current.as_str() == ABOUT_BLANK {
+                        return Ok(());
+                    }
+                }
+                let parsed = Url::parse(ABOUT_BLANK)
+                    .map_err(|e| anyhow::anyhow!("parse about:blank: {e}"))?;
+                webview
+                    .navigate(parsed)
+                    .map_err(|e| anyhow::anyhow!("fetch_worker park navigate failed: {e}"))
+            },
+        );
+        if let Err(err) = outcome {
+            tracing::warn!("[fetch_worker] park to about:blank failed: {err}");
+        }
+    }
+
+    async fn fetch_inner(&self, url: &str, timeout: Duration) -> Result<FetchedPage> {
         ensure_fetch_webview(&self.0.app)?;
 
         let state = self
@@ -506,7 +545,7 @@ impl FetchController for TauriFetchController {
                 .map_err(|e| anyhow::anyhow!("fetch_worker navigate failed: {e}"))
         })?;
 
-        let nav_timeout = timeout.min(Duration::from_secs(45));
+        let nav_timeout = timeout.min(Duration::from_secs(8));
         if let Err(err) = self
             .await_nav_ready(parsed.as_str(), nav_timeout)
             .await
@@ -518,10 +557,10 @@ impl FetchController for TauriFetchController {
             .exec_internal(
                 "wait_for_ready",
                 serde_json::json!({
-                    "ready_state": "complete",
-                    "timeout_ms": 10_000,
+                    "ready_state": "interactive",
+                    "timeout_ms": 4_000,
                 }),
-                Duration::from_millis(12_000),
+                Duration::from_millis(5_000),
             )
             .await;
 
@@ -529,7 +568,7 @@ impl FetchController for TauriFetchController {
             .exec_internal(
                 "extract_text",
                 Value::Null,
-                Duration::from_millis(10_000),
+                Duration::from_millis(8_000),
             )
             .await?;
         if !resp.ok {
@@ -538,29 +577,56 @@ impl FetchController for TauriFetchController {
                 resp.error.unwrap_or_default()
             ));
         }
-        let url_out = resp
-            .value
+        let mut page = page_from_extract_value(&resp.value);
+        if page.text.chars().count() < 200 {
+            tokio::time::sleep(Duration::from_millis(1_200)).await;
+            if let Ok(retry) = self
+                .exec_internal(
+                    "extract_text",
+                    Value::Null,
+                    Duration::from_millis(8_000),
+                )
+                .await
+            {
+                if retry.ok {
+                    let second = page_from_extract_value(&retry.value);
+                    if second.text.chars().count() > page.text.chars().count() {
+                        page = second;
+                    }
+                }
+            }
+        }
+        Ok(page)
+    }
+}
+
+fn page_from_extract_value(value: &Value) -> FetchedPage {
+    FetchedPage {
+        url: value
             .get("url")
             .and_then(|v| v.as_str())
             .unwrap_or("")
-            .to_string();
-        let title = resp
-            .value
+            .to_string(),
+        title: value
             .get("title")
             .and_then(|v| v.as_str())
             .unwrap_or("")
-            .to_string();
-        let text = resp
-            .value
+            .to_string(),
+        text: value
             .get("text")
             .and_then(|v| v.as_str())
             .unwrap_or("")
-            .to_string();
-        Ok(FetchedPage {
-            url: url_out,
-            title,
-            text,
-        })
+            .to_string(),
+    }
+}
+
+#[async_trait]
+impl FetchController for TauriFetchController {
+    async fn fetch(&self, url: &str, timeout: Duration) -> Result<FetchedPage> {
+        let _drive = self.0.drive_lock.lock().await;
+        let result = self.fetch_inner(url, timeout).await;
+        self.park_worker_to_blank();
+        result
     }
 }
 

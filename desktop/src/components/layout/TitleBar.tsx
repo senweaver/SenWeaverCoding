@@ -20,6 +20,7 @@ import { useUpdateStore } from '../../stores/updateStore'
 import { useLanShareStore } from '../../stores/lanShareStore'
 import { enterMinimalMode } from '../../lib/minimalMode'
 import { useComputerUseStore } from '../../stores/computerUseStore'
+import { useComputerRecorderStore } from '../../stores/computerRecorderStore'
 
 const isTauri = typeof window !== 'undefined' && ('__TAURI_INTERNALS__' in window || '__TAURI__' in window)
 const isMacOSEnv =
@@ -381,6 +382,10 @@ function ComputerModeToggle({ t }: { t: T }) {
         cu.status === 'call_user'
       ) {
         cu.stop()
+      }
+      const rec = useComputerRecorderStore.getState()
+      if (rec.status === 'recording') {
+        rec.stopRecording()
       }
       setAppMode('code')
     } else {

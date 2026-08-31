@@ -39,7 +39,6 @@ pub fn detect_completion_claim(text: &str) -> bool {
         "all tasks completed",
         "everything is done",
         "everything is complete",
-        "everything has been",
         "task complete",
         "task completed",
         "task is complete",
@@ -52,16 +51,7 @@ pub fn detect_completion_claim(text: &str) -> bool {
         "fixes complete",
         "verification passed",
         "verification successful",
-        "build succeeds",
-        "build successful",
-        "build passed",
-        "tests pass",
         "tests passed",
-        "tests are passing",
-        "no errors",
-        "zero errors",
-        "ready to commit",
-        "ready for review",
         "implementation complete",
         "refactor complete",
         "migration complete",
@@ -69,10 +59,13 @@ pub fn detect_completion_claim(text: &str) -> bool {
         "all five passed",
     ];
     for pat in EN_STRONG {
-        if let Some(pos) = lower.find(pat) {
+        let mut search = 0usize;
+        while let Some(rel) = lower[search..].find(pat) {
+            let pos = search + rel;
             if !negation_near(&lower, pos, pat.len()) {
                 return true;
             }
+            search = pos + pat.len();
         }
     }
     const CN_STRONG: &[&str] = &[
@@ -111,19 +104,18 @@ pub fn detect_completion_claim(text: &str) -> bool {
         "已完成验证",
         "所有修复已完成",
         "所有问题已修复",
-        "所有改动",
-        "所有任务",
         "可以提交",
         "可以合入",
-        "无错误",
-        "零错误",
         "通过验证",
     ];
     for pat in CN_STRONG {
-        if let Some(pos) = text.find(pat) {
+        let mut search = 0usize;
+        while let Some(rel) = text[search..].find(pat) {
+            let pos = search + rel;
             if !negation_near(text, pos, pat.len()) {
                 return true;
             }
+            search = pos + pat.len();
         }
     }
     false
@@ -166,6 +158,23 @@ pub fn classify_auto_finalize_intent(recent_assistant_text: &str) -> AutoFinaliz
     } else {
         AutoFinalizeIntent::AssumeSkipped
     }
+}
+
+fn parse_update_output(output: &str) -> Option<(String, String)> {
+    if let Some(rest) = output.strip_prefix("Updated step '") {
+        let idx = rest.rfind("': status=")?;
+        let title = &rest[..idx];
+        let status = rest[idx + "': status=".len()..].trim();
+        return Some((title.to_string(), status.to_string()));
+    }
+    if let Some(rest) = output.strip_prefix("Plan todo '") {
+        let idx = rest.rfind("' annotated (status=")?;
+        let title = &rest[..idx];
+        let status = rest[idx + "' annotated (status=".len()..]
+            .trim_end_matches(['.', ')', ' ']);
+        return Some((title.to_string(), status.to_string()));
+    }
+    None
 }
 
 #[derive(Debug, Default, Clone)]
@@ -247,9 +256,14 @@ impl PlanExecutionNudgeState {
                         if !is_terminal {
                             continue;
                         }
-                        match s.get("id").and_then(|v| v.as_str()).filter(|v| !v.is_empty()) {
-                            Some(id) => {
-                                ids.insert(id.to_string());
+                        let key = s
+                            .get("id")
+                            .and_then(|v| v.as_str())
+                            .map(crate::tools::update_plan::normalize_plan_key)
+                            .filter(|k| !k.is_empty());
+                        match key {
+                            Some(key) => {
+                                ids.insert(key);
                             }
                             None => terminal_without_id += 1,
                         }
@@ -259,23 +273,34 @@ impl PlanExecutionNudgeState {
                 }
             }
             "update" => {
-                let status = arguments
+                let arg_status = arguments
                     .get("status")
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
-                let step_id = arguments
+                let arg_key = arguments
                     .get("step_id")
                     .and_then(|v| v.as_str())
-                    .filter(|s| !s.is_empty())
-                    .map(ToString::to_string);
-                let is_terminal = matches!(status, "completed" | "skipped");
-                match step_id {
-                    Some(id) => {
+                    .map(crate::tools::update_plan::normalize_plan_key)
+                    .filter(|k| !k.is_empty());
+                let (key, status) = match parse_update_output(output) {
+                    Some((title, out_status)) => {
+                        let title_key = crate::tools::update_plan::normalize_plan_key(&title);
+                        if title_key.is_empty() {
+                            (arg_key, out_status)
+                        } else {
+                            (Some(title_key), out_status)
+                        }
+                    }
+                    None => (arg_key, arg_status.to_string()),
+                };
+                let is_terminal = matches!(status.as_str(), "completed" | "skipped");
+                match key {
+                    Some(key) => {
                         if is_terminal {
-                            if self.terminal_ids.insert(id) {
+                            if self.terminal_ids.insert(key) {
                                 self.terminal_count = self.terminal_count.saturating_add(1);
                             }
-                        } else if self.terminal_ids.remove(&id) {
+                        } else if self.terminal_ids.remove(&key) {
                             self.terminal_count = self.terminal_count.saturating_sub(1);
                         }
                     }
@@ -312,7 +337,10 @@ impl PlanExecutionNudgeState {
                 }
                 if total > 0 {
                     self.total_steps = total;
-                    self.terminal_count = terminal.max(self.terminal_ids.len()).min(total);
+                    if terminal < self.terminal_ids.len() {
+                        self.terminal_ids.clear();
+                    }
+                    self.terminal_count = terminal.min(total);
                 }
             }
             _ => {}

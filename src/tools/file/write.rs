@@ -268,7 +268,9 @@ impl Tool for FileWriteTool {
                 error: Some(format!(
                     "Refusing to overwrite '{}': this session has not read the file yet. \
                      Use file_read on it first (the write replaces the file's CURRENT \
-                     contents), then retry, or pass expected_mtime_ms from a prior read.",
+                     contents), then retry, or pass expected_mtime_ms from a prior read. A \
+                     compacted/Signatures view does not count: use level=default, paging \
+                     large files with offset/limit.",
                     resolved_target.display()
                 )),
             });
@@ -302,14 +304,28 @@ impl Tool for FileWriteTool {
             .as_deref()
             .is_some_and(|b| b.starts_with(&[0xEF, 0xBB, 0xBF]));
         let preserved_encoding: Option<String> = match (&original_bytes, &original_text) {
-            (Some(bytes), None) => {
-                let label = crate::tools::file::encoding::detect_label(bytes);
-                if crate::tools::file::encoding::is_utf8_label(label) {
-                    None
-                } else {
-                    Some(label.to_string())
+            (Some(bytes), None) => match crate::tools::file::encoding::decode_for_edit(bytes) {
+                Ok((_, label)) => {
+                    if crate::tools::file::encoding::is_utf8_label(label) {
+                        None
+                    } else {
+                        Some(label.to_string())
+                    }
                 }
-            }
+                Err(e) => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "Refusing to overwrite '{}': its current encoding cannot be \
+                             verified round-trip ({e}), so rewriting it as text risks silent \
+                             mojibake. If replacing the file wholesale is intended, remove or \
+                             rename it first via fs_ops, then write the new content.",
+                            resolved_target.display()
+                        )),
+                    });
+                }
+            },
             (Some(_), Some(_)) if utf8_bom => Some("UTF-8-BOM".to_string()),
             _ => None,
         };
@@ -341,7 +357,9 @@ impl Tool for FileWriteTool {
                 contents: content.clone(),
                 overwrite: true,
                 encoding: preserved_encoding,
-                expected_pre_sha256: None,
+                expected_pre_sha256: original_bytes
+                    .as_deref()
+                    .map(crate::apply_model::edit_op::sha256_hex),
             },
         };
         let batch = EditBatch::new(EditOrigin::FileWriteTool).with_op(op);

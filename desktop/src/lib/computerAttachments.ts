@@ -55,32 +55,36 @@ function readAsText(file: File): Promise<string> {
 }
 
 export async function fileToAttachment(file: File): Promise<LocalAttachment | null> {
-  const mime = (file.type || '').toLowerCase()
-  if (isSupportedImage(mime)) {
-    if (file.size > MAX_IMAGE_BYTES) return null
-    const dataUrl = await readAsDataUrl(file)
-    const comma = dataUrl.indexOf(',')
-    if (comma < 0) return null
-    return {
-      id: genId(),
-      name: file.name || 'image',
-      mime,
-      dataBase64: dataUrl.slice(comma + 1),
+  try {
+    const mime = (file.type || '').toLowerCase()
+    if (isSupportedImage(mime)) {
+      if (file.size > MAX_IMAGE_BYTES) return null
+      const dataUrl = await readAsDataUrl(file)
+      const comma = dataUrl.indexOf(',')
+      if (comma < 0) return null
+      return {
+        id: genId(),
+        name: file.name || 'image',
+        mime,
+        dataBase64: dataUrl.slice(comma + 1),
+      }
     }
-  }
-  if (looksLikeTextFile(file)) {
-    if (file.size > MAX_TEXT_BYTES) return null
-    const text = await readAsText(file)
-    const trimmed = text.length > MAX_TEXT_CHARS ? text.slice(0, MAX_TEXT_CHARS) : text
-    if (!trimmed.trim()) return null
-    return {
-      id: genId(),
-      name: file.name || 'document',
-      mime: mime || 'text/plain',
-      text: trimmed,
+    if (looksLikeTextFile(file)) {
+      if (file.size > MAX_TEXT_BYTES) return null
+      const text = await readAsText(file)
+      const trimmed = text.length > MAX_TEXT_CHARS ? text.slice(0, MAX_TEXT_CHARS) : text
+      if (!trimmed.trim()) return null
+      return {
+        id: genId(),
+        name: file.name || 'document',
+        mime: mime || 'text/plain',
+        text: trimmed,
+      }
     }
+    return null
+  } catch {
+    return null
   }
-  return null
 }
 
 export function clipboardImageFiles(event: React.ClipboardEvent): File[] {

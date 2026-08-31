@@ -9,11 +9,24 @@ use std::sync::Arc;
 
 pub struct RestoreFileTool {
     security: Arc<SecurityPolicy>,
+    edit_history: Option<Arc<super::edit_history::EditHistory>>,
 }
 
 impl RestoreFileTool {
     pub fn new(security: Arc<SecurityPolicy>) -> Self {
-        Self { security }
+        Self {
+            security,
+            edit_history: None,
+        }
+    }
+
+    #[must_use]
+    pub fn with_edit_history(
+        mut self,
+        history: Arc<super::edit_history::EditHistory>,
+    ) -> Self {
+        self.edit_history = Some(history);
+        self
     }
 }
 
@@ -24,8 +37,10 @@ impl Tool for RestoreFileTool {
     }
 
     fn description(&self) -> &str {
-        "Restore a file to its last committed state using git checkout. \
-         Useful for undoing bad edits or reverting to the original version."
+        "Restore a file to its previous state. By default reverts to the latest edit-history \
+         snapshot (works offline, undoes the most recent edit; the pre-restore state is \
+         stashed so the restore itself can be undone). Pass revision=<git rev> to restore \
+         from git instead."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -38,8 +53,7 @@ impl Tool for RestoreFileTool {
                 },
                 "revision": {
                     "type": "string",
-                    "description": "Git revision to restore from (default: HEAD)",
-                    "default": "HEAD"
+                    "description": "Optional git revision to restore from (e.g. HEAD). When omitted, the latest edit-history snapshot is used and git is only a fallback."
                 }
             },
             "required": ["path"]
@@ -60,16 +74,42 @@ impl Tool for RestoreFileTool {
             .and_then(|v| v.as_str())
             .ok_or_else(|| anyhow::anyhow!("Missing 'path' parameter"))?;
 
-        let revision = args
+        let revision_explicit = args
             .get("revision")
             .and_then(|v| v.as_str())
-            .unwrap_or("HEAD");
+            .map(str::trim)
+            .filter(|s| !s.is_empty());
 
         if !self.security.is_path_allowed(path) {
             return Ok(ToolResult {
                 success: false,
                 output: String::new(),
                 error: Some(format!("Path not allowed by security policy: {path}")),
+            });
+        }
+
+        let full_path = self.security.resolve_tool_path(path);
+
+        if let Ok(meta) = tokio::fs::symlink_metadata(&full_path).await {
+            if meta.file_type().is_symlink() {
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!(
+                        "Refusing to restore through symlink: {}",
+                        full_path.display()
+                    )),
+                });
+            }
+        }
+        let canonical = tokio::fs::canonicalize(&full_path)
+            .await
+            .unwrap_or_else(|_| full_path.clone());
+        if !self.security.is_resolved_path_allowed(&canonical) {
+            return Ok(ToolResult {
+                success: false,
+                output: String::new(),
+                error: Some(self.security.resolved_path_violation_message(&canonical)),
             });
         }
 
@@ -81,8 +121,69 @@ impl Tool for RestoreFileTool {
             });
         }
 
-        let full_path = self.security.resolve_tool_path(path);
+        let before_bytes = tokio::fs::read(&full_path).await.ok();
 
+        let mut history_note = String::new();
+        if revision_explicit.is_none() {
+            if let Some(history) = self.edit_history.as_ref() {
+                let snapshots = history.file_history_with_batches(&full_path);
+                if snapshots.is_empty() {
+                    history_note =
+                        " (no edit-history snapshot exists for this file; fell back to git)"
+                            .to_string();
+                } else {
+                    let last_index = snapshots.len() - 1;
+                    let history_for_task = Arc::clone(history);
+                    let path_for_task = full_path.clone();
+                    let restore = tokio::task::spawn_blocking(move || {
+                        history_for_task.restore_snapshot_with_stash(
+                            &path_for_task,
+                            last_index,
+                            None,
+                            "restore_file",
+                            "stash current state before snapshot restore",
+                        )
+                    })
+                    .await;
+                    match restore {
+                        Ok(Ok(())) => {
+                            crate::session::record_write_for_current_session(&full_path);
+                            let after_bytes = tokio::fs::read(&full_path).await.ok();
+                            crate::agent::file_edit_emitter::emit_file_edit(
+                                &full_path,
+                                before_bytes.as_deref(),
+                                after_bytes.as_deref(),
+                                None,
+                            )
+                            .await;
+                            return Ok(ToolResult {
+                                success: true,
+                                output: format!(
+                                    "Restored {path} from edit-history snapshot #{last_index} \
+                                     (state before the most recent edit). The pre-restore \
+                                     content was stashed, so this restore can itself be \
+                                     undone. Pass revision=<git rev> to restore from git \
+                                     instead."
+                                ),
+                                error: None,
+                            });
+                        }
+                        Ok(Err(e)) => {
+                            history_note = format!(
+                                " (edit-history restore failed: {e}; fell back to git)"
+                            );
+                        }
+                        Err(e) => {
+                            history_note = format!(
+                                " (edit-history restore task failed: {e}; fell back to git)"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        let revision = revision_explicit.unwrap_or("HEAD");
         let ws = self.security.workspace_dir();
         let workspace = full_path.parent().unwrap_or(ws.as_path());
 
@@ -105,7 +206,7 @@ impl Tool for RestoreFileTool {
                     success: false,
                     output: String::new(),
                     error: Some(format!(
-                        "git checkout timed out after {timeout_secs}s while restoring {path}"
+                        "git checkout timed out after {timeout_secs}s while restoring {path}{history_note}"
                     )),
                 });
             }
@@ -114,9 +215,17 @@ impl Tool for RestoreFileTool {
         match output {
             Ok(out) if out.status.success() => {
                 crate::session::record_write_for_current_session(&full_path);
+                let after_bytes = tokio::fs::read(&full_path).await.ok();
+                crate::agent::file_edit_emitter::emit_file_edit(
+                    &full_path,
+                    before_bytes.as_deref(),
+                    after_bytes.as_deref(),
+                    None,
+                )
+                .await;
                 Ok(ToolResult {
                     success: true,
-                    output: format!("Restored {path} from {revision}"),
+                    output: format!("Restored {path} from git revision {revision}{history_note}"),
                     error: None,
                 })
             }
@@ -128,22 +237,26 @@ impl Tool for RestoreFileTool {
                         success: false,
                         output: String::new(),
                         error: Some(format!(
-                            "Not a git repository. Cannot restore {path}. \
-                             Consider using file_read to check the current state."
+                            "Not a git repository and no usable edit-history snapshot for \
+                             {path}{history_note}. Consider using file_read to check the \
+                             current state, or edit_history tools to inspect snapshots."
                         )),
                     })
                 } else {
                     Ok(ToolResult {
                         success: false,
                         output: String::new(),
-                        error: Some(format!("git checkout failed: {}", stderr.trim())),
+                        error: Some(format!(
+                            "git checkout failed: {}{history_note}",
+                            stderr.trim()
+                        )),
                     })
                 }
             }
             Err(e) => Ok(ToolResult {
                 success: false,
                 output: String::new(),
-                error: Some(format!("Failed to execute git: {e}")),
+                error: Some(format!("Failed to execute git: {e}{history_note}")),
             }),
         }
     }

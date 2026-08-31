@@ -2,8 +2,9 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { memo, useEffect, useMemo, useRef, useState } from 'react'
 import { useTranslation, type TranslationKey } from '../../i18n'
+import { useUIStore } from '../../stores/uiStore'
 import {
   useComputerUseStore,
   type ComputerStatus,
@@ -94,6 +95,81 @@ function statusColor(status: ComputerStatus): string {
   }
 }
 
+const StepListItem = memo(function StepListItem({
+  step,
+  idx,
+  active,
+  onSelect,
+}: {
+  step: ComputerStep
+  idx: number
+  active: boolean
+  onSelect: (index: number) => void
+}) {
+  const t = useTranslation()
+  if (step.kind === 'user_update') {
+    return (
+      <li>
+        <div className="w-full rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+          <div className="mb-1 flex items-center gap-2">
+            <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-600 dark:text-amber-400">
+              <span className="material-symbols-outlined text-[13px]">
+                record_voice_over
+              </span>
+              {t('computerUse.userUpdate')}
+            </span>
+          </div>
+          <p className="text-[12px] leading-snug text-[var(--color-text-primary)]">
+            {step.thought}
+          </p>
+        </div>
+      </li>
+    )
+  }
+  return (
+    <li>
+      <button
+        type="button"
+        onClick={() => onSelect(idx)}
+        className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${
+          active
+            ? 'border-[var(--color-brand)] bg-[var(--color-brand)]/8'
+            : 'border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-brand)]/50'
+        }`}
+      >
+        <div className="mb-1 flex items-center gap-2">
+          <span className="inline-flex items-center gap-1 rounded-md bg-[var(--color-brand)]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-brand)]">
+            <span className="material-symbols-outlined text-[13px]">
+              {actionIcon(step.actionType)}
+            </span>
+            {step.actionType}
+          </span>
+          {step.elementDescription && (
+            <span className="truncate text-[11px] text-[var(--color-text-secondary)]">
+              {step.elementDescription}
+            </span>
+          )}
+          {step.success === false && (
+            <span className="material-symbols-outlined ml-auto text-[14px] text-red-500">
+              error
+            </span>
+          )}
+        </div>
+        {step.thought && (
+          <p className="text-[12px] leading-snug text-[var(--color-text-primary)]">
+            {step.thought}
+          </p>
+        )}
+        {step.value && (
+          <p className="mt-1 truncate text-[11px] text-[var(--color-text-secondary)]">
+            {step.value}
+          </p>
+        )}
+      </button>
+    </li>
+  )
+})
+
 export function ComputerUsePage() {
   const t = useTranslation()
 
@@ -129,10 +205,24 @@ export function ComputerUsePage() {
   const [draftBusy, setDraftBusy] = useState(false)
   const [draftError, setDraftError] = useState<string | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  const stepListRef = useRef<HTMLOListElement>(null)
+  const prevSelectedRef = useRef<number | null>(null)
 
   useEffect(() => {
     void loadModels()
   }, [loadModels])
+
+  useEffect(() => {
+    const idx = selectedStepIndex ?? steps.length - 1
+    if (idx < 0) return
+    const selectionChanged = prevSelectedRef.current !== selectedStepIndex
+    prevSelectedRef.current = selectedStepIndex
+    const following =
+      selectedStepIndex === null || selectedStepIndex >= steps.length - 1
+    if (!selectionChanged && !following) return
+    const el = stepListRef.current?.children[idx] as HTMLElement | undefined
+    el?.scrollIntoView({ block: 'nearest' })
+  }, [selectedStepIndex, steps.length])
 
   const recorderStatus = useComputerRecorderStore((s) => s.status)
   const recorderRecording = recorderStatus === 'recording'
@@ -185,7 +275,9 @@ export function ComputerUsePage() {
       return
     }
     if (!text || !provider || !model) return
-    send(text, hasAttachments ? toComputerAttachments(attachments) : undefined)
+    const ok = send(text, hasAttachments ? toComputerAttachments(attachments) : undefined)
+    if (!ok) return
+    setTask('')
     setAttachments([])
     void enterMinimalMode('computer')
   }
@@ -253,7 +345,7 @@ export function ComputerUsePage() {
           <button
             type="button"
             onClick={() => setShowRecorder(true)}
-            disabled={busy}
+            disabled={busy || status === 'call_user'}
             className="inline-flex items-center gap-1.5 rounded-md border border-[var(--color-border)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-primary)] transition-colors hover:border-red-500/50 hover:text-red-500 disabled:opacity-50"
           >
             <span className="material-symbols-outlined text-[15px]">fiber_manual_record</span>
@@ -363,74 +455,40 @@ export function ComputerUsePage() {
                 {t('computerUse.empty')}
               </div>
             ) : (
-              <ol className="flex flex-col gap-2">
-                {steps.map((step, idx) => {
-                  const active = (selectedStepIndex ?? steps.length - 1) === idx
-                  if (step.kind === 'user_update') {
-                    return (
-                      <li key={step.uid}>
-                        <div className="w-full rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2">
-                          <div className="mb-1 flex items-center gap-2">
-                            <span className="inline-flex items-center gap-1 rounded-md bg-amber-500/20 px-1.5 py-0.5 text-[10px] font-semibold text-amber-600 dark:text-amber-400">
-                              <span className="material-symbols-outlined text-[13px]">
-                                record_voice_over
-                              </span>
-                              {t('computerUse.userUpdate')}
-                            </span>
-                          </div>
-                          <p className="text-[12px] leading-snug text-[var(--color-text-primary)]">
-                            {step.thought}
-                          </p>
-                        </div>
-                      </li>
-                    )
-                  }
-                  return (
-                    <li key={step.uid}>
-                      <button
-                        type="button"
-                        onClick={() => selectStep(idx)}
-                        className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${
-                          active
-                            ? 'border-[var(--color-brand)] bg-[var(--color-brand)]/8'
-                            : 'border-[var(--color-border)] bg-[var(--color-surface)] hover:border-[var(--color-brand)]/50'
-                        }`}
-                      >
-                        <div className="mb-1 flex items-center gap-2">
-                          <span className="inline-flex items-center gap-1 rounded-md bg-[var(--color-brand)]/12 px-1.5 py-0.5 text-[10px] font-semibold text-[var(--color-brand)]">
-                            <span className="material-symbols-outlined text-[13px]">
-                              {actionIcon(step.actionType)}
-                            </span>
-                            {step.actionType}
-                          </span>
-                          {step.elementDescription && (
-                            <span className="truncate text-[11px] text-[var(--color-text-secondary)]">
-                              {step.elementDescription}
-                            </span>
-                          )}
-                          {step.success === false && (
-                            <span className="material-symbols-outlined ml-auto text-[14px] text-red-500">
-                              error
-                            </span>
-                          )}
-                        </div>
-                        {step.thought && (
-                          <p className="text-[12px] leading-snug text-[var(--color-text-primary)]">
-                            {step.thought}
-                          </p>
-                        )}
-                        {step.value && (
-                          <p className="mt-1 truncate text-[11px] text-[var(--color-text-secondary)]">
-                            {step.value}
-                          </p>
-                        )}
-                      </button>
-                    </li>
-                  )
-                })}
+              <ol ref={stepListRef} className="flex flex-col gap-2">
+                {steps.map((step, idx) => (
+                  <StepListItem
+                    key={step.uid}
+                    step={step}
+                    idx={idx}
+                    active={(selectedStepIndex ?? steps.length - 1) === idx}
+                    onSelect={selectStep}
+                  />
+                ))}
               </ol>
             )}
           </div>
+
+          {noModels && (
+            <div className="mx-3 mb-2 flex items-center gap-2 rounded-md border border-amber-500/40 bg-amber-500/10 px-3 py-2">
+              <span className="material-symbols-outlined shrink-0 text-[15px] text-amber-600 dark:text-amber-400">
+                warning
+              </span>
+              <span className="min-w-0 flex-1 text-[11px] leading-snug text-amber-700 dark:text-amber-400">
+                {t('computerUse.noVisionModels')}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  useUIStore.getState().setAppMode('code')
+                  useUIStore.getState().openSettingsOverlay('providers')
+                }}
+                className="shrink-0 rounded-md border border-amber-500/50 px-2 py-1 text-[11px] font-medium text-amber-700 transition-colors hover:bg-amber-500/15 dark:text-amber-400"
+              >
+                {t('computerUse.openSettings')}
+              </button>
+            </div>
+          )}
 
           {error && (
             <div className="mx-3 mb-2 rounded-md border border-red-500/30 bg-red-500/10 px-3 py-2 text-[11px] text-red-600 dark:text-red-400">
@@ -644,6 +702,7 @@ export function ComputerUsePage() {
                 <img
                   src={`data:${selectedStep.screenshotMime ?? 'image/png'};base64,${selectedStep.screenshotBase64}`}
                   alt={t('computerUse.screenshot')}
+                  decoding="async"
                   className="max-h-full max-w-full rounded-lg border border-[var(--color-border)] object-contain shadow-sm"
                 />
                 {selectedStep.targetXNorm !== undefined &&

@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useMemo, useState } from 'react'
 import { ImageGalleryModal } from './ImageGalleryModal'
 import { getBaseUrl, withAuthToken } from '../../api/client'
 
@@ -49,41 +49,11 @@ type Props = {
 
 export function InlineImageGallery({ text }: Props) {
   const [activeIndex, setActiveIndex] = useState<number | null>(null)
-  const sentinelRef = useRef<HTMLDivElement | null>(null)
   const mayContainImages = useMemo(() => looksLikelyToContainImagePath(text), [text])
-  const [shouldScan, setShouldScan] = useState<boolean>(() => {
-    if (typeof IntersectionObserver === 'undefined') return mayContainImages
-    return false
-  })
-
-  useEffect(() => {
-    if (shouldScan) return
-    if (!mayContainImages) return
-    if (typeof IntersectionObserver === 'undefined') {
-      setShouldScan(true)
-      return
-    }
-    const node = sentinelRef.current
-    if (!node) return
-    const io = new IntersectionObserver(
-      (entries) => {
-        for (const entry of entries) {
-          if (entry.isIntersecting) {
-            setShouldScan(true)
-            io.disconnect()
-            break
-          }
-        }
-      },
-      { rootMargin: '120px 0px' },
-    )
-    io.observe(node)
-    return () => io.disconnect()
-  }, [mayContainImages, shouldScan])
 
   const imagePaths = useMemo(
-    () => (shouldScan && mayContainImages ? extractImagePaths(text) : []),
-    [shouldScan, mayContainImages, text],
+    () => (mayContainImages ? extractImagePaths(text) : []),
+    [mayContainImages, text],
   )
 
   const images = useMemo(
@@ -91,10 +61,6 @@ export function InlineImageGallery({ text }: Props) {
     [imagePaths],
   )
 
-  if (!mayContainImages) return null
-  if (!shouldScan) {
-    return <div ref={sentinelRef} aria-hidden="true" style={{ width: 1, height: 1 }} />
-  }
   if (images.length === 0) return null
 
   return (
@@ -111,16 +77,15 @@ export function InlineImageGallery({ text }: Props) {
               type="button"
               onClick={() => setActiveIndex(i)}
               className="group relative overflow-hidden rounded-xl border border-[var(--color-border)] bg-[var(--color-surface-container-low)] text-left shadow-sm transition-all hover:shadow-md hover:border-[var(--color-brand)]/40"
+              style={{ height: images.length === 1 ? 400 : 240 }}
             >
               <img
                 src={img.src}
                 alt={img.name}
                 loading="lazy"
-                className="w-full object-cover"
-                style={{ maxHeight: images.length === 1 ? 400 : 240 }}
+                className="h-full w-full object-contain"
                 onError={(e) => {
-
-                  (e.target as HTMLImageElement).closest('button')!.style.display = 'none'
+                  (e.target as HTMLImageElement).style.visibility = 'hidden'
                 }}
               />
               <div className="absolute inset-0 flex items-center justify-center bg-black/0 opacity-0 transition-all group-hover:bg-black/20 group-hover:opacity-100">

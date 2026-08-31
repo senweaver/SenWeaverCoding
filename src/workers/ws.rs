@@ -562,6 +562,23 @@ fn session_event_to_wire(session_id: &str, event: &SessionEvent) -> Vec<Value> {
             "type": "content_delta",
             "delta": { "type": "text_delta", "text": text },
         })],
+        SessionEventKind::Thinking { text } => vec![json!({
+            "type": "content_delta",
+            "delta": { "type": "thinking_delta", "text": text },
+        })],
+        SessionEventKind::StreamReset => vec![json!({
+            "type": "stream_reset",
+        })],
+        SessionEventKind::FileEdit {
+            path,
+            additions,
+            deletions,
+        } => vec![json!({
+            "type": "file_edit",
+            "path": path,
+            "additions": additions,
+            "deletions": deletions,
+        })],
         SessionEventKind::ToolCall {
             tool_name,
             tool_call_id,

@@ -3,10 +3,11 @@
 // Licensed under the MIT License.
 
 import { parseMarkdown, type ParsedMarkdown } from './markdownParse'
+import { isScrollActive } from './scrollActivity'
 
 const CACHE_MAX_ENTRIES = 300
 const CACHE_MAX_BYTES = 16 * 1024 * 1024
-const PENDING_MAX = 64
+const PENDING_MAX = 512
 const PENDING_TIMEOUT_MS = 10_000
 
 type CacheEntry = { value: ParsedMarkdown; bytes: number }
@@ -74,13 +75,55 @@ function parseFallback(content: string, key: string, cacheWrite = true): ParsedM
   return result
 }
 
+const fallbackQueue: Array<() => void> = []
+let fallbackPumpScheduled = false
+
+function pumpFallbackQueue(): void {
+  fallbackPumpScheduled = false
+  if (isScrollActive()) {
+    if (fallbackQueue.length > 0) {
+      fallbackPumpScheduled = true
+      setTimeout(pumpFallbackQueue, 100)
+    }
+    return
+  }
+  const job = fallbackQueue.shift()
+  if (job) job()
+  if (fallbackQueue.length > 0) scheduleFallbackPump()
+}
+
+function scheduleFallbackPump(): void {
+  if (fallbackPumpScheduled) return
+  fallbackPumpScheduled = true
+  setTimeout(pumpFallbackQueue, 0)
+}
+
+function parseFallbackAsync(
+  content: string,
+  key: string,
+  cacheWrite: boolean,
+): Promise<ParsedMarkdown> {
+  const cached = cacheGet(key)
+  if (cached) return Promise.resolve(cached)
+  return new Promise((resolve) => {
+    fallbackQueue.push(() => {
+      const hit = cacheGet(key)
+      resolve(hit ?? parseFallback(content, key, cacheWrite))
+    })
+    scheduleFallbackPump()
+  })
+}
+
 function drainPendingViaFallback(): void {
   const entries = Array.from(pending.values())
   pending.clear()
   for (const entry of entries) {
     clearTimeout(entry.timer)
-    entry.resolve(parseFallback(entry.content, entry.key, entry.cacheWrite))
+    fallbackQueue.push(() =>
+      entry.resolve(parseFallback(entry.content, entry.key, entry.cacheWrite)),
+    )
   }
+  if (entries.length > 0) scheduleFallbackPump()
 }
 
 function restartWorkerAfterTimeout(): void {
@@ -137,12 +180,13 @@ const SYNC_PARSE_MAX_CHARS = 3072
 
 export function getMarkdownForImmediateRender(
   content: string,
+  options?: { cacheWrite?: boolean },
 ): ParsedMarkdown | undefined {
   const key = contentKey(content)
   const cached = cacheGet(key)
   if (cached) return cached
   if (content.length > SYNC_PARSE_MAX_CHARS) return undefined
-  return parseFallback(content, key, true)
+  return parseFallback(content, key, options?.cacheWrite !== false)
 }
 
 export function parseMarkdownAsync(
@@ -154,8 +198,8 @@ export function parseMarkdownAsync(
   const cached = cacheGet(key)
   if (cached) return Promise.resolve(cached)
   const w = ensureWorker()
-  if (!w) return Promise.resolve(parseFallback(content, key, cacheWrite))
-  if (pending.size >= PENDING_MAX) return Promise.resolve(parseFallback(content, key, cacheWrite))
+  if (!w) return parseFallbackAsync(content, key, cacheWrite)
+  if (pending.size >= PENDING_MAX) return parseFallbackAsync(content, key, cacheWrite)
   const request = new Promise<ParsedMarkdown>((resolve, reject) => {
     const id = nextRequestId++
     const timer = setTimeout(() => {
@@ -168,5 +212,5 @@ export function parseMarkdownAsync(
     pending.set(id, { resolve, reject, content, key, timer, cacheWrite })
     w.postMessage({ id, content })
   })
-  return request.catch(() => parseFallback(content, key, cacheWrite))
+  return request.catch(() => parseFallbackAsync(content, key, cacheWrite))
 }

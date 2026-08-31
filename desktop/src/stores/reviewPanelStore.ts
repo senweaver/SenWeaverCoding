@@ -105,12 +105,41 @@ export const useReviewPanelStore = create<ReviewPanelState>((set, get) => ({
         return
       }
       set((s) => {
+        const prevByPath = new Map<string, EditReviewFile>()
+        for (const f of s.files) prevByPath.set(f.path, f)
         const nextDiffs: Record<string, EditReviewFileDiff | null> = {}
+        const nextHunks: Record<string, EditReviewHunks | null> = {}
+        const nextDecisions: Record<string, Record<number, 'reject'>> = {}
         for (const f of res.files) {
-          const cached = s.diffs[f.path]
-          if (cached !== undefined && cached !== null) nextDiffs[f.path] = cached
+          const prev = prevByPath.get(f.path)
+          const unchanged =
+            prev !== undefined &&
+            prev.status === f.status &&
+            prev.additions === f.additions &&
+            prev.deletions === f.deletions &&
+            prev.firstSnapshotIndex === f.firstSnapshotIndex &&
+            prev.batchIds.length === f.batchIds.length &&
+            prev.batchIds.every((id, i) => id === f.batchIds[i])
+          if (!unchanged) continue
+          const cachedDiff = s.diffs[f.path]
+          if (cachedDiff !== undefined && cachedDiff !== null) {
+            nextDiffs[f.path] = cachedDiff
+          }
+          const cachedHunks = s.hunks[f.path]
+          if (cachedHunks !== undefined && cachedHunks !== null) {
+            nextHunks[f.path] = cachedHunks
+          }
+          const decisions = s.hunkDecisions[f.path]
+          if (decisions) nextDecisions[f.path] = decisions
         }
-        return { files: res.files, diffs: nextDiffs, loading: false, error: null }
+        return {
+          files: res.files,
+          diffs: nextDiffs,
+          hunks: nextHunks,
+          hunkDecisions: nextDecisions,
+          loading: false,
+          error: null,
+        }
       })
     } catch (err) {
       if (get().sessionId !== sessionId || get().generation !== generation) {
@@ -133,7 +162,7 @@ export const useReviewPanelStore = create<ReviewPanelState>((set, get) => ({
       set({ refreshTimer: null })
       const cur = get()
       if (!cur.open || cur.sessionId !== sessionId) return
-      set({ diffs: {}, hunks: {}, hunkDecisions: {}, generation: cur.generation + 1 })
+      set({ generation: cur.generation + 1 })
       void get().refresh()
     }, 800)
     set({ refreshTimer: timer })

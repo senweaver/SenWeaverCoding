@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useMemo } from 'react'
+import { useMemo, useRef, type ReactNode } from 'react'
 import { useTranslation } from '../../i18n'
 import { useSessionStore } from '../../stores/sessionStore'
 import { useSessionRunStateStore } from '../../stores/sessionRunStateStore'
@@ -15,6 +15,7 @@ import {
 } from '../../stores/workspaceQueueStore'
 import type { AttachmentRef, UIAttachment } from '../../types/chat'
 import { resolveSessionTitle } from '../../utils/sessionTitle'
+import { Collapse } from '../shared/Collapse'
 import { Spinner } from '../shared/Spinner'
 import { refsToPlainText } from './composerRefs'
 
@@ -122,26 +123,12 @@ export function WorkspaceQueuePanel({ sessionId }: Props) {
     return resolveSessionTitle(meta?.title, t('sidebar.untitled'))
   }, [otherItems, sessions, t])
 
+  const lastContentRef = useRef<ReactNode>(null)
+
   if (!sessionId) return null
   const ownCount = ownItems.length
   const otherCount = otherQueueCount
-
-  if (ownCount === 0 && otherCount === 0) {
-    if (!otherRunningId) return null
-    return (
-      <div
-        className="mb-1.5 flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)]"
-        data-testid="workspace-busy-hint"
-      >
-        <span className="inline-flex items-center text-[var(--color-brand)]">
-          <Spinner size={9} />
-        </span>
-        <span className="truncate">
-          {t('composer.queue.otherRunning', { title: otherRunningTitle })}
-        </span>
-      </div>
-    )
-  }
+  const open = ownCount > 0 || otherCount > 0 || otherRunningId != null
 
   const expanded = expandedSessions.has(sessionId)
 
@@ -149,7 +136,19 @@ export function WorkspaceQueuePanel({ sessionId }: Props) {
     ? t('composer.queue.title', { count: ownCount })
     : t('composer.queue.waitingFor', { title: otherSessionTitle })
 
-  return (
+  const content = !open ? null : ownCount === 0 && otherCount === 0 ? (
+    <div
+      className="mb-1.5 flex items-center gap-2 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)] px-3 py-1.5 text-xs text-[var(--color-text-secondary)]"
+      data-testid="workspace-busy-hint"
+    >
+      <span className="inline-flex items-center text-[var(--color-brand)]">
+        <Spinner size={9} />
+      </span>
+      <span className="truncate">
+        {t('composer.queue.otherRunning', { title: otherRunningTitle })}
+      </span>
+    </div>
+  ) : (
     <div
       className="mb-1.5 rounded-lg border border-[var(--color-border)] bg-[var(--color-surface-container-low)]"
       data-testid="workspace-queue-panel"
@@ -226,6 +225,10 @@ export function WorkspaceQueuePanel({ sessionId }: Props) {
         </div>
       )}
     </div>
+  )
+  if (open) lastContentRef.current = content
+  return (
+    <Collapse open={open}>{open ? content : lastContentRef.current}</Collapse>
   )
 }
 

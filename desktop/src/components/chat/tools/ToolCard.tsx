@@ -2,7 +2,7 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-import { useEffect, useState, type ComponentType, type ReactNode } from 'react'
+import { memo, useEffect, useState, type ComponentType, type ReactNode } from 'react'
 import { useTranslation, type TranslationKey } from '../../../i18n'
 import {
   getCategoryIcon,
@@ -27,6 +27,7 @@ import { TaskHeader, TaskDetail } from './TaskToolView'
 import { SpawnWorkersHeader, SpawnWorkersDetail } from './SpawnWorkersToolView'
 import { TodoListHeader, TodoListDetail } from './TodoListToolView'
 import { GenericHeader, GenericDetail } from './GenericToolView'
+import { RunningToolTimer } from './RunningToolTimer'
 import { GitHeader, GitDetail } from './GitToolView'
 import { DiagnosticsHeader, DiagnosticsDetail } from './DiagnosticsToolView'
 import { CodeIntelHeader, CodeIntelDetail } from './CodeIntelToolView'
@@ -124,7 +125,7 @@ type Props = ToolViewProps & {
   defaultExpanded?: boolean
 }
 
-export function ToolCard({
+function ToolCardImpl({
   toolName,
   toolUseId,
   input,
@@ -243,9 +244,11 @@ export function ToolCard({
       )}
       <renderer.Header {...childProps} />
       {isStreaming && (
-        <span className="shrink-0 text-[10px] text-[var(--color-text-tertiary)]">
-          …
-        </span>
+        <RunningToolTimer
+          toolName={toolName}
+          input={input}
+          startedAt={toolTimestamp}
+        />
       )}
       {result?.isError && !isStreaming && (
         <span
@@ -294,6 +297,53 @@ function hasMeaningfulOutput(content: unknown): boolean {
   if (typeof content === 'object') return Object.keys(content as object).length > 0
   return false
 }
+
+function areToolCardPropsEqual(prev: Props, next: Props): boolean {
+  if (prev.toolName !== next.toolName) return false
+  if (prev.toolUseId !== next.toolUseId) return false
+  if (prev.input !== next.input) return false
+  if (prev.isStreaming !== next.isStreaming) return false
+  if (prev.compact !== next.compact) return false
+  if (prev.defaultExpanded !== next.defaultExpanded) return false
+  if (prev.parentSessionId !== next.parentSessionId) return false
+  if (prev.toolTimestamp !== next.toolTimestamp) return false
+  if (prev.result !== next.result) {
+    if (!prev.result || !next.result) return false
+    if (
+      prev.result.content !== next.result.content ||
+      prev.result.isError !== next.result.isError
+    ) {
+      return false
+    }
+  }
+  if (prev.childCalls !== next.childCalls) {
+    if (
+      !prev.childCalls ||
+      !next.childCalls ||
+      prev.childCalls.length !== next.childCalls.length
+    ) {
+      return false
+    }
+    for (let i = 0; i < prev.childCalls.length; i++) {
+      if (prev.childCalls[i] !== next.childCalls[i]) return false
+    }
+  }
+  if (prev.childResults !== next.childResults) {
+    if (
+      !prev.childResults ||
+      !next.childResults ||
+      prev.childResults.size !== next.childResults.size
+    ) {
+      return false
+    }
+    for (const [key, value] of prev.childResults) {
+      if (next.childResults.get(key) !== value) return false
+    }
+  }
+  return true
+}
+
+export const ToolCard = memo(ToolCardImpl, areToolCardPropsEqual)
 
 type ModeBadge = { label: string; className: string } | null
 

@@ -9,6 +9,19 @@ pub fn session_to_agent_events(event: &SessionEvent) -> Vec<AgentEvent> {
     match &event.kind {
         SessionEventKind::TurnStarted { .. } => vec![AgentEvent::Thinking],
         SessionEventKind::Delta { text } => vec![AgentEvent::StreamChunk(text.clone())],
+        SessionEventKind::Thinking { .. } => vec![AgentEvent::Thinking],
+        SessionEventKind::StreamReset => vec![AgentEvent::StatusUpdate {
+            action: "stream_reset".into(),
+            detail: "provider stream restarted; partial output discarded".into(),
+        }],
+        SessionEventKind::FileEdit {
+            path,
+            additions,
+            deletions,
+        } => vec![AgentEvent::StatusUpdate {
+            action: "file_edit".into(),
+            detail: format!("edited {path} (+{additions}/-{deletions})"),
+        }],
         SessionEventKind::ToolCall {
             tool_name,
             tool_call_id,

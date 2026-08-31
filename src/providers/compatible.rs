@@ -305,7 +305,7 @@ impl OpenAiCompatibleProvider {
         }
         crate::services::require_services()
             .proxy_runtime()
-            .build_client_with_timeouts_and_headers(
+            .build_llm_chat_client(
                 "provider.compatible",
                 self.timeout_secs,
                 5,
@@ -1554,6 +1554,7 @@ impl OpenAiCompatibleProvider {
     fn convert_messages_for_native(
         messages: &[ChatMessage],
         allow_user_image_parts: bool,
+        strip_reasoning: bool,
     ) -> Vec<NativeMessage> {
         Self::sanitize_native_tool_adjacency(
             messages
@@ -1652,10 +1653,14 @@ impl OpenAiCompatibleProvider {
                 }
             })
             .collect(),
+            strip_reasoning,
         )
     }
 
-    fn sanitize_native_tool_adjacency(messages: Vec<NativeMessage>) -> Vec<NativeMessage> {
+    fn sanitize_native_tool_adjacency(
+        messages: Vec<NativeMessage>,
+        strip_reasoning: bool,
+    ) -> Vec<NativeMessage> {
         let mut out: Vec<NativeMessage> = Vec::with_capacity(messages.len());
         for mut m in messages {
             if m.role == "assistant" {
@@ -1663,7 +1668,7 @@ impl OpenAiCompatibleProvider {
                     m.tool_calls = None;
                 }
 
-                if m.role == "assistant"
+                if !strip_reasoning
                     && m.tool_calls.as_ref().is_some_and(|c| !c.is_empty())
                     && m.reasoning_content
                         .as_ref()
@@ -1694,6 +1699,9 @@ impl OpenAiCompatibleProvider {
                         }
                     }
                 }
+            }
+            if strip_reasoning {
+                m.reasoning_content = None;
             }
             if m.role == "tool" {
                 let preceded_ok = out.last().is_some_and(|last| {
@@ -2344,18 +2352,6 @@ impl Provider for OpenAiCompatibleProvider {
                 .saturating_add(json_tools_reserve),
             Some(self.budget_context_window_for(model)),
         );
-        let api_messages: Vec<Message> = effective_messages
-            .iter()
-            .map(|m| Message {
-                role: m.role.clone(),
-                content: Self::to_message_content(
-                    &m.role,
-                    &m.content,
-                    !self.merge_system_into_user,
-                ),
-            })
-            .collect();
-
         let model_supports_native = Self::model_supports_native_tools(model);
         let has_tools = !tools.is_empty();
         let allow_native_tools = has_tools && model_supports_native;
@@ -2385,9 +2381,13 @@ impl Provider for OpenAiCompatibleProvider {
             return Ok(ProviderChatResponse::text_only(Some(text), None));
         }
 
-        let request = ApiChatRequest {
+        let request = NativeChatRequest {
             model: model.to_string(),
-            messages: api_messages,
+            messages: Self::convert_messages_for_native(
+                &effective_messages,
+                !self.merge_system_into_user,
+                self.should_strip_outbound_reasoning(model),
+            ),
             temperature: Self::adjust_temperature_for_model(model, temperature),
             stream: Some(false),
             stream_options: None,
@@ -2536,11 +2536,12 @@ impl Provider for OpenAiCompatibleProvider {
             self.reserved_output_tokens(model).saturating_add(tools_reserve),
             Some(self.budget_context_window_for(model)),
         );
-        let mut native_request = NativeChatRequest {
+        let native_request = NativeChatRequest {
             model: model.to_string(),
             messages: Self::convert_messages_for_native(
                 &effective_messages,
                 !self.merge_system_into_user,
+                self.should_strip_outbound_reasoning(model),
             ),
             temperature: Self::adjust_temperature_for_model(model, temperature),
             stream: Some(false),
@@ -2555,11 +2556,6 @@ impl Provider for OpenAiCompatibleProvider {
             tools,
             max_tokens: self.max_tokens,
         };
-        if self.should_strip_outbound_reasoning(model) {
-            for message in native_request.messages.iter_mut() {
-                message.reasoning_content = None;
-            }
-        }
 
         let url = self.chat_completions_url();
         let response = match self
@@ -2704,8 +2700,11 @@ impl Provider for OpenAiCompatibleProvider {
             self.reserved_output_tokens(model),
             None,
         );
-        let api_messages =
-            Self::convert_messages_for_native(&sanitized, self.supports_vision);
+        let api_messages = Self::convert_messages_for_native(
+            &sanitized,
+            self.supports_vision,
+            self.should_strip_outbound_reasoning(model),
+        );
         let body = serde_json::json!({
             "model": model,
             "messages": api_messages,
@@ -2878,16 +2877,12 @@ impl Provider for OpenAiCompatibleProvider {
         let use_native_wire = self.native_tool_calling && allow_native_tools;
         let payload = if use_native_wire {
             let tool_list_non_empty = tools.as_ref().is_some_and(|specs| !specs.is_empty());
-            let mut native_messages = Self::convert_messages_for_native(
+            let native_messages = Self::convert_messages_for_native(
                 &effective_messages,
                 !self.merge_system_into_user,
+                self.should_strip_outbound_reasoning(model),
             );
             let thinking_value = self.thinking_param_for_model(model);
-            if self.should_strip_outbound_reasoning(model) {
-                for message in native_messages.iter_mut() {
-                    message.reasoning_content = None;
-                }
-            }
             serde_json::to_value(NativeChatRequest {
                 model: model.to_string(),
                 messages: native_messages,

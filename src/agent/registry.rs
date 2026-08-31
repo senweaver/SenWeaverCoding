@@ -214,6 +214,8 @@ pub struct AgentRegistry {
     agents: RwLock<HashMap<AgentId, AgentInfo>>,
 
     heartbeat_timeout: Duration,
+
+    availability: tokio::sync::Notify,
 }
 
 impl AgentRegistry {
@@ -222,6 +224,7 @@ impl AgentRegistry {
         Self {
             agents: RwLock::new(HashMap::new()),
             heartbeat_timeout: Duration::from_secs(60),
+            availability: tokio::sync::Notify::new(),
         }
     }
 
@@ -229,7 +232,12 @@ impl AgentRegistry {
         Self {
             agents: RwLock::new(HashMap::new()),
             heartbeat_timeout: timeout,
+            availability: tokio::sync::Notify::new(),
         }
+    }
+
+    pub fn availability(&self) -> &tokio::sync::Notify {
+        &self.availability
     }
 
     pub fn register(&self, info: AgentInfo) -> Result<(), RegistryError> {
@@ -240,6 +248,43 @@ impl AgentRegistry {
         }
         info!(agent_id = %info.id, name = %info.name, "Agent registered");
         agents.insert(info.id.clone(), info);
+        drop(agents);
+        self.availability.notify_waiters();
+        Ok(())
+    }
+
+    pub fn register_bounded(
+        &self,
+        info: AgentInfo,
+        max_agents: usize,
+        capability_limits: &HashMap<String, usize>,
+    ) -> Result<(), RegistryError> {
+        let mut agents = self.agents.write();
+        if agents.contains_key(&info.id) {
+            warn!(agent_id = %info.id, "Agent already registered");
+            return Err(RegistryError::AlreadyRegistered(info.id));
+        }
+        if max_agents > 0 && agents.len() >= max_agents {
+            return Err(RegistryError::MaxAgentsLimit(max_agents));
+        }
+        for cap in &info.capabilities {
+            if let Some(&limit) = capability_limits.get(&cap.name) {
+                if limit == 0 {
+                    continue;
+                }
+                let current = agents
+                    .values()
+                    .filter(|a| a.has_capability(&cap.name))
+                    .count();
+                if current >= limit {
+                    return Err(RegistryError::CapabilityLimit(cap.name.clone(), limit));
+                }
+            }
+        }
+        info!(agent_id = %info.id, name = %info.name, "Agent registered");
+        agents.insert(info.id.clone(), info);
+        drop(agents);
+        self.availability.notify_waiters();
         Ok(())
     }
 
@@ -261,6 +306,8 @@ impl AgentRegistry {
                 debug!(agent_id = %agent_id, old = %agent.state, new = %state, "Agent state change");
                 agent.state = state;
                 agent.last_heartbeat = Utc::now();
+                drop(agents);
+                self.availability.notify_waiters();
                 Ok(())
             }
             None => Err(RegistryError::AgentNotFound(agent_id.to_string())),
@@ -311,10 +358,20 @@ impl AgentRegistry {
             agent.current_load = agent.current_load.saturating_sub(1);
             if agent.current_load == 0 {
                 agent.current_task = None;
-                agent.state = AgentState::Idle;
+                match agent.state {
+                    AgentState::Active | AgentState::Restarting => {
+                        agent.state = AgentState::Idle;
+                    }
+                    AgentState::ShuttingDown => {
+                        agent.state = AgentState::Terminated;
+                    }
+                    _ => {}
+                }
             }
             agent.last_heartbeat = Utc::now();
         }
+        drop(agents);
+        self.availability.notify_waiters();
     }
 
     pub fn reconcile_loads_after_event_lag(&self) {
@@ -335,7 +392,8 @@ impl AgentRegistry {
                         agent.current_load = 0;
                         agent.state = AgentState::Idle;
                     } else {
-                        agent.current_load = 1;
+                        agent.current_load =
+                            agent.current_load.clamp(1, agent.max_concurrency.max(1));
                     }
                 }
             }
@@ -421,9 +479,10 @@ impl AgentRegistry {
             .read()
             .iter()
             .filter(|(_, a)| {
-                a.state != AgentState::Terminated
-                    && a.state != AgentState::Idle
-                    && (now - a.last_heartbeat).num_seconds() > timeout_secs
+                !matches!(
+                    a.state,
+                    AgentState::Terminated | AgentState::Idle | AgentState::ShuttingDown
+                ) && (now - a.last_heartbeat).num_seconds() > timeout_secs
             })
             .map(|(id, _)| id.clone())
             .collect()

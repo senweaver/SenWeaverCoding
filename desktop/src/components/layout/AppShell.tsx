@@ -455,6 +455,18 @@ export function AppShell() {
 
   useEffect(() => {
     if (!isTauriRuntime()) return
+    void (async () => {
+      try {
+        const { invoke } = await import('@tauri-apps/api/core')
+        await invoke('recorder_hotkey_set_enabled', { enabled: appMode === 'computer' })
+      } catch {
+
+      }
+    })()
+  }, [appMode])
+
+  useEffect(() => {
+    if (!isTauriRuntime()) return
     const forwardable =
       !!activeChatTabId &&
       activeChatTabId !== SCHEDULED_TAB_ID &&
@@ -609,6 +621,8 @@ export function AppShell() {
           savedRecordingName: s.savedRecordingName,
           savedSkillName: s.savedSkillName,
           startedAt: s.startedAt,
+          narrationEnabled: s.narrationEnabled,
+          narrationMuted: s.narrationMuted,
         }
         const key = JSON.stringify(payload)
         if (!force && key === lastRecorderKey) return

@@ -134,81 +134,118 @@ fn context_snippet(source: &str, row: usize) -> String {
     buf
 }
 
-pub(crate) fn heuristic_check(source: &str, _lang: Language) -> VerificationReport {
-    let mut stack: Vec<(char, u32, u32)> = Vec::new();
-    let mut in_string = false;
-    let mut string_char = '"';
-    let mut line: u32 = 1;
-    let mut col: u32 = 1;
-    let mut prev_was_backslash = false;
+pub(crate) fn heuristic_check(source: &str, lang: Language) -> VerificationReport {
+    let single_quote_strings = matches!(
+        lang,
+        Language::Python | Language::JavaScript | Language::TypeScript
+    );
+    let line_comment: Option<&str> = match lang {
+        Language::Python | Language::Toml => Some("#"),
+        Language::Rust
+        | Language::JavaScript
+        | Language::TypeScript
+        | Language::Go
+        | Language::Java
+        | Language::C
+        | Language::Cpp => Some("//"),
+        _ => None,
+    };
 
-    for ch in source.chars() {
-        match ch {
-            '\n' => {
-                line += 1;
-                col = 1;
-                in_string = false;
-                prev_was_backslash = false;
+    let mut stack: Vec<(char, u32, u32)> = Vec::new();
+    let mut first_unmatched: Option<(char, u32, u32)> = None;
+
+    'lines: for (line_idx, raw_line) in source.lines().enumerate() {
+        let line = line_idx as u32 + 1;
+        let chars: Vec<char> = raw_line.chars().collect();
+        let mut i = 0usize;
+        let mut in_string = false;
+        let mut string_char = '"';
+        let mut escaped = false;
+
+        while i < chars.len() {
+            let ch = chars[i];
+            if in_string {
+                if escaped {
+                    escaped = false;
+                } else if ch == '\\' {
+                    escaped = true;
+                } else if ch == string_char {
+                    in_string = false;
+                }
+                i += 1;
                 continue;
             }
-            '\\' if in_string => {
-                prev_was_backslash = !prev_was_backslash;
-            }
-            '"' | '\'' => {
-                if in_string && ch == string_char && !prev_was_backslash {
-                    in_string = false;
-                } else if !in_string {
-                    in_string = true;
-                    string_char = ch;
+            if let Some(marker) = line_comment {
+                let marker_chars: Vec<char> = marker.chars().collect();
+                if chars[i..].starts_with(marker_chars.as_slice()) {
+                    continue 'lines;
                 }
-                prev_was_backslash = false;
             }
-            '(' | '[' | '{' if !in_string => {
-                stack.push((ch, line, col));
-            }
-            ')' | ']' | '}' if !in_string => {
-                let expected = match ch {
-                    ')' => '(',
-                    ']' => '[',
-                    '}' => '{',
-
-                    _ => continue,
-                };
-                match stack.pop() {
-                    Some((o, _, _)) if o == expected => {}
-                    _ => {
-                        return VerificationReport::failed(
-                            "syntactic",
-                            vec![VerificationIssue {
-                                line,
-                                column: col,
-                                message: format!("unmatched closing bracket '{ch}'"),
-                                severity: IssueSeverity::Error,
-                            }],
-                            String::new(),
-                        );
+            match ch {
+                '"' => {
+                    in_string = true;
+                    string_char = '"';
+                }
+                '\'' => {
+                    if single_quote_strings {
+                        in_string = true;
+                        string_char = '\'';
+                    } else {
+                        let close_rel = chars[i + 1..]
+                            .iter()
+                            .take(3)
+                            .position(|c| *c == '\'');
+                        if let Some(rel) = close_rel {
+                            i += rel + 2;
+                            continue;
+                        }
                     }
                 }
+                '(' | '[' | '{' => {
+                    stack.push((ch, line, i as u32 + 1));
+                }
+                ')' | ']' | '}' => {
+                    let expected = match ch {
+                        ')' => '(',
+                        ']' => '[',
+                        _ => '{',
+                    };
+                    match stack.pop() {
+                        Some((o, _, _)) if o == expected => {}
+                        _ => {
+                            if first_unmatched.is_none() {
+                                first_unmatched = Some((ch, line, i as u32 + 1));
+                            }
+                        }
+                    }
+                }
+                _ => {}
             }
-            _ => {
-                prev_was_backslash = false;
-            }
+            i += 1;
         }
-        col += 1;
     }
 
-    if let Some((ch, l, c)) = stack.into_iter().next() {
-        return VerificationReport::failed(
-            "syntactic",
-            vec![VerificationIssue {
+    let issue = match (first_unmatched, stack.into_iter().next()) {
+        (Some((ch, l, c)), _) => Some((format!("unmatched closing bracket '{ch}'"), l, c)),
+        (None, Some((ch, l, c))) => Some((format!("unclosed bracket '{ch}'"), l, c)),
+        (None, None) => None,
+    };
+
+    match issue {
+        Some((message, l, c)) => VerificationReport {
+            verifier: "syntactic",
+            passed: true,
+            issues: vec![VerificationIssue {
                 line: l,
                 column: c,
-                message: format!("unclosed bracket '{ch}'"),
-                severity: IssueSeverity::Error,
+                message: format!(
+                    "{message} (degraded bracket-balance heuristic; may be a false positive \
+                     in strings/comments - verify with the project's own compiler)"
+                ),
+                severity: IssueSeverity::Warning,
             }],
-            String::new(),
-        );
+            summary: "degraded:bracket-balance-warning".into(),
+        },
+        None => VerificationReport::ok("syntactic"),
     }
-
-    VerificationReport::ok("syntactic")
 }

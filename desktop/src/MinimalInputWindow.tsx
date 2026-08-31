@@ -11,11 +11,10 @@ import { MinimalComposer } from './components/minimal/MinimalComposer'
 import { ComputerPanel } from './components/minimal/computer/ComputerPanel'
 import { isTauriRuntime } from './lib/desktopRuntime'
 import {
-  MINIMAL_EVENT_INPUT_HIDDEN,
   MINIMAL_EVENT_INPUT_SHOW,
   MINIMAL_INPUT_SIZE,
   activateMinimalInputWindow,
-  minimalInputShouldStayVisible,
+  hideMinimalInput,
   prewarmMinimalInputWindow,
   resizeMinimalWindow,
   revealMinimalInputWindow,
@@ -53,14 +52,10 @@ export function MinimalInputWindow() {
   const variant = useMinimalStore((s) => s.variant)
   const opacityPct = useMinimalStore((s) => s.opacityPct)
   const activeTabId = useTabStore((s) => s.activeTabId)
-  const prewarmingRef = useRef(false)
   const revealSeqRef = useRef(0)
   const variantRef = useRef(variant)
   variantRef.current = variant
-  const keepVisibleRef = useRef(false)
-  const blurHideTimerRef = useRef<number | null>(null)
   const lastWindowHeightRef = useRef(0)
-  const dropHoldUntilRef = useRef(0)
 
   const focusVisibleComposer = useCallback(() => {
     requestAnimationFrame(() => {
@@ -73,29 +68,17 @@ export function MinimalInputWindow() {
   }, [])
 
   const applyKeepVisible = useCallback(async (keep: boolean) => {
-    keepVisibleRef.current = keep
     await setMinimalInputKeepVisible(keep)
   }, [])
 
-  const hideSelf = useCallback(async (opts?: { silent?: boolean }) => {
+  const hideSelf = useCallback(async () => {
     if (!isTauriRuntime()) return
-    if (blurHideTimerRef.current != null) {
-      window.clearTimeout(blurHideTimerRef.current)
-      blurHideTimerRef.current = null
-    }
-    await applyKeepVisible(false)
     try {
-      const { getCurrentWindow } = await import('@tauri-apps/api/window')
-      const win = getCurrentWindow()
-      if (!(await win.isVisible())) return
-      await win.hide()
-      if (opts?.silent) return
-      const { emit } = await import('@tauri-apps/api/event')
-      await emit(MINIMAL_EVENT_INPUT_HIDDEN)
+      await hideMinimalInput()
     } catch (err) {
       console.warn('[minimal-input] hide failed', err)
     }
-  }, [applyKeepVisible])
+  }, [])
 
   const applyContentHeight = useCallback((contentHeight: number) => {
     const size = MINIMAL_INPUT_SIZE[variantRef.current] ?? MINIMAL_INPUT_SIZE.code
@@ -124,30 +107,9 @@ export function MinimalInputWindow() {
         const { getCurrentWindow } = await import('@tauri-apps/api/window')
         const win = getCurrentWindow()
         const off = await win.onFocusChanged(({ payload: focused }) => {
-          if (blurHideTimerRef.current != null) {
-            window.clearTimeout(blurHideTimerRef.current)
-            blurHideTimerRef.current = null
-          }
           if (focused) {
             focusVisibleComposer()
-            return
           }
-          if (prewarmingRef.current || keepVisibleRef.current) return
-          if (Date.now() < dropHoldUntilRef.current) return
-          blurHideTimerRef.current = window.setTimeout(() => {
-            blurHideTimerRef.current = null
-            void (async () => {
-              if (prewarmingRef.current || keepVisibleRef.current) return
-              if (Date.now() < dropHoldUntilRef.current) return
-              if (await minimalInputShouldStayVisible()) return
-              try {
-                if (await win.isFocused()) return
-              } catch {
-
-              }
-              void hideSelf()
-            })()
-          }, 80)
         })
         if (disposed) off()
         else unlisten = off
@@ -157,13 +119,9 @@ export function MinimalInputWindow() {
     })()
     return () => {
       disposed = true
-      if (blurHideTimerRef.current != null) {
-        window.clearTimeout(blurHideTimerRef.current)
-        blurHideTimerRef.current = null
-      }
       if (unlisten) unlisten()
     }
-  }, [hideSelf, focusVisibleComposer])
+  }, [focusVisibleComposer])
 
   useEffect(() => {
     if (!isTauriRuntime()) return
@@ -184,27 +142,17 @@ export function MinimalInputWindow() {
             return
           }
           if (payload.type === 'drop') {
-            dropHoldUntilRef.current = Date.now() + 800
             void (async () => {
+              await applyKeepVisible(true)
               await activateMinimalInputWindow()
-              await applyKeepVisible(false)
               focusVisibleComposer()
-              dropHoldUntilRef.current = Date.now() + 400
+              window.setTimeout(() => {
+                void applyKeepVisible(false)
+              }, 400)
             })()
             return
           }
-          void (async () => {
-            if (Date.now() < dropHoldUntilRef.current) return
-            await applyKeepVisible(false)
-            if (await minimalInputShouldStayVisible()) return
-            try {
-              const { getCurrentWindow } = await import('@tauri-apps/api/window')
-              if (await getCurrentWindow().isFocused()) return
-            } catch {
-
-            }
-            void hideSelf()
-          })()
+          void applyKeepVisible(false)
         })
         if (cancelled) {
           off()
@@ -219,7 +167,7 @@ export function MinimalInputWindow() {
       cancelled = true
       if (unlisten) unlisten()
     }
-  }, [applyKeepVisible, focusVisibleComposer, hideSelf])
+  }, [applyKeepVisible, focusVisibleComposer])
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -237,17 +185,10 @@ export function MinimalInputWindow() {
     void (async () => {
       await waitForPaint()
       if (cancelled) return
-      prewarmingRef.current = true
-      try {
-        await prewarmMinimalInputWindow()
-        await new Promise((r) => window.setTimeout(r, 160))
-      } finally {
-        if (!cancelled) prewarmingRef.current = false
-      }
+      await prewarmMinimalInputWindow()
     })()
     return () => {
       cancelled = true
-      prewarmingRef.current = false
     }
   }, [])
 

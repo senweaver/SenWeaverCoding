@@ -64,6 +64,7 @@ export function ComputerBar() {
 
   const recStatus = useMinimalRecorderStore((s) => s.status)
   const recStepCount = useMinimalRecorderStore((s) => s.stepCount)
+  const recStatusMessage = useMinimalRecorderStore((s) => s.statusMessage)
   const recording = recStatus === 'recording'
   const generating = recStatus === 'generating'
 
@@ -222,7 +223,7 @@ export function ComputerBar() {
   const recorderText = recording
     ? `${t('computerUse.record.recording')} · ${t('computerUse.record.stepsRecorded', {
         count: recStepCount,
-      })}`
+      })}${recStatusMessage ? ` · ${recStatusMessage}` : ''}`
     : generating
       ? t('computerUse.record.generating')
       : null

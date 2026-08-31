@@ -251,27 +251,12 @@ pub async fn handle_generate_recording_skill(
         return e.into_response();
     }
     let config: Config = state.live_config.load_ref().as_ref().clone();
-    let provider = body
-        .get("provider")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| config.multimodal.vision_provider.clone())
-        .or_else(|| config.default_provider.clone());
-    let model = body
-        .get("model")
-        .and_then(|v| v.as_str())
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .or_else(|| config.multimodal.vision_model.clone())
-        .or_else(|| config.default_model.clone());
-    let (Some(provider), Some(model)) = (provider, model) else {
+    let Some((provider, model)) = super::resolve_vision_route(&body, &config) else {
         return (
             axum::http::StatusCode::BAD_REQUEST,
             Json(serde_json::json!({
-                "error": "no vision provider/model configured for skill generation"
+                "error": "no vision provider/model configured for skill generation",
+                "code": "no_vision_model"
             })),
         )
             .into_response();
@@ -464,23 +449,9 @@ async fn handle_socket_record(socket: WebSocket, state: AppState) {
                             continue;
                         };
                         let config: Config = state.live_config.load_ref().as_ref().clone();
-                        let provider = parsed
-                            .get("provider")
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                            .or_else(|| config.multimodal.vision_provider.clone())
-                            .or_else(|| config.default_provider.clone());
-                        let model = parsed
-                            .get("model")
-                            .and_then(|v| v.as_str())
-                            .map(str::trim)
-                            .filter(|s| !s.is_empty())
-                            .map(str::to_string)
-                            .or_else(|| config.multimodal.vision_model.clone())
-                            .or_else(|| config.default_model.clone());
-                        let (Some(provider), Some(model)) = (provider, model) else {
+                        let Some((provider, model)) =
+                            super::resolve_vision_route(&parsed, &config)
+                        else {
                             let _ = event_tx.send(RecorderEvent::error_code(
                                 "no_vision_model",
                                 "no vision provider/model configured for skill generation",

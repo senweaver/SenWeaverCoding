@@ -244,7 +244,8 @@ impl Tool for CodeXfileRefactorTool {
         let symbol_for_blocking = symbol.clone();
         let new_name_for_blocking = new_name.clone();
         let workspace_for_blocking = workspace.clone();
-        let computed = tokio::task::spawn_blocking(move || -> anyhow::Result<Vec<FileRename>> {
+        let (computed, skipped_files) = tokio::task::spawn_blocking(
+            move || -> anyhow::Result<(Vec<FileRename>, Vec<String>)> {
             let graph = match SymbolGraph::load(&workspace_for_blocking) {
                 Ok(Some(g)) => g,
                 _ => {
@@ -272,10 +273,18 @@ impl Tool for CodeXfileRefactorTool {
 
             let re = word_boundary_re(&symbol_for_blocking)?;
             let mut renames: Vec<FileRename> = Vec::new();
+            let mut skipped: Vec<String> = Vec::new();
             for rel in &affected_files {
                 let abs = workspace_for_blocking.join(rel);
-                let Ok(old) = std::fs::read_to_string(&abs) else {
-                    continue;
+                let old = match std::fs::read_to_string(&abs) {
+                    Ok(text) => text,
+                    Err(error) => {
+                        skipped.push(format!(
+                            "{} (not renamed: {error})",
+                            rel.display()
+                        ));
+                        continue;
+                    }
                 };
 
                 #[cfg(feature = "code-intel")]
@@ -309,8 +318,9 @@ impl Tool for CodeXfileRefactorTool {
                     });
                 }
             }
-            Ok(renames)
-        })
+                Ok((renames, skipped))
+            },
+        )
         .await
         .map_err(|e| anyhow::anyhow!("code_xfile_refactor task panicked: {e}"))??;
 
@@ -322,7 +332,12 @@ impl Tool for CodeXfileRefactorTool {
                     "symbol": symbol,
                     "new_name": new_name,
                     "files": [],
-                    "note": "no files required modification",
+                    "skipped_files": skipped_files,
+                    "note": if skipped_files.is_empty() {
+                        "no files required modification"
+                    } else {
+                        "no files were modified, but some affected files could not be read (see skipped_files); the rename may be incomplete"
+                    },
                 })
                 .to_string(),
                 error: None,
@@ -348,6 +363,7 @@ impl Tool for CodeXfileRefactorTool {
                     "new_name": new_name,
                     "identifier_scoped": !regex_only,
                     "note": regex_note,
+                    "skipped_files": skipped_files,
                     "files": computed.iter().map(|r| json!({
                         "file": r.rel,
                         "diff": unified_diff(&r.old, &r.new, &r.rel),
@@ -434,6 +450,7 @@ impl Tool for CodeXfileRefactorTool {
                                 "note": regex_note,
                                 "files_changed": computed.len(),
                                 "files": computed.iter().map(|r| &r.rel).collect::<Vec<_>>(),
+                                "skipped_files": skipped_files,
                             })
                             .to_string(),
                             error: None,

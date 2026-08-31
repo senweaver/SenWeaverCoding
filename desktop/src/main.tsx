@@ -53,6 +53,14 @@ async function showCurrentWindow() {
   }
 }
 
+function waitForPaint(): Promise<void> {
+  return new Promise((resolve) => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => resolve())
+    })
+  })
+}
+
 function revealWindowNow() {
   if (revealRequested) return
   revealRequested = true
@@ -226,18 +234,14 @@ async function boot() {
           : (rootModule as typeof import('./App')).App
     ReactDOM.createRoot(root).render(
       React.createElement(
-        React.StrictMode,
+        boundaryModule.AppErrorBoundary,
         null,
-        React.createElement(
-          boundaryModule.AppErrorBoundary,
-          null,
-          React.createElement(RootComponent),
-        ),
+        React.createElement(RootComponent),
       ),
     )
     bootCompleted = true
     if (!minimalKind) {
-      setTimeout(() => revealWindowNow(), 0)
+      void waitForPaint().then(() => revealWindowNow())
     }
   } catch (err) {
     paintBootError(

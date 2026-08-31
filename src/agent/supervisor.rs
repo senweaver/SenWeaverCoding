@@ -109,7 +109,17 @@ pub enum SupervisorEventKind {
     Recovered,
 }
 
-pub type RestartCallback = Box<dyn Fn(&AgentInfo) -> bool + Send + Sync>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RestartOutcome {
+
+    Restarted,
+
+    LeaseRenewed,
+
+    Failed,
+}
+
+pub type RestartCallback = Box<dyn Fn(&AgentInfo) -> RestartOutcome + Send + Sync>;
 
 pub struct Supervisor {
     config: SupervisorConfig,
@@ -201,34 +211,28 @@ impl Supervisor {
         &self.registry
     }
 
-    pub fn can_register(&self, info: &AgentInfo) -> Result<(), SupervisorError> {
-        let current_count = self.registry.all().len();
-        if current_count >= self.config.max_agents {
-            return Err(SupervisorError::MaxAgentsLimit(self.config.max_agents));
-        }
-
-        for cap in &info.capabilities {
-            if let Some(&limit) = self.config.capability_limits.get(&cap.name) {
-                if limit == 0 {
-                    continue;
-                }
-                let current = self.registry.inner().find_by_capability(&cap.name).len();
-                if current >= limit {
-                    return Err(SupervisorError::CapabilityLimit(cap.name.clone(), limit));
-                }
-            }
-        }
-
-        Ok(())
+    pub fn config(&self) -> &SupervisorConfig {
+        &self.config
     }
 
     pub fn register_agent(&self, info: AgentInfo) -> Result<(), SupervisorError> {
-        self.can_register(&info)?;
-        if self.registry.register(info.clone()).is_ok() {
-            info!(agent_id = %info.id, "Supervisor: agent registered");
-            Ok(())
-        } else {
-            Err(SupervisorError::AlreadyRegistered(info.id))
+        let agent_id = info.id.clone();
+        match self.registry.inner().register_bounded(
+            info,
+            self.config.max_agents,
+            &self.config.capability_limits,
+        ) {
+            Ok(()) => {
+                info!(agent_id = %agent_id, "Supervisor: agent registered");
+                Ok(())
+            }
+            Err(crate::error::RegistryError::MaxAgentsLimit(limit)) => {
+                Err(SupervisorError::MaxAgentsLimit(limit))
+            }
+            Err(crate::error::RegistryError::CapabilityLimit(cap, limit)) => {
+                Err(SupervisorError::CapabilityLimit(cap, limit))
+            }
+            Err(_) => Err(SupervisorError::AlreadyRegistered(agent_id)),
         }
     }
 
@@ -238,6 +242,35 @@ impl Supervisor {
         let stale_ids = self.registry.inner().check_stale();
 
         for agent_id in &stale_ids {
+            if let Some(info) = self.registry.get(agent_id) {
+                if info.state == AgentState::Active && info.current_load > 0 {
+                    let _ = self.registry.heartbeat(agent_id);
+                    debug!(
+                        agent_id = %agent_id,
+                        "Supervisor: stale heartbeat but agent still holds work; lease renewed"
+                    );
+                    continue;
+                }
+            }
+
+            if self.restart_count(agent_id) >= self.config.max_restarts {
+                let _ = self.registry.set_state(agent_id, AgentState::Terminated);
+                let give_up = SupervisorEvent {
+                    kind: SupervisorEventKind::RestartFailed,
+                    agent_id: agent_id.clone(),
+                    timestamp: Utc::now(),
+                    detail: "Max restart attempts exceeded; agent terminated".to_string(),
+                };
+                events.push(give_up.clone());
+                self.record_event(give_up);
+                error!(agent_id = %agent_id, "Supervisor: giving up on agent restart");
+                continue;
+            }
+
+            if !self.should_restart(agent_id) {
+                continue;
+            }
+
             let event = SupervisorEvent {
                 kind: SupervisorEventKind::Unhealthy,
                 agent_id: agent_id.clone(),
@@ -248,20 +281,7 @@ impl Supervisor {
             self.record_event(event);
 
             let _ = self.registry.set_state(agent_id, AgentState::Failed);
-
-            if self.should_restart(agent_id) {
-                self.initiate_restart(agent_id, &mut events);
-            } else {
-                let give_up = SupervisorEvent {
-                    kind: SupervisorEventKind::RestartFailed,
-                    agent_id: agent_id.clone(),
-                    timestamp: Utc::now(),
-                    detail: "Max restart attempts exceeded".to_string(),
-                };
-                events.push(give_up.clone());
-                self.record_event(give_up);
-                error!(agent_id = %agent_id, "Supervisor: giving up on agent restart");
-            }
+            self.initiate_restart(agent_id, &mut events);
         }
 
         let sustained = Duration::from_secs(
@@ -310,69 +330,78 @@ impl Supervisor {
     }
 
     fn initiate_restart(&self, agent_id: &str, events: &mut Vec<SupervisorEvent>) {
-        let mut history = self.restart_history.write();
-        let record = history
-            .entry(agent_id.to_string())
-            .or_insert_with(|| RestartRecord {
-                count: 0,
-                last_restart: Instant::now(),
-                backoff: Duration::from_secs(self.config.restart_backoff_base_secs),
-            });
+        let agent_info = self.registry.get(agent_id);
 
-        record.count += 1;
-        record.last_restart = Instant::now();
+        let _ = self.registry.set_state(agent_id, AgentState::Restarting);
 
-        record.backoff = Duration::from_secs(
-            self.config.restart_backoff_base_secs * 2u64.pow(record.count.min(6)),
-        );
+        let outcome = {
+            let callback = self.restart_callback.read();
+            match (callback.as_ref(), agent_info) {
+                (Some(cb), Some(info)) => cb(&info),
+                (None, _) => {
+                    error!(
+                        agent_id = %agent_id,
+                        "Supervisor: no restart callback registered; cannot restart agent"
+                    );
+                    RestartOutcome::Failed
+                }
+                (Some(_), None) => {
+                    error!(
+                        agent_id = %agent_id,
+                        "Supervisor: agent missing from registry; cannot restart"
+                    );
+                    RestartOutcome::Failed
+                }
+            }
+        };
+
+        if outcome == RestartOutcome::LeaseRenewed {
+            let _ = self.registry.set_state(agent_id, AgentState::Active);
+            debug!(
+                agent_id = %agent_id,
+                "Supervisor: agent still holds work; lease renewed without consuming a restart"
+            );
+            return;
+        }
+
+        let count = {
+            let mut history = self.restart_history.write();
+            let record = history
+                .entry(agent_id.to_string())
+                .or_insert_with(|| RestartRecord {
+                    count: 0,
+                    last_restart: Instant::now(),
+                    backoff: Duration::from_secs(self.config.restart_backoff_base_secs),
+                });
+            record.count += 1;
+            record.last_restart = Instant::now();
+            record.backoff = Duration::from_secs(
+                self.config.restart_backoff_base_secs * 2u64.pow(record.count.min(6)),
+            );
+            record.count
+        };
 
         let event = SupervisorEvent {
             kind: SupervisorEventKind::RestartInitiated,
             agent_id: agent_id.to_string(),
             timestamp: Utc::now(),
-            detail: format!(
-                "Restart attempt {}/ {}",
-                record.count, self.config.max_restarts
-            ),
+            detail: format!("Restart attempt {}/ {}", count, self.config.max_restarts),
         };
         events.push(event.clone());
         self.record_event(event);
 
-        let agent_info = self.registry.get(agent_id);
-
-        let _ = self.registry.set_state(agent_id, AgentState::Restarting);
-
-        let callback = self.restart_callback.read();
-        let restart_succeeded = match (callback.as_ref(), agent_info) {
-            (Some(cb), Some(info)) => cb(&info),
-            (None, _) => {
-                error!(
-                    agent_id = %agent_id,
-                    "Supervisor: no restart callback registered; cannot restart agent"
-                );
-                false
-            }
-            (Some(_), None) => {
-                error!(
-                    agent_id = %agent_id,
-                    "Supervisor: agent missing from registry; cannot restart"
-                );
-                false
-            }
-        };
-
-        if restart_succeeded {
+        if outcome == RestartOutcome::Restarted {
             let success_event = SupervisorEvent {
                 kind: SupervisorEventKind::RestartSucceeded,
                 agent_id: agent_id.to_string(),
                 timestamp: Utc::now(),
-                detail: format!("Agent restarted successfully (attempt {})", record.count),
+                detail: format!("Agent restarted successfully (attempt {count})"),
             };
             events.push(success_event.clone());
             self.record_event(success_event);
             info!(
                 agent_id = %agent_id,
-                attempt = record.count,
+                attempt = count,
                 "Supervisor: agent restarted successfully"
             );
         } else {
@@ -382,13 +411,13 @@ impl Supervisor {
                 kind: SupervisorEventKind::RestartFailed,
                 agent_id: agent_id.to_string(),
                 timestamp: Utc::now(),
-                detail: format!("Restart callback failed (attempt {})", record.count),
+                detail: format!("Restart callback failed (attempt {count})"),
             };
             events.push(fail_event.clone());
             self.record_event(fail_event);
             error!(
                 agent_id = %agent_id,
-                attempt = record.count,
+                attempt = count,
                 "Supervisor: agent restart failed"
             );
         }
@@ -407,19 +436,24 @@ impl Supervisor {
     }
 
     pub fn shutdown_agent(&self, agent_id: &str) -> bool {
-        if self
-            .registry
-            .set_state(agent_id, AgentState::ShuttingDown)
-            .is_ok()
-        {
+        let target_state = match self.registry.get(agent_id) {
+            Some(info) if info.current_load == 0 => AgentState::Terminated,
+            Some(_) => AgentState::ShuttingDown,
+            None => return false,
+        };
+        if self.registry.set_state(agent_id, target_state).is_ok() {
             let event = SupervisorEvent {
                 kind: SupervisorEventKind::ShutDown,
                 agent_id: agent_id.to_string(),
                 timestamp: Utc::now(),
-                detail: "Graceful shutdown initiated".to_string(),
+                detail: if target_state == AgentState::Terminated {
+                    "Shutdown completed immediately (no in-flight work)".to_string()
+                } else {
+                    "Graceful shutdown initiated; draining in-flight work".to_string()
+                },
             };
             self.record_event(event);
-            info!(agent_id = %agent_id, "Supervisor: shutdown initiated");
+            info!(agent_id = %agent_id, state = %target_state, "Supervisor: shutdown initiated");
             true
         } else {
             false

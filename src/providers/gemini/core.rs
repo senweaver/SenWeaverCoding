@@ -974,7 +974,7 @@ impl GeminiProvider {
     fn http_client(&self) -> Client {
         crate::services::require_services()
             .proxy_runtime()
-            .build_client_with_timeouts_and_headers(
+            .build_llm_chat_client(
                 "provider.gemini",
                 self.timeout_secs,
                 10,
@@ -2183,6 +2183,18 @@ impl Provider for GeminiProvider {
                     .send(Err(StreamError::Provider(
                         "Gemini stream ended without any content; connection closed mid-response"
                             .to_string(),
+                    )))
+                    .await;
+                return;
+            }
+            if made_progress && !saw_stop_reason {
+                tracing::warn!(
+                    target: "providers.gemini.stream",
+                    "Gemini stream closed without a finish reason after partial output; failing closed so the turn is retried instead of presenting truncated output as complete"
+                );
+                let _ = tx
+                    .send(Err(StreamError::Provider(
+                        "Gemini stream closed without a finish reason after partial output; connection closed mid-response".to_string(),
                     )))
                     .await;
                 return;

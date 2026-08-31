@@ -51,6 +51,11 @@ import {
   buildAssistantTurnCopyMap,
   type AssistantTurnCopyInfo,
 } from '../../utils/assistantTurnCopy'
+import {
+  notifyScrollActivity,
+  isScrollActive,
+  registerChatScroller,
+} from '../../lib/scrollActivity'
 
 type ToolCall = Extract<UIMessage, { type: 'tool_use' }>
 type ToolResult = Extract<UIMessage, { type: 'tool_result' }>
@@ -182,9 +187,12 @@ function appendChildToolCall(
   else childToolCallsByParent.set(parentToolUseId, [toolCall])
 }
 
+const supersededTodoCloneCache = new WeakMap<UIMessage, UIMessage>()
+
 export function buildRenderModel(
   messages: UIMessage[],
   pendingAskToolUseId?: string | null,
+  stickyAskToolUseIds?: ReadonlySet<string>,
 ): RenderModel {
   const items: RenderItem[] = []
   const toolResultMap = new Map<string, ToolResult>()
@@ -214,9 +222,12 @@ export function buildRenderModel(
       }
     } else {
       const summary = buildExploredSummary(buffer)
+      const firstTool = buffer.find(
+        (m): m is ToolCall => m.type === 'tool_use',
+      )
       items.push({
         kind: 'explored',
-        id: `explored-${buffer[0]?.id ?? 'empty'}`,
+        id: `explored-${firstTool ? firstTool.toolUseId : buffer[0]?.id ?? 'empty'}`,
         items: buffer.filter((m) => m.type !== 'tool_result'),
         summary,
       })
@@ -253,7 +264,8 @@ export function buildRenderModel(
         flush()
         if (
           toolResultMap.has(msg.toolUseId) ||
-          (pendingAskToolUseId != null && msg.toolUseId === pendingAskToolUseId)
+          (pendingAskToolUseId != null && msg.toolUseId === pendingAskToolUseId) ||
+          stickyAskToolUseIds?.has(msg.toolUseId) === true
         ) {
           items.push({ kind: 'message', message: msg })
         }
@@ -407,7 +419,12 @@ export function buildRenderModel(
       const idx = todoItemIdxs[k]!
       const it = items[idx]!
       if (it.kind === 'message' && !it.message.superseded) {
-        items[idx] = { ...it, message: { ...it.message, superseded: true } }
+        let clone = supersededTodoCloneCache.get(it.message)
+        if (!clone) {
+          clone = { ...it.message, superseded: true }
+          supersededTodoCloneCache.set(it.message, clone)
+        }
+        items[idx] = { ...it, message: clone }
       }
     }
   }
@@ -423,10 +440,13 @@ const AUTO_SCROLL_BOTTOM_THRESHOLD_PX = 32
 const USER_SCROLL_UP_CANCEL_PX = 24
 
 const AUTO_SCROLL_REARM_THRESHOLD_PX = 48
+const LOAD_OLDER_THRESHOLD_PX = 2400
 const FIRST_ITEM_INDEX_BASE = 1_000_000
+const INITIAL_SETTLE_MAX_MS = 8_000
+const TURN_END_PIN_GRACE_MS = 1_600
 
 const EMPTY_MESSAGES: UIMessage[] = []
-const EMPTY_SUBAGENT_TIMELINES: Record<string, never> = {}
+const EMPTY_TIMELINE_KEYS: string[] = []
 
 function renderItemKey(item: RenderItem): string {
   return item.kind === 'explored' ? item.id : item.message.id
@@ -495,14 +515,17 @@ function ListFooter({ context }: { context?: ListFooterContext }) {
             </div>
           </div>
         ) : (
-          <StreamingIndicator action={planningPhaseAction} />
+          <StreamingIndicator action={planningPhaseAction} sessionId={resolvedSessionId} />
         )
       )}
     </div>
   )
 }
 
-const VIRTUOSO_COMPONENTS = { Header: ListHeader, Footer: ListFooter }
+const VIRTUOSO_COMPONENTS = {
+  Header: ListHeader,
+  Footer: ListFooter,
+}
 
 export function MessageList({ sessionId }: MessageListProps = {}) {
   const activeTabId = useTabStore((s) => s.activeTabId)
@@ -512,7 +535,7 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     chatState,
     streamingText,
     activeThinkingId,
-    activeThinkingContent,
+    hasLiveThinkingContent,
     pendingPermission,
     pendingRewind,
     providerRetry,
@@ -529,7 +552,9 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
         chatState: st?.chatState ?? ('idle' as const),
         streamingText: st?.streamingText ?? '',
         activeThinkingId: st?.activeThinkingId ?? null,
-        activeThinkingContent: st?.activeThinkingContent ?? '',
+        hasLiveThinkingContent:
+          st?.activeThinkingId != null &&
+          (st?.activeThinkingContent ?? '').trim().length > 0,
         pendingPermission: st?.pendingPermission ?? null,
         pendingRewind: st?.pendingRewind ?? null,
         providerRetry: st?.providerRetry ?? null,
@@ -569,9 +594,9 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   const scrollRafRef = useRef<number | null>(null)
   const followRafRef = useRef<number | null>(null)
   const followForceRef = useRef(false)
-  const prevRenderKeysRef = useRef<string[]>([])
   const initialPinPendingRef = useRef(true)
-  const initialPinDeadlineRef = useRef(0)
+  const initialSettleRef = useRef(true)
+  const settleDeadlineRef = useRef(0)
   const t = useTranslation()
   const [rewindTarget, setRewindTarget] = useState<{
     userMessageIndex: number
@@ -641,8 +666,10 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
 
     lastScrollTopRef.current = next.scrollTop
     userInteractingRef.current = false
+    let dragUpAccum = 0
 
     const cancelFollow = () => {
+      initialSettleRef.current = false
       if (!followRef.current) return
       followRef.current = false
       setShowScrollToBottom(true)
@@ -650,14 +677,20 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
 
     const onScroll = () => {
       const st = next.scrollTop
+      const prevSt = lastScrollTopRef.current
+      if (userInteractingRef.current) notifyScrollActivity()
+      if (userInteractingRef.current && !programmaticScrollRef.current) {
+        if (st < prevSt) dragUpAccum += prevSt - st
+        else if (st > prevSt) dragUpAccum = 0
+      }
       const distanceFromBottom = next.scrollHeight - st - next.clientHeight
       const draggedUp =
         userInteractingRef.current &&
         !programmaticScrollRef.current &&
-        st < lastScrollTopRef.current - USER_SCROLL_UP_CANCEL_PX
+        dragUpAccum > USER_SCROLL_UP_CANCEL_PX
       if (draggedUp && followRef.current) {
         cancelFollow()
-      } else if (st > lastScrollTopRef.current && distanceFromBottom <= AUTO_SCROLL_REARM_THRESHOLD_PX) {
+      } else if (st > prevSt && distanceFromBottom <= AUTO_SCROLL_REARM_THRESHOLD_PX) {
         followRef.current = true
         setShowScrollToBottom((prev) => (prev ? false : prev))
       } else if (distanceFromBottom <= AUTO_SCROLL_BOTTOM_THRESHOLD_PX && followRef.current) {
@@ -667,19 +700,27 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     }
 
     const onWheel = (e: WheelEvent) => {
+      initialSettleRef.current = false
+      notifyScrollActivity()
       if (e.deltaY < 0 && next.scrollHeight - next.clientHeight > 1) {
         cancelFollow()
       }
     }
     const onPointerDown = () => {
+      initialSettleRef.current = false
       userInteractingRef.current = true
+      dragUpAccum = 0
     }
     const endPointerInteraction = () => {
       userInteractingRef.current = false
     }
     const onKeyDown = (e: KeyboardEvent) => {
       if (e.key === 'PageUp' || e.key === 'Home' || e.key === 'ArrowUp') {
+        notifyScrollActivity()
         cancelFollow()
+      } else if (e.key === 'PageDown' || e.key === 'End' || e.key === 'ArrowDown' || e.key === ' ') {
+        notifyScrollActivity()
+        initialSettleRef.current = false
       }
     }
 
@@ -693,7 +734,10 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     window.addEventListener('touchend', endPointerInteraction, { passive: true })
     window.addEventListener('touchcancel', endPointerInteraction, { passive: true })
 
+    registerChatScroller(next)
+
     scrollerCleanupRef.current = () => {
+      registerChatScroller(null)
       next.removeEventListener('scroll', onScroll)
       next.removeEventListener('wheel', onWheel)
       next.removeEventListener('pointerdown', onPointerDown)
@@ -715,22 +759,47 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     }
   }, [])
 
+  const pinToLatestProgrammatically = useCallback(() => {
+    programmaticScrollRef.current = true
+    virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' })
+    if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
+    scrollRafRef.current = requestAnimationFrame(() => {
+      scrollRafRef.current = null
+      programmaticScrollRef.current = false
+      if (followRef.current) scrollFollowToBottom(true)
+    })
+  }, [scrollFollowToBottom])
+
   const scrollToBottomNow = useCallback(() => {
     followRef.current = true
     atBottomRef.current = true
+    initialSettleRef.current = true
+    settleDeadlineRef.current = Date.now() + INITIAL_SETTLE_MAX_MS
     setShowScrollToBottom(false)
-    scrollFollowToBottom(true)
-  }, [scrollFollowToBottom])
+    pinToLatestProgrammatically()
+  }, [pinToLatestProgrammatically])
 
-  useEffect(() => {
+  const isInitialSettleActive = useCallback(() => {
+    if (!initialSettleRef.current) return false
+    const deadline = settleDeadlineRef.current
+    if (deadline > 0 && Date.now() >= deadline) {
+      initialSettleRef.current = false
+      return false
+    }
+    return true
+  }, [])
+
+  useLayoutEffect(() => {
     followRef.current = true
     atBottomRef.current = true
     atTopRef.current = false
     userInteractingRef.current = false
-    prevRenderKeysRef.current = []
     initialPinPendingRef.current = true
-    initialPinDeadlineRef.current = 0
-    setFirstItemIndex(FIRST_ITEM_INDEX_BASE)
+    initialSettleRef.current = true
+    settleDeadlineRef.current = 0
+    stickyAskIdsRef.current = pendingAskToolUseId
+      ? new Set([pendingAskToolUseId])
+      : new Set()
     setShowScrollToBottom(false)
   }, [resolvedSessionId])
 
@@ -740,11 +809,49 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     scrollFollowToBottom()
   }, [scrollFollowToBottom])
 
+  const turnEndPinUntilRef = useRef(0)
+  const prevChatStateRef = useRef(chatState)
+  useLayoutEffect(() => {
+    const prev = prevChatStateRef.current
+    prevChatStateRef.current = chatState
+    if (prev !== 'idle' && chatState === 'idle') {
+      turnEndPinUntilRef.current = Date.now() + TURN_END_PIN_GRACE_MS
+      if (followRef.current) {
+        scrollFollowToBottom()
+      }
+    }
+  }, [chatState, scrollFollowToBottom])
+
+  const loadOlderRetryRef = useRef<number | null>(null)
+  const maybeLoadOlderRef = useRef<() => void>(() => {})
   const maybeLoadOlder = useCallback(() => {
     if (!resolvedSessionId) return
+    if (isInitialSettleActive()) return
     const st = useChatStore.getState().sessions[resolvedSessionId]
     if (!st || st.historyHasMore !== true || st.historyLoadingOlder === true) return
+    const scroller = scrollerElRef.current
+    if (scroller !== null && scroller.scrollTop > LOAD_OLDER_THRESHOLD_PX + 800) return
+    const nearWall = scroller !== null && scroller.scrollTop < 600
+    if (isScrollActive() && !nearWall) {
+      if (loadOlderRetryRef.current === null) {
+        loadOlderRetryRef.current = window.setTimeout(() => {
+          loadOlderRetryRef.current = null
+          maybeLoadOlderRef.current()
+        }, 180)
+      }
+      return
+    }
     void useChatStore.getState().loadOlderHistory(resolvedSessionId)
+  }, [resolvedSessionId, isInitialSettleActive])
+  maybeLoadOlderRef.current = maybeLoadOlder
+
+  useEffect(() => {
+    return () => {
+      if (loadOlderRetryRef.current !== null) {
+        window.clearTimeout(loadOlderRetryRef.current)
+        loadOlderRetryRef.current = null
+      }
+    }
   }, [resolvedSessionId])
 
   useEffect(() => {
@@ -858,8 +965,11 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       : null
   }, [pendingPermission])
 
+  const stickyAskIdsRef = useRef<Set<string>>(new Set())
+  if (pendingAskToolUseId) stickyAskIdsRef.current.add(pendingAskToolUseId)
+
   const { toolResultMap, renderItems, childToolCallsByParent } = useMemo(
-    () => buildRenderModel(baseMessages, pendingAskToolUseId),
+    () => buildRenderModel(baseMessages, pendingAskToolUseId, stickyAskIdsRef.current),
     [baseMessages, pendingAskToolUseId],
   )
 
@@ -897,14 +1007,20 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     return next
   }, [childToolCallsByParent, toolResultMap])
 
-  const subagentTimelines = useChatStore(
-    useShallow((s) =>
-      resolvedSessionId
-        ? s.sessions[resolvedSessionId]?.subagentTimelines ?? EMPTY_SUBAGENT_TIMELINES
-        : EMPTY_SUBAGENT_TIMELINES,
-    ),
+  const subagentTimelineKeys = useChatStore(
+    useShallow((s) => {
+      const rec = resolvedSessionId
+        ? s.sessions[resolvedSessionId]?.subagentTimelines
+        : undefined
+      return rec ? Object.keys(rec) : EMPTY_TIMELINE_KEYS
+    }),
+  )
+  const foldedParentIds = useMemo(
+    () => new Set(subagentTimelineKeys),
+    [subagentTimelineKeys],
   )
 
+  const prevListRenderItemsRef = useRef<RenderItem[]>([])
   const listRenderItems = useMemo(() => {
     let end = renderItems.length
     if (chatState === 'idle' && streamingText.trim().length === 0) {
@@ -926,29 +1042,63 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       item.kind === 'message' &&
       item.message.type === 'subagent_chunk' &&
       !!item.message.parentToolUseId &&
-      !!subagentTimelines[item.message.parentToolUseId]
-    if (!trimmed.some(isFoldedSubagentChunk)) return trimmed
-    return trimmed.filter((item) => !isFoldedSubagentChunk(item))
-  }, [renderItems, chatState, streamingText, subagentTimelines])
+      foldedParentIds.has(item.message.parentToolUseId)
+    const result = trimmed.some(isFoldedSubagentChunk)
+      ? trimmed.filter((item) => !isFoldedSubagentChunk(item))
+      : trimmed
+    const prev = prevListRenderItemsRef.current
+    if (prev !== result && prev.length === result.length) {
+      let identical = true
+      for (let i = 0; i < result.length; i++) {
+        if (prev[i] !== result[i]) {
+          identical = false
+          break
+        }
+      }
+      if (identical) return prev
+    }
+    prevListRenderItemsRef.current = result
+    return result
+  }, [renderItems, chatState, streamingText, foldedParentIds])
+
+  const renderKeys = useMemo(() => listRenderItems.map(renderItemKey), [listRenderItems])
 
   useLayoutEffect(() => {
-    const keys = listRenderItems.map(renderItemKey)
+    if (!initialPinPendingRef.current) return
+    if (listRenderItems.length === 0) return
+    initialPinPendingRef.current = false
+    initialSettleRef.current = true
+    settleDeadlineRef.current = Date.now() + INITIAL_SETTLE_MAX_MS
+    followRef.current = true
+    atBottomRef.current = true
+    setShowScrollToBottom(false)
+    requestAnimationFrame(() => {
+      pinToLatestProgrammatically()
+    })
+  }, [resolvedSessionId, listRenderItems.length, pinToLatestProgrammatically])
+
+  const lastHistoryReloadNonceRef = useRef(historyReloadNonce)
+  const prevRenderKeysRef = useRef<string[]>(renderKeys)
+  const [renderedSessionId, setRenderedSessionId] = useState(resolvedSessionId)
+  if (renderedSessionId !== resolvedSessionId) {
+    setRenderedSessionId(resolvedSessionId)
+    setFirstItemIndex(FIRST_ITEM_INDEX_BASE)
+    prevRenderKeysRef.current = renderKeys
+    lastHistoryReloadNonceRef.current = historyReloadNonce
+  } else if (prevRenderKeysRef.current !== renderKeys) {
     const prevKeys = prevRenderKeysRef.current
-    const firstKey = keys[0]
+    prevRenderKeysRef.current = renderKeys
+    const firstKey = renderKeys[0]
     const prevFirstKey = prevKeys[0]
-    if (
-      prevFirstKey !== undefined &&
-      firstKey !== undefined &&
-      firstKey !== prevFirstKey
-    ) {
+    if (prevFirstKey !== undefined && firstKey !== undefined && firstKey !== prevFirstKey) {
       const prevIndexByKey = new Map<string, number>()
       for (let i = 0; i < prevKeys.length; i++) {
         const k = prevKeys[i]
         if (k !== undefined && !prevIndexByKey.has(k)) prevIndexByKey.set(k, i)
       }
       let delta: number | null = null
-      for (let i = 0; i < keys.length; i++) {
-        const k = keys[i]
+      for (let i = 0; i < renderKeys.length; i++) {
+        const k = renderKeys[i]
         if (k === undefined) continue
         const prevIdx = prevIndexByKey.get(k)
         if (prevIdx !== undefined) {
@@ -958,41 +1108,16 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       }
       if (delta !== null && delta !== 0) {
         setFirstItemIndex((v) => v - delta)
+        atTopRef.current = false
       }
     }
-    prevRenderKeysRef.current = keys
-  }, [listRenderItems])
-
-  const pinToLatestProgrammatically = useCallback(() => {
-    programmaticScrollRef.current = true
-    virtuosoRef.current?.scrollToIndex({ index: 'LAST', align: 'end', behavior: 'auto' })
-    if (scrollRafRef.current != null) cancelAnimationFrame(scrollRafRef.current)
-    scrollRafRef.current = requestAnimationFrame(() => {
-      scrollRafRef.current = null
-      programmaticScrollRef.current = false
-    })
-  }, [])
-
-  useLayoutEffect(() => {
-    if (!initialPinPendingRef.current) return
-    if (listRenderItems.length === 0) return
-    initialPinPendingRef.current = false
-    initialPinDeadlineRef.current = Date.now() + 1500
-    followRef.current = true
-    atBottomRef.current = true
-    setShowScrollToBottom(false)
-    requestAnimationFrame(() => {
-      pinToLatestProgrammatically()
-    })
-  }, [listRenderItems.length, pinToLatestProgrammatically])
-
-  const lastHistoryReloadNonceRef = useRef(historyReloadNonce)
+  }
   useLayoutEffect(() => {
     if (historyReloadNonce === lastHistoryReloadNonceRef.current) return
     lastHistoryReloadNonceRef.current = historyReloadNonce
-    prevRenderKeysRef.current = []
-    setFirstItemIndex(FIRST_ITEM_INDEX_BASE)
-    followRef.current = true
+    if (!followRef.current) return
+    initialSettleRef.current = true
+    settleDeadlineRef.current = Date.now() + INITIAL_SETTLE_MAX_MS
     atBottomRef.current = true
     setShowScrollToBottom(false)
     requestAnimationFrame(() => {
@@ -1032,9 +1157,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     () => buildAssistantTurnCopyMap(messages),
     [messages],
   )
-
-  const hasLiveThinkingContent =
-    Boolean(activeThinkingId) && activeThinkingContent.trim().length > 0
 
   const isTailRendering = useMemo(() => {
     if (streamingText.trim().length > 0) return true
@@ -1167,7 +1289,15 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     }
     return ''
   }, [messages])
-  const footerStreamingText = (() => {
+
+  const lastToolUseId = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const m = messages[i]
+      if (m?.type === 'tool_use') return m.toolUseId
+    }
+    return null
+  }, [messages])
+  const footerStreamingText = useMemo(() => {
     if (!streamingText) return streamingText
     if (!lastAssistantText) return streamingText
     if (lastAssistantText === streamingText || lastAssistantText.endsWith(streamingText)) {
@@ -1176,12 +1306,18 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
     const committed = lastAssistantText.trimEnd()
     const live = streamingText.trimEnd()
     if (live && (committed === live || committed.endsWith(live))) return ''
+    if (committed && streamingText.startsWith(committed)) {
+      return streamingText.slice(committed.length).replace(/^\n+/, '')
+    }
     return streamingText
-  })()
+  }, [streamingText, lastAssistantText])
+
+  const gatedStreamingText = footerStreamingText
+  const gatedThinkingId = hasLiveThinkingContent ? activeThinkingId : null
 
   const footerContext = useMemo<ListFooterContext>(
     () => ({
-      streamingText: footerStreamingText,
+      streamingText: gatedStreamingText,
       isStreaming: chatState === 'streaming',
       resolvedSessionId: resolvedSessionId ?? null,
       showRetryBanner,
@@ -1190,19 +1326,18 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
       awaitingWorkers: chatState === 'awaiting_workers',
       planningLabel:
         t('chat.willResumeWhenWorkersFinish') || 'Will resume when subagents finish',
-      activeThinkingId: hasLiveThinkingContent ? activeThinkingId : null,
+      activeThinkingId: gatedThinkingId,
       onLiveThinkingGrow: handleLiveThinkingGrow,
     }),
     [
-      footerStreamingText,
+      gatedStreamingText,
       chatState,
       resolvedSessionId,
       showRetryBanner,
       showPlanningIndicator,
       planningPhaseAction,
       t,
-      hasLiveThinkingContent,
-      activeThinkingId,
+      gatedThinkingId,
       handleLiveThinkingGrow,
     ],
   )
@@ -1245,19 +1380,25 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
 
   const renderListItem = useCallback((item: RenderItem) => {
           if (item.kind === 'explored') {
+            const isLiveGroup =
+              lastToolUseId !== null &&
+              item.items.some(
+                (entry) =>
+                  entry.type === 'tool_use' && entry.toolUseId === lastToolUseId,
+              )
             const stillStreaming =
               chatState !== 'idle' &&
               item.items.some((entry) => {
                 if (entry.type === 'thinking') return entry.id === activeThinkingId
-                if (entry.type === 'tool_use') return !toolResultMap.has(entry.toolUseId)
+                if (entry.type === 'tool_use')
+                  return isLiveGroup && !toolResultMap.has(entry.toolUseId)
                 return false
               })
-            const exploredKey = item.items[0]?.id ?? 'explored'
             return (
               <SectionErrorBoundary
-                key={exploredKey}
+                key={item.id}
                 label="explored"
-                resetKeys={[exploredKey]}
+                resetKeys={[item.id]}
               >
                 <ExploredCard
                   items={item.items}
@@ -1308,13 +1449,6 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
             )
           }
 
-          if (
-            msg.type === 'subagent_chunk' &&
-            msg.parentToolUseId &&
-            subagentTimelines[msg.parentToolUseId]
-          ) {
-            return null
-          }
           const turnCopy =
             msg.type === 'assistant_text'
               ? assistantTurnCopyByMsgId.get(msg.id) ?? null
@@ -1377,13 +1511,13 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
   }, [
     chatState,
     activeThinkingId,
+    lastToolUseId,
     toolResultMap,
     resolvedSessionId,
     handleLiveThinkingGrow,
     rewindIndexByMsgId,
     restoreAnchorMsgId,
     editingMessage,
-    subagentTimelines,
     assistantTurnCopyByMsgId,
     childToolCallsByParent,
     childResultsByParent,
@@ -1419,11 +1553,11 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
         totalListHeightChanged={() => {
           if (!followRef.current) return
           if (typeof document !== 'undefined' && document.hidden) return
-          if (Date.now() < initialPinDeadlineRef.current) {
+          if (isInitialSettleActive()) {
             pinToLatestProgrammatically()
             return
           }
-          if (chatState === 'idle') return
+          if (chatState === 'idle' && Date.now() >= turnEndPinUntilRef.current) return
           scrollFollowToBottom()
         }}
         atBottomStateChange={(atBottom) => {
@@ -1438,9 +1572,10 @@ export function MessageList({ sessionId }: MessageListProps = {}) {
           atTopRef.current = atTop
           if (atTop) maybeLoadOlder()
         }}
+        atTopThreshold={LOAD_OLDER_THRESHOLD_PX}
         atBottomThreshold={AUTO_SCROLL_BOTTOM_THRESHOLD_PX}
-        defaultItemHeight={100}
-        increaseViewportBy={{ top: 240, bottom: 320 }}
+        defaultItemHeight={64}
+        increaseViewportBy={{ top: 800, bottom: 320 }}
         startReached={maybeLoadOlder}
         components={VIRTUOSO_COMPONENTS}
         itemContent={itemContent}
@@ -1720,7 +1855,12 @@ function areMessageBlockPropsEqual(
   next: MessageBlockProps,
 ): boolean {
   if (prev.message !== next.message) return false
-  if (prev.activeThinkingId !== next.activeThinkingId) return false
+  if (
+    (prev.message.id === prev.activeThinkingId) !==
+    (next.message.id === next.activeThinkingId)
+  )
+    return false
+  if (prev.onLiveThinkingGrow !== next.onLiveThinkingGrow) return false
   if (prev.toolStreaming !== next.toolStreaming) return false
   if (prev.tailMenuEnabled !== next.tailMenuEnabled) return false
   if (prev.sessionId !== next.sessionId) return false
@@ -1747,8 +1887,30 @@ function areMessageBlockPropsEqual(
       return false
     }
   }
-  if (prev.childCalls !== next.childCalls) return false
-  if (prev.childResults !== next.childResults) return false
+  if (prev.childCalls !== next.childCalls) {
+    if (
+      !prev.childCalls ||
+      !next.childCalls ||
+      prev.childCalls.length !== next.childCalls.length
+    ) {
+      return false
+    }
+    for (let i = 0; i < prev.childCalls.length; i++) {
+      if (prev.childCalls[i] !== next.childCalls[i]) return false
+    }
+  }
+  if (prev.childResults !== next.childResults) {
+    if (
+      !prev.childResults ||
+      !next.childResults ||
+      prev.childResults.size !== next.childResults.size
+    ) {
+      return false
+    }
+    for (const [key, value] of prev.childResults) {
+      if (next.childResults.get(key) !== value) return false
+    }
+  }
   if (prev.onRequestRewind !== next.onRequestRewind) return false
   if (prev.onRequestRestore !== next.onRequestRestore) return false
   if (prev.onEditAsDraft !== next.onEditAsDraft) return false
@@ -1791,6 +1953,9 @@ export const MessageBlock = memo(function MessageBlock({
         <UserMessage
           content={message.content}
           attachments={message.attachments}
+          pending={message.pending}
+          clientMsgId={message.clientMsgId}
+          sessionId={sessionId}
           designRef={message.designRef}
           designRefName={message.designRefName}
           designRefElement={message.designRefElement}

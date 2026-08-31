@@ -80,8 +80,5 @@ pub use multi_agent_runtime::{
 pub use registry::{AgentRegistry, AgentRegistryHandle};
 pub use supervisor::{Supervisor, SupervisorHandle};
 pub use task_orchestrator::queue::{TaskQueue, TaskQueueHandle};
-pub use team_protocol::{
-    ChannelType, Goal, GoalPriority, GoalStatus, MessagePayload, Role, Team, TeamConfig,
-    TeamMessage,
-};
+pub use team_protocol::{ChannelType, MessagePayload, Role, Team, TeamConfig, TeamMessage};
 

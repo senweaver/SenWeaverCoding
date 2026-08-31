@@ -9,15 +9,6 @@ import { hasServerForLanguage, lspBridge } from '../../lib/lspBridge'
 import { workspaceAbsPathToUri, joinWorkspaceAbsPath } from '../../lib/workspacePath'
 import { inferLanguageFromPath } from '../../lib/extLanguage'
 
-function cheapHash(input: string): string {
-  let h = 0x811c9dc5
-  for (let i = 0; i < input.length; i++) {
-    h ^= input.charCodeAt(i)
-    h = (h + ((h << 1) + (h << 4) + (h << 7) + (h << 8) + (h << 24))) >>> 0
-  }
-  return `${h.toString(16)}:${input.length}`
-}
-
 type LspPosition = { line: number; character: number }
 type LspRange = { start: LspPosition; end: LspPosition }
 
@@ -242,7 +233,7 @@ export function OutlinePanel({ workDir, onJump }: Props) {
       return
     }
     const text = buffer.draft ?? ''
-    const key = `${activeTab}::${cheapHash(text)}::${supported ? 'lsp' : isMarkdownFallback ? 'md' : 'none'}`
+    const key = `${activeTab}::${buffer.modifiedAt ?? ''}:${text.length}::${supported ? 'lsp' : isMarkdownFallback ? 'md' : 'none'}`
 
     if (isMarkdownFallback) {
       if (lastRequestKey.current === key) return

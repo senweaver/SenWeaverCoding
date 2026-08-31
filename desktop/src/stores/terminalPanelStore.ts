@@ -90,6 +90,17 @@ function safeWrite(key: string, value: string) {
   }
 }
 
+const HEIGHT_PERSIST_DEBOUNCE_MS = 300
+let heightPersistTimer: ReturnType<typeof setTimeout> | null = null
+
+function schedulePersistHeight(getHeight: () => number) {
+  if (heightPersistTimer) clearTimeout(heightPersistTimer)
+  heightPersistTimer = setTimeout(() => {
+    heightPersistTimer = null
+    safeWrite(STORAGE_KEY_HEIGHT, String(getHeight()))
+  }, HEIGHT_PERSIST_DEBOUNCE_MS)
+}
+
 const initialOpen = safeRead(STORAGE_KEY_OPEN) === '1'
 const initialHeightRaw = parseInt(safeRead(STORAGE_KEY_HEIGHT) ?? '', 10)
 const initialHeight =
@@ -145,8 +156,8 @@ export const useTerminalPanelStore = create<State>((set, get) => ({
 
   setHeight: (px) => {
     const clamped = Math.max(HEIGHT_MIN, Math.min(HEIGHT_MAX, Math.round(px)))
-    safeWrite(STORAGE_KEY_HEIGHT, String(clamped))
     set({ heightPx: clamped })
+    schedulePersistHeight(() => get().heightPx)
   },
 
   openNewTab: (opts) => {

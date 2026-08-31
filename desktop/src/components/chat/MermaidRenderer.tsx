@@ -396,11 +396,22 @@ export function MermaidRenderer({ code }: Props) {
     return (
       <div
         ref={sentinelRef}
-        className="my-4 flex items-center justify-center rounded-[var(--radius-lg)] border border-[var(--color-border)]/50 bg-[var(--color-surface-container-low)] py-8"
+        className="my-4 overflow-hidden rounded-[var(--radius-lg)] border border-[var(--color-outline-variant)]/50 bg-[var(--color-surface-container-low)]"
       >
-        <div className="flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
-          <span className="material-symbols-outlined animate-spin text-[16px]">progress_activity</span>
-          {shouldRender ? t('mermaid.rendering') : t('mermaid.queued')}
+        <div className="flex items-center justify-between border-b border-[var(--color-outline-variant)]/40 bg-[var(--color-surface-container)] px-3 py-1.5 text-[11px] text-[var(--color-text-tertiary)]">
+          <div className="flex items-center gap-2">
+            <span className="material-symbols-outlined text-[14px]">account_tree</span>
+            <span className="font-semibold uppercase tracking-[0.14em]">Mermaid</span>
+          </div>
+        </div>
+        <div
+          className="flex items-center justify-center bg-[var(--color-surface)] p-4"
+          style={{ height: 400 }}
+        >
+          <div className="flex items-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
+            <span className="material-symbols-outlined animate-spin text-[16px]">progress_activity</span>
+            {shouldRender ? t('mermaid.rendering') : t('mermaid.queued')}
+          </div>
         </div>
       </div>
     )
@@ -434,7 +445,7 @@ export function MermaidRenderer({ code }: Props) {
         <div
           ref={containerRef}
           className="flex items-center justify-center overflow-auto bg-[var(--color-surface)] p-4 cursor-pointer"
-          style={{ maxHeight: 400 }}
+          style={{ height: 400 }}
           onClick={handlePreview}
           dangerouslySetInnerHTML={{ __html: sanitizeMermaidSvg(svg) }}
         />

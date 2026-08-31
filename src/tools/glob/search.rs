@@ -96,11 +96,23 @@ impl Tool for GlobSearchTool {
             });
         }
 
-        let full_pattern = self
-            .security
-            .resolve_tool_path(pattern)
-            .to_string_lossy()
-            .to_string();
+        let full_pattern = {
+            let expanded = std::path::Path::new(pattern);
+            if expanded.is_absolute() || pattern.contains(':') || pattern.starts_with('~') {
+                self.security
+                    .resolve_tool_path(pattern)
+                    .to_string_lossy()
+                    .to_string()
+            } else {
+                format!(
+                    "{}/{}",
+                    glob::Pattern::escape(
+                        &self.security.workspace_dir().display().to_string()
+                    ),
+                    pattern
+                )
+            }
+        };
 
         enum WalkOutcome {
             Ok {

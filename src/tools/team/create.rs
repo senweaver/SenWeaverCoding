@@ -105,13 +105,23 @@ impl Tool for TeamCreateTool {
             }
             None => crate::agent::team_protocol::TeamConfig::default(),
         };
-        crate::services::team::runtime::create_team(
+        let rejected = match crate::services::team::runtime::create_team(
             &id,
             name,
             &members,
             leader.as_deref(),
             team_cfg,
-        );
+        ) {
+            Ok(rejected) => rejected,
+            Err(e) => {
+                self.registry.write().remove(&id);
+                return Ok(ToolResult {
+                    success: false,
+                    output: String::new(),
+                    error: Some(format!("team runtime rejected creation: {e}")),
+                });
+            }
+        };
 
         if let Some(svc) = crate::services::try_get_services() {
             svc.team_memory_sync
@@ -129,7 +139,8 @@ impl Tool for TeamCreateTool {
             output: json!({
                 "team_id": id,
                 "name": name,
-                "member_count": members.len(),
+                "member_count": members.len().saturating_sub(rejected.len()),
+                "rejected_members": rejected,
             })
             .to_string(),
             error: None,

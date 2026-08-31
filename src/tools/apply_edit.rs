@@ -129,7 +129,7 @@ impl Tool for ApplyEditTool {
             }
         };
 
-        crate::session::record_observed_for_current_session(&full_path);
+        crate::session::record_read_for_current_session(&full_path);
 
         let Some(refiner) = crate::apply_model::fast_apply::runtime_ladder_refiner() else {
             return Ok(Self::err(

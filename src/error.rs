@@ -506,6 +506,12 @@ pub enum RegistryError {
     #[error("agent '{0}' is not available for task assignment (state: {1})")]
     AgentNotAvailable(String, String),
 
+    #[error("registry limit exceeded: max_agents={0}")]
+    MaxAgentsLimit(usize),
+
+    #[error("registry capability '{0}' limit {1} exceeded")]
+    CapabilityLimit(String, usize),
+
     #[error("agent '{agent_id}' not in expected state: expected {expected}, found {found}")]
     StateMismatch {
         agent_id: String,
@@ -544,6 +550,18 @@ pub enum TaskQueueError {
 
     #[error("queue capacity exceeded")]
     CapacityExceeded,
+
+    #[error(
+        "task '{task_id}' claim is stale: reported by '{reporter}' (attempt {reported_attempt}) \
+         but currently held by '{holder}' (attempt {current_attempt})"
+    )]
+    StaleClaim {
+        task_id: String,
+        reporter: String,
+        reported_attempt: u32,
+        holder: String,
+        current_attempt: u32,
+    },
 }
 
 impl ErrorClassification for SenError {
@@ -667,9 +685,10 @@ impl ErrorClassification for RegistryError {
         match self {
             RegistryError::AlreadyRegistered(_) => ErrorCategory::Storage,
             RegistryError::AgentNotFound(_) => ErrorCategory::NotFound,
-            RegistryError::AgentNotAvailable(_, _) | RegistryError::StateMismatch { .. } => {
-                ErrorCategory::Validation
-            }
+            RegistryError::AgentNotAvailable(_, _)
+            | RegistryError::StateMismatch { .. }
+            | RegistryError::MaxAgentsLimit(_)
+            | RegistryError::CapabilityLimit(_, _) => ErrorCategory::Validation,
         }
     }
 }
@@ -678,9 +697,9 @@ impl ErrorClassification for TaskQueueError {
     fn category(&self) -> ErrorCategory {
         match self {
             TaskQueueError::TaskNotFound(_) => ErrorCategory::NotFound,
-            TaskQueueError::StatusMismatch { .. } | TaskQueueError::NotRunning(_) => {
-                ErrorCategory::Validation
-            }
+            TaskQueueError::StatusMismatch { .. }
+            | TaskQueueError::NotRunning(_)
+            | TaskQueueError::StaleClaim { .. } => ErrorCategory::Validation,
             TaskQueueError::CapacityExceeded => ErrorCategory::Internal,
         }
     }

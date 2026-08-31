@@ -4,6 +4,9 @@
 
 use super::super::edit_history::EditHistory;
 use super::super::traits::{Tool, ToolResult};
+use super::eol::{
+    adapt_replacement_eol, adapt_text_to_eol, dominant_eol, find_eol_insensitive_spans, EolSpan,
+};
 use crate::apply_model::{EditBatch, EditOp, EditOrigin, OpsApplier};
 use crate::security::SecurityPolicy;
 use async_trait::async_trait;
@@ -68,69 +71,12 @@ async fn fresh_mtime_note(path: &std::path::Path) -> String {
     }
 }
 
-fn dominant_eol(content: &str) -> &'static str {
-    let crlf = content.matches("\r\n").count();
-    let total_lf = content.matches('\n').count();
-    let bare_lf = total_lf.saturating_sub(crlf);
-    if crlf > bare_lf { "\r\n" } else { "\n" }
-}
-
-fn adapt_text_to_eol(text: &str, eol: &str) -> String {
-    let lf = text.replace("\r\n", "\n");
-    if eol == "\r\n" {
-        lf.replace('\n', "\r\n")
-    } else {
-        lf
+fn offset_spans(mut spans: Vec<EolSpan>, base: usize) -> Vec<EolSpan> {
+    for span in &mut spans {
+        span.start += base;
+        span.end += base;
     }
-}
-
-fn find_eol_insensitive_unique(content: &str, old_string: &str) -> Option<(usize, usize, bool)> {
-    if !content.contains('\r') && !old_string.contains('\r') {
-        return None;
-    }
-    let old_lf = old_string.replace("\r\n", "\n");
-    if old_lf.is_empty() {
-        return None;
-    }
-
-    let bytes = content.as_bytes();
-    let mut normalized: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut offsets: Vec<usize> = Vec::with_capacity(bytes.len());
-    let mut i = 0usize;
-    while i < bytes.len() {
-        if bytes[i] == b'\r' && i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-            offsets.push(i);
-            normalized.push(b'\n');
-            i += 2;
-        } else {
-            offsets.push(i);
-            normalized.push(bytes[i]);
-            i += 1;
-        }
-    }
-
-    let finder = Finder::new(old_lf.as_bytes());
-    let mut matches = finder.find_iter(&normalized);
-    let first = matches.next()?;
-    if matches.next().is_some() {
-        return None;
-    }
-
-    let norm_end = first + old_lf.len();
-    let orig_start = offsets[first];
-    let last_norm_idx = norm_end - 1;
-    let last_orig_idx = offsets[last_norm_idx];
-    let last_width = if bytes[last_orig_idx] == b'\r'
-        && last_orig_idx + 1 < bytes.len()
-        && bytes[last_orig_idx + 1] == b'\n'
-    {
-        2
-    } else {
-        1
-    };
-    let orig_end = last_orig_idx + last_width;
-    let span_had_crlf = content[orig_start..orig_end].contains("\r\n");
-    Some((orig_start, orig_end, span_had_crlf))
+    spans
 }
 
 impl FileEditTool {
@@ -414,7 +360,8 @@ impl Tool for FileEditTool {
                 error: Some(format!(
                     "Refusing to edit '{}': this session has not read the file yet. \
                      Use file_read on it first (the edit needs to be based on the file's \
-                     CURRENT contents), then retry the edit.",
+                     CURRENT contents), then retry the edit. A compacted/Signatures view does \
+                     not count: use level=default, paging large files with offset/limit.",
                     resolved_target.display()
                 )),
             });
@@ -709,21 +656,28 @@ impl FileEditTool {
         }
 
         if hits.is_empty() {
-            if !replace_all && scope_name.is_none() {
-                if let Some((span_start, span_end, span_had_crlf)) =
-                    find_eol_insensitive_unique(&content, old_string)
-                {
-                    let adapted_new = if span_had_crlf {
-                        new_string.replace("\r\n", "\n").replace('\n', "\r\n")
-                    } else {
-                        new_string.replace("\r\n", "\n")
-                    };
-                    let mut out = String::with_capacity(
-                        content.len() + adapted_new.len(),
-                    );
-                    out.push_str(&content[..span_start]);
-                    out.push_str(&adapted_new);
-                    out.push_str(&content[span_end..]);
+            let eol_spans = offset_spans(
+                find_eol_insensitive_spans(
+                    &content[search_range.clone()],
+                    old_string,
+                    usize::MAX,
+                ),
+                search_range.start,
+            );
+            if !eol_spans.is_empty() {
+                if replace_all {
+                    let mut out = String::with_capacity(content.len() + new_string.len());
+                    let mut cursor = 0usize;
+                    for span in &eol_spans {
+                        out.push_str(&content[cursor..span.start]);
+                        out.push_str(&super::eol::adapt_new_text_for_span(
+                            new_string,
+                            span.had_crlf,
+                        ));
+                        cursor = span.end;
+                    }
+                    out.push_str(&content[cursor..]);
+                    let count = eol_spans.len();
                     return match self
                         .dispatch_full_file_rewrite_encoded(
                             resolved_target,
@@ -734,18 +688,18 @@ impl FileEditTool {
                         .await
                     {
                         Ok(()) => {
-                            let base_line = locate_line(&content, span_start).0;
+                            let base_line = locate_line(&content, eol_spans[0].start).0;
                             let diff = self.generate_diff(
                                 display_path,
-                                &content[span_start..span_end],
-                                &adapted_new,
+                                old_string,
+                                new_string,
                                 base_line,
                             );
                             Ok(ToolResult {
                                 success: true,
                                 output: format!(
-                                    "Edited {display_path}: replaced 1 occurrence(s) \
-                                     [auto-recovered a CRLF/LF line-ending mismatch between old_string and the file; the replacement uses the file's original line endings]{}\n{diff}",
+                                    "Edited {display_path}: replaced {count} occurrence(s) \
+                                     [auto-recovered a CRLF/LF line-ending mismatch between old_string and the file; replacements use the file's original line endings]{}\n{diff}",
                                     fresh_mtime_note(resolved_target).await
                                 ),
                                 error: None,
@@ -758,6 +712,85 @@ impl FileEditTool {
                         }),
                     };
                 }
+                let chosen: Option<EolSpan> = if eol_spans.len() == 1 {
+                    Some(eol_spans[0])
+                } else if let Some(anchor_line) =
+                    args.get("near_line").and_then(|v| v.as_u64())
+                {
+                    eol_spans.iter().copied().min_by_key(|span| {
+                        let (line_no, _) = locate_line(&content, span.start);
+                        (line_no as i64 - anchor_line as i64).unsigned_abs()
+                    })
+                } else {
+                    None
+                };
+                let Some(span) = chosen else {
+                    let mut msg = format!(
+                        "old_string matches {} times after line-ending normalization (the \
+                         file's CRLF/LF differs from your old_string; that difference is \
+                         handled automatically). Showing first {} hit locations:\n",
+                        eol_spans.len(),
+                        eol_spans.len().min(3)
+                    );
+                    for span in eol_spans.iter().take(3) {
+                        let (line_no, line) = locate_line(&content, span.start);
+                        msg.push_str(&format!("  - line {line_no} : {line}\n"));
+                    }
+                    msg.push_str(
+                        "Use exact, longer old_string (include surrounding lines) to \
+                         disambiguate, or pass near_line=<line number> to anchor the intended \
+                         match.",
+                    );
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(msg),
+                    });
+                };
+                let adapted_new =
+                    super::eol::adapt_new_text_for_span(new_string, span.had_crlf);
+                let mut out = String::with_capacity(content.len() + adapted_new.len());
+                out.push_str(&content[..span.start]);
+                out.push_str(&adapted_new);
+                out.push_str(&content[span.end..]);
+                let eol_note = if eol_spans.len() > 1 {
+                    " [disambiguated by near_line: nearest match selected]"
+                } else {
+                    ""
+                };
+                return match self
+                    .dispatch_full_file_rewrite_encoded(
+                        resolved_target,
+                        &content,
+                        &out,
+                        encoding_label.clone(),
+                    )
+                    .await
+                {
+                    Ok(()) => {
+                        let base_line = locate_line(&content, span.start).0;
+                        let diff = self.generate_diff(
+                            display_path,
+                            &content[span.start..span.end],
+                            &adapted_new,
+                            base_line,
+                        );
+                        Ok(ToolResult {
+                            success: true,
+                            output: format!(
+                                "Edited {display_path}: replaced 1 occurrence(s) \
+                                 [auto-recovered a CRLF/LF line-ending mismatch between old_string and the file; the replacement uses the file's original line endings]{eol_note}{}\n{diff}",
+                                fresh_mtime_note(resolved_target).await
+                            ),
+                            error: None,
+                        })
+                    }
+                    Err(e) => Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!("Failed to write file: {e}")),
+                    }),
+                };
             }
             if !replace_all && scope_name.is_none() {
                 if let Some((ws_start, ws_end, adjusted_new)) =
@@ -881,6 +914,9 @@ impl FileEditTool {
                 error: Some(msg),
             });
         }
+
+        let adapted_exact = adapt_replacement_eol(old_string, new_string, dominant_eol(&content));
+        let new_string = adapted_exact.as_str();
 
         if !replace_all && encoding_label.is_none() {
             let pos = hits[0];
@@ -1055,19 +1091,38 @@ impl FileEditTool {
             }
         }
 
+        let mut insert_pos: Option<usize> = None;
         if hits.is_empty() {
-            let had_read = crate::session::has_read_in_current_session(resolved_target);
-            let error = super::match_diagnostics::failure_message(
-                &content,
-                pattern,
-                display_path,
-                had_read,
-            );
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(error),
-            });
+            let eol_spans = find_eol_insensitive_spans(&content, pattern, usize::MAX);
+            match eol_spans.len() {
+                0 => {
+                    let had_read =
+                        crate::session::has_read_in_current_session(resolved_target);
+                    let error = super::match_diagnostics::failure_message(
+                        &content,
+                        pattern,
+                        display_path,
+                        had_read,
+                    );
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(error),
+                    });
+                }
+                1 => {
+                    insert_pos = Some(eol_spans[0].end);
+                }
+                n => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "Pattern matches {n} times after line-ending normalization; must match exactly once. Include more surrounding lines to disambiguate."
+                        )),
+                    });
+                }
+            }
         }
 
         if hits.len() > 1 {
@@ -1081,8 +1136,10 @@ impl FileEditTool {
             });
         }
 
-        let pos = hits[0];
-        let insert_pos = pos + pattern.len();
+        let insert_pos = insert_pos.unwrap_or_else(|| hits[0] + pattern.len());
+        let new_string =
+            adapt_replacement_eol(pattern, new_string, dominant_eol(&content));
+        let new_string = new_string.as_str();
         let new_content = format!("{}{}{}", &content[..insert_pos], new_string, &content[insert_pos..]);
 
         match self
@@ -1138,19 +1195,38 @@ impl FileEditTool {
             }
         }
 
+        let mut insert_pos: Option<usize> = None;
         if hits.is_empty() {
-            let had_read = crate::session::has_read_in_current_session(resolved_target);
-            let error = super::match_diagnostics::failure_message(
-                &content,
-                pattern,
-                display_path,
-                had_read,
-            );
-            return Ok(ToolResult {
-                success: false,
-                output: String::new(),
-                error: Some(error),
-            });
+            let eol_spans = find_eol_insensitive_spans(&content, pattern, usize::MAX);
+            match eol_spans.len() {
+                0 => {
+                    let had_read =
+                        crate::session::has_read_in_current_session(resolved_target);
+                    let error = super::match_diagnostics::failure_message(
+                        &content,
+                        pattern,
+                        display_path,
+                        had_read,
+                    );
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(error),
+                    });
+                }
+                1 => {
+                    insert_pos = Some(eol_spans[0].start);
+                }
+                n => {
+                    return Ok(ToolResult {
+                        success: false,
+                        output: String::new(),
+                        error: Some(format!(
+                            "Pattern matches {n} times after line-ending normalization; must match exactly once. Include more surrounding lines to disambiguate."
+                        )),
+                    });
+                }
+            }
         }
 
         if hits.len() > 1 {
@@ -1164,7 +1240,10 @@ impl FileEditTool {
             });
         }
 
-        let pos = hits[0];
+        let pos = insert_pos.unwrap_or_else(|| hits[0]);
+        let new_string =
+            adapt_replacement_eol(pattern, new_string, dominant_eol(&content));
+        let new_string = new_string.as_str();
         let new_content = format!("{}{}{}", &content[..pos], new_string, &content[pos..]);
 
         match self

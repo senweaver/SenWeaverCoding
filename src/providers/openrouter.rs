@@ -762,7 +762,7 @@ impl OpenRouterProvider {
     fn http_client(&self) -> Client {
         crate::services::require_services()
             .proxy_runtime()
-            .build_client_with_timeouts_and_headers(
+            .build_llm_chat_client(
                 "provider.openrouter",
                 self.timeout_secs,
                 OPENROUTER_CONNECT_TIMEOUT_SECS,

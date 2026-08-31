@@ -382,15 +382,25 @@ impl Verifier for TestRunnerVerifier {
                 })
             }
             ParserKind::StderrTail => {
-                let summary = if stderr.len() > self.config.stderr_tail_chars {
-                    let start = crate::util::ceil_char_boundary(
-                        &stderr,
-                        stderr.len() - self.config.stderr_tail_chars,
-                    );
-                    format!("label={label} ...{}", &stderr[start..])
-                } else {
-                    format!("label={label} {stderr}")
+                let tail_of = |text: &str| -> String {
+                    if text.len() > self.config.stderr_tail_chars {
+                        let start = crate::util::ceil_char_boundary(
+                            text,
+                            text.len() - self.config.stderr_tail_chars,
+                        );
+                        format!("...{}", &text[start..])
+                    } else {
+                        text.to_string()
+                    }
                 };
+                let diagnostics = if stderr.trim().is_empty() && !stdout.trim().is_empty() {
+                    tail_of(&stdout)
+                } else if !stderr.trim().is_empty() && !stdout.trim().is_empty() && !exit_ok {
+                    format!("{}\n{}", tail_of(&stderr), tail_of(&stdout))
+                } else {
+                    tail_of(&stderr)
+                };
+                let summary = format!("label={label} {diagnostics}");
                 Ok(if exit_ok {
                     VerificationReport {
                         verifier: self.name(),
@@ -404,7 +414,11 @@ impl Verifier for TestRunnerVerifier {
                         vec![VerificationIssue {
                             line: 0,
                             column: 0,
-                            message: format!("{program} exited with {}", output.status),
+                            message: format!(
+                                "{program} exited with {}: {}",
+                                output.status,
+                                crate::util::truncate_with_ellipsis(&diagnostics, 2_000)
+                            ),
                             severity: IssueSeverity::Error,
                         }],
                         summary,

@@ -309,6 +309,8 @@ pub struct Agent {
     >,
 
     last_turn_resumed: bool,
+
+    gateway_synced_user_messages: std::sync::atomic::AtomicU64,
 }
 
 pub struct AgentBuilder {
@@ -703,6 +705,7 @@ impl AgentBuilder {
             unfinished_task: std::sync::Mutex::new(None),
             pending_intent_decision: std::sync::Mutex::new(None),
             last_turn_resumed: false,
+            gateway_synced_user_messages: std::sync::atomic::AtomicU64::new(0),
         })
     }
 
@@ -1605,7 +1608,7 @@ impl Agent {
         match guard.take() {
             Some((msg, stashed_at, decision))
                 if msg == user_message
-                    || stashed_at.elapsed() < PENDING_DECISION_FRESH_WINDOW =>
+                    && stashed_at.elapsed() < PENDING_DECISION_FRESH_WINDOW =>
             {
                 Some(decision)
             }
@@ -1715,6 +1718,16 @@ impl Agent {
         self.history.clear();
     }
 
+    pub fn gateway_sync_marker(&self) -> u64 {
+        self.gateway_synced_user_messages
+            .load(std::sync::atomic::Ordering::Relaxed)
+    }
+
+    pub fn set_gateway_sync_marker(&self, count: u64) {
+        self.gateway_synced_user_messages
+            .store(count, std::sync::atomic::Ordering::Relaxed);
+    }
+
     pub fn set_mode_tool_filter(&mut self, filter: Option<std::collections::HashSet<String>>) {
 
         self.mode_tool_filter = filter;
@@ -1736,6 +1749,17 @@ impl Agent {
 
         if let Some(prev_mode) = prev {
             if prev_mode != mode {
+                self.history.retain(|entry| match entry {
+                    ConversationMessage::Chat(msg) => {
+                        if msg.role != "system" {
+                            return true;
+                        }
+                        let trimmed = msg.content.trim_start();
+                        !(trimmed.starts_with("[Mode Switch]")
+                            || trimmed.starts_with("[Plan-Mode Reset]"))
+                    }
+                    _ => true,
+                });
                 let contract = mode.system_prompt_injection();
                 let body = format!(
                     "[Mode Switch] Now operating in {} mode.\n{}",

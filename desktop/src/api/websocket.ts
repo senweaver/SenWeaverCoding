@@ -19,6 +19,20 @@ const PENDING_MAX_BYTES = 262_144
 const MAX_CONCURRENT_CONNECTIONS = 32
 const HANDLER_ERROR_NOTIFY_THROTTLE_MS = 10_000
 
+const USER_OUTBOX_MAX_ENTRIES = 50
+const USER_OUTBOX_STORAGE_MAX_BYTES = 524_288
+const USER_OUTBOX_STORAGE_PREFIX = 'sen.userOutbox.'
+
+const FRAME_WORKER_PARSE_MIN_BYTES = 262_144
+const FRAME_QUEUE_MAX = 2048
+const FRAME_PARSE_TIMEOUT_MS = 10_000
+
+type OutboxEntry = {
+  clientMsgId: string
+  serialized: string
+  enqueuedAt: number
+}
+
 const CRITICAL_MESSAGE_TYPES = new Set<string>([
   'user_message',
   'stop_generation',
@@ -51,18 +65,26 @@ function encodeWebSocketToken(token: string): string {
   return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
 }
 
-function messageByteLength(message: ClientMessage): number {
+function serializeMessage(message: ClientMessage): string | null {
   try {
-    return JSON.stringify(message).length
+    return JSON.stringify(message)
   } catch {
-    return 0
+    return null
   }
 }
 
 type ConnectionState = 'idle' | 'connecting' | 'open' | 'closed' | 'abandoned'
 
+type FrameJob = {
+  raw: string
+  done: boolean
+  ok: boolean
+  msg?: ServerMessage
+}
+
 type PendingEntry = {
   message: ClientMessage
+  serialized: string
   bytes: number
   critical: boolean
   enqueuedAt: number
@@ -88,6 +110,7 @@ type Connection = {
   lastHandlerErrorNotifyAt: number
   lastServerSeq: number
   lastSeqGapNotifyAt: number
+  frameQueue: FrameJob[]
 }
 
 class WebSocketManager {
@@ -95,6 +118,316 @@ class WebSocketManager {
   private connectListeners = new Set<ConnectListener>()
   private runtimeConfigResolvers = new Map<string, (success: boolean) => void>()
   private preRegisteredHandlers = new Map<string, Set<MessageHandler>>()
+  private userOutbox = new Map<string, Map<string, OutboxEntry>>()
+  private userOutboxLoaded = new Set<string>()
+  private frameWorker: Worker | null = null
+  private frameWorkerFailed = false
+  private nextFrameRequestId = 1
+  private framePending = new Map<
+    number,
+    {
+      job: FrameJob
+      sessionId: string
+      conn: Connection
+      timer: ReturnType<typeof setTimeout>
+    }
+  >()
+
+  private parseFrameJobSync(job: FrameJob) {
+    try {
+      job.msg = JSON.parse(job.raw) as ServerMessage
+      job.ok = true
+    } catch {
+      job.ok = false
+    }
+    job.done = true
+  }
+
+  private ensureFrameWorker(): Worker | null {
+    if (this.frameWorkerFailed) return null
+    if (this.frameWorker) return this.frameWorker
+    try {
+      this.frameWorker = new Worker(
+        new URL('../workers/frameParse.worker.ts', import.meta.url),
+        { type: 'module' },
+      )
+      this.frameWorker.onmessage = (
+        event: MessageEvent<{ id: number; ok: boolean; result?: ServerMessage }>,
+      ) => {
+        const { id, ok, result } = event.data
+        const entry = this.framePending.get(id)
+        if (!entry) return
+        this.framePending.delete(id)
+        clearTimeout(entry.timer)
+        if (ok && result !== undefined) {
+          entry.job.msg = result
+          entry.job.ok = true
+          entry.job.done = true
+        } else {
+          this.parseFrameJobSync(entry.job)
+        }
+        this.drainFrameQueue(entry.sessionId, entry.conn)
+      }
+      this.frameWorker.onerror = () => {
+        this.frameWorkerFailed = true
+        const failed = this.frameWorker
+        this.frameWorker = null
+        try {
+          failed?.terminate()
+        } catch (err) {
+          console.warn('[wsManager] frame worker terminate failed', err)
+        }
+        this.settlePendingFrameJobsSync()
+      }
+    } catch {
+      this.frameWorkerFailed = true
+      this.frameWorker = null
+    }
+    return this.frameWorker
+  }
+
+  private settlePendingFrameJobsSync() {
+    const entries = [...this.framePending.values()]
+    this.framePending.clear()
+    for (const entry of entries) {
+      clearTimeout(entry.timer)
+      if (!entry.job.done) this.parseFrameJobSync(entry.job)
+    }
+    for (const entry of entries) {
+      this.drainFrameQueue(entry.sessionId, entry.conn)
+    }
+  }
+
+  private requestFrameParse(sessionId: string, conn: Connection, job: FrameJob): boolean {
+    const worker = this.ensureFrameWorker()
+    if (!worker) return false
+    const id = this.nextFrameRequestId++
+    const timer = setTimeout(() => {
+      const entry = this.framePending.get(id)
+      if (!entry) return
+      this.framePending.delete(id)
+      console.warn('[wsManager] frame parse worker timed out; falling back to sync parse')
+      const stalled = this.frameWorker
+      this.frameWorker = null
+      try {
+        stalled?.terminate()
+      } catch (err) {
+        console.warn('[wsManager] stalled frame worker terminate failed', err)
+      }
+      if (!entry.job.done) this.parseFrameJobSync(entry.job)
+      this.drainFrameQueue(entry.sessionId, entry.conn)
+      this.settlePendingFrameJobsSync()
+    }, FRAME_PARSE_TIMEOUT_MS)
+    this.framePending.set(id, { job, sessionId, conn, timer })
+    try {
+      worker.postMessage({ id, raw: job.raw })
+      return true
+    } catch (err) {
+      console.warn('[wsManager] frame worker postMessage failed', err)
+      this.framePending.delete(id)
+      clearTimeout(timer)
+      return false
+    }
+  }
+
+  private drainFrameQueue(sessionId: string, conn: Connection) {
+    while (conn.frameQueue.length > 0 && conn.frameQueue[0]?.done) {
+      const job = conn.frameQueue.shift()
+      if (!job) break
+      if (!job.ok) {
+        conn.parseFailures++
+        console.warn(
+          `[wsManager] ws message parse failure (session=${sessionId}, total=${conn.parseFailures})`,
+        )
+        continue
+      }
+      this.deliverFrame(sessionId, conn, job.msg as ServerMessage)
+    }
+  }
+
+  private deliverFrame(sessionId: string, conn: Connection, msg: ServerMessage) {
+    if (
+      typeof msg !== 'object' ||
+      msg === null ||
+      typeof (msg as { type?: unknown }).type !== 'string'
+    ) {
+      conn.parseFailures++
+      console.warn(
+        `[wsManager] ws message failed shape validation (session=${sessionId}, total=${conn.parseFailures})`,
+      )
+      return
+    }
+    const msgType = (msg as { type?: string }).type
+    const frameSeq = (msg as { seq?: unknown }).seq
+    if (typeof frameSeq === 'number' && Number.isFinite(frameSeq)) {
+      if (conn.lastServerSeq > 0 && frameSeq > conn.lastServerSeq + 1) {
+        const missed = frameSeq - conn.lastServerSeq - 1
+        console.warn(
+          `[wsManager] frame sequence gap (session=${sessionId}, missed=${missed})`,
+        )
+        const now = Date.now()
+        if (now - conn.lastSeqGapNotifyAt > HANDLER_ERROR_NOTIFY_THROTTLE_MS) {
+          conn.lastSeqGapNotifyAt = now
+          this.broadcastSystemNotification(
+            sessionId,
+            'ws_frame_gap',
+            'Frame sequence gap detected; client state may be out of sync.',
+            { missed },
+          )
+        }
+      }
+      if (frameSeq > conn.lastServerSeq) {
+        conn.lastServerSeq = frameSeq
+      }
+    }
+    if (msgType === 'pong') {
+      conn.lastPongAt = Date.now()
+      return
+    }
+    let handlerFailed = false
+    for (const handler of conn.handlers) {
+      try {
+        handler(msg)
+      } catch (err) {
+        handlerFailed = true
+        console.warn(`[wsManager] handler threw for session ${sessionId}`, err)
+      }
+    }
+    if (handlerFailed && msgType !== 'system_notification') {
+      const now = Date.now()
+      if (now - conn.lastHandlerErrorNotifyAt > HANDLER_ERROR_NOTIFY_THROTTLE_MS) {
+        conn.lastHandlerErrorNotifyAt = now
+        this.broadcastSystemNotification(
+          sessionId,
+          'ws_handler_error',
+          'A message handler failed; client state may be out of sync.',
+          { messageType: msgType },
+        )
+      }
+    }
+  }
+
+  private outboxFor(sessionId: string): Map<string, OutboxEntry> {
+    if (!this.userOutboxLoaded.has(sessionId)) {
+      this.userOutboxLoaded.add(sessionId)
+      try {
+        const raw = sessionStorage.getItem(`${USER_OUTBOX_STORAGE_PREFIX}${sessionId}`)
+        if (raw) {
+          const parsed = JSON.parse(raw) as OutboxEntry[]
+          if (Array.isArray(parsed)) {
+            const restored = new Map<string, OutboxEntry>()
+            for (const entry of parsed) {
+              if (
+                entry &&
+                typeof entry.clientMsgId === 'string' &&
+                typeof entry.serialized === 'string'
+              ) {
+                restored.set(entry.clientMsgId, {
+                  clientMsgId: entry.clientMsgId,
+                  serialized: entry.serialized,
+                  enqueuedAt:
+                    typeof entry.enqueuedAt === 'number' ? entry.enqueuedAt : Date.now(),
+                })
+              }
+            }
+            if (restored.size > 0) {
+              const existing = this.userOutbox.get(sessionId)
+              if (existing) {
+                for (const [key, value] of restored) {
+                  if (!existing.has(key)) existing.set(key, value)
+                }
+              } else {
+                this.userOutbox.set(sessionId, restored)
+              }
+            }
+          }
+        }
+      } catch (err) {
+        console.warn('[wsManager] user outbox restore failed', err)
+      }
+    }
+    let box = this.userOutbox.get(sessionId)
+    if (!box) {
+      box = new Map()
+      this.userOutbox.set(sessionId, box)
+    }
+    return box
+  }
+
+  private persistOutbox(sessionId: string) {
+    try {
+      const box = this.userOutbox.get(sessionId)
+      const key = `${USER_OUTBOX_STORAGE_PREFIX}${sessionId}`
+      if (!box || box.size === 0) {
+        sessionStorage.removeItem(key)
+        return
+      }
+      const entries = [...box.values()]
+        .filter((e) => e.serialized.length <= USER_OUTBOX_STORAGE_MAX_BYTES)
+        .sort((a, b) => a.enqueuedAt - b.enqueuedAt)
+      if (entries.length === 0) {
+        sessionStorage.removeItem(key)
+        return
+      }
+      sessionStorage.setItem(key, JSON.stringify(entries))
+    } catch (err) {
+      console.warn('[wsManager] user outbox persist failed', err)
+    }
+  }
+
+  private registerUserMessage(sessionId: string, message: ClientMessage) {
+    const clientMsgId = (message as { clientMsgId?: unknown }).clientMsgId
+    if (typeof clientMsgId !== 'string' || clientMsgId.length === 0) return
+    const serialized = serializeMessage(message)
+    if (serialized === null) return
+    const box = this.outboxFor(sessionId)
+    box.set(clientMsgId, { clientMsgId, serialized, enqueuedAt: Date.now() })
+    while (box.size > USER_OUTBOX_MAX_ENTRIES) {
+      const oldest = [...box.values()].sort((a, b) => a.enqueuedAt - b.enqueuedAt)[0]
+      if (!oldest) break
+      box.delete(oldest.clientMsgId)
+      console.warn(
+        `[wsManager] user outbox overflow; dropping oldest clientMsgId=${oldest.clientMsgId} session=${sessionId}`,
+      )
+    }
+    this.persistOutbox(sessionId)
+  }
+
+  confirmUserMessage(sessionId: string, clientMsgId: string) {
+    const box = this.outboxFor(sessionId)
+    if (box.delete(clientMsgId)) {
+      this.persistOutbox(sessionId)
+    }
+  }
+
+  retryUserMessage(sessionId: string, clientMsgId: string) {
+    const entry = this.outboxFor(sessionId).get(clientMsgId)
+    if (!entry) return
+    const conn = this.connections.get(sessionId)
+    if (conn && conn.ws.readyState === WebSocket.OPEN) {
+      try {
+        conn.ws.send(entry.serialized)
+        return
+      } catch (err) {
+        console.warn('[wsManager] retryUserMessage send failed', err)
+      }
+    }
+    this.connect(sessionId, { force: this.isAbandoned(sessionId) })
+  }
+
+  private resendUserOutbox(sessionId: string, conn: Connection) {
+    const box = this.outboxFor(sessionId)
+    if (box.size === 0) return
+    const entries = [...box.values()].sort((a, b) => a.enqueuedAt - b.enqueuedAt)
+    for (const entry of entries) {
+      try {
+        conn.ws.send(entry.serialized)
+      } catch (err) {
+        console.warn('[wsManager] user outbox resend failed', err)
+        break
+      }
+    }
+  }
 
   notifyRuntimeConfigUpdated(sessionId: string, requestId: string, success = true) {
     const key = `${sessionId}\u0000${requestId}`
@@ -251,6 +584,7 @@ class WebSocketManager {
       console.warn('[wsManager] WebSocket constructor threw', err)
       const placeholder = existing ?? this.createEmptyConnection()
       placeholder.state = 'closed'
+      placeholder.intentionalClose = false
       this.connections.set(sessionId, placeholder)
       this.scheduleReconnect(sessionId, placeholder)
       return
@@ -284,6 +618,7 @@ class WebSocketManager {
       lastHandlerErrorNotifyAt: 0,
       lastServerSeq: 0,
       lastSeqGapNotifyAt: 0,
+      frameQueue: [],
     }
     this.connections.set(sessionId, conn)
 
@@ -311,83 +646,34 @@ class WebSocketManager {
       this.startPongWatcher(sessionId, conn)
       this.notifyConnected(sessionId)
       this.flushPendingMessages(conn)
+      this.resendUserOutbox(sessionId, conn)
     }
 
     ws.onmessage = (event) => {
       conn.lastActivityAt = Date.now()
-      let msg: ServerMessage
-      try {
-        msg = JSON.parse(event.data as string) as ServerMessage
-      } catch (err) {
+      const raw = event.data
+      if (typeof raw !== 'string') {
         conn.parseFailures++
         console.warn(
-          `[wsManager] ws message parse failure (session=${sessionId}, total=${conn.parseFailures})`,
-          err,
+          `[wsManager] non-text ws frame ignored (session=${sessionId}, total=${conn.parseFailures})`,
         )
         return
+      }
+      const job: FrameJob = { raw, done: false, ok: false }
+      conn.frameQueue.push(job)
+      if (conn.frameQueue.length > FRAME_QUEUE_MAX) {
+        for (const stalled of conn.frameQueue) {
+          if (!stalled.done) this.parseFrameJobSync(stalled)
+        }
       }
       if (
-        typeof msg !== 'object' ||
-        msg === null ||
-        typeof (msg as { type?: unknown }).type !== 'string'
+        job.done ||
+        raw.length < FRAME_WORKER_PARSE_MIN_BYTES ||
+        !this.requestFrameParse(sessionId, conn, job)
       ) {
-        conn.parseFailures++
-        console.warn(
-          `[wsManager] ws message failed shape validation (session=${sessionId}, total=${conn.parseFailures})`,
-        )
-        return
+        if (!job.done) this.parseFrameJobSync(job)
       }
-      const msgType = (msg as { type?: string }).type
-      const frameSeq = (msg as { seq?: unknown }).seq
-      if (typeof frameSeq === 'number' && Number.isFinite(frameSeq)) {
-        if (
-          conn.lastServerSeq > 0 &&
-          frameSeq > conn.lastServerSeq + 1
-        ) {
-          const missed = frameSeq - conn.lastServerSeq - 1
-          console.warn(
-            `[wsManager] frame sequence gap (session=${sessionId}, missed=${missed})`,
-          )
-          const now = Date.now()
-          if (now - conn.lastSeqGapNotifyAt > HANDLER_ERROR_NOTIFY_THROTTLE_MS) {
-            conn.lastSeqGapNotifyAt = now
-            this.broadcastSystemNotification(
-              sessionId,
-              'ws_frame_gap',
-              'Frame sequence gap detected; client state may be out of sync.',
-              { missed },
-            )
-          }
-        }
-        if (frameSeq > conn.lastServerSeq) {
-          conn.lastServerSeq = frameSeq
-        }
-      }
-      if (msgType === 'pong') {
-        conn.lastPongAt = Date.now()
-        return
-      }
-      let handlerFailed = false
-      for (const handler of conn.handlers) {
-        try {
-          handler(msg)
-        } catch (err) {
-          handlerFailed = true
-          console.warn(`[wsManager] handler threw for session ${sessionId}`, err)
-        }
-      }
-      if (handlerFailed && msgType !== 'system_notification') {
-        const now = Date.now()
-        if (now - conn.lastHandlerErrorNotifyAt > HANDLER_ERROR_NOTIFY_THROTTLE_MS) {
-          conn.lastHandlerErrorNotifyAt = now
-          this.broadcastSystemNotification(
-            sessionId,
-            'ws_handler_error',
-            'A message handler failed; client state may be out of sync.',
-            { messageType: msgType },
-          )
-        }
-      }
+      this.drainFrameQueue(sessionId, conn)
     }
 
     ws.onclose = (event) => {
@@ -439,6 +725,7 @@ class WebSocketManager {
       lastHandlerErrorNotifyAt: 0,
       lastServerSeq: 0,
       lastSeqGapNotifyAt: 0,
+      frameQueue: [],
     }
   }
 
@@ -447,7 +734,7 @@ class WebSocketManager {
       const entry = conn.pendingMessages.shift()!
       conn.pendingBytes = Math.max(0, conn.pendingBytes - entry.bytes)
       try {
-        conn.ws.send(JSON.stringify(entry.message))
+        conn.ws.send(entry.serialized)
       } catch (err) {
         console.warn('[wsManager] flush send failed', err)
         conn.pendingMessages.unshift(entry)
@@ -487,6 +774,7 @@ class WebSocketManager {
     }
     conn.pendingMessages = []
     conn.pendingBytes = 0
+    conn.frameQueue = []
     conn.state = 'closed'
 
     try {
@@ -512,6 +800,13 @@ class WebSocketManager {
   }
 
   send(sessionId: string, message: ClientMessage) {
+    const isTrackedUserMessage =
+      (message as { type?: string }).type === 'user_message' &&
+      typeof (message as { clientMsgId?: unknown }).clientMsgId === 'string'
+    if (isTrackedUserMessage) {
+      this.registerUserMessage(sessionId, message)
+    }
+
     let conn = this.connections.get(sessionId)
     if (!conn) {
       this.connect(sessionId)
@@ -527,16 +822,35 @@ class WebSocketManager {
     }
 
     if (conn.ws.readyState === WebSocket.OPEN) {
+      if (conn.pendingMessages.length > 0) {
+        this.flushPendingMessages(conn)
+      }
       try {
         conn.ws.send(JSON.stringify(message))
       } catch (err) {
         console.warn('[wsManager] send threw, queueing', err)
-        this.enqueuePending(sessionId, conn, message)
+        if (!isTrackedUserMessage) {
+          this.enqueuePending(sessionId, conn, message)
+        }
       }
       return
     }
 
-    this.enqueuePending(sessionId, conn, message)
+    if ((message as { type?: string }).type === 'ping') {
+      if (
+        (conn.ws.readyState === WebSocket.CLOSED ||
+          conn.ws.readyState === WebSocket.CLOSING) &&
+        !conn.intentionalClose &&
+        !conn.reconnectTimer
+      ) {
+        this.scheduleReconnect(sessionId, conn)
+      }
+      return
+    }
+
+    if (!isTrackedUserMessage) {
+      this.enqueuePending(sessionId, conn, message)
+    }
 
     if (
       conn.ws.readyState === WebSocket.CLOSED ||
@@ -549,10 +863,18 @@ class WebSocketManager {
   }
 
   private enqueuePending(sessionId: string, conn: Connection, message: ClientMessage) {
-    const bytes = messageByteLength(message)
+    const serialized = serializeMessage(message)
+    if (serialized === null) {
+      console.warn(
+        `[wsManager] dropping unserializable message type=${(message as { type?: string }).type} session=${sessionId}`,
+      )
+      return
+    }
+    const bytes = serialized.length
     const critical = isCriticalMessage(message)
     const entry: PendingEntry = {
       message,
+      serialized,
       bytes,
       critical,
       enqueuedAt: Date.now(),
@@ -693,8 +1015,8 @@ class WebSocketManager {
     )
 
     conn.reconnectTimer = setTimeout(() => {
+      conn.reconnectTimer = null
       if (this.connections.get(sessionId) === conn && !conn.intentionalClose) {
-        conn.reconnectTimer = null
         this.connect(sessionId)
       }
     }, delay)

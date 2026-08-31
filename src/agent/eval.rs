@@ -38,7 +38,7 @@ const REASONING_KEYWORDS: &[&str] = &[
 
 pub fn estimate_complexity(message: &str) -> ComplexityTier {
     let lower = message.to_lowercase();
-    let len = message.len();
+    let len = message.chars().count();
 
     let keyword_count = REASONING_KEYWORDS
         .iter()

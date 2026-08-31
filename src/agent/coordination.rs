@@ -17,15 +17,18 @@ use tracing::{debug, info, trace, warn};
 use super::registry::AgentId;
 use crate::observability::coordination_metrics::{self, LockAcquireOutcome};
 
-fn path_escapes_session_workspace(path: &Path) -> bool {
-    let root = match crate::session::current_session_context() {
-        Some(ctx) if !ctx.workspace_dir.trim().is_empty() => PathBuf::from(&ctx.workspace_dir),
-        _ => return false,
-    };
-    if root.as_os_str().is_empty() {
+fn current_session_workspace_root() -> Option<PathBuf> {
+    crate::session::current_session_context()
+        .filter(|ctx| !ctx.workspace_dir.trim().is_empty())
+        .map(|ctx| PathBuf::from(&ctx.workspace_dir))
+        .filter(|root| !root.as_os_str().is_empty())
+}
+
+fn path_escapes_workspace_root(path: &Path, root: Option<&Path>) -> bool {
+    let Some(root) = root else {
         return false;
-    }
-    let norm_root = crate::util::normalize_path_for_containment(&root);
+    };
+    let norm_root = crate::util::normalize_path_for_containment(root);
     let candidate = if path.is_absolute() {
         path.to_path_buf()
     } else {
@@ -363,7 +366,7 @@ impl LockManager {
         {
             let mut locks = self.locks.write();
 
-            if let Some(existing) = locks.get(resource) {
+            if let Some(existing) = locks.get_mut(resource) {
                 if existing.is_expired() {
                     debug!(
                         resource = %resource,
@@ -372,6 +375,8 @@ impl LockManager {
                     );
                     denied_owner = None;
                 } else if existing.owner == agent_id {
+                    existing.acquired_at = Instant::now();
+                    existing.ttl = ttl;
                     return LockResult::AlreadyHeld;
                 } else {
                     denied_owner = Some(existing.owner.clone());
@@ -541,15 +546,18 @@ impl LockManager {
         let mgr = Arc::clone(self);
         let path_for_err = path.clone();
         let range_for_err = range.clone();
-        tokio::task::spawn_blocking(move || mgr.acquire_region(&path, range, &agent_id, opts))
-            .await
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "acquire_region_async join failed");
-                Err(LockError::Timeout {
-                    path: path_for_err,
-                    range: range_for_err,
-                })
+        let workspace_root = current_session_workspace_root();
+        tokio::task::spawn_blocking(move || {
+            mgr.acquire_region_with_root(&path, range, &agent_id, opts, workspace_root.as_deref())
+        })
+        .await
+        .unwrap_or_else(|e| {
+            tracing::error!(error = %e, "acquire_region_async join failed");
+            Err(LockError::Timeout {
+                path: path_for_err,
+                range: range_for_err,
             })
+        })
     }
 
     pub async fn acquire_region_shared_async(
@@ -562,8 +570,15 @@ impl LockManager {
         let mgr = Arc::clone(self);
         let path_for_err = path.clone();
         let range_for_err = range.clone();
+        let workspace_root = current_session_workspace_root();
         tokio::task::spawn_blocking(move || {
-            mgr.acquire_region_shared(&path, range, &agent_id, opts)
+            mgr.acquire_region_shared_with_root(
+                &path,
+                range,
+                &agent_id,
+                opts,
+                workspace_root.as_deref(),
+            )
         })
         .await
         .unwrap_or_else(|e| {
@@ -582,11 +597,23 @@ impl LockManager {
         agent_id: &str,
         opts: AcquireOpts,
     ) -> Result<RegionLockToken, LockError> {
+        let root = current_session_workspace_root();
+        self.acquire_region_with_root(path, range, agent_id, opts, root.as_deref())
+    }
+
+    fn acquire_region_with_root(
+        self: &Arc<Self>,
+        path: &Path,
+        range: Range<usize>,
+        agent_id: &str,
+        opts: AcquireOpts,
+        workspace_root: Option<&Path>,
+    ) -> Result<RegionLockToken, LockError> {
         if path.as_os_str().is_empty() {
             coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Conflict);
             return Err(LockError::WorkspaceEscape);
         }
-        if path_escapes_session_workspace(path) {
+        if path_escapes_workspace_root(path, workspace_root) {
             coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Conflict);
             return Err(LockError::WorkspaceEscape);
         }
@@ -705,11 +732,23 @@ impl LockManager {
         agent_id: &str,
         opts: AcquireOpts,
     ) -> Result<RegionLockToken, LockError> {
+        let root = current_session_workspace_root();
+        self.acquire_region_shared_with_root(path, range, agent_id, opts, root.as_deref())
+    }
+
+    fn acquire_region_shared_with_root(
+        self: &Arc<Self>,
+        path: &Path,
+        range: Range<usize>,
+        agent_id: &str,
+        opts: AcquireOpts,
+        workspace_root: Option<&Path>,
+    ) -> Result<RegionLockToken, LockError> {
         if path.as_os_str().is_empty() {
             coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Conflict);
             return Err(LockError::WorkspaceEscape);
         }
-        if path_escapes_session_workspace(path) {
+        if path_escapes_workspace_root(path, workspace_root) {
             coordination_metrics::incr_lockmgr_acquire(LockAcquireOutcome::Conflict);
             return Err(LockError::WorkspaceEscape);
         }
@@ -815,12 +854,36 @@ impl LockManager {
         agent_id: &str,
         opts: AcquireOpts,
     ) -> Result<RegionLockTokens, LockError> {
+        let mut ordered: Vec<&RegionRequest> = specs.iter().collect();
+        ordered.sort_by(|a, b| {
+            a.path
+                .cmp(&b.path)
+                .then_with(|| a.range.start.cmp(&b.range.start))
+                .then_with(|| a.range.end.cmp(&b.range.end))
+        });
+        let overall_deadline = if opts.wait_timeout.is_zero() {
+            None
+        } else {
+            Some(Instant::now() + opts.wait_timeout)
+        };
         let mut acquired: Vec<RegionLockToken> = Vec::with_capacity(specs.len());
-        for spec in specs {
+        for spec in ordered {
+            let mut spec_opts = opts;
+            if let Some(deadline) = overall_deadline {
+                let remaining = deadline.saturating_duration_since(Instant::now());
+                if remaining.is_zero() {
+                    drop(acquired);
+                    return Err(LockError::Timeout {
+                        path: spec.path.clone(),
+                        range: spec.range.clone(),
+                    });
+                }
+                spec_opts.wait_timeout = remaining;
+            }
             let token_result = if spec.exclusive {
-                self.acquire_region(&spec.path, spec.range.clone(), agent_id, opts)
+                self.acquire_region(&spec.path, spec.range.clone(), agent_id, spec_opts)
             } else {
-                self.acquire_region_shared(&spec.path, spec.range.clone(), agent_id, opts)
+                self.acquire_region_shared(&spec.path, spec.range.clone(), agent_id, spec_opts)
             };
             match token_result {
                 Ok(tok) => acquired.push(tok),
@@ -965,9 +1028,9 @@ impl LockManager {
 
     fn add_wait_edge(&self, requester: &str, blocker: &str) {
         let mut g = self.wait_graph.write();
-        g.entry(requester.to_string())
-            .or_default()
-            .insert(blocker.to_string());
+        let edges = g.entry(requester.to_string()).or_default();
+        edges.clear();
+        edges.insert(blocker.to_string());
     }
 
     fn clear_wait_edges(&self, requester: &str) {
@@ -1094,6 +1157,18 @@ impl BarrierManager {
             if barrier.created_at.elapsed() >= barrier.timeout {
                 barriers.remove(barrier_name);
                 return BarrierResult::TimedOut;
+            }
+
+            if !barrier.expected.contains(agent_id) {
+                debug!(
+                    barrier = %barrier_name,
+                    agent = %agent_id,
+                    "ignoring arrival from an agent outside the barrier's expected set"
+                );
+                return BarrierResult::Waiting {
+                    arrived: barrier.arrived.len(),
+                    expected: barrier.expected.len(),
+                };
             }
 
             barrier.arrived.insert(agent_id.to_string());
@@ -1230,6 +1305,10 @@ impl VotingManager {
         timeout: Duration,
         majority: f64,
     ) {
+        let mut eligible = eligible;
+        if eligible.is_empty() {
+            eligible.insert(initiator.to_string());
+        }
         let mut sessions = self.sessions.write();
         sessions.insert(
             session_id.to_string(),

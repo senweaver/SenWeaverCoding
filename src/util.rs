@@ -561,29 +561,65 @@ pub fn atomic_replace_file(
 }
 
 #[cfg(windows)]
+fn to_extended_length_wide(path: &std::path::Path) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    let raw = path.as_os_str().to_string_lossy();
+    if raw.starts_with(r"\\?\") || raw.starts_with(r"\\.\") || !path.is_absolute() {
+        return path.as_os_str().encode_wide().chain(Some(0)).collect();
+    }
+    let backslashed = raw.replace('/', "\\");
+    let prefixed = if let Some(unc) = backslashed.strip_prefix(r"\\") {
+        format!(r"\\?\UNC\{unc}")
+    } else {
+        format!(r"\\?\{backslashed}")
+    };
+    std::ffi::OsString::from(prefixed)
+        .encode_wide()
+        .chain(Some(0))
+        .collect()
+}
+
+#[cfg(windows)]
+fn windows_move_with_retry(
+    source: &std::path::Path,
+    target: &std::path::Path,
+    flags: u32,
+) -> std::io::Result<()> {
+    use windows_sys::Win32::Storage::FileSystem::MoveFileExW;
+    const RETRY_DELAYS_MS: &[u64] = &[10, 25, 50, 120];
+    let source_wide = to_extended_length_wide(source);
+    let target_wide = to_extended_length_wide(target);
+    let mut attempt = 0usize;
+    loop {
+        let result =
+            unsafe { MoveFileExW(source_wide.as_ptr(), target_wide.as_ptr(), flags) };
+        if result != 0 {
+            return Ok(());
+        }
+        let err = std::io::Error::last_os_error();
+        let code = err.raw_os_error().unwrap_or(0);
+        let transient_share_conflict = matches!(code, 5 | 32 | 33);
+        if !transient_share_conflict || attempt >= RETRY_DELAYS_MS.len() {
+            return Err(err);
+        }
+        std::thread::sleep(std::time::Duration::from_millis(RETRY_DELAYS_MS[attempt]));
+        attempt += 1;
+    }
+}
+
+#[cfg(windows)]
 pub fn atomic_replace_file(
     source: &std::path::Path,
     target: &std::path::Path,
 ) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
     use windows_sys::Win32::Storage::FileSystem::{
-        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+        MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
     };
-
-    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
-    let result = unsafe {
-        MoveFileExW(
-            source_wide.as_ptr(),
-            target_wide.as_ptr(),
-            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
-        )
-    };
-    if result == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    windows_move_with_retry(
+        source,
+        target,
+        MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+    )
 }
 
 pub fn atomic_write_new(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
@@ -633,18 +669,8 @@ pub fn atomic_move_no_replace(
     source: &std::path::Path,
     target: &std::path::Path,
 ) -> std::io::Result<()> {
-    use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::Storage::FileSystem::{MOVEFILE_WRITE_THROUGH, MoveFileExW};
-
-    let source_wide: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
-    let target_wide: Vec<u16> = target.as_os_str().encode_wide().chain(Some(0)).collect();
-    let result =
-        unsafe { MoveFileExW(source_wide.as_ptr(), target_wide.as_ptr(), MOVEFILE_WRITE_THROUGH) };
-    if result == 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
+    use windows_sys::Win32::Storage::FileSystem::MOVEFILE_WRITE_THROUGH;
+    windows_move_with_retry(source, target, MOVEFILE_WRITE_THROUGH)
 }
 
 #[cfg(any(target_os = "linux", target_os = "android"))]

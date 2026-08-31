@@ -433,6 +433,89 @@ impl ProxyRuntime {
         c
     }
 
+    pub fn build_llm_chat_client(
+        &self,
+        service_key: &str,
+        inactivity_timeout_secs: u64,
+        connect_timeout_secs: u64,
+        headers: &HashMap<String, String>,
+    ) -> reqwest::Client {
+        const LLM_CHAT_READ_TIMEOUT_FLOOR_SECS: u64 = 600;
+        crate::services::proxy::registry::register(service_key);
+        let read_timeout_secs = inactivity_timeout_secs.max(LLM_CHAT_READ_TIMEOUT_FLOOR_SECS);
+
+        let headers_fp = {
+            use std::hash::{Hash, Hasher};
+            let mut pairs: Vec<(&String, &String)> = headers.iter().collect();
+            pairs.sort_by(|a, b| a.0.cmp(b.0));
+            let mut hasher = std::collections::hash_map::DefaultHasher::new();
+            for (k, v) in pairs {
+                k.hash(&mut hasher);
+                v.hash(&mut hasher);
+            }
+            hasher.finish()
+        };
+        let ck = format!(
+            "{}|chat|hdr{:x}|{}",
+            cache_key(service_key, Some(read_timeout_secs), Some(connect_timeout_secs)),
+            headers_fp,
+            self.proxy_fingerprint(service_key)
+        );
+        if let Some(c) = self.cached_client(&ck) {
+            return c;
+        }
+
+        let mut header_map = reqwest::header::HeaderMap::with_capacity(headers.len());
+        for (key, value) in headers {
+            let trimmed_key = key.trim();
+            if trimmed_key.is_empty() {
+                continue;
+            }
+            if is_disallowed_custom_header(trimmed_key) {
+                tracing::warn!(
+                    service_key,
+                    header_name = trimmed_key,
+                    "skipping reserved/disallowed custom HTTP header when building HTTP client"
+                );
+                continue;
+            }
+            match (
+                reqwest::header::HeaderName::from_bytes(trimmed_key.as_bytes()),
+                reqwest::header::HeaderValue::from_str(value),
+            ) {
+                (Ok(name), Ok(val)) => {
+                    header_map.insert(name, val);
+                }
+                _ => {
+                    tracing::warn!(
+                        service_key,
+                        header_name = trimmed_key,
+                        "skipping invalid custom HTTP header name or value when building HTTP client"
+                    );
+                }
+            }
+        }
+
+        let builder = reqwest::Client::builder()
+            .read_timeout(std::time::Duration::from_secs(read_timeout_secs))
+            .connect_timeout(std::time::Duration::from_secs(connect_timeout_secs))
+            .pool_idle_timeout(std::time::Duration::from_secs(30))
+            .tcp_keepalive(std::time::Duration::from_secs(30))
+            .default_headers(header_map);
+        let builder = self.apply_to_builder(builder, service_key);
+        let c = builder.build().unwrap_or_else(|e| {
+            self.client_build_fallback(
+                service_key,
+                &e,
+                Some(read_timeout_secs),
+                Some(connect_timeout_secs),
+                false,
+            )
+        });
+        self.set_cached_client(ck, c.clone());
+        c
+    }
+
     pub fn build_stream_client(
         &self,
         service_key: &str,

@@ -118,7 +118,18 @@ pub fn repair_partial_tool_input_json(raw: &str) -> Option<String> {
         }
     }
 
+    let allowed_drop = (trimmed.len() / 50).max(64);
     for &pos in comma_positions.iter().rev().take(32) {
+        let dropped = trimmed.len() - pos;
+        if dropped > allowed_drop {
+            tracing::warn!(
+                dropped_bytes = dropped,
+                allowed_drop,
+                total_len = trimmed.len(),
+                "refusing comma-truncation repair of tool-call arguments: it would silently discard too much argument tail; failing closed instead"
+            );
+            break;
+        }
         if let Some(repaired) = close_open_json_structures(&trimmed[..pos]) {
             return Some(repaired);
         }
@@ -337,7 +348,7 @@ pub fn normalize_chat_messages_for_provider_ext(
     let cleaned = clean_empty_assistant_tool_calls_in_chat_messages(mirrored);
     let non_empty = drop_payloadless_assistant_messages(cleaned);
     let reasoning_normalized = match kind {
-        ProviderKind::Anthropic => non_empty,
+        ProviderKind::Anthropic => normalize_reasoning_envelopes_for_anthropic(non_empty),
         _ => {
             if consumes_reasoning_envelope {
                 promote_reasoning_only_assistants_for_openai(non_empty)
@@ -587,6 +598,187 @@ pub fn flatten_reasoning_envelopes_for_wire(messages: Vec<ChatMessage>) -> Vec<C
             flattened,
             dropped,
             "flattened reasoning envelopes to plain content for a wire that does not consume them (prevents raw JSON leak)"
+        );
+    }
+    out
+}
+
+const ANTHROPIC_NATIVE_BLOCK_TYPES: &[&str] = &[
+    "text",
+    "thinking",
+    "redacted_thinking",
+    "tool_use",
+    "tool_result",
+    "image",
+];
+
+fn set_signed_thinking_metadata(msg: &mut ChatMessage, thinking: &str, signature: &str) {
+    msg.metadata.insert(
+        "reasoning_content".to_string(),
+        Value::String(thinking.to_string()),
+    );
+    msg.metadata.insert(
+        "thinking_signature".to_string(),
+        Value::String(signature.to_string()),
+    );
+}
+
+pub fn normalize_reasoning_envelopes_for_anthropic(
+    messages: Vec<ChatMessage>,
+) -> Vec<ChatMessage> {
+    let mut out: Vec<ChatMessage> = Vec::with_capacity(messages.len());
+    let mut normalized: usize = 0;
+    let mut dropped: usize = 0;
+
+    for mut msg in messages {
+        if msg.role != "assistant" {
+            out.push(msg);
+            continue;
+        }
+        let trimmed = msg.content.trim_start();
+        if trimmed.starts_with('{') {
+            let Ok(Value::Object(obj)) = serde_json::from_str::<Value>(trimmed) else {
+                out.push(msg);
+                continue;
+            };
+            let is_envelope = !obj.is_empty()
+                && obj.keys().all(|key| {
+                    matches!(
+                        key.as_str(),
+                        "content" | "tool_calls" | "reasoning_content" | "thinking_signature"
+                    )
+                });
+            if !is_envelope || envelope_has_tool_calls(Some(&obj)) {
+                out.push(msg);
+                continue;
+            }
+            let content_text = obj
+                .get("content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let reasoning = obj
+                .get("reasoning_content")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            let signature = obj
+                .get("thinking_signature")
+                .and_then(Value::as_str)
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+            match (reasoning, signature) {
+                (Some(thinking), Some(sig)) => {
+                    set_signed_thinking_metadata(&mut msg, &thinking, &sig);
+                    msg.content = content_text.unwrap_or_default();
+                    normalized += 1;
+                    out.push(msg);
+                }
+                (reasoning, _) => match content_text.or(reasoning) {
+                    Some(text) => {
+                        msg.content = text;
+                        normalized += 1;
+                        out.push(msg);
+                    }
+                    None => {
+                        dropped += 1;
+                    }
+                },
+            }
+            continue;
+        }
+        if trimmed.starts_with('[') {
+            let Ok(Value::Array(items)) = serde_json::from_str::<Value>(trimmed) else {
+                out.push(msg);
+                continue;
+            };
+            let all_known_blocks = !items.is_empty()
+                && items.iter().all(|item| {
+                    item.get("type")
+                        .and_then(Value::as_str)
+                        .is_some_and(|t| ANTHROPIC_NATIVE_BLOCK_TYPES.contains(&t))
+                });
+            let has_tool_use = items
+                .iter()
+                .any(|item| item.get("type").and_then(Value::as_str) == Some("tool_use"));
+            let has_renderable = items.iter().any(|item| {
+                matches!(
+                    item.get("type").and_then(Value::as_str),
+                    Some("text") | Some("thinking")
+                )
+            });
+            if !all_known_blocks || has_tool_use || !has_renderable {
+                out.push(msg);
+                continue;
+            }
+            let mut text_parts: Vec<String> = Vec::new();
+            let mut signed_thinking: Option<(String, String)> = None;
+            let mut unsigned_thinking: Vec<String> = Vec::new();
+            for item in &items {
+                match item.get("type").and_then(Value::as_str) {
+                    Some("text") => {
+                        if let Some(text) = item
+                            .get("text")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty())
+                        {
+                            text_parts.push(text.to_string());
+                        }
+                    }
+                    Some("thinking") => {
+                        let thinking = item
+                            .get("thinking")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+                        let signature = item
+                            .get("signature")
+                            .and_then(Value::as_str)
+                            .map(str::trim)
+                            .filter(|s| !s.is_empty());
+                        match (thinking, signature) {
+                            (Some(t), Some(s)) if signed_thinking.is_none() => {
+                                signed_thinking = Some((t.to_string(), s.to_string()));
+                            }
+                            (Some(t), _) => unsigned_thinking.push(t.to_string()),
+                            _ => {}
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let joined_text = text_parts.join("\n");
+            if let Some((thinking, sig)) = signed_thinking {
+                set_signed_thinking_metadata(&mut msg, &thinking, &sig);
+                msg.content = joined_text;
+                normalized += 1;
+                out.push(msg);
+            } else if !joined_text.is_empty() {
+                msg.content = joined_text;
+                normalized += 1;
+                out.push(msg);
+            } else if let Some(first) = unsigned_thinking.into_iter().next() {
+                msg.content = first;
+                normalized += 1;
+                out.push(msg);
+            } else {
+                dropped += 1;
+            }
+            continue;
+        }
+        out.push(msg);
+    }
+
+    if normalized > 0 || dropped > 0 {
+        tracing::warn!(
+            target: "providers.sanitize",
+            normalized,
+            dropped,
+            "normalized reasoning envelopes / native block blobs for the Anthropic wire (prevents raw JSON leaking into assistant text)"
         );
     }
     out

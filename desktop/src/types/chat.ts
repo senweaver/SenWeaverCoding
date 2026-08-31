@@ -13,6 +13,7 @@ export type ClientMessage =
       content: string
       attachments?: AttachmentRef[]
       displayContent?: string
+      clientMsgId?: string
     }
   | {
       type: 'permission_response'
@@ -81,6 +82,7 @@ export type ServerMessage = ServerMessagePayload & { seq?: number }
 
 type ServerMessagePayload =
   | { type: 'connected'; sessionId: string }
+  | { type: 'user_message_ack'; clientMsgId: string; sessionId?: string }
   | { type: 'content_start'; blockType: 'text' | 'tool_use'; toolName?: string; toolUseId?: string; parentToolUseId?: string }
   | { type: 'content_delta'; text?: string }
   | { type: 'content_reset' }
@@ -303,10 +305,12 @@ export type TaskSummaryItem = {
 export type UIMessageCommon = {
 
   superseded?: boolean
+
+  rawId?: string
 }
 
 export type UIMessage =
-  | (UIMessageCommon & { id: string; type: 'user_text'; content: string; timestamp: number; attachments?: UIAttachment[]; pending?: boolean; userMessageIndex?: number; designRef?: string; designRefName?: string; designRefElement?: string; designRefElementLabel?: string })
+  | (UIMessageCommon & { id: string; type: 'user_text'; content: string; timestamp: number; attachments?: UIAttachment[]; pending?: boolean; clientMsgId?: string; userMessageIndex?: number; designRef?: string; designRefName?: string; designRefElement?: string; designRefElementLabel?: string })
   | (UIMessageCommon & { id: string; type: 'assistant_text'; content: string; timestamp: number; model?: string })
   | (UIMessageCommon & {
       id: string

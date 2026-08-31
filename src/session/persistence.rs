@@ -37,6 +37,26 @@ enum SessionLogMsg {
     Snapshot(Box<SessionState>),
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct SnapshotEnvelope {
+    absorbed: u64,
+    absorbed_hash: String,
+    state: SessionState,
+}
+
+enum SnapshotFailure {
+    Recoverable(std::io::Error),
+    Fatal(std::io::Error),
+}
+
+impl SnapshotFailure {
+    fn error(&self) -> &std::io::Error {
+        match self {
+            Self::Recoverable(e) | Self::Fatal(e) => e,
+        }
+    }
+}
+
 pub struct SessionEventLog {
     root: PathBuf,
     id: SessionId,
@@ -242,40 +262,18 @@ impl SessionEventLog {
         })?;
         match tx.try_send(SessionLogMsg::Append(evt.clone())) {
             Ok(()) => {}
-            Err(mpsc::TrySendError::Full(msg)) => {
+            Err(mpsc::TrySendError::Full(_)) => {
                 self.write_degraded.store(true, Ordering::Relaxed);
                 let failures = self.write_failures.fetch_add(1, Ordering::Relaxed) + 1;
                 tracing::warn!(
                     session_id = %self.id,
                     total_failures = failures,
-                    "session event log write queue full; applying bounded backpressure (ordered)"
+                    "session event log write queue full; deferring event to the ordered replay buffer instead of blocking"
                 );
-                const EMERGENCY_BUDGET: Duration = Duration::from_secs(5);
-                const EMERGENCY_STEP: Duration = Duration::from_millis(20);
-                let deadline = std::time::Instant::now() + EMERGENCY_BUDGET;
-                let mut pending = msg;
-                loop {
-                    match tx.try_send(pending) {
-                        Ok(()) => break,
-                        Err(mpsc::TrySendError::Full(m)) => {
-                            if std::time::Instant::now() >= deadline {
-                                return Err(std::io::Error::new(
-                                    std::io::ErrorKind::WouldBlock,
-                                    "session event log write queue still full after backpressure budget; \
-                                     event dropped rather than written out of order",
-                                ));
-                            }
-                            pending = m;
-                            std::thread::sleep(EMERGENCY_STEP);
-                        }
-                        Err(mpsc::TrySendError::Disconnected(_)) => {
-                            return Err(std::io::Error::new(
-                                std::io::ErrorKind::BrokenPipe,
-                                "session event log writer thread is gone",
-                            ));
-                        }
-                    }
-                }
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::WouldBlock,
+                    "session event log write queue full; event deferred to the ordered replay buffer",
+                ));
             }
             Err(mpsc::TrySendError::Disconnected(_)) => {
                 return Err(std::io::Error::new(
@@ -336,10 +334,14 @@ impl SessionEventLog {
         let mut snapshot_corrupt = false;
         let mut state: Option<SessionState> = None;
 
+        let mut envelope_marker: Option<(u64, Option<u64>)> = None;
         if snap_path.exists() {
             match std::fs::read(&snap_path) {
-                Ok(raw) => match serde_json::from_slice::<SessionState>(&raw) {
-                    Ok(parsed) => state = Some(parsed),
+                Ok(raw) => match parse_snapshot_payload(&raw) {
+                    Ok((parsed, marker)) => {
+                        state = Some(parsed);
+                        envelope_marker = marker;
+                    }
                     Err(err) => {
                         snapshot_corrupt = true;
                         let ts = chrono::Utc::now().format("%Y%m%d%H%M%S");
@@ -392,7 +394,19 @@ impl SessionEventLog {
             let (skip, expected_hash) = if snapshot_corrupt {
                 (0, None)
             } else {
-                read_absorbed_marker(&self.root)
+                let mut chosen: (u64, Option<u64>) = (0, None);
+                let file_marker = read_absorbed_marker(&self.root);
+                for candidate in [envelope_marker, Some(file_marker)].into_iter().flatten() {
+                    let (skip, hash) = candidate;
+                    if skip == 0 {
+                        continue;
+                    }
+                    if absorbed_prefix_matches(&events_path, skip, hash).unwrap_or(false) {
+                        chosen = (skip, hash);
+                        break;
+                    }
+                }
+                chosen
             };
             apply_event_file_skipping(&events_path, id, &mut working, skip, expected_hash)?;
             recovered_any = true;
@@ -401,6 +415,49 @@ impl SessionEventLog {
         Ok(if recovered_any { Some(working) } else { None })
     }
 
+}
+
+fn absorbed_prefix_matches(
+    path: &Path,
+    skip: u64,
+    expected_hash: Option<u64>,
+) -> std::io::Result<bool> {
+    use std::hash::Hasher as _;
+    if skip == 0 {
+        return Ok(true);
+    }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    let mut seen = 0u64;
+    for line in BufReader::new(File::open(path)?).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        hash_line(&mut hasher, &line);
+        seen += 1;
+        if seen == skip {
+            break;
+        }
+    }
+    if seen < skip {
+        return Ok(false);
+    }
+    match expected_hash {
+        Some(expected) => Ok(hasher.finish() == expected),
+        None => Ok(true),
+    }
+}
+
+fn parse_snapshot_payload(
+    raw: &[u8],
+) -> Result<(SessionState, Option<(u64, Option<u64>)>), serde_json::Error> {
+    match serde_json::from_slice::<SnapshotEnvelope>(raw) {
+        Ok(envelope) => {
+            let hash = u64::from_str_radix(&envelope.absorbed_hash, 16).ok();
+            Ok((envelope.state, Some((envelope.absorbed, hash))))
+        }
+        Err(_) => serde_json::from_slice::<SessionState>(raw).map(|state| (state, None)),
+    }
 }
 
 fn apply_event_file(
@@ -581,15 +638,24 @@ fn session_writer_loop(
                             dirty = false;
                             session_write_mode_metrics::incr_session_snapshot_written();
                         }
-                        Err(e) => {
+                        Err(failure) => {
                             batch_failed = true;
                             let failures = write_failures.fetch_add(1, Ordering::Relaxed) + 1;
                             write_degraded.store(true, Ordering::Relaxed);
                             tracing::error!(
-                                error = %e,
+                                error = %failure.error(),
                                 total_failures = failures,
                                 "session snapshot write failed; persistence degraded"
                             );
+                            if matches!(failure, SnapshotFailure::Fatal(_)) {
+                                tracing::error!(
+                                    "session writer stopping after fatal snapshot rotation failure; \
+                                     subsequent appends will be buffered by the session actor"
+                                );
+                                let _ = writer.flush();
+                                drop(lock);
+                                return;
+                            }
                         }
                     }
                 }
@@ -694,26 +760,36 @@ fn write_snapshot_to_disk(
     root: &Path,
     writer: &mut BufWriter<File>,
     state: &SessionState,
-) -> std::io::Result<()> {
+) -> Result<(), SnapshotFailure> {
     let active = root.join(EVENTS_FILE);
-    writer.flush()?;
+    writer.flush().map_err(SnapshotFailure::Recoverable)?;
     let (absorbed, absorbed_hash) = count_and_hash_nonempty_lines(&active);
 
     let snap_path = root.join(SNAPSHOT_FILE);
     let tmp_path = root.join(format!("{SNAPSHOT_FILE}.tmp"));
-    let json = serde_json::to_vec(state)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+    let envelope = SnapshotEnvelope {
+        absorbed,
+        absorbed_hash: format!("{absorbed_hash:016x}"),
+        state: state.clone(),
+    };
+    let json = serde_json::to_vec(&envelope).map_err(|e| {
+        SnapshotFailure::Recoverable(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            e.to_string(),
+        ))
+    })?;
     {
         use std::io::Write as _;
         let mut tmp = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
-            .open(&tmp_path)?;
-        tmp.write_all(&json)?;
-        tmp.sync_all()?;
+            .open(&tmp_path)
+            .map_err(SnapshotFailure::Recoverable)?;
+        tmp.write_all(&json).map_err(SnapshotFailure::Recoverable)?;
+        tmp.sync_all().map_err(SnapshotFailure::Recoverable)?;
     }
-    std::fs::rename(&tmp_path, &snap_path)?;
+    std::fs::rename(&tmp_path, &snap_path).map_err(SnapshotFailure::Recoverable)?;
     write_absorbed_marker(root, absorbed, absorbed_hash);
 
     let rotated = root.join(format!("events.{}.jsonl", state.version));
@@ -747,7 +823,7 @@ fn write_snapshot_to_disk(
             .open(&active)
     };
     let (new_file, marker_after_reopen) = if rotation_failed {
-        (open_truncated()?, 0)
+        (open_truncated().map_err(SnapshotFailure::Recoverable)?, 0)
     } else {
         match open_appending() {
             Ok(file) => (file, 0),
@@ -758,20 +834,23 @@ fn write_snapshot_to_disk(
                             error = %open_err,
                             "failed to reopen fresh session event log; rolled the rotation back to keep appends replayable"
                         );
-                        (open_appending()?, absorbed)
+                        (
+                            open_appending().map_err(SnapshotFailure::Fatal)?,
+                            absorbed,
+                        )
                     }
                     Err(rollback_err) => {
                         tracing::error!(
                             error = %open_err,
                             rollback_error = %rollback_err,
                             rotated = %rotated.display(),
-                            "failed to reopen fresh session event log AND failed to roll back rotation; subsequent events will not be replayable"
+                            "failed to reopen fresh session event log AND failed to roll back rotation; stopping the writer so appends fail loudly instead of landing in the rotated file"
                         );
-                        return Err(open_err);
+                        return Err(SnapshotFailure::Fatal(open_err));
                     }
                 }
             }
-            Err(open_err) => return Err(open_err),
+            Err(open_err) => return Err(SnapshotFailure::Recoverable(open_err)),
         }
     };
     *writer = BufWriter::new(new_file);

@@ -47,7 +47,12 @@ impl TelnyxProvider {
     fn build_client(timeout_secs: u64) -> Client {
         crate::services::require_services()
             .proxy_runtime()
-            .build_client_with_timeouts("provider.telnyx", timeout_secs.max(1), 10)
+            .build_llm_chat_client(
+                "provider.telnyx",
+                timeout_secs.max(1),
+                10,
+                &std::collections::HashMap::new(),
+            )
     }
 
     #[must_use]

@@ -474,7 +474,12 @@ impl BedrockProvider {
     fn http_client(&self) -> Client {
         crate::services::require_services()
             .proxy_runtime()
-            .build_client_with_timeouts("provider.bedrock", 120, 10)
+            .build_llm_chat_client(
+                "provider.bedrock",
+                120,
+                10,
+                &std::collections::HashMap::new(),
+            )
     }
 
     fn encode_model_path(model_id: &str) -> String {

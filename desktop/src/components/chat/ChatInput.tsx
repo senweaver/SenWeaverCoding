@@ -83,7 +83,13 @@ const EMPTY_SLASH_COMMANDS: Array<{ name: string; description: string }> = []
 
 export function ChatInput({ variant = 'default', embedded = false, onSubmit, draftWorkDir }: ChatInputProps) {
   const t = useTranslation()
-  const [input, setInput] = useState('')
+  const inputRef = useRef('')
+  const [hasText, setHasText] = useState(false)
+  const setInput = useCallback((value: string) => {
+    inputRef.current = value
+    const nonEmpty = value.trim().length > 0
+    setHasText((prev) => (prev === nonEmpty ? prev : nonEmpty))
+  }, [])
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [designRef, setDesignRef] = useState<string | null>(null)
   const [designRefElement, setDesignRefElement] = useState<
@@ -490,7 +496,7 @@ export function ChatInput({ variant = 'default', embedded = false, onSubmit, dra
   const canSubmit =
     !isWorkspaceMissing &&
     (isMemberSession || hasModel) &&
-    (input.trim().length > 0 || (!isMemberSession && attachments.length > 0))
+    (hasText || (!isMemberSession && attachments.length > 0))
   const actAsStopButton = !isMemberSession && isActive && !canSubmit
   const isHeroComposer = variant === 'hero' && !isMemberSession
   const resolvedWorkDir = activeSession?.workDir || gitInfo?.workDir || draftWorkDir || undefined
@@ -543,7 +549,7 @@ export function ChatInput({ variant = 'default', embedded = false, onSubmit, dra
     }
     if (prev) {
       setComposerDraft(prev, {
-        text: input,
+        text: inputRef.current,
         attachments: attachments.map((att) => ({
           type: att.type,
           name: att.name,
@@ -967,13 +973,13 @@ export function ChatInput({ variant = 'default', embedded = false, onSubmit, dra
   )
 
   const selectSlashCommand = useCallback((command: string) => {
-    const value = composerRef.current?.getValue() ?? input
+    const value = composerRef.current?.getValue() ?? inputRef.current
     const cursorPos = composerRef.current?.getCaret() ?? caretRef.current
     const replacement = replaceSlashToken(value, cursorPos, command)
     composerRef.current?.setValue(replacement.value, replacement.cursorPos)
     composerRef.current?.focus()
     setSlashMenuOpen(false)
-  }, [input])
+  }, [])
 
   const handleSubmit = () => {
     if (isPendingQuestion) {
@@ -981,7 +987,7 @@ export function ChatInput({ variant = 'default', embedded = false, onSubmit, dra
       window.dispatchEvent(new CustomEvent('plan:question:submit'))
       return
     }
-    const text = (composerRef.current?.getValue() ?? input).trim()
+    const text = (composerRef.current?.getValue() ?? inputRef.current).trim()
     if ((!text && (!attachments.length || isMemberSession)) || isWorkspaceMissing) return
 
     if (codingMode === 'designer' && !isMemberSession && activeTabId) {
@@ -1886,7 +1892,7 @@ export function ChatInput({ variant = 'default', embedded = false, onSubmit, dra
             </div>
           )}
 
-          {isHeroComposer && codingMode !== 'designer' && input.trim().length === 0 && promptSuggestions.length > 0 && (
+          {isHeroComposer && codingMode !== 'designer' && !hasText && promptSuggestions.length > 0 && (
             <div className="mb-2 flex flex-wrap gap-1.5">
               {promptSuggestions.map((s) => (
                 <button
@@ -1912,7 +1918,7 @@ export function ChatInput({ variant = 'default', embedded = false, onSubmit, dra
                 dataRole="chat-composer"
                 ariaLabel={composerPlaceholder}
                 placeholder={composerPlaceholder}
-                initialValue={input}
+                initialValue={inputRef.current}
                 disabled={isWorkspaceMissing}
                 onChange={handleComposerChange}
                 onKeyDown={handleKeyDown}
@@ -1930,7 +1936,7 @@ export function ChatInput({ variant = 'default', embedded = false, onSubmit, dra
               dataRole="chat-composer"
               ariaLabel={composerPlaceholder}
               placeholder={composerPlaceholder}
-              initialValue={input}
+              initialValue={inputRef.current}
               disabled={isWorkspaceMissing}
               onChange={handleComposerChange}
               onKeyDown={handleKeyDown}
