@@ -40,8 +40,89 @@ impl Default for AutoTitleConfig {
     }
 }
 
-const TITLE_PROMPT: &str = "Generate a concise title (max 60 chars) for this conversation. \
-Return ONLY the title text, no quotes, no prefix, no explanation.";
+const TITLE_PROMPT: &str = "You write short titles for chat sessions. Given the user's first message and the assistant's reply, \
+produce ONE concise title that names the concrete topic or task. Rules: write the title in the same language the user \
+wrote in (Chinese request => Chinese title, English request => English title); keep it to at most 12 Chinese characters \
+or 6 English words; do not use quotes, brackets, emoji, trailing punctuation, or any prefix such as 'Title:'. \
+Return ONLY the title text.";
+
+const PLACEHOLDER_TITLES: &[&str] = &[
+    "untitled session",
+    "untitled",
+    "new session",
+    "new conversation",
+    "new agent",
+    "新对话",
+    "新智能体",
+    "新建智能体",
+    "未命名会话",
+];
+
+pub fn is_placeholder_title(title: &str) -> bool {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+    let lowered = trimmed.to_lowercase();
+    if PLACEHOLDER_TITLES.iter().any(|p| *p == lowered) {
+        return true;
+    }
+    let bytes = trimmed.as_bytes();
+    trimmed.len() == 13
+        && trimmed.starts_with("Session ")
+        && bytes[8].is_ascii_digit()
+        && bytes[9].is_ascii_digit()
+        && bytes[10] == b':'
+        && bytes[11].is_ascii_digit()
+        && bytes[12].is_ascii_digit()
+}
+
+pub fn provisional_title(content: &str, max_chars: usize) -> Option<String> {
+    for raw in content.lines() {
+        let line = raw.trim();
+        if line.is_empty()
+            || line.starts_with("[IMAGE:")
+            || line.starts_with("[Attached file:")
+            || line.starts_with("[Attached image:")
+        {
+            continue;
+        }
+        let stripped = line
+            .trim_start_matches(|c: char| matches!(c, '#' | '>' | '*' | '-' | '•') || c.is_whitespace())
+            .trim();
+        if stripped.is_empty() {
+            continue;
+        }
+        let collapsed = stripped.split_whitespace().collect::<Vec<_>>().join(" ");
+        let total = collapsed.chars().count();
+        if total <= max_chars {
+            return Some(collapsed);
+        }
+        let mut title: String = collapsed.chars().take(max_chars.max(1)).collect();
+        title.push('…');
+        return Some(title);
+    }
+    None
+}
+
+fn clean_generated_title(raw: &str) -> String {
+    let mut title = raw.trim();
+    for prefix in ["Title:", "title:", "标题：", "标题:"] {
+        if let Some(rest) = title.strip_prefix(prefix) {
+            title = rest.trim();
+        }
+    }
+    let title = title
+        .lines()
+        .map(str::trim)
+        .find(|l| !l.is_empty())
+        .unwrap_or("");
+    title
+        .trim_matches(|c: char| matches!(c, '"' | '\'' | '“' | '”' | '‘' | '’' | '《' | '》' | '「' | '」' | '`' | '*'))
+        .trim_end_matches(|c: char| matches!(c, '.' | '。' | '!' | '！' | '?' | '？' | ',' | '，' | ';' | '；' | ':' | '：'))
+        .trim()
+        .to_string()
+}
 
 pub async fn generate_title(
     provider: &dyn Provider,
@@ -80,9 +161,11 @@ pub async fn generate_title(
 
     match provider.chat(request, model, 0.3).await {
         Ok(response) => {
-            let raw = response.text.as_deref().unwrap_or("").trim().to_string();
-            let title = raw.trim_matches('"').trim_matches('\'').to_string();
-            if title.is_empty() || title.len() > config.max_length * 2 {
+            let title = clean_generated_title(response.text.as_deref().unwrap_or(""));
+            if title.is_empty()
+                || title.len() > config.max_length * 2
+                || is_placeholder_title(&title)
+            {
                 None
             } else {
                 Some(truncate(&title, config.max_length).to_string())

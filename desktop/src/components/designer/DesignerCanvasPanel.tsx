@@ -15,6 +15,7 @@ import {
   deckManifestForPath,
   isDesignArtifactPath,
   isInDesignerSessionDir,
+  unitDisplayName,
   useDesignerCanvasStore,
   type CanvasTweaks,
 } from '../../stores/designerCanvasStore'
@@ -25,6 +26,7 @@ import { useActiveTabWorkDir } from '../../lib/activeWorkDir'
 import { printUnitsMerged } from '../../lib/designerPrint'
 import { DesignArtifactFrame } from './DesignArtifactFrame'
 import { DesignerAddUnitButton } from './DesignerAddUnit'
+import { DesignerDeleteUnitDialog } from './DesignerDeleteUnitDialog'
 
 export function DesignerCanvasPanel() {
   const t = useTranslation()
@@ -58,20 +60,10 @@ export function DesignerCanvasPanel() {
   const [refreshTokens, setRefreshTokens] = useState<Record<string, number>>({})
   const [exporting, setExporting] = useState(false)
   const [printing, setPrinting] = useState(false)
-  const [deleteArmed, setDeleteArmed] = useState(false)
+  const [pendingDeleteUnitId, setPendingDeleteUnitId] = useState<string | null>(null)
 
   useEffect(() => {
-    setDeleteArmed(false)
-  }, [panel?.selectedUnitId])
-
-  useEffect(() => {
-    if (!deleteArmed) return
-    const timer = window.setTimeout(() => setDeleteArmed(false), 3000)
-    return () => window.clearTimeout(timer)
-  }, [deleteArmed])
-
-  useEffect(() => {
-    if (!activeTabId || !panel?.visible) return
+    if (!activeTabId || !panel?.visible || pendingDeleteUnitId) return
     const onKeyDown = (event: KeyboardEvent) => {
       if (event.key !== 'Escape') return
       const target = event.target as HTMLElement | null
@@ -85,7 +77,7 @@ export function DesignerCanvasPanel() {
     }
     window.addEventListener('keydown', onKeyDown)
     return () => window.removeEventListener('keydown', onKeyDown)
-  }, [activeTabId, panel?.visible, selectUnit, setSelectMode])
+  }, [activeTabId, panel?.visible, pendingDeleteUnitId, selectUnit, setSelectMode])
 
   useEffect(() => {
     if (activeTabId) ensure(activeTabId)
@@ -145,6 +137,9 @@ export function DesignerCanvasPanel() {
   const viewport = panel?.viewport ?? { panX: 0, panY: 0, zoom: 0.6 }
   const columnWidth = panel?.columnWidth ?? 640
   const units = panel?.units ?? []
+  const pendingDeleteUnit = pendingDeleteUnitId
+    ? units.find((u) => u.id === pendingDeleteUnitId) ?? null
+    : null
   const selectMode = panel?.selectMode ?? false
   const tweaks = panel?.tweaks ?? {
     accent: null,
@@ -447,39 +442,12 @@ export function DesignerCanvasPanel() {
             onClick={() => {
               const sel = panel?.selectedUnitId
               if (!activeTabId || !sel) return
-              if (!deleteArmed) {
-                setDeleteArmed(true)
-                addToast({
-                  type: 'info',
-                  message: t('designer.canvas.deleteConfirm'),
-                  duration: 3000,
-                })
-                return
-              }
-              setDeleteArmed(false)
-              void removeUnit(activeTabId, sel).then((ok) => {
-                if (!ok) {
-                  addToast({
-                    type: 'error',
-                    message: t('designer.canvas.deleteFailed'),
-                  })
-                }
-              })
+              setPendingDeleteUnitId(sel)
             }}
-            title={
-              deleteArmed
-                ? t('designer.canvas.deleteConfirm')
-                : t('designer.canvas.deleteUnit')
-            }
-            className={`flex h-6 w-6 items-center justify-center rounded disabled:opacity-30 ${
-              deleteArmed
-                ? 'bg-[var(--color-danger)]/15 text-[var(--color-danger)]'
-                : 'text-[var(--color-text-tertiary)] hover:bg-[var(--color-danger)]/12 hover:text-[var(--color-danger)]'
-            }`}
+            title={t('designer.canvas.deleteUnit')}
+            className="flex h-6 w-6 items-center justify-center rounded text-[var(--color-text-tertiary)] hover:bg-[var(--color-danger)]/12 hover:text-[var(--color-danger)] disabled:opacity-30"
           >
-            <span className="material-symbols-outlined text-[16px]">
-              {deleteArmed ? 'delete_forever' : 'delete'}
-            </span>
+            <span className="material-symbols-outlined text-[16px]">delete</span>
           </button>
           <button
             type="button"
@@ -660,6 +628,23 @@ export function DesignerCanvasPanel() {
           </button>
         </div>
       </div>
+      <DesignerDeleteUnitDialog
+        unit={pendingDeleteUnit}
+        onCancel={() => setPendingDeleteUnitId(null)}
+        onConfirm={async (unit) => {
+          if (!activeTabId) return false
+          const ok = await removeUnit(activeTabId, unit.id)
+          if (ok) {
+            setPendingDeleteUnitId(null)
+            addToast({
+              type: 'success',
+              message: t('designer.canvas.deleteDone', { name: unitDisplayName(unit) }),
+              duration: 3000,
+            })
+          }
+          return ok
+        }}
+      />
     </aside>
   )
 }

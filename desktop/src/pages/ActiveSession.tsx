@@ -10,6 +10,7 @@ import { useChatStore } from '../stores/chatStore'
 import { useCLITaskStore } from '../stores/cliTaskStore'
 import { useTeamStore } from '../stores/teamStore'
 import { useTranslation } from '../i18n'
+import { resolveSessionTitle } from '../utils/sessionTitle'
 import { MessageList } from '../components/chat/MessageList'
 import { SectionErrorBoundary } from '../components/layout/SectionErrorBoundary'
 import { ChatInput } from '../components/chat/ChatInput'
@@ -180,7 +181,7 @@ export function ActiveSession() {
             <div className="mx-auto flex w-full max-w-[860px] items-center border-b border-outline-variant/10 px-8 py-3">
               <div className="flex-1">
                 <h1 className="text-lg font-bold font-headline text-on-surface leading-tight">
-                  {session?.title || t('session.untitled')}
+                  {resolveSessionTitle(session?.title, t('session.untitled'))}
                 </h1>
                 <div className="flex items-center gap-2 text-[10px] text-outline font-medium mt-1">
                   {isActive && (

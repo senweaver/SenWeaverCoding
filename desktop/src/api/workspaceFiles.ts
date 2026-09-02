@@ -245,75 +245,135 @@ export const workspaceFilesApi = {
     if (typeof window === 'undefined' || typeof window.EventSource !== 'function') {
       return () => {}
     }
-    const url = withAuthToken(`${getBaseUrl()}/api/workspace/watch${qs({ root })}`)
-    let disposed = false
-    let source: EventSource | null = null
-    let retryTimer: ReturnType<typeof setTimeout> | null = null
-    let retryMs = 1000
-    let hadConnection = false
-
-    const connect = () => {
-      if (disposed) return
-      if (source) {
-        try {
-          source.close()
-        } catch {
-        }
-        source = null
-      }
-      source = new window.EventSource(url, { withCredentials: false })
-      source.onmessage = (msg: MessageEvent) => {
-        try {
-          const data = JSON.parse(msg.data) as WorkspaceWatchEvent
-          if (data && typeof data.relPath === 'string' && typeof data.kind === 'string') {
-            if (typeof data.fromRelPath !== 'string') {
-              delete (data as { fromRelPath?: string }).fromRelPath
-            }
-            onEvent(data)
-          }
-        } catch {
-        }
-      }
-      source.onopen = () => {
-        retryMs = 1000
-        if (hadConnection) {
-          onReconnect?.()
-        }
-        hadConnection = true
-      }
-      source.onerror = (event: Event) => {
-        if (source) {
-          try {
-            source.close()
-          } catch {
-          }
-          source = null
-        }
-        onError?.(event)
-        if (disposed || retryTimer) return
-        retryTimer = setTimeout(() => {
-          retryTimer = null
-          retryMs = Math.min(retryMs * 2, 30_000)
-          connect()
-        }, retryMs)
-      }
-    }
-
-    connect()
-
+    const url = withAuthToken(
+      `${getBaseUrl()}/api/workspace/watch${qs({ root: normalizeWatchRoot(root) })}`,
+    )
+    const subscriber: WatchSubscriber = { onEvent, onError, onReconnect }
+    const channel = acquireWatchChannel(url)
+    channel.subscribers.add(subscriber)
+    let released = false
     return () => {
-      disposed = true
-      if (retryTimer) {
-        clearTimeout(retryTimer)
-        retryTimer = null
-      }
-      if (source) {
-        try {
-          source.close()
-        } catch {
-        }
-        source = null
+      if (released) return
+      released = true
+      channel.subscribers.delete(subscriber)
+      if (channel.subscribers.size === 0) {
+        releaseWatchChannel(url, channel)
       }
     }
   },
+}
+
+type WatchSubscriber = {
+  onEvent: (event: WorkspaceWatchEvent) => void
+  onError?: (err: Event) => void
+  onReconnect?: () => void
+}
+
+type WatchChannel = {
+  subscribers: Set<WatchSubscriber>
+  source: EventSource | null
+  retryTimer: ReturnType<typeof setTimeout> | null
+  retryMs: number
+  hadConnection: boolean
+  disposed: boolean
+}
+
+const watchChannels = new Map<string, WatchChannel>()
+
+function normalizeWatchRoot(root: string): string {
+  const stripped = root.replace(/[\\/]+$/, '')
+  if (!stripped || /^[A-Za-z]:$/.test(stripped)) return root
+  return stripped
+}
+
+function acquireWatchChannel(url: string): WatchChannel {
+  const existing = watchChannels.get(url)
+  if (existing) return existing
+  const channel: WatchChannel = {
+    subscribers: new Set(),
+    source: null,
+    retryTimer: null,
+    retryMs: 1000,
+    hadConnection: false,
+    disposed: false,
+  }
+  watchChannels.set(url, channel)
+  connectWatchChannel(url, channel)
+  return channel
+}
+
+function releaseWatchChannel(url: string, channel: WatchChannel): void {
+  channel.disposed = true
+  if (watchChannels.get(url) === channel) {
+    watchChannels.delete(url)
+  }
+  if (channel.retryTimer) {
+    clearTimeout(channel.retryTimer)
+    channel.retryTimer = null
+  }
+  closeWatchSource(channel)
+}
+
+function closeWatchSource(channel: WatchChannel): void {
+  if (!channel.source) return
+  try {
+    channel.source.close()
+  } catch {
+  }
+  channel.source = null
+}
+
+function connectWatchChannel(url: string, channel: WatchChannel): void {
+  if (channel.disposed) return
+  closeWatchSource(channel)
+  const source = new window.EventSource(url, { withCredentials: false })
+  channel.source = source
+  source.onmessage = (msg: MessageEvent) => {
+    let data: WorkspaceWatchEvent | null = null
+    try {
+      const parsed = JSON.parse(msg.data) as WorkspaceWatchEvent
+      if (parsed && typeof parsed.relPath === 'string' && typeof parsed.kind === 'string') {
+        if (typeof parsed.fromRelPath !== 'string') {
+          delete (parsed as { fromRelPath?: string }).fromRelPath
+        }
+        data = parsed
+      }
+    } catch {
+    }
+    if (!data) return
+    for (const sub of Array.from(channel.subscribers)) {
+      try {
+        sub.onEvent(data)
+      } catch {
+      }
+    }
+  }
+  source.onopen = () => {
+    channel.retryMs = 1000
+    if (channel.hadConnection) {
+      for (const sub of Array.from(channel.subscribers)) {
+        try {
+          sub.onReconnect?.()
+        } catch {
+        }
+      }
+    }
+    channel.hadConnection = true
+  }
+  source.onerror = (event: Event) => {
+    if (channel.source !== source) return
+    closeWatchSource(channel)
+    for (const sub of Array.from(channel.subscribers)) {
+      try {
+        sub.onError?.(event)
+      } catch {
+      }
+    }
+    if (channel.disposed || channel.retryTimer) return
+    channel.retryTimer = setTimeout(() => {
+      channel.retryTimer = null
+      channel.retryMs = Math.min(channel.retryMs * 2, 30_000)
+      connectWatchChannel(url, channel)
+    }, channel.retryMs)
+  }
 }

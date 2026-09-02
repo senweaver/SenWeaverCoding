@@ -89,8 +89,10 @@ import {
   MINIMAL_EVENT_OPEN_SETTINGS,
   MINIMAL_EVENT_STOP,
   MINIMAL_EVENT_SUBMIT,
+  MINIMAL_EVENT_WORKDIR_CHANGE,
 } from '../../lib/minimalMode'
 import type {
+  MinimalActiveSession,
   MinimalComputerProgress,
   MinimalComputerReplay,
   MinimalComputerReply,
@@ -99,7 +101,12 @@ import type {
   MinimalRecorderControl,
   MinimalRecorderProgress,
   MinimalSubmitPayload,
+  MinimalWorkDirChangePayload,
 } from '../../lib/minimalMode'
+import {
+  resolveReplacedSessionIdSettled,
+  switchEmptySessionWorkDir,
+} from '../../lib/sessionWorkDir'
 import { useChatStore } from '../../stores/chatStore'
 import { useSessionRuntimeStore } from '../../stores/sessionRuntimeStore'
 import { useComputerUseStore } from '../../stores/computerUseStore'
@@ -474,15 +481,15 @@ export function AppShell() {
     void (async () => {
       try {
         const { emit } = await import('@tauri-apps/api/event')
-        await emit(
-          MINIMAL_EVENT_ACTIVE_SESSION,
-          forwardable ? { id: activeChatTabId, title: activeChatTitle } : null,
-        )
+        const payload: MinimalActiveSession | null = forwardable
+          ? { id: activeChatTabId, title: activeChatTitle, workDir: activeWorkDir ?? null }
+          : null
+        await emit(MINIMAL_EVENT_ACTIVE_SESSION, payload)
       } catch {
 
       }
     })()
-  }, [activeChatTabId, activeChatTitle, activeChatTabType])
+  }, [activeChatTabId, activeChatTitle, activeChatTabType, activeWorkDir])
 
   useEffect(() => {
     if (!isTauriRuntime()) return
@@ -498,17 +505,38 @@ export function AppShell() {
         await listen<MinimalSubmitPayload>(MINIMAL_EVENT_SUBMIT, (event) => {
           const payload = event.payload
           if (!payload?.sessionId || typeof payload.content !== 'string') return
-          useSessionRuntimeStore.getState().reloadFromStorage()
-          useChatStore
-            .getState()
-            .sendMessage(payload.sessionId, payload.content, payload.attachments, payload.options)
+          void resolveReplacedSessionIdSettled(payload.sessionId).then((sessionId) => {
+            useSessionRuntimeStore.getState().reloadFromStorage()
+            useChatStore
+              .getState()
+              .sendMessage(sessionId, payload.content, payload.attachments, payload.options)
+          })
         }),
       )
       register(
         await listen<string>(MINIMAL_EVENT_STOP, (event) => {
           const sessionId = event.payload
           if (!sessionId) return
-          useChatStore.getState().stopGeneration(sessionId)
+          void resolveReplacedSessionIdSettled(sessionId).then((resolved) => {
+            useChatStore.getState().stopGeneration(resolved)
+          })
+        }),
+      )
+      register(
+        await listen<MinimalWorkDirChangePayload>(MINIMAL_EVENT_WORKDIR_CHANGE, (event) => {
+          const payload = event.payload
+          const workDir = payload?.workDir?.trim()
+          if (!payload?.sessionId || !workDir) return
+          void switchEmptySessionWorkDir(payload.sessionId, workDir).catch((err) => {
+            useUIStore.getState().addToast({
+              type: 'error',
+              message: translate(
+                useSettingsStore.getState().locale,
+                'minimal.error.workDirSwitchFailed',
+                { error: err instanceof Error ? err.message : String(err) },
+              ),
+            })
+          })
         }),
       )
 

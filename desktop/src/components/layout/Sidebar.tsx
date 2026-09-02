@@ -89,6 +89,7 @@ export function Sidebar() {
   const [searchQuery, setSearchQuery] = useState('')
   const [contextMenu, setContextMenu] = useState<{ id: string; x: number; y: number } | null>(null)
   const [pendingDeleteSessionId, setPendingDeleteSessionId] = useState<string | null>(null)
+  const [sessionDeleting, setSessionDeleting] = useState(false)
   const [pendingDeleteWorkspace, setPendingDeleteWorkspace] = useState<WorkspaceGroup | null>(null)
   const [workspaceDeleting, setWorkspaceDeleting] = useState(false)
   const [renamingId, setRenamingId] = useState<string | null>(null)
@@ -218,12 +219,40 @@ export function Sidebar() {
   }, [])
 
   const confirmDelete = useCallback(async () => {
-    if (!pendingDeleteSessionId) return
-    await deleteSession(pendingDeleteSessionId)
-    disconnectSession(pendingDeleteSessionId)
-    closeTab(pendingDeleteSessionId)
-    setPendingDeleteSessionId(null)
-  }, [closeTab, deleteSession, disconnectSession, pendingDeleteSessionId])
+    if (!pendingDeleteSessionId || sessionDeleting) return
+    const id = pendingDeleteSessionId
+    setSessionDeleting(true)
+    try {
+      if (useSessionRunStateStore.getState().running.has(id)) {
+        stopGeneration(id)
+        await waitForSessionsIdle([id], 2500)
+      }
+      await deleteSession(id)
+      cancelAllQueuedForSession(id)
+      disconnectSession(id)
+      closeTab(id)
+      setPendingDeleteSessionId(null)
+    } catch (err) {
+      addToast({
+        type: 'error',
+        message: t('sidebar.deleteSessionFailed', {
+          error: err instanceof Error ? err.message : String(err),
+        }),
+      })
+    } finally {
+      setSessionDeleting(false)
+    }
+  }, [
+    addToast,
+    cancelAllQueuedForSession,
+    closeTab,
+    deleteSession,
+    disconnectSession,
+    pendingDeleteSessionId,
+    sessionDeleting,
+    stopGeneration,
+    t,
+  ])
 
   const handleDeleteWorkspace = useCallback((ws: WorkspaceGroup) => {
     setContextMenu(null)
@@ -319,6 +348,7 @@ export function Sidebar() {
   }, [])
 
   const handleSidebarDrag = useCallback((e: React.MouseEvent) => {
+    if (!e.currentTarget.contains(e.target as Node)) return
     if ((e.target as HTMLElement).closest('button, input, textarea, select, a, [role="button"]')) return
     startDraggingRef.current?.()
   }, [])
@@ -811,13 +841,23 @@ export function Sidebar() {
 
       <ConfirmDialog
         open={pendingDeleteSessionId !== null}
-        onClose={() => setPendingDeleteSessionId(null)}
+        onClose={() => {
+          if (sessionDeleting) return
+          setPendingDeleteSessionId(null)
+        }}
         onConfirm={confirmDelete}
         title={t('common.delete')}
-        body={pendingDeleteSessionId ? t('sidebar.confirmDelete') : ''}
+        body={
+          pendingDeleteSessionId
+            ? runningSessions.has(pendingDeleteSessionId)
+              ? t('sidebar.confirmDeleteRunning')
+              : t('sidebar.confirmDelete')
+            : ''
+        }
         confirmLabel={t('common.delete')}
         cancelLabel={t('common.cancel')}
         confirmVariant="danger"
+        loading={sessionDeleting}
       />
 
       <ConfirmDialog

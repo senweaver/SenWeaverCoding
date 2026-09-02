@@ -124,6 +124,7 @@ fn turn_event_is_droppable(event: &TurnEvent) -> bool {
 pub fn draft_to_turn(event: DraftEvent) -> Option<TurnEvent> {
     match event {
         DraftEvent::Clear => Some(TurnEvent::StreamReset),
+        DraftEvent::Checkpoint => Some(TurnEvent::DraftCheckpoint),
         DraftEvent::Progress(text) => Some(TurnEvent::StatusUpdate {
             action: "preparing".into(),
             detail: text,

@@ -5,6 +5,7 @@
 import { useEffect } from 'react'
 import { useSettingsStore, syncLocaleToShell } from '../stores/settingsStore'
 import { useSessionRunStateStore } from '../stores/sessionRunStateStore'
+import { useSessionStore } from '../stores/sessionStore'
 import { useTabStore } from '../stores/tabStore'
 import { useProviderStore } from '../stores/providerStore'
 import { useMinimalStore } from '../stores/minimalStore'
@@ -190,7 +191,12 @@ export function useMinimalWindowBridge() {
           useTabStore.setState({ activeTabId: null })
           return
         }
-        const { id, title } = active
+        const { id, title, workDir } = active
+        useSessionStore.getState().upsertSessionStub({
+          id,
+          title: title ?? null,
+          workDir: typeof workDir === 'string' && workDir.trim() ? workDir : null,
+        })
         useTabStore.setState((state) => {
           const existing = state.tabs.find((tab) => tab.sessionId === id)
           if (existing) {

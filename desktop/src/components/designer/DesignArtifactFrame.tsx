@@ -369,6 +369,7 @@ export function DesignArtifactFrame({
   const [content, setContent] = useState<FileContent | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  const [reloadNonce, setReloadNonce] = useState(0)
   const [renaming, setRenaming] = useState(false)
   const [nameDraft, setNameDraft] = useState('')
   const [deviceOpen, setDeviceOpen] = useState(false)
@@ -435,7 +436,7 @@ export function DesignArtifactFrame({
     return () => {
       cancelled = true
     }
-  }, [inView, root, unit.relPath, refreshToken, needsContent])
+  }, [inView, root, unit.relPath, refreshToken, needsContent, reloadNonce])
 
   const rawSrc = rawId
     ? workspaceFilesApi.rawUrl(rawId, unit.relPath, refreshToken || undefined)
@@ -623,6 +624,8 @@ export function DesignArtifactFrame({
     unit.device && unit.device !== 'auto' ? DEVICE_PRESETS[unit.device].w : null
   const contentW = unit.width
   const contentH = Math.max(1, unit.height - 28)
+  const hasPreview =
+    isDeckUnit || isDiagramUnit || (isHtml && srcDoc !== null) || rawSrc !== null || content !== null
 
   const renderPreviewContent = (params: {
     width: number
@@ -935,13 +938,45 @@ export function DesignArtifactFrame({
 
       <div className="relative min-h-0 flex-1 overflow-hidden bg-white">
         {loading && !srcDoc && !rawSrc && !content && (
-          <div className="flex h-full items-center justify-center text-[11px] text-[var(--color-text-tertiary)]">
-            …
+          <div className="flex h-full items-center justify-center gap-2 text-[11px] text-[var(--color-text-tertiary)]">
+            <span
+              className="inline-block h-3 w-3 animate-spin rounded-full border-2 border-[var(--color-text-tertiary)] border-t-transparent"
+              aria-hidden="true"
+            />
+            {t('designer.canvas.previewLoading')}
           </div>
         )}
         {!loading && error && !content && (
-          <div className="flex h-full items-center justify-center px-3 text-center text-[11px] text-[var(--color-danger)]">
-            {error}
+          <div
+            className="flex h-full flex-col items-center justify-center gap-2 px-3 text-center"
+            onPointerDown={(e) => e.stopPropagation()}
+          >
+            <div className="text-[11px] font-medium text-[var(--color-danger)]">
+              {/timed out|timeout/i.test(error)
+                ? t('designer.canvas.previewTimeout')
+                : t('designer.canvas.previewLoadFailed')}
+            </div>
+            <div
+              className="max-w-full truncate text-[10px] text-[var(--color-text-tertiary)]"
+              title={error}
+            >
+              {error}
+            </div>
+            <button
+              type="button"
+              onClick={(e) => {
+                e.stopPropagation()
+                setReloadNonce((n) => n + 1)
+              }}
+              className="rounded-md border border-[var(--color-border)] bg-[var(--color-surface)] px-2.5 py-1 text-[11px] font-medium text-[var(--color-text-primary)] hover:bg-[var(--color-surface-hover)]"
+            >
+              {t('designer.canvas.previewRetry')}
+            </button>
+          </div>
+        )}
+        {!loading && !error && selectMode && !hasPreview && (
+          <div className="pointer-events-none absolute inset-0 flex items-center justify-center px-3 text-center text-[11px] text-[var(--color-text-tertiary)]">
+            {t('designer.canvas.previewUnavailableForPick')}
           </div>
         )}
         {renderPreviewContent({
@@ -1111,7 +1146,13 @@ function MediaBody({
     if (src) {
       return (
         <div className="flex h-full items-center justify-center bg-black p-1">
-          <video src={src} controls onError={markFailed} className="max-h-full max-w-full" />
+          <video
+            src={src}
+            controls
+            preload="metadata"
+            onError={markFailed}
+            className="max-h-full max-w-full"
+          />
         </div>
       )
     }
@@ -1120,7 +1161,7 @@ function MediaBody({
     if (src) {
       return (
         <div className="flex h-full items-center justify-center bg-[var(--color-surface)] p-3">
-          <audio src={src} controls onError={markFailed} className="w-full" />
+          <audio src={src} controls preload="metadata" onError={markFailed} className="w-full" />
         </div>
       )
     }

@@ -221,6 +221,8 @@ pub enum DraftEvent {
 
     Clear,
 
+    Checkpoint,
+
     Progress(String),
 
     Phase {
@@ -842,6 +844,19 @@ fn append_turn_records_to_history(
     }
 }
 
+async fn surface_unstreamed_reply_before_abort(
+    on_delta: Option<&tokio::sync::mpsc::Sender<DraftEvent>>,
+    response_streamed_live: bool,
+    display_text: &str,
+) {
+    if response_streamed_live || display_text.trim().is_empty() {
+        return;
+    }
+    if let Some(tx) = on_delta {
+        let _ = tx.send(DraftEvent::Content(display_text.to_string())).await;
+    }
+}
+
 async fn auto_finalize_incomplete_plan_steps(
     tools_registry: &[Box<dyn Tool>],
     on_delta: Option<&tokio::sync::mpsc::Sender<DraftEvent>>,
@@ -1404,6 +1419,7 @@ struct StreamedChatOutcome {
 
     usage: Option<crate::providers::traits::TokenUsage>,
     forwarded_live_deltas: bool,
+    forwarded_thinking: bool,
 
     stop_reason: Option<crate::providers::traits::StopReason>,
 
@@ -1813,6 +1829,8 @@ async fn consume_provider_streaming_response(
                                 .is_err()
                             {
                                 delta_sender = None;
+                            } else {
+                                outcome.forwarded_thinking = true;
                             }
                         }
                     }
@@ -1834,6 +1852,8 @@ async fn consume_provider_streaming_response(
                             .is_err()
                         {
                             delta_sender = None;
+                        } else {
+                            outcome.forwarded_thinking = true;
                         }
                     }
                 }
@@ -1993,6 +2013,32 @@ async fn consume_provider_streaming_response(
                         delta_sender = None;
                     }
                 }
+
+                if !suppress_forwarding
+                    && visible_delta.contains('\n')
+                    && outcome.tool_calls.is_empty()
+                    && crate::agent::streaming_markers::find_tool_marker(&outcome.response_text)
+                        .is_none()
+                {
+                    if let Some(cut) = crate::agent::loop_::control::detect_trailing_line_repetition(
+                        &outcome.response_text,
+                    ) {
+                        tracing::warn!(
+                            bytes_dropped = outcome.response_text.len().saturating_sub(cut),
+                            repeats = crate::agent::loop_::control::STREAM_REPEAT_LINE_COUNT,
+                            "LLM stream degenerated into repeating the same line; truncating the response after the first occurrence"
+                        );
+                        outcome.response_text.truncate(cut);
+                        let deduped = outcome.response_text.trim_end().to_string();
+                        outcome.response_text = deduped.clone();
+                        if let Some(tx) = delta_sender {
+                            let _ = tx.send(DraftEvent::Clear).await;
+                            let _ = tx.send(DraftEvent::Content(deduped)).await;
+                            outcome.forwarded_live_deltas = true;
+                        }
+                        break;
+                    }
+                }
             }
         }
     }
@@ -2001,9 +2047,13 @@ async fn consume_provider_streaming_response(
     if !residual_thinking.is_empty() {
         outcome.reasoning_content.push_str(&residual_thinking);
         if let Some(tx) = delta_sender {
-            let _ = tx
+            if tx
                 .send(DraftEvent::Thinking(residual_thinking))
-                .await;
+                .await
+                .is_ok()
+            {
+                outcome.forwarded_thinking = true;
+            }
         }
     }
     if !residual_visible.is_empty() {
@@ -3696,6 +3746,7 @@ pub(crate) async fn run_unified_loop_impl(
     let mut empty_response_nudges_used = 0usize;
     const MAX_EMPTY_RESPONSE_NUDGES: usize = 2;
     let mut truncation_prefix = String::new();
+    let mut truncation_prefix_checkpointed = false;
 
     let mut turn_modified_files = false;
     let mut evaluator_retries = 0u32;
@@ -4567,6 +4618,7 @@ pub(crate) async fn run_unified_loop_impl(
             iteration + 1,
         );
         let mut streamed_live_deltas = false;
+        let mut streamed_thinking_forwarded = false;
 
         let mut emergency_compress_attempts: u32 = 0;
         let mut emergency_context_window: Option<usize> = None;
@@ -4611,6 +4663,7 @@ pub(crate) async fn run_unified_loop_impl(
                         );
                     }
                     streamed_live_deltas = streamed.forwarded_live_deltas;
+                    streamed_thinking_forwarded = streamed.forwarded_thinking;
 
                     for rec in &streamed.pre_executed {
                         let call_line = if rec.args.is_empty() {
@@ -4962,6 +5015,7 @@ pub(crate) async fn run_unified_loop_impl(
             _parse_issue_detected,
             response_streamed_live,
             response_stop_reason,
+            response_opened_with_thinking,
         ) = match chat_result {
             Ok(resp) => {
                 let (resp_input_tokens, resp_output_tokens) = resp
@@ -5225,6 +5279,7 @@ pub(crate) async fn run_unified_loop_impl(
                     parse_issue.is_some(),
                     streamed_live_deltas,
                     resp.stop_reason,
+                    streamed_thinking_forwarded,
                 )
             }
             Err(e) => {
@@ -5273,7 +5328,46 @@ pub(crate) async fn run_unified_loop_impl(
             }
         }
 
+        if !tool_calls.is_empty() {
+            loop_state.reset_text_response_streak();
+        }
+
         if tool_calls.is_empty() {
+            let identical_text_streak = if awaiting_user_input || response_text.trim().is_empty() {
+                0
+            } else {
+                loop_state.note_text_response(&response_text)
+            };
+            let repeated_text_response = identical_text_streak > 0;
+            let repeated_tail_of_prefix = truncation_prefix_checkpointed
+                && repeated_text_response
+                && truncation_prefix.trim_end().ends_with(display_text.trim());
+            if repeated_text_response {
+                tracing::warn!(
+                    target: "agent.loop",
+                    turn_id = %turn_id,
+                    identical_text_streak,
+                    "model returned the identical text-only reply again; dropping the duplicate from the transcript"
+                );
+                if response_streamed_live {
+                    if let Some(ref tx) = on_delta {
+                        let _ = tx.send(DraftEvent::Clear).await;
+                        let already_visible = if truncation_prefix_checkpointed {
+                            repeated_tail_of_prefix
+                        } else {
+                            response_opened_with_thinking
+                        };
+                        if !already_visible && !display_text.trim().is_empty() {
+                            let _ = tx.send(DraftEvent::Content(display_text.clone())).await;
+                        }
+                    }
+                }
+            }
+            let abort_surface_text: &str = if repeated_tail_of_prefix {
+                ""
+            } else {
+                display_text.as_str()
+            };
 
             if matches!(
                 response_stop_reason,
@@ -5281,6 +5375,23 @@ pub(crate) async fn run_unified_loop_impl(
             ) && truncation_nudges_used < MAX_TRUNCATION_NUDGES
                 && !awaiting_user_input
             {
+                if identical_text_streak
+                    >= crate::agent::loop_::control::IDENTICAL_TEXT_RESPONSE_ABORT_STREAK
+                {
+                    surface_unstreamed_reply_before_abort(
+                        on_delta.as_ref(),
+                        response_streamed_live,
+                        abort_surface_text,
+                    )
+                    .await;
+                    return Err(anyhow::anyhow!(
+                        crate::agent::loop_::control::repeated_text_response_error(
+                            model,
+                            identical_text_streak,
+                            "its output was cut off at the token limit and every continuation restarted from the beginning",
+                        )
+                    ));
+                }
                 truncation_nudges_used += 1;
                 tracing::warn!(
                     target: "agent.loop",
@@ -5289,9 +5400,16 @@ pub(crate) async fn run_unified_loop_impl(
                     max = MAX_TRUNCATION_NUDGES,
                     "provider reported stop_reason=length; response was truncated mid-output, injecting continuation nudge"
                 );
-                if !response_text.trim().is_empty() {
+                if !response_text.trim().is_empty() && !repeated_text_response {
                     history.push(ChatMessage::assistant(&response_text));
                     truncation_prefix.push_str(&response_text);
+                    if let Some(ref tx) = on_delta {
+                        if !response_streamed_live && !display_text.trim().is_empty() {
+                            let _ = tx.send(DraftEvent::Content(display_text.clone())).await;
+                        }
+                        let _ = tx.send(DraftEvent::Checkpoint).await;
+                    }
+                    truncation_prefix_checkpointed = true;
                 }
                 history.push(ChatMessage::system(
                     "[Output Truncated] Your previous message hit the maximum output token limit and was cut off mid-response. \
@@ -5368,7 +5486,7 @@ pub(crate) async fn run_unified_loop_impl(
                     max = MAX_PARSE_ISSUE_NUDGES,
                     "response looked like a tool call but parsed empty; injecting nudge and continuing instead of ending the turn"
                 );
-                if !response_text.trim().is_empty() {
+                if !response_text.trim().is_empty() && !repeated_text_response {
                     history.push(ChatMessage::assistant(&response_text));
                 }
                 history.push(ChatMessage::system(
@@ -5386,32 +5504,64 @@ pub(crate) async fn run_unified_loop_impl(
                     plan_mode_flag,
                 );
 
-            if matches!(
-                crate::agent::plan_mode::enforcement::evaluate_plan_mode_exit(
-                    in_plan_mode,
-                    &plan_nudge_state,
-                    awaiting_user_input,
-                ),
-                crate::agent::plan_mode::enforcement::PlanModeExitDecision::InjectNudge
+            match crate::agent::plan_mode::enforcement::evaluate_plan_mode_exit(
+                in_plan_mode,
+                &plan_nudge_state,
+                awaiting_user_input,
+                identical_text_streak,
             ) {
-                tracing::info!(
-                    target: "agent.plan_mode",
-                    turn_id = %turn_id,
-                    nudge_count = plan_nudge_state.nudge_count + 1,
-                    max_nudges =
-                        crate::agent::plan_mode::enforcement::MAX_PLAN_NUDGES,
-                    "Plan mode: model exited without exit_plan_mode; injecting nudge"
-                );
-
-                if !response_text.trim().is_empty() {
-                    history.push(ChatMessage::assistant(&response_text));
+                crate::agent::plan_mode::enforcement::PlanModeExitDecision::AbortRepetition => {
+                    runtime_trace::record_event(
+                        "plan_mode_repetition_abort",
+                        Some(channel_name),
+                        Some(provider_name),
+                        Some(model),
+                        Some(&turn_id),
+                        Some(false),
+                        None,
+                        serde_json::json!({
+                            "iteration": iteration + 1,
+                            "nudges": plan_nudge_state.nudge_count,
+                            "identical_streak": identical_text_streak,
+                        }),
+                    );
+                    surface_unstreamed_reply_before_abort(
+                        on_delta.as_ref(),
+                        response_streamed_live,
+                        abort_surface_text,
+                    )
+                    .await;
+                    return Err(anyhow::anyhow!(
+                        crate::agent::loop_::control::repeated_text_response_error(
+                            model,
+                            identical_text_streak,
+                            "Plan mode requires an exit_plan_mode tool call, but the model kept ending with the same prose instead",
+                        )
+                    ));
                 }
-                plan_nudge_state.note_stop_without_exit();
-                let msg = crate::agent::plan_mode::enforcement::nudge_message(
-                    &plan_nudge_state,
-                );
-                history.push(ChatMessage::system(msg));
-                continue;
+                crate::agent::plan_mode::enforcement::PlanModeExitDecision::InjectNudge => {
+                    tracing::info!(
+                        target: "agent.plan_mode",
+                        turn_id = %turn_id,
+                        nudge_count = plan_nudge_state.nudge_count + 1,
+                        max_nudges =
+                            crate::agent::plan_mode::enforcement::MAX_PLAN_NUDGES,
+                        repeated_text_response,
+                        "Plan mode: model exited without exit_plan_mode; injecting nudge"
+                    );
+
+                    if !response_text.trim().is_empty() && !repeated_text_response {
+                        history.push(ChatMessage::assistant(&response_text));
+                    }
+                    plan_nudge_state.note_stop_without_exit();
+                    let msg = crate::agent::plan_mode::enforcement::nudge_message(
+                        &plan_nudge_state,
+                        repeated_text_response,
+                    );
+                    history.push(ChatMessage::system(msg));
+                    continue;
+                }
+                crate::agent::plan_mode::enforcement::PlanModeExitDecision::Allow => {}
             }
 
             if matches!(
@@ -5429,7 +5579,24 @@ pub(crate) async fn run_unified_loop_impl(
                     total = plan_exec_nudge_state.total_steps,
                     "Plan execution: model exited with unfinished todos; injecting nudge"
                 );
-                if !response_text.trim().is_empty() {
+                if identical_text_streak
+                    >= crate::agent::loop_::control::IDENTICAL_TEXT_RESPONSE_ABORT_STREAK
+                {
+                    surface_unstreamed_reply_before_abort(
+                        on_delta.as_ref(),
+                        response_streamed_live,
+                        abort_surface_text,
+                    )
+                    .await;
+                    return Err(anyhow::anyhow!(
+                        crate::agent::loop_::control::repeated_text_response_error(
+                            model,
+                            identical_text_streak,
+                            "plan execution still had unfinished steps, but the model kept ending with the same prose instead of continuing",
+                        )
+                    ));
+                }
+                if !response_text.trim().is_empty() && !repeated_text_response {
                     history.push(ChatMessage::assistant(&response_text));
                 }
                 plan_exec_nudge_state.note_nudge_issued();
@@ -5464,7 +5631,24 @@ pub(crate) async fn run_unified_loop_impl(
                             crate::agent::curator_mode_enforcement::MAX_CURATOR_NUDGES,
                         "Curator mode: model exited without exit_curator_mode; injecting nudge"
                     );
-                    if !response_text.trim().is_empty() {
+                    if identical_text_streak
+                        >= crate::agent::loop_::control::IDENTICAL_TEXT_RESPONSE_ABORT_STREAK
+                    {
+                        surface_unstreamed_reply_before_abort(
+                            on_delta.as_ref(),
+                            response_streamed_live,
+                            abort_surface_text,
+                        )
+                        .await;
+                        return Err(anyhow::anyhow!(
+                            crate::agent::loop_::control::repeated_text_response_error(
+                                model,
+                                identical_text_streak,
+                                "Curator mode requires an exit_curator_mode tool call, but the model kept ending with the same prose instead",
+                            )
+                        ));
+                    }
+                    if !response_text.trim().is_empty() && !repeated_text_response {
                         history.push(ChatMessage::assistant(&response_text));
                     }
                     curator_nudge_state.note_stop_without_exit();
@@ -5617,10 +5801,22 @@ pub(crate) async fn run_unified_loop_impl(
                 (response_text, display_text)
             };
 
+            let continuation_repeats_prefix = !truncation_prefix.is_empty()
+                && repeated_text_response
+                && truncation_prefix.trim_end().ends_with(display_text.trim());
             let full_display_text = if truncation_prefix.is_empty() {
                 display_text.clone()
+            } else if continuation_repeats_prefix {
+                truncation_prefix.clone()
             } else {
                 format!("{truncation_prefix}{display_text}")
+            };
+            let post_hoc_text: &str = if !truncation_prefix_checkpointed {
+                full_display_text.as_str()
+            } else if continuation_repeats_prefix {
+                ""
+            } else {
+                display_text.as_str()
             };
 
             if runtime_trace::is_enabled() {
@@ -5640,7 +5836,8 @@ pub(crate) async fn run_unified_loop_impl(
             }
 
             if let Some(ref tx) = on_delta {
-                let should_emit_post_hoc_chunks = !response_streamed_live;
+                let should_emit_post_hoc_chunks =
+                    !response_streamed_live && !post_hoc_text.trim().is_empty();
                 if !should_emit_post_hoc_chunks {
                     history.push(ChatMessage::assistant(response_text.clone()));
                     if crate::agent::plan_mode::execution_enforcement::should_auto_finalize_on_exit(
@@ -5692,7 +5889,7 @@ pub(crate) async fn run_unified_loop_impl(
                 let mut chunk = String::new();
                 let mut delivered_chars = 0usize;
                 let mut delivery_interrupted = false;
-                for word in full_display_text.split_inclusive(char::is_whitespace) {
+                for word in post_hoc_text.split_inclusive(char::is_whitespace) {
                     if cancellation_token
                         .as_ref()
                         .is_some_and(CancellationToken::is_cancelled)
@@ -5724,7 +5921,7 @@ pub(crate) async fn run_unified_loop_impl(
                     }
                 }
                 if delivery_interrupted {
-                    let total_chars = full_display_text.len();
+                    let total_chars = post_hoc_text.len();
                     history.push(ChatMessage::assistant(response_text.clone()));
                     tracing::error!(
                         target: "agent.loop",
@@ -7341,6 +7538,7 @@ pub(crate) async fn run_unified_loop_impl(
                 }
                 loop_recovery_used += 1;
                 truncation_prefix.clear();
+                truncation_prefix_checkpointed = false;
                 history.push(ChatMessage::system(loop_recovery_nudge(&abort_text)));
                 continue;
             }
@@ -7355,6 +7553,7 @@ pub(crate) async fn run_unified_loop_impl(
             &tool_results,
         );
         truncation_prefix.clear();
+        truncation_prefix_checkpointed = false;
 
         for body in deferred_system_after_tool_batch {
             history.push(ChatMessage::system(body));

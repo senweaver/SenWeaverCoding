@@ -576,8 +576,15 @@ export const useDesignerCanvasStore = create<StoreState>((set, get) => ({
     const panel = get().panels[sessionId]
     const unit = panel?.units.find((u) => u.id === unitId)
     if (!unit) return true
+    try {
+      const res = await designerApi.deleteArtifact(sessionId, unit.relPath)
+      if (!res.ok) return false
+    } catch {
+      return false
+    }
     set((state) => {
       const prev = state.panels[sessionId] ?? DEFAULT_STATE
+      if (!prev.units.some((u) => u.id === unitId)) return {}
       const units = prev.units.filter((u) => u.id !== unitId)
       writeStoredLayout(sessionId, units)
       return {
@@ -588,12 +595,7 @@ export const useDesignerCanvasStore = create<StoreState>((set, get) => ({
         }),
       }
     })
-    try {
-      await designerApi.deleteArtifact(sessionId, unit.relPath)
-      return true
-    } catch {
-      return false
-    }
+    return true
   },
 
   removeUnitLocal: (sessionId, relPath) =>

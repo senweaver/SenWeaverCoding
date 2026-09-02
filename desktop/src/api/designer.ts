@@ -160,7 +160,7 @@ export const designerApi = {
     )
   },
   deleteArtifact(sessionId: string, relPath: string) {
-    return api.post<{ ok: boolean }>(
+    return api.post<{ ok: boolean; error?: string }>(
       `/api/sessions/${encodeURIComponent(sessionId)}/design-artifacts/delete`,
       { relPath },
     )

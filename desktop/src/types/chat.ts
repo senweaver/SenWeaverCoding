@@ -86,6 +86,7 @@ type ServerMessagePayload =
   | { type: 'content_start'; blockType: 'text' | 'tool_use'; toolName?: string; toolUseId?: string; parentToolUseId?: string }
   | { type: 'content_delta'; text?: string }
   | { type: 'content_reset' }
+  | { type: 'content_checkpoint' }
   | { type: 'tool_use_complete'; toolName: string; toolUseId: string; input: unknown; parentToolUseId?: string; sessionId?: string }
   | { type: 'tool_use_args_delta'; toolName: string; callIndex: number; argsSnapshot: string; sessionId?: string }
   | { type: 'tool_result'; toolUseId: string; content: unknown; isError: boolean; parentToolUseId?: string }

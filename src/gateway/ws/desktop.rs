@@ -2929,6 +2929,7 @@ fn is_critical_broadcast(payload: &serde_json::Value) -> bool {
         payload.get("type").and_then(|v| v.as_str()),
         Some(
             "session_history_changed"
+                | "session_title_updated"
                 | "workspace_busy"
                 | "permission_request"
                 | "message_complete"
@@ -3569,6 +3570,7 @@ struct DesktopSqlitePersist {
     thinking_buf: String,
     thinking_segment_started_ms: Option<u64>,
     text_buf: String,
+    continuation_prefix: String,
     assistant_segment: Vec<serde_json::Value>,
     out: Vec<crate::providers::ChatMessage>,
 }
@@ -3598,6 +3600,7 @@ impl DesktopSqlitePersist {
     }
 
     fn absorb_pending_text(&mut self) {
+        self.continuation_prefix.clear();
         let pending = self.text_buf.trim_end();
         if pending.is_empty() {
             self.text_buf.clear();
@@ -3620,8 +3623,13 @@ impl DesktopSqlitePersist {
         }
     }
 
+    fn checkpoint_draft(&mut self) {
+        self.continuation_prefix = self.text_buf.clone();
+    }
+
     fn reset_stream(&mut self) {
         self.text_buf.clear();
+        self.text_buf.push_str(&self.continuation_prefix);
     }
 
     fn discard_pending_thinking(&mut self) {
@@ -3660,7 +3668,9 @@ impl DesktopSqlitePersist {
 
     fn on_thinking(&mut self, delta: &str) {
         if self.thinking_buf.is_empty() && !delta.is_empty() {
-            self.absorb_pending_text();
+            if self.continuation_prefix.is_empty() {
+                self.absorb_pending_text();
+            }
             self.thinking_segment_started_ms = Some(Self::wallclock_ms_unix());
         }
         self.thinking_buf.push_str(delta);
@@ -4140,6 +4150,7 @@ async fn run_turn(
     let mut streaming_tool_args: std::collections::HashMap<u32, (String, usize, bool)> =
         std::collections::HashMap::new();
     let mut accumulated_text = String::new();
+    let mut checkpoint_text = String::new();
     let mut streamed_turn_error: Option<String> = None;
     let mut thinking_forwarded = false;
     let started = std::time::Instant::now();
@@ -4230,6 +4241,61 @@ async fn run_turn(
     } else {
         -1
     };
+
+    let title_before_turn: Option<String> = if let Some(backend) = state.session_backend.clone() {
+        let session_key_get = session_key.to_string();
+        tokio::task::spawn_blocking(move || backend.get_session_name(&session_key_get).ok().flatten())
+            .await
+            .ok()
+            .flatten()
+            .map(|name| name.trim().to_string())
+    } else {
+        None
+    };
+    let title_was_placeholder = title_before_turn
+        .as_deref()
+        .map(crate::agent::auto_title::is_placeholder_title)
+        .unwrap_or(true);
+    let provisional_title: Option<String> = if title_was_placeholder {
+        match state.session_backend.clone() {
+            Some(backend) => {
+                match crate::agent::auto_title::provisional_title(
+                    title_source_from_turn_content(content),
+                    60,
+                ) {
+                    Some(summary) => {
+                        let persisted = persist_session_title(
+                            backend,
+                            session_key,
+                            summary.clone(),
+                            "provisional",
+                        )
+                        .await;
+                        if persisted {
+                            remember_provisional_title(session_key, &summary);
+                            broadcast_session_event(
+                                session_id,
+                                &serde_json::json!({
+                                    "type": "session_title_updated",
+                                    "sessionId": session_id,
+                                    "title": summary,
+                                }),
+                            );
+                            Some(summary)
+                        } else {
+                            None
+                        }
+                    }
+                    None => None,
+                }
+            }
+            None => None,
+        }
+    } else {
+        remembered_provisional_title(session_key)
+            .filter(|remembered| title_before_turn.as_deref() == Some(remembered.as_str()))
+    };
+
     let mut recorded_batches: std::collections::HashSet<String> =
         std::collections::HashSet::new();
 
@@ -4448,6 +4514,7 @@ async fn run_turn(
                 }
                 TurnEvent::StreamReset => {
                     accumulated_text.clear();
+                    accumulated_text.push_str(&checkpoint_text);
                     streaming_tool_args.clear();
                     if let Ok(mut pg) = sqlite_persist_forward.lock() {
                         pg.reset_stream();
@@ -4460,9 +4527,23 @@ async fn run_turn(
                     )
                     .await;
                 }
+                TurnEvent::DraftCheckpoint => {
+                    checkpoint_text = accumulated_text.clone();
+                    if let Ok(mut pg) = sqlite_persist_forward.lock() {
+                        pg.checkpoint_draft();
+                    }
+                    let _ = send_json(
+                        outbound,
+                        &serde_json::json!({
+                            "type": "content_checkpoint",
+                        }),
+                    )
+                    .await;
+                }
                 TurnEvent::Thinking { delta } => {
                     if thinking_forwarded || !delta.trim().is_empty() {
                         thinking_forwarded = true;
+                        text_block_open = false;
                         if let Ok(mut pg) = sqlite_persist_forward.lock() {
                             pg.on_thinking(&delta);
                         }
@@ -4475,6 +4556,7 @@ async fn run_turn(
                     tool_call_id,
                 } => {
                     text_block_open = false;
+                    checkpoint_text.clear();
                     streaming_tool_args.clear();
                     let id = tool_call_id
                         .filter(|s| !s.is_empty())
@@ -5192,6 +5274,7 @@ async fn run_turn(
             }
         }
     };
+    let assistant_text_for_title: Option<String> = turn_result.as_ref().ok().cloned();
 
     match turn_result {
         Ok(final_text) => {
@@ -5389,59 +5472,87 @@ async fn run_turn(
     if let Some(backend) = state.session_backend.clone() {
         let session_key_get = session_key.to_string();
         let backend_get = backend.clone();
-        let existing = tokio::task::spawn_blocking(move || {
+        let current_title = tokio::task::spawn_blocking(move || {
             backend_get.get_session_name(&session_key_get).ok().flatten()
         })
         .await
         .ok()
-        .flatten();
-        let needs_auto_title = existing
+        .flatten()
+        .map(|name| name.trim().to_string());
+        let current_is_placeholder = current_title
             .as_deref()
-            .map(|name| name.trim().is_empty() || is_legacy_default_title(name))
+            .map(crate::agent::auto_title::is_placeholder_title)
             .unwrap_or(true);
-        if needs_auto_title {
-            let summary = first_line(title_source_from_turn_content(content))
-                .chars()
-                .take(60)
-                .collect::<String>();
-            if !summary.is_empty() {
-                let session_key_set = session_key.to_string();
-                let backend_set = backend.clone();
-                let summary_for_set = summary.clone();
-                let persisted = match tokio::task::spawn_blocking(move || {
-                    backend_set.set_session_name(&session_key_set, &summary_for_set)
-                })
-                .await
-                {
-                    Ok(Ok(())) => true,
-                    Ok(Err(e)) => {
-                        tracing::warn!(
-                            target: "ws_desktop_persist",
-                            error = %e,
-                            "failed to persist auto-generated session title"
-                        );
-                        false
-                    }
-                    Err(e) => {
-                        tracing::warn!(
-                            target: "ws_desktop_persist",
-                            error = %e,
-                            "session title persist task panicked"
-                        );
-                        false
-                    }
-                };
-                if persisted {
-                    let _ = send_json(
-                        outbound,
-                        &serde_json::json!({
-                            "type": "session_title_updated",
-                            "sessionId": session_id,
-                            "title": summary,
-                        }),
+        let current_is_provisional = match (current_title.as_deref(), provisional_title.as_deref()) {
+            (Some(current), Some(provisional)) => current == provisional,
+            _ => false,
+        };
+        if !current_is_placeholder && !current_is_provisional {
+            forget_provisional_title(session_key);
+        }
+        let auto_title_config = state.config.lock().auto_title.clone();
+        if (current_is_placeholder || current_is_provisional) && auto_title_config.enabled {
+            let assistant_text = assistant_text_for_title
+                .clone()
+                .filter(|text| !text.trim().is_empty())
+                .unwrap_or_else(|| accumulated_text.clone());
+            if !assistant_text.trim().is_empty() {
+                let user_text = title_source_from_turn_content(content).to_string();
+                let (runtime_config, runtime_model) = agent.runtime_provider_snapshot();
+                let fallback_provider = state.current_provider();
+                let fallback_model = state.current_model();
+                let session_id_owned = session_id.to_string();
+                let session_key_owned = session_key.to_string();
+                let expected_title = current_title.clone().unwrap_or_default();
+                let _ = crate::runtime::spawn_supervised("ws_desktop.auto_title", async move {
+                    let (provider, model) = match build_title_provider(&runtime_config, &runtime_model).await {
+                        Some(built) => built,
+                        None => (fallback_provider, fallback_model),
+                    };
+                    let Some(title) = crate::agent::auto_title::generate_title(
+                        provider.as_ref(),
+                        &user_text,
+                        &assistant_text,
+                        &model,
+                        &auto_title_config,
                     )
-                    .await;
-                }
+                    .await
+                    else {
+                        return;
+                    };
+                    let backend_check = backend.clone();
+                    let session_key_check = session_key_owned.clone();
+                    let latest = tokio::task::spawn_blocking(move || {
+                        backend_check.get_session_name(&session_key_check).ok().flatten()
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                    .map(|name| name.trim().to_string())
+                    .unwrap_or_default();
+                    let untouched = latest.is_empty()
+                        || latest == expected_title
+                        || crate::agent::auto_title::is_placeholder_title(&latest);
+                    if !untouched {
+                        forget_provisional_title(&session_key_owned);
+                        return;
+                    }
+                    if latest == title {
+                        forget_provisional_title(&session_key_owned);
+                        return;
+                    }
+                    if persist_session_title(backend, &session_key_owned, title.clone(), "generated").await {
+                        forget_provisional_title(&session_key_owned);
+                        broadcast_session_event(
+                            &session_id_owned,
+                            &serde_json::json!({
+                                "type": "session_title_updated",
+                                "sessionId": session_id_owned,
+                                "title": title,
+                            }),
+                        );
+                    }
+                });
             }
         }
     }
@@ -5449,8 +5560,100 @@ async fn run_turn(
     pending_ask_request_id
 }
 
-fn first_line(s: &str) -> &str {
-    s.lines().next().unwrap_or("").trim()
+const MAX_REMEMBERED_PROVISIONAL_TITLES: usize = 4096;
+
+fn provisional_title_registry(
+) -> &'static parking_lot::Mutex<std::collections::HashMap<String, String>> {
+    static REG: std::sync::OnceLock<parking_lot::Mutex<std::collections::HashMap<String, String>>> =
+        std::sync::OnceLock::new();
+    REG.get_or_init(|| parking_lot::Mutex::new(std::collections::HashMap::new()))
+}
+
+fn remember_provisional_title(session_key: &str, title: &str) {
+    let mut guard = provisional_title_registry().lock();
+    if guard.len() >= MAX_REMEMBERED_PROVISIONAL_TITLES && !guard.contains_key(session_key) {
+        guard.clear();
+    }
+    guard.insert(session_key.to_string(), title.to_string());
+}
+
+fn remembered_provisional_title(session_key: &str) -> Option<String> {
+    provisional_title_registry().lock().get(session_key).cloned()
+}
+
+fn forget_provisional_title(session_key: &str) {
+    provisional_title_registry().lock().remove(session_key);
+}
+
+async fn persist_session_title(
+    backend: std::sync::Arc<dyn crate::channels::session::backend::SessionBackend>,
+    session_key: &str,
+    title: String,
+    kind: &'static str,
+) -> bool {
+    let session_key_owned = session_key.to_string();
+    match tokio::task::spawn_blocking(move || backend.set_session_name(&session_key_owned, &title)).await {
+        Ok(Ok(())) => true,
+        Ok(Err(e)) => {
+            tracing::warn!(
+                target: "ws_desktop_persist",
+                error = %e,
+                kind,
+                "failed to persist auto-generated session title"
+            );
+            false
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "ws_desktop_persist",
+                error = %e,
+                kind,
+                "session title persist task panicked"
+            );
+            false
+        }
+    }
+}
+
+async fn build_title_provider(
+    config: &std::sync::Arc<crate::config::Config>,
+    model: &str,
+) -> Option<(std::sync::Arc<dyn crate::providers::traits::Provider>, String)> {
+    let provider_name_raw = config
+        .default_provider
+        .clone()
+        .unwrap_or_else(|| "openrouter".to_string());
+    let provider_name = crate::providers::resolve_runtime_provider_name(&provider_name_raw, config);
+    let api_key = config.api_key.clone().filter(|k| !k.trim().is_empty());
+    let api_url = config.api_url.clone().filter(|u| !u.trim().is_empty());
+    let options = crate::providers::provider_runtime_options_from_config(config);
+    let model_owned = model.trim().to_string();
+    if model_owned.is_empty() {
+        return None;
+    }
+    let model_for_build = model_owned.clone();
+    let built = tokio::task::spawn_blocking(move || {
+        crate::providers::create_provider_for_model(
+            &provider_name,
+            &model_for_build,
+            api_key.as_deref(),
+            api_url.as_deref(),
+            &options,
+        )
+    })
+    .await
+    .ok()?;
+    match built {
+        Ok(provider) => Some((std::sync::Arc::from(provider), model_owned)),
+        Err(e) => {
+            tracing::debug!(
+                target: "ws_desktop_persist",
+                error = %e,
+                "auto-title provider build failed; falling back to the gateway default provider"
+            );
+            None
+        }
+    }
 }
 
 fn title_source_from_turn_content(content: &str) -> &str {
@@ -5525,28 +5728,4 @@ fn mode_transition_auto_approved(
     to: crate::agent::coding_mode::CodingMode,
 ) -> bool {
     crate::agent::mode::transition::is_auto_approved(whitelist, from, to)
-}
-
-fn is_legacy_default_title(name: &str) -> bool {
-    let trimmed = name.trim();
-    if matches!(
-        trimmed,
-        "Untitled session" | "New Session" | "新对话" | "New conversation"
-    ) {
-        return true;
-    }
-
-    if let Some(rest) = trimmed.strip_prefix("Session ") {
-        let bytes = rest.as_bytes();
-        if bytes.len() == 5
-            && bytes[0].is_ascii_digit()
-            && bytes[1].is_ascii_digit()
-            && bytes[2] == b':'
-            && bytes[3].is_ascii_digit()
-            && bytes[4].is_ascii_digit()
-        {
-            return true;
-        }
-    }
-    false
 }

@@ -62,6 +62,7 @@ type SessionStore = {
   clearWorkDirSelectionIfMatches: (workDir: string | null | undefined) => void
   renameSession: (id: string, title: string) => Promise<void>
   updateSessionTitle: (id: string, title: string) => void
+  upsertSessionStub: (stub: { id: string; title: string | null; workDir: string | null }) => void
   setActiveSession: (id: string | null) => void
   setSelectedProjects: (projects: string[]) => void
   setUserPinnedSessionWorkDir: (path: string | null | undefined) => void
@@ -183,11 +184,44 @@ export const useSessionStore = create<SessionStore>((set, get) => ({
   },
 
   updateSessionTitle: (id, title) => {
+    if (!get().sessions.some((session) => session.id === id)) {
+      void get().fetchSessions()
+      return
+    }
     set((s) => ({
       sessions: s.sessions.map((session) =>
         session.id === id ? { ...session, title } : session,
       ),
     }))
+  },
+
+  upsertSessionStub: ({ id, title, workDir }) => {
+    if (!id) return
+    set((s) => {
+      const existing = s.sessions.find((session) => session.id === id)
+      if (existing) {
+        const nextTitle = title ?? existing.title
+        const nextWorkDir = workDir ?? existing.workDir
+        if (nextTitle === existing.title && nextWorkDir === existing.workDir) return s
+        return {
+          sessions: s.sessions.map((session) =>
+            session.id === id ? { ...session, title: nextTitle, workDir: nextWorkDir } : session,
+          ),
+        }
+      }
+      const now = new Date().toISOString()
+      const stub: SessionListItem = {
+        id,
+        title: title ?? '',
+        createdAt: now,
+        modifiedAt: now,
+        messageCount: 0,
+        projectPath: workDir ?? '',
+        workDir,
+        workDirExists: true,
+      }
+      return { sessions: [stub, ...s.sessions] }
+    })
   },
 
   setActiveSession: (id) => set({ activeSessionId: id }),

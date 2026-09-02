@@ -47,7 +47,7 @@ function readZoomPct(): number {
   }
 }
 
-function applyZoomPct(pct: number): void {
+function applyZoomPct(pct: number): number {
   const clamped = Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, pct))
   try {
     localStorage.setItem(ZOOM_STORAGE_KEY, String(clamped))
@@ -55,13 +55,14 @@ function applyZoomPct(pct: number): void {
 
   }
   document.documentElement.style.fontSize = `${(16 * clamped) / 100}px`
+  return clamped
 }
 
 export function TitleBar() {
   const t = useTranslation()
   const lanSharePanelOpen = useLanShareStore((s) => s.panelOpen)
-  const toggleLanSharePanel = useLanShareStore((s) => s.togglePanel)
   const templateLibraryOpen = useUIStore((s) => s.templateLibraryOpen)
+  const [zoomPct, setZoomPct] = useState<number>(() => readZoomPct())
 
   type MenuId = 'help'
   const [openMenu, setOpenMenu] = useState<MenuId | null>(null)
@@ -134,18 +135,13 @@ export function TitleBar() {
     }
   }
 
-  const zoomIn = () => {
-    applyZoomPct(readZoomPct() + ZOOM_STEP)
-    closeAll()
+  const changeZoom = (next: number) => {
+    setZoomPct(applyZoomPct(next))
   }
-  const zoomOut = () => {
-    applyZoomPct(readZoomPct() - ZOOM_STEP)
-    closeAll()
-  }
-  const zoomReset = () => {
-    applyZoomPct(100)
-    closeAll()
-  }
+  const zoomIn = () => changeZoom(readZoomPct() + ZOOM_STEP)
+  const zoomOut = () => changeZoom(readZoomPct() - ZOOM_STEP)
+  const zoomReset = () => changeZoom(100)
+  const zoomLabel = Number.isInteger(zoomPct) ? `${zoomPct}%` : `${zoomPct.toFixed(1)}%`
 
   return (
     <div
@@ -166,10 +162,7 @@ export function TitleBar() {
           active={lanSharePanelOpen}
           onClick={() => {
             closeAll()
-            if (!useLanShareStore.getState().panelOpen) {
-              useUIStore.getState().closeTemplateLibrary()
-            }
-            toggleLanSharePanel()
+            useUIStore.getState().toggleLanSharePanel()
           }}
         />
         <PanelTrigger
@@ -177,9 +170,6 @@ export function TitleBar() {
           active={templateLibraryOpen}
           onClick={() => {
             closeAll()
-            if (!useUIStore.getState().templateLibraryOpen) {
-              useLanShareStore.getState().closePanel()
-            }
             useUIStore.getState().toggleTemplateLibrary()
           }}
         />
@@ -194,13 +184,25 @@ export function TitleBar() {
 
       {showWindowsCaption && <WindowsCaptionButtons isMaximized={captionMaximized} t={t} />}
 
-      <AnchoredDropdown anchorRef={helpBtnRef} panelRef={helpPanelRef} open={openMenu === 'help'}>
+      <AnchoredDropdown
+        anchorRef={helpBtnRef}
+        panelRef={helpPanelRef}
+        open={openMenu === 'help'}
+        repositionKey={zoomPct}
+      >
         <MenuRow onClick={() => void openExternal(DOCS_URL)}>{t('menu.help.documentation')}</MenuRow>
         <MenuRow onClick={() => void openExternal(GITHUB_REPO_URL)}>{t('menu.help.github')}</MenuRow>
         <MenuDivider />
-        <MenuRow onClick={zoomIn}>{t('menu.help.zoomIn')}</MenuRow>
-        <MenuRow onClick={zoomOut}>{t('menu.help.zoomOut')}</MenuRow>
-        <MenuRow onClick={zoomReset}>{t('menu.help.resetZoom')}</MenuRow>
+        <MenuGroupLabel>{t('menu.help.uiFontSize', { pct: zoomLabel })}</MenuGroupLabel>
+        <MenuRow onClick={zoomIn} disabled={zoomPct >= ZOOM_MAX}>
+          {t('menu.help.zoomIn')}
+        </MenuRow>
+        <MenuRow onClick={zoomOut} disabled={zoomPct <= ZOOM_MIN}>
+          {t('menu.help.zoomOut')}
+        </MenuRow>
+        <MenuRow onClick={zoomReset} disabled={zoomPct === 100}>
+          {t('menu.help.resetZoom')}
+        </MenuRow>
         <MenuDivider />
         <MenuRow onClick={checkForUpdatesMenu}>{t('menu.help.checkForUpdates')}</MenuRow>
       </AnchoredDropdown>
@@ -262,11 +264,13 @@ function AnchoredDropdown({
   anchorRef,
   panelRef,
   open,
+  repositionKey,
   children,
 }: {
   anchorRef: RefObject<HTMLButtonElement | null>
   panelRef: RefObject<HTMLDivElement | null>
   open: boolean
+  repositionKey?: number
   children: ReactNode
 }) {
   const [pos, setPos] = useState({ top: 0, left: 0 })
@@ -281,7 +285,7 @@ function AnchoredDropdown({
   useLayoutEffect(() => {
     if (!open) return
     updatePos()
-  }, [open, updatePos])
+  }, [open, updatePos, repositionKey])
 
   useEffect(() => {
     if (!open) return
@@ -313,13 +317,30 @@ function MenuDivider() {
   return <div role="separator" className="my-1 h-px bg-[var(--color-border)]" />
 }
 
-function MenuRow({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+function MenuGroupLabel({ children }: { children: ReactNode }) {
+  return (
+    <div className="px-3 pb-0.5 pt-1 text-[11px] font-medium text-[var(--color-text-tertiary)]">
+      {children}
+    </div>
+  )
+}
+
+function MenuRow({
+  children,
+  onClick,
+  disabled = false,
+}: {
+  children: ReactNode
+  onClick: () => void
+  disabled?: boolean
+}) {
   return (
     <button
       type="button"
       role="menuitem"
+      disabled={disabled}
       onClick={onClick}
-      className="flex w-full px-3 py-1.5 text-left text-xs text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)]"
+      className="flex w-full px-3 py-1.5 text-left text-xs text-[var(--color-text-primary)] transition-colors hover:bg-[var(--color-surface-hover)] disabled:cursor-default disabled:opacity-45 disabled:hover:bg-transparent"
     >
       {children}
     </button>

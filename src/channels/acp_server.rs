@@ -350,6 +350,14 @@ impl AcpServer {
                         "type": "content_reset",
                     }),
                 },
+                TurnEvent::DraftCheckpoint => JsonRpcNotification {
+                    jsonrpc: "2.0",
+                    method: "session/event",
+                    params: serde_json::json!({
+                        "sessionId": session_id,
+                        "type": "content_checkpoint",
+                    }),
+                },
                 TurnEvent::ToolCall {
                     name,
                     args,

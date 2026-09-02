@@ -6,6 +6,7 @@ import { isTauriRuntime } from './desktopRuntime'
 import { t } from '../i18n'
 import { useUIStore, type AppMode } from '../stores/uiStore'
 import { useTabStore, SCHEDULED_TAB_ID } from '../stores/tabStore'
+import { useSessionStore } from '../stores/sessionStore'
 import type { AttachmentRef } from '../types/chat'
 import type { useChatStore } from '../stores/chatStore'
 import type { ComputerAttachment, ComputerStatus } from '../stores/computerUseStore'
@@ -40,6 +41,7 @@ export const MINIMAL_EVENT_ACTIVE_SESSION = 'minimal://active-session'
 export const MINIMAL_EVENT_ACTIVATE = 'minimal://activate'
 export const MINIMAL_EVENT_SUBMIT = 'minimal://submit'
 export const MINIMAL_EVENT_STOP = 'minimal://stop'
+export const MINIMAL_EVENT_WORKDIR_CHANGE = 'minimal://workdir-change'
 export const MINIMAL_EVENT_INPUT_HIDDEN = 'minimal://input-hidden'
 export const MINIMAL_EVENT_INPUT_SHOW = 'minimal://input-show'
 
@@ -66,6 +68,7 @@ export interface MinimalActivatePayload {
 export interface MinimalActiveSession {
   id: string
   title: string | null
+  workDir?: string | null
 }
 
 export interface MinimalSubmitPayload {
@@ -73,6 +76,11 @@ export interface MinimalSubmitPayload {
   content: string
   attachments?: AttachmentRef[]
   options?: ChatSendOptions
+}
+
+export interface MinimalWorkDirChangePayload {
+  sessionId: string
+  workDir: string
 }
 
 export interface MinimalComputerProgress {
@@ -189,7 +197,8 @@ export function currentActiveSession(): MinimalActiveSession | null {
     if (!id || id === SCHEDULED_TAB_ID) return null
     const tab = state.tabs.find((t) => t.sessionId === id)
     if (tab && tab.type !== 'session') return null
-    return { id, title: tab?.title ?? null }
+    const session = useSessionStore.getState().sessions.find((s) => s.id === id)
+    return { id, title: tab?.title ?? null, workDir: session?.workDir ?? null }
   } catch {
     return null
   }

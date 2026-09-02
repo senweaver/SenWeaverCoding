@@ -449,6 +449,7 @@ body.sen-file-dragging * {
   --shadow-error-ring: 0 0 0 1px rgba(255, 180, 171, 0.26);
   --shadow-button-primary: 0 12px 24px rgba(255, 110, 64, 0.18);
 
+  --color-btn-primary-fg: var(--color-on-primary);
   --gradient-btn-primary: linear-gradient(135deg, var(--color-primary), var(--color-primary-container));
   --gradient-btn-primary-hover: linear-gradient(135deg, var(--color-primary-container), var(--color-primary));
 

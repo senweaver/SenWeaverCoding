@@ -13,6 +13,7 @@ import { Modal } from '../components/shared/Modal'
 import { ConfirmDialog } from '../components/shared/ConfirmDialog'
 import { Input } from '../components/shared/Input'
 import { Button } from '../components/shared/Button'
+import { SegmentedControl } from '../components/shared/SegmentedControl'
 import type { EffortLevel, ThemeMode, CloseBehavior } from '../types/settings'
 import type { Locale } from '../i18n'
 import type {
@@ -1637,12 +1638,12 @@ function GeneralSettings() {
 
   const enableCommandPolicy = autonomyData?.enableCommandPolicy ?? false
 
-  const EFFORT_LABELS: Record<EffortLevel, string> = {
-    low: t('settings.general.effort.low'),
-    medium: t('settings.general.effort.medium'),
-    high: t('settings.general.effort.high'),
-    max: t('settings.general.effort.max'),
-  }
+  const EFFORT_OPTIONS: Array<{ value: EffortLevel; label: string }> = [
+    { value: 'low', label: t('settings.general.effort.low') },
+    { value: 'medium', label: t('settings.general.effort.medium') },
+    { value: 'high', label: t('settings.general.effort.high') },
+    { value: 'max', label: t('settings.general.effort.max') },
+  ]
 
   const LANGUAGES: Array<{ value: Locale; label: string }> = [
     { value: 'en', label: 'English' },
@@ -1666,84 +1667,49 @@ function GeneralSettings() {
         title={t('settings.general.appearanceTitle')}
         description={t('settings.general.appearanceDescription')}
       >
-        <div className="flex flex-wrap gap-2">
-          {THEMES.map(({ value, label }) => (
-            <button
-              key={value}
-              onClick={() => void setTheme(value)}
-              className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
-                theme === value
-                  ? 'bg-[image:var(--gradient-btn-primary)] text-[var(--color-btn-primary-fg)] border-transparent shadow-[var(--shadow-button-primary)]'
-                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          ariaLabel={t('settings.general.appearanceTitle')}
+          value={theme}
+          options={THEMES}
+          onChange={(value) => void setTheme(value)}
+        />
       </SettingsSection>
 
       <SettingsSection
         title={t('settings.general.closeBehaviorTitle')}
         description={t('settings.general.closeBehaviorDescription')}
       >
-        <div className="flex flex-wrap gap-2">
-          {CLOSE_BEHAVIORS.map(({ value, label }) => (
-            <button
-              key={value}
-              onClick={() => void setCloseBehavior(value)}
-              className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
-                closeBehavior === value
-                  ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)] border-[var(--color-brand)]'
-                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          ariaLabel={t('settings.general.closeBehaviorTitle')}
+          value={closeBehavior}
+          options={CLOSE_BEHAVIORS}
+          onChange={(value) => void setCloseBehavior(value)}
+        />
       </SettingsSection>
 
       <SettingsSection
         title={t('settings.general.languageTitle')}
         description={t('settings.general.languageDescription')}
       >
-        <div className="flex flex-wrap gap-2">
-          {LANGUAGES.map(({ value, label }) => (
-            <button
-              key={value}
-              onClick={() => setLocale(value)}
-              className={`h-7 px-4 min-w-[88px] text-xs font-semibold rounded-lg border transition-all ${
-                locale === value
-                  ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)] border-[var(--color-brand)]'
-                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          ariaLabel={t('settings.general.languageTitle')}
+          value={locale}
+          options={LANGUAGES}
+          onChange={(value) => setLocale(value)}
+        />
       </SettingsSection>
 
       <SettingsSection
         title={t('settings.general.effortTitle')}
         description={t('settings.general.effortDescription')}
       >
-        <div className="flex flex-wrap gap-2">
-          {(['low', 'medium', 'high', 'max'] as EffortLevel[]).map((level) => (
-            <button
-              key={level}
-              onClick={() => setEffort(level)}
-              className={`h-7 px-4 min-w-[72px] text-xs font-semibold rounded-lg border transition-all ${
-                effortLevel === level
-                  ? 'bg-[var(--color-brand)] text-[var(--color-on-primary)] border-[var(--color-brand)]'
-                  : 'border-[var(--color-border)] text-[var(--color-text-secondary)] hover:bg-[var(--color-surface-hover)]'
-              }`}
-            >
-              {EFFORT_LABELS[level]}
-            </button>
-          ))}
-        </div>
+        <SegmentedControl
+          ariaLabel={t('settings.general.effortTitle')}
+          value={effortLevel}
+          options={EFFORT_OPTIONS}
+          onChange={(value) => setEffort(value)}
+          minItemWidth={72}
+        />
       </SettingsSection>
 
       <SettingsSection

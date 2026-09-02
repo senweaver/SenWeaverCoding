@@ -4,6 +4,7 @@
 
 import { create } from 'zustand'
 import { useLanShareStore } from './lanShareStore'
+import { useReviewPanelStore } from './reviewPanelStore'
 import type { ThemeMode } from '../types/settings'
 
 const THEME_STORAGE_KEY = 'sen-theme'
@@ -197,6 +198,9 @@ type UIStore = {
   openTemplateLibrary: () => void
   closeTemplateLibrary: () => void
   toggleTemplateLibrary: () => void
+  openLanSharePanel: () => void
+  toggleLanSharePanel: () => void
+  openReviewPanel: (sessionId: string) => void
   openModal: (id: string) => void
   closeModal: () => void
   openWorkspaceFinder: (
@@ -269,6 +273,29 @@ function clearToastTimer(id: string) {
   }
 }
 
+type FullscreenOverlay = 'settings' | 'templateLibrary' | 'lanShare' | 'review'
+
+function closeSiblingOverlays(keep: FullscreenOverlay): Partial<UIStore> {
+  const next: Partial<UIStore> = {}
+  if (keep !== 'settings') {
+    next.settingsOverlayOpen = false
+    next.pendingSettingsTab = null
+    next.pendingCustomSubTab = null
+  }
+  if (keep !== 'templateLibrary') {
+    next.templateLibraryOpen = false
+  }
+  if (keep !== 'lanShare') {
+    const lanShare = useLanShareStore.getState()
+    if (lanShare.panelOpen) lanShare.closePanel()
+  }
+  if (keep !== 'review') {
+    const review = useReviewPanelStore.getState()
+    if (review.open) review.closePanel()
+  }
+  return next
+}
+
 export const useUIStore = create<UIStore>((set, get) => ({
   theme: getStoredTheme(),
   sidebarOpen: true,
@@ -331,32 +358,67 @@ export const useUIStore = create<UIStore>((set, get) => ({
   setActiveView: (view) => set({ activeView: view }),
   setAppMode: (mode) => set({ appMode: mode }),
   toggleAppMode: () => set((s) => ({ appMode: s.appMode === 'computer' ? 'code' : 'computer' })),
-  openSettingsOverlay: (tab) =>
+  openSettingsOverlay: (tab) => {
+    const siblings = closeSiblingOverlays('settings')
     set((state) => ({
+      ...siblings,
       settingsOverlayOpen: true,
       pendingSettingsTab: tab ?? state.pendingSettingsTab,
-    })),
+    }))
+  },
   closeSettingsOverlay: () =>
     set({ settingsOverlayOpen: false, pendingSettingsTab: null, pendingCustomSubTab: null }),
-  toggleSettingsOverlay: (tab) =>
-    set((state) => {
-      if (state.settingsOverlayOpen) {
-        return {
-          settingsOverlayOpen: false,
-          pendingSettingsTab: null,
-          pendingCustomSubTab: null,
-        }
-      }
-      return {
-        settingsOverlayOpen: true,
-        pendingSettingsTab: tab ?? state.pendingSettingsTab,
-      }
-    }),
+  toggleSettingsOverlay: (tab) => {
+    if (get().settingsOverlayOpen) {
+      set({
+        settingsOverlayOpen: false,
+        pendingSettingsTab: null,
+        pendingCustomSubTab: null,
+      })
+      return
+    }
+    const siblings = closeSiblingOverlays('settings')
+    set((state) => ({
+      ...siblings,
+      settingsOverlayOpen: true,
+      pendingSettingsTab: tab ?? state.pendingSettingsTab,
+    }))
+  },
   setPendingSettingsTab: (tab) => set({ pendingSettingsTab: tab }),
   setPendingCustomSubTab: (subTab) => set({ pendingCustomSubTab: subTab }),
-  openTemplateLibrary: () => set({ templateLibraryOpen: true }),
+  openTemplateLibrary: () => {
+    const siblings = closeSiblingOverlays('templateLibrary')
+    set({ ...siblings, templateLibraryOpen: true })
+  },
   closeTemplateLibrary: () => set({ templateLibraryOpen: false }),
-  toggleTemplateLibrary: () => set((s) => ({ templateLibraryOpen: !s.templateLibraryOpen })),
+  toggleTemplateLibrary: () => {
+    if (get().templateLibraryOpen) {
+      set({ templateLibraryOpen: false })
+      return
+    }
+    const siblings = closeSiblingOverlays('templateLibrary')
+    set({ ...siblings, templateLibraryOpen: true })
+  },
+  openLanSharePanel: () => {
+    const siblings = closeSiblingOverlays('lanShare')
+    set(siblings)
+    useLanShareStore.getState().openPanel()
+  },
+  toggleLanSharePanel: () => {
+    const lanShare = useLanShareStore.getState()
+    if (lanShare.panelOpen) {
+      lanShare.closePanel()
+      return
+    }
+    const siblings = closeSiblingOverlays('lanShare')
+    set(siblings)
+    lanShare.openPanel()
+  },
+  openReviewPanel: (sessionId) => {
+    const siblings = closeSiblingOverlays('review')
+    set(siblings)
+    useReviewPanelStore.getState().openPanel(sessionId)
+  },
   openModal: (id) => set({ activeModal: id }),
   closeModal: () => set({ activeModal: null }),
 
@@ -377,6 +439,8 @@ export const useUIStore = create<UIStore>((set, get) => ({
   dismissChatOverlays: () => {
     const lanShare = useLanShareStore.getState()
     if (lanShare.panelOpen) lanShare.closePanel()
+    const review = useReviewPanelStore.getState()
+    if (review.open) review.closePanel()
     set((s) => {
       if (
         !s.settingsOverlayOpen &&

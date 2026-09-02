@@ -573,6 +573,16 @@ impl RpcCtx {
                     )
                     .await;
                 }
+                TurnEvent::DraftCheckpoint => {
+                    self.write_notification(
+                        "session/event",
+                        serde_json::json!({
+                            "sessionId": sid,
+                            "type": "content_checkpoint",
+                        }),
+                    )
+                    .await;
+                }
                 TurnEvent::Thinking { delta } => {
                     self.write_notification(
                         "session/event",

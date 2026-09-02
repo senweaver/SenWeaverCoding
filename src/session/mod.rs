@@ -463,7 +463,8 @@ pub fn turn_event_to_session_event(
             }
         }
         TurnEvent::StreamReset => SessionEventKind::StreamReset,
-        TurnEvent::ProgressTick { .. }
+        TurnEvent::DraftCheckpoint
+        | TurnEvent::ProgressTick { .. }
         | TurnEvent::CommandPreview { .. }
         | TurnEvent::Cancelling { .. }
         | TurnEvent::PiiSanitized { .. }

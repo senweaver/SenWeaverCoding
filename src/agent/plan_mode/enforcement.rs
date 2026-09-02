@@ -88,18 +88,33 @@ pub enum PlanModeExitDecision {
     Allow,
 
     InjectNudge,
+
+    AbortRepetition,
 }
 
 pub fn evaluate_plan_mode_exit(
     in_plan_mode: bool,
     state: &PlanModeNudgeState,
     awaiting_user_input: bool,
+    identical_response_streak: u32,
 ) -> PlanModeExitDecision {
     if awaiting_user_input {
         return PlanModeExitDecision::Allow;
     }
     if !in_plan_mode || state.exit_plan_mode_called {
         return PlanModeExitDecision::Allow;
+    }
+
+    if identical_response_streak
+        >= crate::agent::loop_::control::IDENTICAL_TEXT_RESPONSE_ABORT_STREAK
+    {
+        tracing::error!(
+            target: "agent.plan_mode",
+            nudge_count = state.nudge_count,
+            identical_response_streak,
+            "Plan mode: model keeps returning the identical reply instead of calling exit_plan_mode; aborting the turn"
+        );
+        return PlanModeExitDecision::AbortRepetition;
     }
 
     if state.stop_without_exit >= HARD_PLAN_NUDGE_LIMIT {
@@ -124,8 +139,8 @@ pub fn evaluate_plan_mode_exit(
     PlanModeExitDecision::InjectNudge
 }
 
-pub fn nudge_message(state: &PlanModeNudgeState) -> &'static str {
-    if state.nudge_count >= MAX_PLAN_NUDGES {
+pub fn nudge_message(state: &PlanModeNudgeState, repeated_response: bool) -> &'static str {
+    if repeated_response || state.nudge_count >= MAX_PLAN_NUDGES {
         PLAN_MODE_NUDGE_STRONG
     } else {
         PLAN_MODE_NUDGE_MESSAGE

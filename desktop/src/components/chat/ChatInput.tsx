@@ -57,6 +57,12 @@ import { useCredentialsStore } from '../../stores/credentialsStore'
 import { useBrowserPanelStore } from '../../stores/browserPanelStore'
 import { dockListTabs, type BrowserDockTabInfo } from '../../lib/browserDock'
 import { bindDebugTab, unbindDebugTab, bindPrototypeRef, bindPrototypeFigma, unbindPrototypeRef } from '../../lib/debugTabBind'
+import { switchEmptySessionWorkDir } from '../../lib/sessionWorkDir'
+import {
+  MINIMAL_EVENT_WORKDIR_CHANGE,
+  emitMinimalEvent,
+  type MinimalWorkDirChangePayload,
+} from '../../lib/minimalMode'
 
 type GitInfo = { branch: string | null; repoName: string | null; workDir: string; changedFiles: number }
 
@@ -2123,18 +2129,15 @@ export function ChatInput({ variant = 'default', embedded = false, onSubmit, dra
                 value={resolvedWorkDir || ''}
                 onChange={async (newWorkDir) => {
                   if (!activeTabId) return
-                  useSessionStore.getState().setUserPinnedSessionWorkDir(newWorkDir)
-                  const oldId = activeTabId
-                  const { deleteSession, createSession } = useSessionStore.getState()
-                  const { replaceTabSession } = useTabStore.getState()
-                  const { disconnectSession, connectToSession, setSessionPermissionMode } = useChatStore.getState()
-                  const newId = await createSession(newWorkDir)
-                  useSessionRuntimeStore.getState().moveSelection(oldId, newId)
-                  disconnectSession(oldId)
-                  replaceTabSession(oldId, newId)
-                  connectToSession(newId)
-                  setSessionPermissionMode(newId, useSettingsStore.getState().permissionMode)
-                  deleteSession(oldId).catch(() => {})
+                  if (embedded) {
+                    const payload: MinimalWorkDirChangePayload = {
+                      sessionId: activeTabId,
+                      workDir: newWorkDir,
+                    }
+                    void emitMinimalEvent(MINIMAL_EVENT_WORKDIR_CHANGE, payload)
+                    return
+                  }
+                  await switchEmptySessionWorkDir(activeTabId, newWorkDir)
                 }}
               />
             )}

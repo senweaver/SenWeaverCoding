@@ -587,8 +587,7 @@ export function FileTree({ workDir, onSelect }: Props) {
     (node: FileTreeNode) => {
       const abs = joinWorkspaceAbsPath(workDir, node.relPath)
       void useLanShareStore.getState().addShare(abs)
-      useUIStore.getState().closeTemplateLibrary()
-      useLanShareStore.getState().openPanel()
+      useUIStore.getState().openLanSharePanel()
       addToast({ type: 'success', message: t('lanShare.sharedToast', { name: node.name }) })
     },
     [addToast, t, workDir],

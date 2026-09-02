@@ -238,6 +238,8 @@ pub enum SdkTurnEvent {
 
     StreamReset,
 
+    DraftCheckpoint,
+
     Thinking { delta: String },
 
     ToolCall {
@@ -256,6 +258,7 @@ impl From<crate::agent::TurnEvent> for SdkTurnEvent {
         match event {
             T::Chunk { delta } => Self::Chunk { delta },
             T::StreamReset => Self::StreamReset,
+            T::DraftCheckpoint => Self::DraftCheckpoint,
             T::Thinking { delta } => Self::Thinking { delta },
             T::ToolCall {
                 name,

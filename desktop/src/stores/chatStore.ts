@@ -94,6 +94,7 @@ export type PerSessionState = {
 
   cumulativeCostUsd: number
   elapsedSeconds: number
+  planningPhaseStartedAt?: number | null
   statusVerb: string
   planningPhaseAction: string
   planningPhaseDetail: string
@@ -208,6 +209,7 @@ const DEFAULT_SESSION_STATE: PerSessionState = {
   cumulativeTokens: 0,
   cumulativeCostUsd: 0,
   elapsedSeconds: 0,
+  planningPhaseStartedAt: null,
   statusVerb: '',
   planningPhaseAction: '',
   planningPhaseDetail: '',
@@ -1441,6 +1443,7 @@ const thinkingFlushTimerBySession = new Map<string, ScheduledFlushHandle>()
 const pendingDeltaFirstAt = new Map<string, number>()
 const pendingThinkingFirstAt = new Map<string, number>()
 const lastStreamActivityAtBySession = new Map<string, number>()
+const continuationPrefixBySession = new Map<string, string>()
 const FLUSH_HIGH_WATER_CHARS = 96
 const FLUSH_HIGH_WATER_MS = 80
 const BUSY_FLUSH_MAX_DEFER_MS = 250
@@ -1837,6 +1840,7 @@ function clearSessionStreamBuffers(sessionId: string): void {
   pendingThinkingBySession.delete(sessionId)
   pendingThinkingFirstAt.delete(sessionId)
   lastStreamActivityAtBySession.delete(sessionId)
+  continuationPrefixBySession.delete(sessionId)
   clearPendingToolArgs(sessionId)
 }
 
@@ -2271,6 +2275,11 @@ function resolvePlanningPhaseAction(verb: string | undefined, previous: string):
     return previous.trim() || 'waiting_model'
   }
   return raw
+}
+
+function resumeParentAfterWorkers(session: PerSessionState): Partial<PerSessionState> {
+  if (session.chatState !== 'awaiting_workers') return {}
+  return { chatState: 'thinking', planningPhaseStartedAt: Date.now() }
 }
 
 function absorbPendingStreamIntoSession(
@@ -3439,6 +3448,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     const clientMsgId =
       !isMemberSession && !options?.designGeneration ? crypto.randomUUID() : null
 
+    continuationPrefixBySession.delete(sessionId)
     set((s) => {
       const session = s.sessions[sessionId] ?? createDefaultSessionState()
       const bufferedDelta = consumePendingDelta(sessionId)
@@ -3476,6 +3486,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             chatState: 'thinking',
             stopRequested: false,
             elapsedSeconds: 0,
+            planningPhaseStartedAt: Date.now(),
             streamingText: '',
             statusVerb: isMemberSession ? '' : randomSpinnerVerb(),
             planningPhaseAction: 'waiting_model',
@@ -3629,6 +3640,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         sessions: updateSessionIn(s.sessions, sessionId, () => ({
           pendingPermission: null,
           chatState: allowed ? 'tool_executing' : 'thinking',
+          planningPhaseStartedAt: Date.now(),
           messages: allowed ? messages : resolveDanglingCuratorCards(messages),
         })),
       }
@@ -3743,6 +3755,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       stuckReconcileDeferTimers.delete(sessionId)
     }
     clearPendingToolArgs(sessionId)
+    continuationPrefixBySession.delete(sessionId)
     set((s) => {
       const cur = s.sessions[sessionId]
       if (!cur) return s
@@ -3787,6 +3800,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
     wsManager.send(sessionId, { type: 'stop_generation' })
     const pendingDelta = consumePendingDelta(sessionId)
     clearPendingToolArgs(sessionId)
+    continuationPrefixBySession.delete(sessionId)
     set((s) => {
       const session = s.sessions[sessionId]
       if (!session) return s
@@ -3806,6 +3820,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             streamingText: '',
             chatState: 'idle',
             stopRequested: true,
+            planningPhaseStartedAt: null,
             pendingPermission: null,
             activeThinkingId: null,
             activeThinkingContent: '',
@@ -4430,6 +4445,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         sessions: updateSessionIn(s.sessions, sessionId, () => ({
           messages,
           chatState: 'thinking',
+          planningPhaseStartedAt: Date.now(),
         })),
       }
     })
@@ -4481,6 +4497,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         return {
           sessions: updateSessionIn(s.sessions, sessionId, () => ({
             chatState: 'thinking',
+            planningPhaseStartedAt: Date.now(),
           })),
         }
       }
@@ -4494,6 +4511,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         sessions: updateSessionIn(s.sessions, sessionId, () => ({
           messages,
           chatState: 'thinking',
+          planningPhaseStartedAt: Date.now(),
         })),
       }
     })
@@ -4550,6 +4568,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         return {
           sessions: updateSessionIn(s.sessions, sessionId, () => ({
             chatState: 'thinking',
+            planningPhaseStartedAt: Date.now(),
           })),
         }
       }
@@ -4563,6 +4582,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         sessions: updateSessionIn(s.sessions, sessionId, () => ({
           messages,
           chatState: 'thinking',
+          planningPhaseStartedAt: Date.now(),
         })),
       }
     })
@@ -4777,6 +4797,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         break
 
       case 'status':
+        if (msg.state === 'idle') {
+          continuationPrefixBySession.delete(sessionId)
+        }
         update((session) => {
           const pendingText = `${session.streamingText}${consumePendingDelta(sessionId)}`
           const hasPendingStreamText = pendingText.trim().length > 0
@@ -4800,6 +4823,9 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 : msg.state,
             ...(msg.verb && msg.verb !== 'Thinking' ? { statusVerb: msg.verb } : {}),
             ...(msg.tokens ? { tokenUsage: { ...session.tokenUsage, output_tokens: msg.tokens } } : {}),
+            ...(session.chatState === 'idle' && msg.state !== 'idle'
+              ? { planningPhaseStartedAt: Date.now() }
+              : {}),
             ...(msg.state === 'idle' ? {
               activeThinkingId: null,
               activeThinkingContent: '',
@@ -4808,6 +4834,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               statusVerb: '',
               planningPhaseAction: '',
               planningPhaseDetail: '',
+              planningPhaseStartedAt: null,
               streamingToolArgs: null,
             } : {
               planningPhaseAction: resolvePlanningPhaseAction(
@@ -4863,6 +4890,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             planningPhaseDetail: '',
           }))
         } else if (msg.blockType === 'tool_use') {
+          continuationPrefixBySession.delete(sessionId)
           update((s) => {
             const flushed = flushText
               ? appendAssistantTextMessage(s.messages, pendingText, Date.now(), undefined, echoDedupOptions(sessionId))
@@ -4891,6 +4919,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             })
           }
         } else if (flushText) {
+          continuationPrefixBySession.delete(sessionId)
           update((s) => ({
             messages: appendAssistantTextMessage(s.messages, pendingText, Date.now(), undefined, echoDedupOptions(sessionId)),
             streamingText: '',
@@ -4962,14 +4991,29 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         break
 
+      case 'content_checkpoint': {
+        update((s) => {
+          const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
+          if (pendingText.trim()) {
+            continuationPrefixBySession.set(sessionId, pendingText)
+          } else {
+            continuationPrefixBySession.delete(sessionId)
+          }
+          return pendingText !== s.streamingText ? { streamingText: pendingText } : {}
+        })
+        break
+      }
+
       case 'content_reset': {
         consumePendingDelta(sessionId)
         clearPendingToolArgs(sessionId)
+        const restoredText = continuationPrefixBySession.get(sessionId) ?? ''
         update((s) => {
           const patch = mergePendingThinkingIntoActive(s, sessionId)
           return {
-            streamingText: '',
+            streamingText: restoredText,
             streamingToolArgs: null,
+            planningPhaseStartedAt: Date.now(),
             activeThinkingId: patch.activeThinkingId,
             activeThinkingContent: patch.activeThinkingId
               ? patch.activeThinkingContent
@@ -5027,9 +5071,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             pendingThinkingFirstAt.delete(sessionId)
             if (!buffered.trim()) return
             const THINKING_IDLE_THRESHOLD_MS = 5000
+            const keepDraftOpen = continuationPrefixBySession.has(sessionId)
             update((s) => {
               const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
-              const baseMessages = pendingText.trim()
+              const commitDraft = pendingText.trim().length > 0 && !keepDraftOpen
+              const baseMessages = commitDraft
                 ? appendAssistantTextMessage(s.messages, pendingText, Date.now(), undefined, echoDedupOptions(sessionId))
                 : s.messages
               const hasActive = Boolean(s.activeThinkingId)
@@ -5064,7 +5110,11 @@ export const useChatStore = create<ChatStore>((set, get) => ({
                 activeThinkingLastChunkAt: now,
                 planningPhaseAction: '',
                 planningPhaseDetail: '',
-                ...(pendingText.trim() ? { streamingText: '' } : {}),
+                ...(commitDraft
+                  ? { streamingText: '' }
+                  : pendingText !== s.streamingText
+                    ? { streamingText: pendingText }
+                    : {}),
               }
             })
           }
@@ -5397,6 +5447,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               }),
             ],
             chatState: 'thinking',
+            planningPhaseStartedAt: Date.now(),
             activeThinkingId: null,
           }
         })
@@ -5413,6 +5464,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           update((s) => ({
             messages: sealThinkingForSession(sessionId, s),
             chatState: s.chatState === 'idle' ? 'idle' : 'thinking',
+            planningPhaseStartedAt: Date.now(),
             activeThinkingId: null,
           }))
           break
@@ -5427,6 +5479,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           update((s) => ({
             messages: sealThinkingForSession(sessionId, s),
             chatState: s.chatState === 'idle' ? 'idle' : 'thinking',
+            planningPhaseStartedAt: Date.now(),
             activeThinkingId: null,
           }))
           break
@@ -5463,6 +5516,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             return {
               messages: next,
               chatState: s.chatState === 'idle' ? 'idle' : 'thinking',
+              planningPhaseStartedAt: Date.now(),
               activeThinkingId: null,
               ...subagentPatch,
             }
@@ -5482,6 +5536,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             return {
               messages: next,
               chatState: s.chatState === 'idle' ? 'idle' : 'thinking',
+              planningPhaseStartedAt: Date.now(),
               activeThinkingId: null,
               ...subagentPatch,
             }
@@ -5500,6 +5555,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
               },
             ],
             chatState: s.chatState === 'idle' ? 'idle' : 'thinking',
+            planningPhaseStartedAt: Date.now(),
             activeThinkingId: null,
             ...subagentPatch,
           }
@@ -5548,6 +5604,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'message_complete': {
         const session = get().sessions[sessionId]
         if (!session) break
+        continuationPrefixBySession.delete(sessionId)
         const text = `${session.streamingText}${consumePendingDelta(sessionId)}`
         const turnDelta =
           (msg.usage?.input_tokens ?? 0) +
@@ -5578,6 +5635,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
             tokenUsage: msg.usage,
             cumulativeTokens: (s.cumulativeTokens ?? 0) + Math.max(0, turnDelta),
             chatState: s.pendingPermission ? s.chatState : 'idle',
+            planningPhaseStartedAt: null,
             pendingResourceWaits: [],
             providerRetry: null,
           }
@@ -5591,18 +5649,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
 
       case 'provider_retry': {
         const now = Date.now()
+        const continuationPrefix = continuationPrefixBySession.get(sessionId)
         update((s) => {
           const merged = flushPendingDeltaIntoStreaming(sessionId, s.streamingText)
           const sealed = sealThinkingForSession(sessionId, s)
-          const baseMessages = merged.trim()
+          const commitPartial = merged.trim().length > 0 && continuationPrefix === undefined
+          const baseMessages = commitPartial
             ? appendAssistantTextMessage(sealed, merged, Date.now(), undefined, echoDedupOptions(sessionId))
             : sealed
-          if (merged.trim()) {
+          if (commitPartial) {
             dirtyMidTurnSessions.add(sessionId)
           }
           return {
             messages: baseMessages,
-            streamingText: '',
+            streamingText: continuationPrefix ?? '',
             activeThinkingId: null,
             activeThinkingContent: '',
             activeThinkingStartedAt: null,
@@ -5694,9 +5754,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           .getState()
           .markCompleted(msg.workerId, msg.success, msg.summary)
         if (!useWorkersStore.getState().hasRunningWorkers(sessionId)) {
-          update((s) => ({
-            chatState: s.chatState === 'awaiting_workers' ? 'thinking' : s.chatState,
-          }))
+          update(resumeParentAfterWorkers)
         }
         break
       }
@@ -5704,23 +5762,20 @@ export const useChatStore = create<ChatStore>((set, get) => ({
       case 'worker_stopped': {
         useWorkersStore.getState().markStopped(msg.workerId, msg.reason)
         if (!useWorkersStore.getState().hasRunningWorkers(sessionId)) {
-          update((s) => ({
-            chatState: s.chatState === 'awaiting_workers' ? 'thinking' : s.chatState,
-          }))
+          update(resumeParentAfterWorkers)
         }
         break
       }
 
       case 'parent_resumed': {
-        update((s) => ({
-          chatState: s.chatState === 'awaiting_workers' ? 'thinking' : s.chatState,
-        }))
+        update(resumeParentAfterWorkers)
         break
       }
 
       case 'error': {
         const isConfigError = isNoModelConfiguredError(msg.message, msg.code)
         const isCancelled = msg.code === 'CANCELLED'
+        continuationPrefixBySession.delete(sessionId)
         update((s) => {
           const pendingText = `${s.streamingText}${consumePendingDelta(sessionId)}`
           let newMessages = sealThinkingForSession(sessionId, s)
@@ -5741,6 +5796,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
           return {
             messages: newMessages,
             chatState: 'idle',
+            planningPhaseStartedAt: null,
             activeThinkingId: null,
             activeThinkingContent: '',
             activeThinkingStartedAt: null,
@@ -5937,6 +5993,7 @@ export const useChatStore = create<ChatStore>((set, get) => ({
         }
         if (msg.subtype === 'ws_unreachable') {
           dirtyMidTurnSessions.delete(sessionId)
+          continuationPrefixBySession.delete(sessionId)
           update((s) => {
             const merged = flushPendingDeltaIntoStreaming(sessionId, s.streamingText)
             const baseMessages = resolveDanglingCuratorCards(

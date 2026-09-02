@@ -13,6 +13,13 @@ import { formatBytes } from '../../lib/formatBytes'
 const UP_TO_DATE_AUTO_DISMISS_MS = 4000
 const ERROR_AUTO_DISMISS_MS = 6000
 
+const NETWORK_ERROR_PATTERN =
+  /error sending request|dns error|failed to lookup|connect(ion)? (refused|reset|timed out|error)|network is unreachable|timed out|tls|certificate|could not resolve|no such host|fetch failed|failed to fetch/i
+
+function isNetworkErrorMessage(message: string): boolean {
+  return message.length > 0 && NETWORK_ERROR_PATTERN.test(message)
+}
+
 type SilentBoundaryProps = {
   fallback?: ReactNode
   children: ReactNode
@@ -140,16 +147,36 @@ function UpdateCheckerInner() {
   }
 
   if (showErrorToast) {
+    const rawError = (error ?? '').trim()
+    const networkError = isNetworkErrorMessage(rawError)
+    const headline = networkError
+      ? t('update.toast.networkError')
+      : t('update.toast.errorTitle')
     return (
-      <div className="fixed z-[200] max-w-sm" style={floaterStyle}>
-        <div className="flex items-center gap-3 rounded-[var(--radius-lg)] border border-[var(--color-error)]/40 bg-[var(--color-surface-container-low)] px-4 py-2 shadow-[var(--shadow-dropdown)]">
-          <p className="flex-1 text-sm text-[var(--color-error)]">
-            {t('update.toast.error', { error: error ?? '' })}
-          </p>
+      <div className="fixed z-[200] w-[min(28rem,calc(100vw-2rem))]" style={floaterStyle}>
+        <div className="flex items-start gap-3 rounded-[var(--radius-lg)] border border-[var(--color-error)]/40 bg-[var(--color-surface-container-low)] px-4 py-2.5 shadow-[var(--shadow-dropdown)]">
+          <div className="min-w-0 flex-1">
+            <p className="text-sm font-medium text-[var(--color-error)] break-words [overflow-wrap:anywhere]">
+              {headline}
+            </p>
+            {networkError && (
+              <p className="mt-0.5 text-xs text-[var(--color-text-secondary)] break-words [overflow-wrap:anywhere]">
+                {t('update.toast.networkErrorHint')}
+              </p>
+            )}
+            {rawError && (
+              <p
+                className="mt-1 max-h-24 overflow-y-auto text-[11px] leading-snug text-[var(--color-text-tertiary)] break-words [overflow-wrap:anywhere]"
+                title={rawError}
+              >
+                {rawError}
+              </p>
+            )}
+          </div>
           <button
             type="button"
             onClick={clearManualCheck}
-            className="text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
+            className="shrink-0 text-xs text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] transition-colors"
           >
             {t('update.toast.dismiss')}
           </button>

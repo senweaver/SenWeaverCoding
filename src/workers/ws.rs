@@ -285,6 +285,9 @@ impl WorkerWireTracker {
             TurnEvent::StreamReset => vec![json!({
                 "type": "content_reset",
             })],
+            TurnEvent::DraftCheckpoint => vec![json!({
+                "type": "content_checkpoint",
+            })],
             TurnEvent::Thinking { delta } if !delta.trim().is_empty() => vec![json!({
                 "type": "thinking",
                 "text": delta,

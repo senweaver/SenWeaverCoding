@@ -45,8 +45,8 @@ function ToastItem({ toast }: { toast: ToastType }) {
         animate-in slide-in-from-right fade-in duration-200
       `}
     >
-      <div className="flex items-center justify-between gap-2">
-        <span className="flex-1">{displayMessage}</span>
+      <div className="flex items-start justify-between gap-2">
+        <span className="min-w-0 flex-1 break-words [overflow-wrap:anywhere]">{displayMessage}</span>
         <button
           onClick={() => removeToast(toast.id)}
           className="text-[var(--color-text-tertiary)] hover:text-[var(--color-text-primary)] text-sm leading-none shrink-0"
@@ -94,7 +94,7 @@ export function ToastContainer() {
 
   return (
     <div
-      className="fixed bottom-4 z-[100] flex max-h-[60vh] max-w-sm flex-col gap-2 overflow-y-auto overscroll-contain pr-1"
+      className="fixed bottom-4 z-[100] flex max-h-[60vh] w-[min(24rem,calc(100vw-2rem))] flex-col gap-2 overflow-y-auto overscroll-contain pr-1"
       style={{ right: `${rightInset + 16}px` }}
     >
       {toasts.map((toast) => (

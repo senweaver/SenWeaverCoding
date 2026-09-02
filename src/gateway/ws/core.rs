@@ -823,6 +823,7 @@ async fn process_chat_message(
 
     let forward_fut = async {
         let mut accumulated_text = String::new();
+        let mut checkpoint_text = String::new();
         while let Some(event) = event_rx.recv().await {
             let ws_msg = match event {
                 TurnEvent::Chunk { delta } => {
@@ -833,7 +834,13 @@ async fn process_chat_message(
                     serde_json::json!({ "type": "chunk", "content": delta })
                 }
                 TurnEvent::StreamReset => {
+                    accumulated_text.clear();
+                    accumulated_text.push_str(&checkpoint_text);
                     serde_json::json!({ "type": "content_reset" })
+                }
+                TurnEvent::DraftCheckpoint => {
+                    checkpoint_text = accumulated_text.clone();
+                    serde_json::json!({ "type": "content_checkpoint" })
                 }
                 TurnEvent::Thinking { delta } => {
                     serde_json::json!({ "type": "thinking", "content": delta })
@@ -1172,7 +1179,11 @@ async fn process_chat_message(
                     .await
                     .ok()
                     .flatten();
-                    if existing_name.is_none() {
+                    let needs_title = existing_name
+                        .as_deref()
+                        .map(crate::agent::auto_title::is_placeholder_title)
+                        .unwrap_or(true);
+                    if needs_title {
                         let provider_for_title = state.current_provider();
                         let model_for_title = state.current_model();
                         if let Some(title) = crate::agent::auto_title::generate_title(

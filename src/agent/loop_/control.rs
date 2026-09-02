@@ -2,12 +2,74 @@
 // Copyright (c) 2025-2026 SenWeaverCoding
 // Licensed under the MIT License.
 
-use std::collections::hash_map::Entry;
+use std::collections::hash_map::{DefaultHasher, Entry};
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
 
 pub type LoopDetectionCallback = Box<dyn Fn(&str) + Send + Sync>;
 
 pub const DEFAULT_IDENTICAL_OUTPUT_THRESHOLD: u32 = 5;
+
+pub const IDENTICAL_TEXT_RESPONSE_ABORT_STREAK: u32 = 2;
+
+pub const STREAM_REPEAT_LINE_MIN_CHARS: usize = 24;
+
+pub const STREAM_REPEAT_LINE_COUNT: usize = 3;
+
+pub fn text_response_fingerprint(text: &str) -> Option<u64> {
+    let mut hasher = DefaultHasher::new();
+    let mut words = 0usize;
+    for word in text.split_whitespace() {
+        word.to_lowercase().hash(&mut hasher);
+        words += 1;
+    }
+    (words > 0).then(|| hasher.finish())
+}
+
+pub fn detect_trailing_line_repetition(text: &str) -> Option<usize> {
+    let completed_end = text.rfind('\n')?;
+    let completed = &text[..completed_end];
+    if completed.matches("```").count() % 2 == 1 {
+        return None;
+    }
+    let mut tail: Vec<(usize, &str)> = Vec::with_capacity(STREAM_REPEAT_LINE_COUNT);
+    let mut segment_end = completed.len();
+    for line in completed.rsplit('\n') {
+        let start = segment_end - line.len();
+        let trimmed = line.trim();
+        if !trimmed.is_empty() {
+            tail.push((start, trimmed));
+            if tail.len() == STREAM_REPEAT_LINE_COUNT {
+                break;
+            }
+        }
+        segment_end = start.saturating_sub(1);
+    }
+    if tail.len() < STREAM_REPEAT_LINE_COUNT {
+        return None;
+    }
+    let reference = text_response_fingerprint(tail[0].1)?;
+    if tail[0].1.chars().count() < STREAM_REPEAT_LINE_MIN_CHARS {
+        return None;
+    }
+    if tail
+        .iter()
+        .skip(1)
+        .any(|(_, line)| text_response_fingerprint(line) != Some(reference))
+    {
+        return None;
+    }
+    Some(tail[STREAM_REPEAT_LINE_COUNT - 2].0)
+}
+
+pub fn repeated_text_response_error(model: &str, repeats: u32, context: &str) -> String {
+    format!(
+        "repeated_model_response: the model '{model}' produced the same reply {attempts} times in a row without making progress ({context}); \
+         the turn was aborted to stop the loop. Likely causes: the output token limit (max_tokens) is too small for the model's reasoning plus its answer, \
+         or the model is not honoring the required tool call. Try raising the output limit, disabling extended thinking, or switching models.",
+        attempts = repeats + 1,
+    )
+}
 
 enum SeenSignature {
     Pending,
@@ -21,6 +83,10 @@ pub struct LoopControlState {
     last_tool_output_hash: Option<u64>,
 
     consecutive_identical_outputs: u32,
+
+    last_text_response_fingerprint: Option<u64>,
+
+    identical_text_response_streak: u32,
 
     seen_tool_signatures: HashMap<(String, String), SeenSignature>,
 
@@ -55,6 +121,8 @@ impl LoopControlState {
             loop_detector: crate::agent::loop_::detector::LoopDetector::new(config),
             last_tool_output_hash: None,
             consecutive_identical_outputs: 0,
+            last_text_response_fingerprint: None,
+            identical_text_response_streak: 0,
             seen_tool_signatures: HashMap::new(),
             coverage: crate::agent::loop_::coverage::CoverageLedger::new(),
             identical_output_threshold: threshold,
@@ -148,9 +216,30 @@ impl LoopControlState {
     pub fn reset(&mut self) {
         self.last_tool_output_hash = None;
         self.consecutive_identical_outputs = 0;
+        self.reset_text_response_streak();
         self.seen_tool_signatures.clear();
         self.coverage.reset();
         self.loop_detector.reset();
+    }
+
+    pub fn note_text_response(&mut self, text: &str) -> u32 {
+        let Some(fingerprint) = text_response_fingerprint(text) else {
+            self.reset_text_response_streak();
+            return 0;
+        };
+        if self.last_text_response_fingerprint == Some(fingerprint) {
+            self.identical_text_response_streak =
+                self.identical_text_response_streak.saturating_add(1);
+        } else {
+            self.identical_text_response_streak = 0;
+            self.last_text_response_fingerprint = Some(fingerprint);
+        }
+        self.identical_text_response_streak
+    }
+
+    pub fn reset_text_response_streak(&mut self) {
+        self.last_text_response_fingerprint = None;
+        self.identical_text_response_streak = 0;
     }
 
     pub fn record_per_tool(

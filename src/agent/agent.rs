@@ -37,6 +37,8 @@ pub enum TurnEvent {
 
     StreamReset,
 
+    DraftCheckpoint,
+
     Thinking { delta: String },
 
     ToolCall {
@@ -1881,6 +1883,10 @@ impl Agent {
             "session runtime selection points to an unknown provider profile; falling back to global defaults"
         );
         base
+    }
+
+    pub fn runtime_provider_snapshot(&self) -> (std::sync::Arc<crate::config::Config>, String) {
+        (self.effective_provider_config(), self.model_name.clone())
     }
 
     fn sync_config_from_store(&mut self) -> ConfigChange {

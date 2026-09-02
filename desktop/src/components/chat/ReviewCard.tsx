@@ -6,7 +6,7 @@ import { useRef, useState, type ReactNode } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import { useChatStore } from '../../stores/chatStore'
 import { useTabStore } from '../../stores/tabStore'
-import { useReviewPanelStore } from '../../stores/reviewPanelStore'
+import { useUIStore } from '../../stores/uiStore'
 import { useTranslation } from '../../i18n'
 import {
   isWorkspaceRootPath,
@@ -188,7 +188,7 @@ export function ReviewCard() {
             onClick={(e) => {
               e.stopPropagation()
               if (activeTabId) {
-                useReviewPanelStore.getState().openPanel(activeTabId)
+                useUIStore.getState().openReviewPanel(activeTabId)
               }
             }}
             className="rounded-md border border-[var(--color-border)]/60 px-2 py-0.5 text-[11px] font-medium text-[var(--color-text-secondary)] transition-colors hover:bg-[var(--color-surface-container-high)]"

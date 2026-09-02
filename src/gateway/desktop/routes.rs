@@ -6541,13 +6541,12 @@ pub async fn handle_session_design_artifact_delete(
     let backend_cloned = backend.clone();
     let session_key_cl = session_key.clone();
     let rel_cl = rel.clone();
-    let _ = tokio::task::spawn_blocking(move || {
+    let outcome = tokio::task::spawn_blocking(move || -> Result<(), String> {
         let work_dir = backend_cloned
             .get_session_work_dir(&session_key_cl)
             .ok()
             .flatten()
             .unwrap_or(fallback_dir);
-        let _ = backend_cloned.delete_design_artifact(&session_key_cl, &rel_cl);
         let root = std::path::Path::new(&work_dir);
         let normalized = rel_cl.trim_start_matches(['/', '\\']).replace('\\', "/");
         let target = root.join(&normalized);
@@ -6558,19 +6557,44 @@ pub async fn handle_session_design_artifact_delete(
             .unwrap_or(false)
             && normalized.contains(".senweavercoding/designer/");
         if let (Ok(root_c), Ok(target_c)) = (root.canonicalize(), target.canonicalize()) {
-            if target_c.starts_with(&root_c) && target_c.is_file() {
-                if is_deck_manifest {
-                    if let Some(deck_dir) = target_c.parent() {
-                        let _ = std::fs::remove_dir_all(deck_dir);
+            if !target_c.starts_with(&root_c) {
+                return Err("path escapes the session workspace".to_string());
+            }
+            if target_c.is_file() {
+                let removed = if is_deck_manifest {
+                    match target_c.parent() {
+                        Some(deck_dir) => std::fs::remove_dir_all(deck_dir),
+                        None => std::fs::remove_file(&target_c),
                     }
                 } else {
-                    let _ = std::fs::remove_file(&target_c);
+                    std::fs::remove_file(&target_c)
+                };
+                if let Err(e) = removed {
+                    if e.kind() != std::io::ErrorKind::NotFound {
+                        return Err(format!("failed to delete file: {e}"));
+                    }
                 }
             }
         }
+        backend_cloned
+            .delete_design_artifact(&session_key_cl, &rel_cl)
+            .map_err(|e| format!("failed to update design artifact index: {e}"))
     })
     .await;
-    Json(serde_json::json!({ "ok": true })).into_response()
+    match outcome {
+        Ok(Ok(())) => Json(serde_json::json!({ "ok": true })).into_response(),
+        Ok(Err(error)) => {
+            tracing::warn!(
+                target: "gateway.designer",
+                session_id = %id,
+                rel_path = %rel,
+                error = %error,
+                "design artifact delete failed"
+            );
+            Json(serde_json::json!({ "ok": false, "error": error })).into_response()
+        }
+        Err(e) => Json(serde_json::json!({ "ok": false, "error": e.to_string() })).into_response(),
+    }
 }
 
 #[derive(serde::Deserialize)]

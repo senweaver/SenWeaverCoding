@@ -33,6 +33,10 @@ pub fn classify_turn_error_code(message: &str) -> &'static str {
         return "CANCELLED";
     }
 
+    if lower.contains("repeated_model_response") {
+        return "REPEATED_MODEL_RESPONSE";
+    }
+
     if contains_any(
         &lower,
         &[
